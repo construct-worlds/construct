@@ -145,7 +145,13 @@ impl Router {
             .map(|model| {
                 json!({
                     "id": model.id,
-                    "display_name": format!("{} · {}", model.model, model.route),
+                    // Claude Code hardcodes the secondary label for every
+                    // discovered model to "From gateway" and only consumes
+                    // `id` plus `display_name` from this response. Keep the
+                    // owning integration explicit in the customizable field
+                    // so Construct routes cannot be mistaken for rows owned
+                    // by an unrelated user-configured gateway.
+                    "display_name": format!("{} · {} · Construct", model.model, model.route),
                     "description": format!(
                         "Routed by Construct through {} to {}.",
                         model.route, model.model

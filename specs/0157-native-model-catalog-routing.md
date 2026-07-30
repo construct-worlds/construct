@@ -35,7 +35,9 @@ catalog override. Claude receives a loopback Anthropic gateway URL whose
 `/v1/models` response is consumed by Claude Code's native gateway discovery.
 The Claude adapter enables loopback discovery only for that child process
 and does not displace a user-configured `ANTHROPIC_BASE_URL`. Native catalog
-entries remain present alongside Construct entries.
+entries remain present alongside Construct entries. Claude's gateway source
+subtitle is harness-owned and may be generic, so each published display name
+also identifies Construct explicitly.
 
 ## Reason
 
@@ -110,8 +112,9 @@ the readable Construct id `construct-kimi/kimi-k2.5`, so only that request
 is translated and routed to Kimi. The parent's concurrent native request
 still goes to the origin Codex selected.
 
-A Claude session opens `/model` and sees `gpt-5.6-sol · codex-oauth` as a
-gateway entry next to Claude's built-in rows. Selecting it carries
+A Claude session opens `/model` and sees
+`gpt-5.6-sol · codex-oauth · Construct` as a gateway entry next to Claude's
+built-in rows. Selecting it carries
 `claude-construct-codex-oauth/gpt-5.6-sol` on the request, allowing the same
 Claude session or one of its native subagents to select the Codex route
 without changing the parent's model.
