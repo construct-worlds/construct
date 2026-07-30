@@ -1,6 +1,6 @@
 # 0162-tunnel-re-registration-is-a-scoped-credential
 
-Status: proposed
+Status: accepted
 Date: 2026-07-30
 Area: protocol
 Scope: how a running daemon re-registers a first-party tunnel after its owner credential has expired, without user interaction.
