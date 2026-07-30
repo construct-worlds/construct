@@ -2,9 +2,9 @@
 
 `/remote-control` exposes the running daemon through a browser-accessible web
 client so you can check and steer the same fleet from another device. The TUI
-shows a modal with a QR code, the addresses this machine can be reached at, a
-username, and a password; the local modeline shows a `remote` badge while remote
-clients are attached.
+shows a modal with a QR code, the addresses this machine can be reached at, and
+the credentials required away from loopback; the local modeline shows a
+`remote` badge while remote clients are attached.
 
 Opening the dialog does **not** expose the daemon to the internet. It binds the
 listener and shows how to reach it on the local network — a phone on the same
@@ -62,17 +62,19 @@ To turn remote control off completely — listener included — use
 
 ## Authentication and binding
 
-The remote listener binds every interface and gates every request with HTTP
-Basic auth. The username is `remote`; the password is generated per session (a
-memorable `word.word.NNNN` string) unless you supply your own. Failed attempts
-are throttled daemon-wide, so the short password is safe to be the only
-credential — but that throttle is load-bearing, and the listener is reachable
-from the whole local network, so treat the auth path as security-sensitive.
+The displayed `local:` address uses the daemon's separate loopback-only web UI
+and needs no login because it is reachable only by local processes. The remote
+listener binds every interface and remains gated by HTTP Basic auth for LAN and
+tunnel access. The username is `remote`; the password is generated per session
+(a memorable `word.word.NNNN` string) unless you supply your own.
+Failed attempts are throttled daemon-wide, so the short password is safe to be
+the only LAN credential — but that throttle is load-bearing, and the listener
+is reachable from the whole local network, so treat the auth path as
+security-sensitive.
 
-The daemon also starts a separate localhost-only browser UI at
-`http://127.0.0.1:5746/`. That UI is bound to loopback and has **no** auth at
-all — it must never be exposed off-machine, which is exactly why it stays on
-loopback while the remote-control listener does not.
+The loopback UI defaults to `http://127.0.0.1:5746/` (with automatic port
+fallback when needed). It must never be exposed off-machine, which is exactly
+why it stays on loopback while the remote-control listener does not.
 
 Tunnel + listener state is persisted under the runtime directory so a daemon
 restart preserves the active URL, password, and provider when possible; a

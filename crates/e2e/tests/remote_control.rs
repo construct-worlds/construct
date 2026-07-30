@@ -3,8 +3,8 @@
 //!
 //! Specifically:
 //!
-//!  - **Security**: wrong Basic credentials → 401 (i.e. the auth
-//!    gate isn't accidentally an open door).
+//!  - **Security**: the displayed loopback URL needs no login, while
+//!    the LAN/tunnel listener still rejects wrong Basic credentials.
 //!  - **Lifecycle**: `remote.stop` is idempotent — first call
 //!    reports `was_running: true`, repeat calls report `false`
 //!    instead of erroring.
@@ -30,6 +30,15 @@ use std::time::Duration;
 use construct_protocol::TunnelProvider;
 
 use construct_e2e::Daemon;
+
+fn remote_listener_url(d: &Daemon) -> String {
+    let snap = d.dir.path().join("run/remote.json");
+    let snap_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&snap).expect("read remote snapshot"))
+            .expect("parse remote snapshot");
+    let port = snap_json["port"].as_u64().expect("snapshot port");
+    format!("http://127.0.0.1:{port}/")
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_control_security_and_lifecycle() {
@@ -59,7 +68,19 @@ async fn remote_control_security_and_lifecycle() {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
-    let root = r.local_url.clone();
+    // `local:` points at the daemon's separate loopback-only web UI and
+    // therefore opens without a browser login prompt.
+    let local = http
+        .get(&r.local_url)
+        .send()
+        .await
+        .expect("http get local URL without credentials");
+    assert_eq!(local.status().as_u16(), 200, "local URL should need no login");
+
+    // LAN and tunnels terminate on the wildcard-bound remote listener,
+    // which remains fully Basic-auth-gated. Dial it through loopback in
+    // this test, using the listener's actual port from its snapshot.
+    let root = remote_listener_url(&d);
 
     // Security gate: wrong password → 401. If this ever 200s, the
     // Basic-auth check is broken and the whole remote-control
@@ -202,8 +223,8 @@ async fn listener_is_reachable_off_loopback() {
     // non-loopback local address. We don't use `lan_url` here: CI hosts
     // often have no RFC1918 address at all, and this property — "the
     // socket is not bound to 127.0.0.1" — is testable without one.
-    let port: u16 = r
-        .local_url
+    let listener_url = remote_listener_url(&d);
+    let port: u16 = listener_url
         .rsplit(':')
         .next()
         .and_then(|s| s.trim_end_matches('/').parse().ok())
@@ -245,7 +266,7 @@ async fn tunnel_only_stop_keeps_lan_listener() {
         .remote_start(TunnelProvider::None, None)
         .await
         .expect("remote.start");
-    let root = r.local_url.clone();
+    let root = remote_listener_url(&d);
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
