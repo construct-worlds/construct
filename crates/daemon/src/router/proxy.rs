@@ -32,6 +32,7 @@ const MAX_ERROR_BODY: usize = 64 * 1024;
 const MAX_RESPONSE_BODY: usize = 100 * 1024 * 1024;
 const MAX_SSE_FRAME: usize = 100 * 1024 * 1024;
 const ERROR_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const CONSTRUCT_SESSION_HEADER: &str = "x-construct-session";
 
 /// Serve one client connection.
 ///
@@ -100,10 +101,10 @@ pub async fn serve(mut client: TcpStream, router: Arc<Router>) -> Result<()> {
 /// Serve Claude Code's session-local gateway URL on the same loopback
 /// listener as the HTTPS proxy.
 ///
-/// The opaque session token in the path is the authority boundary. Native
-/// requests retain a user's API credential or exchange the session token for
-/// the detected Claude login; published ids take the same request-scoped
-/// routing path as intercepted HTTPS.
+/// The opaque session token in `x-construct-session` is the authority
+/// boundary. Keeping it out of the base URL lets every Claude session share
+/// one native gateway-model cache entry. Older adapters that carry the token
+/// in the path remain supported across daemon restarts.
 async fn serve_claude_gateway(
     mut client: TcpStream,
     mut request: ParsedRequest,
@@ -113,8 +114,23 @@ async fn serve_claude_gateway(
     let Some(rest) = request.path.strip_prefix(PREFIX) else {
         return write_simple(&mut client, 404, r#"{"error":"not found"}"#).await;
     };
-    let Some((token, upstream_path)) = rest.split_once('/') else {
+    let Some((path_authority, upstream_path)) = rest.split_once('/') else {
         return write_simple(&mut client, 404, r#"{"error":"not found"}"#).await;
+    };
+    let header_token = request
+        .header(CONSTRUCT_SESSION_HEADER)
+        .map(String::from_utf8_lossy);
+    let token = if path_authority == "claude" {
+        let Some(token) = header_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        else {
+            return write_simple(&mut client, 403, r#"{"error":"missing session"}"#).await;
+        };
+        token
+    } else {
+        path_authority
     };
     let Some(ctx) = router.session_for_token(token) else {
         return write_simple(&mut client, 403, r#"{"error":"unknown session"}"#).await;
@@ -130,6 +146,9 @@ async fn serve_claude_gateway(
     }) || request
         .header("x-api-key")
         .is_some_and(|value| String::from_utf8_lossy(value).trim() == token);
+    request
+        .headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case(CONSTRUCT_SESSION_HEADER));
     request.path = format!("/{upstream_path}");
     let body = read_body(&mut client, &request).await?;
     let pinned_route = ctx.armed_route();
@@ -787,6 +806,7 @@ fn is_hop_header(name: &str) -> bool {
         "te",
         "trailer",
         "accept-encoding",
+        CONSTRUCT_SESSION_HEADER,
     ];
     DROP.iter().any(|d| name.eq_ignore_ascii_case(d))
 }
@@ -1569,6 +1589,7 @@ mod tests {
         assert!(is_dropped_header("Host"));
         assert!(is_dropped_header("content-length"));
         assert!(is_dropped_header("proxy-authorization"));
+        assert!(is_dropped_header("x-construct-session"));
         assert!(!is_dropped_header("anthropic-version"));
         assert!(!is_dropped_header("content-type"));
     }
@@ -1581,6 +1602,7 @@ mod tests {
         assert!(!is_hop_header("authorization"));
         assert!(!is_hop_header("x-api-key"));
         assert!(is_hop_header("proxy-authorization"));
+        assert!(is_hop_header("x-construct-session"));
         assert!(is_hop_header("connection"));
         assert!(is_hop_header("content-length"));
     }

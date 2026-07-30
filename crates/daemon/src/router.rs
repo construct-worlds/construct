@@ -666,10 +666,15 @@ impl Router {
         if harness == "claude" && catalog_enabled {
             env.insert(
                 construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG.to_string(),
-                format!(
-                    "http://127.0.0.1:{}/__construct/{token}",
-                    self.port()
-                ),
+                format!("http://127.0.0.1:{}/__construct/claude", self.port()),
+            );
+            env.insert(
+                construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG_TOKEN.to_string(),
+                token.to_string(),
+            );
+            env.insert(
+                construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG_DATA.to_string(),
+                self.claude_models_response().to_string(),
             );
         }
         if let Ok(ca) = self.ca() {
@@ -1225,19 +1230,48 @@ mod tests {
         );
 
         let env = r.attach_session("s-claude", "claude", None).unwrap();
-        assert!(env[construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG]
-            .starts_with("http://127.0.0.1:"));
+        assert_eq!(
+            env[construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG],
+            format!("http://127.0.0.1:{}/__construct/claude", r.port())
+        );
         assert!(r.sessions.read().unwrap()["s-claude"].catalog_enabled());
 
         let token = Router::token_from_env(&env).unwrap();
+        assert_eq!(
+            env[construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG_TOKEN],
+            token
+        );
+        assert!(
+            env[construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG_DATA]
+                .contains(&published.id)
+        );
+        let mut denied_gateway =
+            tokio::net::TcpStream::connect(("127.0.0.1", r.port()))
+                .await
+                .unwrap();
+        denied_gateway
+            .write_all(
+                b"GET /__construct/claude/v1/models?limit=1000 HTTP/1.1\r\n\
+                  Host: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut denied_response = String::new();
+        denied_gateway
+            .read_to_string(&mut denied_response)
+            .await
+            .unwrap();
+        assert!(denied_response.starts_with("HTTP/1.1 403"), "{denied_response}");
+
         let mut gateway = tokio::net::TcpStream::connect(("127.0.0.1", r.port()))
             .await
             .unwrap();
         gateway
             .write_all(
                 format!(
-                    "GET /__construct/{token}/v1/models?limit=1000 HTTP/1.1\r\n\
-                     Host: 127.0.0.1\r\nConnection: close\r\n\r\n"
+                    "GET /__construct/claude/v1/models?limit=1000 HTTP/1.1\r\n\
+                     Host: 127.0.0.1\r\nX-Construct-Session: {token}\r\n\
+                     Connection: close\r\n\r\n"
                 )
                 .as_bytes(),
             )
@@ -1261,8 +1295,9 @@ mod tests {
         inference
             .write_all(
                 format!(
-                    "POST /__construct/{token}/v1/messages HTTP/1.1\r\n\
-                     Host: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\
+                    "POST /__construct/claude/v1/messages HTTP/1.1\r\n\
+                     Host: 127.0.0.1\r\nX-Construct-Session: {token}\r\n\
+                     Authorization: Bearer user-oauth-token\r\n\
                      Content-Type: application/json\r\nContent-Length: {}\r\n\
                      Connection: close\r\n\r\n{request_body}",
                     request_body.len()
