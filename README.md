@@ -204,6 +204,9 @@ For an optimized build, use `cargo build --workspace --release` and replace
   your own.
 - [smith built-in agent](docs/smith.md) — providers, model selection, tools,
   approvals, automode, and hooks.
+- [Model routing](docs/model-routing.md) — redirect a session's model traffic
+  to another provider, and publish route targets into a harness's native
+  model picker.
 - [Unified tool layer](docs/unified-tool-layer.md) — MCP servers and shared tools for
   fleet control, browser automation, and agent coordination.
 - [Generative widgets](docs/generative-widgets.md) — agent-generated Markdown UI

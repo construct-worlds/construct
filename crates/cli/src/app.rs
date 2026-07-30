@@ -16324,7 +16324,7 @@ mod tests {
 
         let menu = app.route_menu.as_ref().expect("picker open");
         assert_eq!(menu.target_rows(), 3);
-        assert_eq!(menu.target_label(0), "Default");
+        assert_eq!(menu.target_label(0), "No redirect");
         assert!(menu.target_enabled(1));
         assert!(
             !menu.target_enabled(2),
@@ -16332,7 +16332,7 @@ mod tests {
         );
 
         let frame = rendered(&mut app, 120, 30);
-        assert!(frame.contains("* Default"), "marker is spaced: {frame}");
+        assert!(frame.contains("* No redirect"), "marker is spaced: {frame}");
         assert!(frame.contains("kimi"), "{frame}");
         assert!(frame.contains("glm"), "{frame}");
         // The wire dialect is the router's problem, not a user-facing
@@ -16464,7 +16464,7 @@ mod tests {
         let frame = rendered(&mut app, 120, 30);
         assert!(frame.contains("not route-capable"), "{frame}");
         assert!(
-            frame.contains("Default"),
+            frame.contains("No redirect"),
             "unrouting stays offered: {frame}"
         );
     }
@@ -16698,7 +16698,7 @@ mod tests {
 
         let frame = rendered(&mut app, 160, 30);
         assert!(
-            frame.contains("claude-opus-5 -> kimi-k2.5"),
+            frame.contains("claude-opus-5 → kimi-k2.5"),
             "modeline must show both models: {frame}"
         );
     }

@@ -5,15 +5,15 @@ use super::*;
 /// model is shown, so the two are never confused).
 ///
 /// Two steps, because a target and a model are separate choices: pick where
-/// the traffic goes, then which model to ask for. `Default` is the first
-/// row of the first step and needs no second one — it is the absence of a
-/// route, not a target with a model.
+/// the traffic goes, then which model to ask for. `No redirect` is the
+/// first row of the first step and needs no second one — it is the absence
+/// of a route, not a target with a model.
 impl App {
     pub(super) async fn open_route_menu(&mut self, session_id: String, col: u16, row: u16) {
         let listed = match self.client.list_routes(Some(&session_id)).await {
             Ok(l) => l,
             Err(e) => {
-                self.set_status(format!("routes unavailable: {e}"));
+                self.set_status(format!("redirect unavailable: {e}"));
                 return;
             }
         };
@@ -208,24 +208,29 @@ impl App {
         route: Option<String>,
         model: Option<String>,
     ) {
+        // Status labels lead with the model, matching how a decoded native
+        // pick reads everywhere else (`model · route`, spec 0158).
         let label = match (&route, &model) {
-            (Some(r), Some(m)) => format!("{r} · {m}"),
+            (Some(r), Some(m)) => format!("{m} · {r}"),
             (Some(r), None) => r.clone(),
-            (None, _) => "default".to_string(),
+            (None, _) => String::new(),
         };
-        // A pin only applies to requests carrying a native model id. While
-        // the harness is on a Construct catalog entry, every request names
-        // its own route, so an armed pin would otherwise appear to do
-        // nothing (spec 0158): say so instead of reporting a silent no-op.
+        let clearing = label.is_empty();
+        // A redirect only applies to requests carrying a native model id.
+        // While the harness is on a Construct catalog entry, every request
+        // names its own route, so an armed redirect would otherwise appear
+        // to do nothing (spec 0158): say so instead of reporting a silent
+        // no-op.
         let inert = route.is_some().then(|| self.session_native_selection(&session_id)).flatten();
         match self.client.set_route(&session_id, route, model).await {
             Ok(()) => match inert {
                 Some((native_route, native_model)) => self.set_status(format!(
-                    "route: {label} — waits: harness picked {native_model} · {native_route} in its own picker"
+                    "redirect armed: {label} — idle while the harness addresses {native_model} · {native_route} directly"
                 )),
-                None => self.set_status(format!("route: {label}")),
+                None if clearing => self.set_status("redirect off".to_string()),
+                None => self.set_status(format!("redirecting to {label}")),
             },
-            Err(e) => self.set_status(format!("route failed: {e}")),
+            Err(e) => self.set_status(format!("redirect failed: {e}")),
         }
     }
 }
@@ -240,11 +245,13 @@ pub fn native_selection(model: Option<&str>) -> Option<(String, String)> {
         .flatten()
 }
 
-/// One line on what routing does, shown once between Default and the
-/// targets it contrasts with. Short on purpose: the picker is a menu, not
-/// documentation, and the sentence has to earn its two rows.
+/// One line on what a redirect does, shown once between "No redirect" and
+/// the targets it contrasts with. Short on purpose: the picker is a menu,
+/// not documentation, and the sentence has to earn its two rows — it must
+/// fit two lines at the menu's minimum width, so the last word is never
+/// silently dropped by the two-line cap.
 pub const ROUTE_DESCRIPTION: &str =
-    "Send this session's model request to another provider. No restart required";
+    "Redirect model requests to another provider — transparent to the harness.";
 
 /// Which column the keyboard is driving. Both are always visible; focus
 /// only decides what moves.
@@ -325,9 +332,9 @@ impl RouteMenu {
         route.models.clone()
     }
 
-    /// Rows above the two columns: Default, a rule, and the description.
-    /// Default sits apart because it is the absence of a route, not one of
-    /// the targets listed under it.
+    /// Rows above the two columns: "No redirect", a rule, and the
+    /// description. It sits apart because it is the absence of a route,
+    /// not one of the targets listed under it.
     pub fn header_rows(&self) -> u16 {
         2 + self.desc_lines
     }
@@ -393,9 +400,10 @@ impl RouteMenu {
     pub fn target_label(&self, index: usize) -> String {
         match self.target_at(index) {
             Some(r) => r.name.clone(),
-            // Not "pass through": from the user's side this is simply the
-            // session's own model, unrouted.
-            None if index == 0 => "Default".to_string(),
+            // Named for its effect, not "pass through" or "default": from
+            // the user's side this row means requests go where the harness
+            // addresses them, unredirected.
+            None if index == 0 => "No redirect".to_string(),
             None => String::new(),
         }
     }
@@ -729,7 +737,7 @@ mod tests {
     #[test]
     fn the_first_target_is_default_and_always_selectable() {
         let m = menu(vec![option("kimi", &["kimi-k2.5"], Some("no key"))], None);
-        assert_eq!(m.target_label(0), "Default");
+        assert_eq!(m.target_label(0), "No redirect");
         assert!(m.target_enabled(0));
         assert!(!m.target_descends(0), "Default has no models to move into");
         assert!(!m.target_enabled(1), "an unusable target is not selectable");

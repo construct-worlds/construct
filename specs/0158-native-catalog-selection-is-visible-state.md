@@ -68,7 +68,10 @@ its own model.
   visually distinct; collapsing them into one "active" marker recreates
   the ambiguity this spec removes.
 - Wording stays functional and plain: the picker explains the native
-  marker in prose, not iconography alone.
+  marker in prose, not iconography alone. The pinned route is presented
+  as a "redirect" in user-facing language (see
+  [0114](0114-session-route-is-durable-session-state.md)), which is what
+  makes its coexistence with a native pick legible without a manual.
 
 ## Non-Goals
 

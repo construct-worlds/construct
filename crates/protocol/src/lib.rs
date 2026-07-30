@@ -2834,7 +2834,7 @@ pub struct SessionRoute {
     /// Model the route substitutes into outbound requests.
     pub model: String,
     /// The model the harness itself last reported, captured when the
-    /// route was armed. Lets a client render `<origin> -> <routed>` even
+    /// route was armed. Lets a client render `<origin> → <routed>` even
     /// though the harness keeps reporting its own model (spec 0114).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_model: Option<String>,

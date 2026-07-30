@@ -56,6 +56,14 @@ routing is indistinguishable from a harness that changed its own model.
 
 ## Consequences
 
+- User-facing surfaces name this mechanism a **redirect** ("Redirect
+  requests", "No redirect", "redirecting to …"), because redirection is a
+  concept users already hold that carries the semantics without a manual:
+  it is transparent to the harness, it applies to requests addressed to
+  the harness's own model, and it does not touch requests that explicitly
+  address another target (the native catalog selection of
+  [0157](0157-native-model-catalog-routing.md)). Wire, config, and CLI
+  names keep "route" — the rename is language, not protocol.
 - The route is stored by name, and that name is a model-profile name
   shared with the harness-agnostic profile registry — an endpoint is
   declared once and reachable from every consumer of it. A name that no
