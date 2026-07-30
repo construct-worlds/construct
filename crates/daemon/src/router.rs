@@ -1208,11 +1208,21 @@ mod tests {
         assert_eq!(resolved.name, "fast");
         assert_eq!(resolved.model, "model-one");
         assert_eq!(resolved.target_dialect, Dialect::OpenAiChat);
-        assert!(r.claude_models_response()["data"]
+        let claude_response = r.claude_models_response();
+        let picker_entry = claude_response["data"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|entry| entry["id"] == published.id));
+            .find(|entry| entry["id"] == published.id)
+            .unwrap();
+        assert_eq!(
+            picker_entry["display_name"],
+            "model-one · fast · Construct"
+        );
+        assert_eq!(
+            picker_entry["description"],
+            "Routed by Construct through fast to model-one."
+        );
 
         let env = r.attach_session("s-claude", "claude", None).unwrap();
         assert!(env[construct_protocol::adapter::ENV_CLAUDE_MODEL_CATALOG]
