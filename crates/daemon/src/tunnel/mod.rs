@@ -125,6 +125,11 @@ pub async fn run(
     // Keep a successful OAuth grant in memory across transport and service
     // retries. A failure after login must not repeatedly open browser windows.
     let mut construct_owner_token = None;
+    // The scoped credential a registration hands back for re-registering this
+    // reservation. It outlives the owner grant, so a route lost to a service
+    // deploy can be recovered without anyone at this machine. Memory only, and
+    // dropped with this task when the tunnel stops.
+    let mut construct_reregistration_token = None;
     loop {
         match run_once(
             provider,
@@ -133,6 +138,7 @@ pub async fn run(
             subdomain.as_deref(),
             &construct_instance_id,
             &mut construct_owner_token,
+            &mut construct_reregistration_token,
         )
         .await
         {
@@ -170,6 +176,7 @@ async fn run_once(
     subdomain: Option<&str>,
     construct_instance_id: &str,
     construct_owner_token: &mut Option<String>,
+    construct_reregistration_token: &mut Option<String>,
 ) -> anyhow::Result<()> {
     match provider {
         TunnelProvider::None => Ok(()),
@@ -181,6 +188,7 @@ async fn run_once(
                 subdomain,
                 construct_instance_id,
                 construct_owner_token,
+                construct_reregistration_token,
             )
             .await
         }

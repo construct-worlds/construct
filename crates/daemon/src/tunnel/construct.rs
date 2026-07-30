@@ -45,6 +45,62 @@ struct Registration {
     tunnel_token: String,
     ready_url: String,
     expires_in_seconds: u64,
+    /// Credential authorizing the next unattended re-registration of this
+    /// reservation. Absent when talking to a service that predates it, in
+    /// which case recovery falls back to the owner credential as before.
+    #[serde(default)]
+    reregistration_token: Option<String>,
+}
+
+/// Which credential a registration attempt presented. The distinction only
+/// matters when the service refuses it: a refused re-registration credential
+/// should fall back to the owner credential, while a refused owner credential
+/// is what forces a fresh browser handoff.
+enum Credential {
+    Reregistration(String),
+    Owner(String),
+}
+
+impl Credential {
+    fn bearer(&self) -> &str {
+        match self {
+            Credential::Reregistration(token) | Credential::Owner(token) => token,
+        }
+    }
+}
+
+/// Which held credential to present, or `None` when the daemon holds neither
+/// and has no choice but an interactive handoff.
+///
+/// The re-registration credential wins whenever it is held. Reaching for the
+/// owner credential first would work just as often, but it expires on a login's
+/// timescale rather than a route's, so preferring it quietly reintroduces the
+/// browser prompt this exists to avoid.
+fn select_credential(
+    reregistration: &Option<String>,
+    owner: &Option<String>,
+) -> Option<Credential> {
+    if let Some(token) = reregistration {
+        return Some(Credential::Reregistration(token.clone()));
+    }
+    owner.clone().map(Credential::Owner)
+}
+
+/// Forget exactly the credential the service just refused.
+///
+/// A refused re-registration credential says nothing about the owner
+/// credential, which may still be current — dropping both would open a browser
+/// that was never needed. A refused owner credential is the case that genuinely
+/// requires re-authorization.
+fn forget_refused(
+    credential: &Credential,
+    reregistration: &mut Option<String>,
+    owner: &mut Option<String>,
+) {
+    match credential {
+        Credential::Reregistration(_) => *reregistration = None,
+        Credential::Owner(_) => *owner = None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -78,6 +134,7 @@ pub async fn run_once(
     requested_tunnel_name: Option<&str>,
     construct_instance_id: &str,
     cached_owner_token: &mut Option<String>,
+    cached_reregistration_token: &mut Option<String>,
 ) -> Result<()> {
     let tunnel_name = requested_tunnel_name
         .filter(|name| valid_tunnel_name(name))
@@ -85,17 +142,21 @@ pub async fn run_once(
     let api_url =
         std::env::var("CONSTRUCT_TUNNEL_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
     let http = reqwest::Client::new();
-    let owner_token = match cached_owner_token.as_ref() {
-        Some(token) => token.clone(),
+    // Prefer the re-registration credential. It is scoped to this reservation
+    // and outlives the owner credential, which is what lets a lost route come
+    // back with nobody at this machine — reaching for the owner credential
+    // first would re-open a browser the remote user cannot get to.
+    let credential = match select_credential(cached_reregistration_token, cached_owner_token) {
+        Some(credential) => credential,
         None => {
             let token = authorize(&http, remote, &api_url).await?;
             *cached_owner_token = Some(token.clone());
-            token
+            Credential::Owner(token)
         }
     };
     let response = http
         .post(&api_url)
-        .bearer_auth(&owner_token)
+        .bearer_auth(credential.bearer())
         .json(&RegisterRequest {
             construct_instance_id,
             tunnel_name,
@@ -106,7 +167,16 @@ pub async fn run_once(
         .await
         .context("contact Construct tunnel service")?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        *cached_owner_token = None;
+        if matches!(credential, Credential::Reregistration(_)) {
+            tracing::info!(
+                "re-registration credential was refused; falling back to owner authorization"
+            );
+        }
+        forget_refused(
+            &credential,
+            cached_reregistration_token,
+            cached_owner_token,
+        );
     }
     let status = response.status();
     if !status.is_success() {
@@ -121,6 +191,15 @@ pub async fn run_once(
         .json::<Registration>()
         .await
         .context("decode Construct tunnel registration")?;
+    // Every registration mints a fresh one and retires the previous, so this
+    // has to be taken on success or the next recovery presents a spent
+    // credential. Memory only, and never logged: spec 0146 keeps tunnel
+    // credentials off disk, and 0162 does not relax that.
+    if let Some(token) = registration.reregistration_token.clone() {
+        if !token.is_empty() {
+            *cached_reregistration_token = Some(token);
+        }
+    }
 
     let reverse = format!(
         "tcp://127.0.0.1:{}:127.0.0.1:{local_port}",
@@ -374,6 +453,93 @@ mod tests {
             "https://tunnel.zarvis.ai/api/v1/auth/requests"
         );
         assert!(auth_api_url("https://tunnel.zarvis.ai/wrong").is_err());
+    }
+
+    #[test]
+    fn re_registration_credential_is_preferred_over_the_owner_credential() {
+        let reregistration = Some("scoped".to_string());
+        let owner = Some("interactive".to_string());
+        assert!(matches!(
+            select_credential(&reregistration, &owner),
+            Some(Credential::Reregistration(token)) if token == "scoped"
+        ));
+    }
+
+    #[test]
+    fn owner_credential_is_used_when_no_scoped_credential_is_held() {
+        let owner = Some("interactive".to_string());
+        assert!(matches!(
+            select_credential(&None, &owner),
+            Some(Credential::Owner(token)) if token == "interactive"
+        ));
+    }
+
+    #[test]
+    fn holding_neither_credential_forces_an_interactive_handoff() {
+        assert!(select_credential(&None, &None).is_none());
+    }
+
+    /// A refused scoped credential must not cost the owner credential too: the
+    /// next attempt should quietly retry with it rather than open a browser the
+    /// remote user cannot reach.
+    #[test]
+    fn a_refused_scoped_credential_leaves_the_owner_credential_intact() {
+        let mut reregistration = Some("scoped".to_string());
+        let mut owner = Some("interactive".to_string());
+        let presented = select_credential(&reregistration, &owner).unwrap();
+
+        forget_refused(&presented, &mut reregistration, &mut owner);
+
+        assert_eq!(reregistration, None);
+        assert_eq!(owner.as_deref(), Some("interactive"));
+        assert!(matches!(
+            select_credential(&reregistration, &owner),
+            Some(Credential::Owner(_))
+        ));
+    }
+
+    #[test]
+    fn a_refused_owner_credential_is_the_one_that_forces_re_authorization() {
+        let mut reregistration = None;
+        let mut owner = Some("interactive".to_string());
+        let presented = select_credential(&reregistration, &owner).unwrap();
+
+        forget_refused(&presented, &mut reregistration, &mut owner);
+
+        assert_eq!(owner, None);
+        assert!(select_credential(&reregistration, &owner).is_none());
+    }
+
+    /// A service that predates the credential simply omits the field, and the
+    /// daemon has to keep working against it.
+    #[test]
+    fn registration_without_a_scoped_credential_still_decodes() {
+        let body = serde_json::json!({
+            "public_url": "https://demo.tunnel.zarvis.ai",
+            "relay_url": "wss://relay.tunnel.zarvis.ai",
+            "remote_port": 22255u16,
+            "tunnel_token": "t",
+            "ready_url": "https://tunnel.zarvis.ai/api/v1/tunnels/x/ready",
+            "expires_in_seconds": 86400u64,
+        });
+        let registration: Registration = serde_json::from_value(body).unwrap();
+        assert_eq!(registration.reregistration_token, None);
+    }
+
+    #[test]
+    fn registration_carries_the_scoped_credential_when_the_service_issues_one() {
+        let body = serde_json::json!({
+            "public_url": "https://demo.tunnel.zarvis.ai",
+            "relay_url": "wss://relay.tunnel.zarvis.ai",
+            "remote_port": 22255u16,
+            "tunnel_token": "t",
+            "ready_url": "https://tunnel.zarvis.ai/api/v1/tunnels/x/ready",
+            "expires_in_seconds": 86400u64,
+            "reregistration_token": "scoped",
+            "reregistration_expires_in_seconds": 2592000u64,
+        });
+        let registration: Registration = serde_json::from_value(body).unwrap();
+        assert_eq!(registration.reregistration_token.as_deref(), Some("scoped"));
     }
 
     #[test]
