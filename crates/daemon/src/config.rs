@@ -287,7 +287,8 @@ enabled = true
 #   XDG_CONFIG_HOME / XDG_STATE_HOME / XDG_DATA_HOME / XDG_RUNTIME_DIR also apply.
 #
 # Daemon:
-#   CONSTRUCT_WEBUI_PORT      — local web UI port (default: 5746)
+#   CONSTRUCT_WEBUI_PORT      — pin local web UI port (default: reclaim
+#                              runtime_dir/webui.port or 5746, auto-pick if busy)
 #   CONSTRUCT_REMOTE_WS_PORT  — auto-start remote WS listener on this port at boot
 #   CONSTRUCT_PROGRAM_TEMPLATES_DIR — program templates dir (overrides [program].templates_dir)
 #
@@ -385,8 +386,12 @@ enabled = true
 # [router]
 # enabled        = false # opt out of all model routing and publication
 # publish_models = false # keep manual routing, but do not augment native pickers
-# port           = 8917 # fixed on purpose: harness processes outlive the daemon
-#                       # and keep dialing the port they were given at spawn
+# port           = 8917 # optional pin. When omitted the daemon reclaims the
+#                       # port last bound by this home (runtime_dir/router.port),
+#                       # falling back to 8917 and then a free port if busy.
+#                       # Harness processes outlive the daemon and keep dialing
+#                       # the port they were given at spawn, so the persisted
+#                       # port is what makes restart safe without config.
 #
 # # Optional picker/subagent ordering. Each selector is `<route>/<model>`.
 # # Codex exposes only its five lowest-priority catalog entries to spawn_agent;
@@ -553,15 +558,18 @@ pub struct RouterConfig {
     pub featured_models: Vec<String>,
     /// Loopback port the router listens on.
     ///
-    /// Deliberately fixed and outside the OS ephemeral range rather than
-    /// assigned per session. A harness process is told this port once, at
-    /// spawn, and outlives the daemon
-    /// (`Adapter::spawn_reconnectable`) — so after a daemon restart the
-    /// same port *must* come back or that process can no longer reach us.
-    /// A port the OS never hands out for ephemeral binds makes reclaiming
-    /// it deterministic.
-    #[serde(default = "default_router_port")]
-    pub port: u16,
+    /// `None` (the default when the key is omitted) means: prefer the
+    /// port this home last bound (`runtime_dir/router.port`), else the
+    /// compiled default (`8917`), and if that is busy pick a free port
+    /// and persist it. Harness processes outlive the daemon and keep
+    /// dialing the port they were given at spawn, so reclaiming the
+    /// *same home's* port across restarts is mandatory; auto-picking is
+    /// what lets a second home coexist without config.
+    ///
+    /// `Some(port)` pins the port — no auto-fallback, no overwrite of
+    /// the persisted file on success. `Some(0)` asks the OS (tests).
+    #[serde(default)]
+    pub port: Option<u16>,
     /// `[router.oauth]` — model each subscription login sends, keyed by
     /// provider name (`claude-oauth`, `codex-oauth`, `grok-oauth`,
     /// `kimi-oauth`).
@@ -578,7 +586,7 @@ impl Default for RouterConfig {
             enabled: default_router_enabled(),
             publish_models: default_publish_models(),
             featured_models: Vec::new(),
-            port: default_router_port(),
+            port: None,
             oauth: BTreeMap::new(),
         }
     }
@@ -707,10 +715,6 @@ fn default_router_enabled() -> bool {
 
 fn default_publish_models() -> bool {
     true
-}
-
-fn default_router_port() -> u16 {
-    8917
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -989,6 +993,7 @@ mod tests {
         let cfg: Config = toml::from_str("").expect("parse");
         assert!(cfg.router.enabled);
         assert!(cfg.router.publish_models);
+        assert_eq!(cfg.router.port, None, "omitted port means auto-allocate");
     }
 
     #[test]
@@ -1002,7 +1007,7 @@ mod tests {
         .expect("parse");
         assert!(cfg.router.enabled);
         assert!(cfg.router.publish_models);
-        assert_eq!(cfg.router.port, 18918);
+        assert_eq!(cfg.router.port, Some(18918));
 
         let opted_out: Config = toml::from_str(
             r#"

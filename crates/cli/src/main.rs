@@ -430,13 +430,7 @@ async fn main() -> Result<()> {
         // Handled above (early return); listed for match exhaustiveness.
         Command::Daemon { .. } => unreachable!("daemon mode handled before this match"),
         Command::Paths => {
-            let p = Paths::discover();
-            println!("config:  {}", p.config_dir.display());
-            println!("state:   {}", p.state_dir.display());
-            println!("data:    {}", p.data_dir.display());
-            println!("runtime: {}", p.runtime_dir.display());
-            println!("socket:  {}", p.socket().display());
-            println!("webui:   {}", construct_protocol::paths::local_webui_url());
+            construct_daemon::print_paths();
             Ok(())
         }
         Command::Ping => {

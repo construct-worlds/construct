@@ -50,10 +50,13 @@ the public, token-protected path is `/remote-control`, see
 
 | Use | Default | Override |
 |---|---|---|
-| Web UI port | `5746` (binds `http://127.0.0.1:5746/`) | `CONSTRUCT_WEBUI_PORT` |
+| Web UI port | `5746`, then auto-pick if busy | `CONSTRUCT_WEBUI_PORT` (pin; no auto-fallback) |
 
-`construct paths` prints the resolved URL on the `webui:` line, so
-you don't have to dig it out of the daemon log:
+When `CONSTRUCT_WEBUI_PORT` is unset the daemon prefers the port last bound by
+this home (`$runtime_dir/webui.port`), else `5746`, and if that is busy binds a
+free port and writes it back. A second `CONSTRUCT_HOME` therefore gets its own
+UI without config. `construct paths` reads the same file, so the printed URL
+matches the live listener:
 
 ```text
 $ construct paths
@@ -63,7 +66,12 @@ data:    ~/.local/share/construct
 runtime: ~/.local/state/construct
 socket:  ~/.local/state/construct/construct.sock
 webui:   http://127.0.0.1:5746/
+router:  http://127.0.0.1:8917/  (persisted)
 ```
+
+The model-router port follows the same reclaim rules under
+`$runtime_dir/router.port` (see [model-routing.md](model-routing.md)); set
+`[router] port = N` only when you want to pin it.
 
 ## Built-in harness child command overrides
 

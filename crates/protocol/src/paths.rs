@@ -136,6 +136,25 @@ impl Paths {
     pub fn smith_model_limits_file(&self) -> PathBuf {
         self.state_dir.join("smith-model-limits.json")
     }
+
+    /// Last successfully bound model-router port for this home.
+    ///
+    /// Written after the daemon binds the router listener so a later
+    /// restart of the *same* home reclaims the port live harnesses are
+    /// still dialing. Distinct homes (distinct runtime dirs) get
+    /// distinct files, so two daemons no longer fight over 8917.
+    pub fn router_port_file(&self) -> PathBuf {
+        self.runtime_dir.join("router.port")
+    }
+
+    /// Last successfully bound localhost web-UI port for this home.
+    ///
+    /// Same reclaim story as [`Self::router_port_file`]: keeps
+    /// `construct paths` and browser bookmarks stable across restarts
+    /// of one home, while letting a second home pick a free port.
+    pub fn webui_port_file(&self) -> PathBuf {
+        self.runtime_dir.join("webui.port")
+    }
 }
 
 fn home_dir() -> PathBuf {
@@ -145,22 +164,91 @@ fn home_dir() -> PathBuf {
 }
 
 /// Default port for the localhost-only browser UI. Override with the
-/// `CONSTRUCT_WEBUI_PORT` env var. The daemon binds `127.0.0.1:<port>`; the
-/// CLI's `construct paths` prints the resolved URL.
+/// `CONSTRUCT_WEBUI_PORT` env var, or let the daemon auto-pick and persist
+/// under [`Paths::webui_port_file`]. The daemon binds `127.0.0.1:<port>`;
+/// the CLI's `construct paths` prints the resolved URL.
 pub const DEFAULT_WEBUI_PORT: u16 = 5746;
 
-/// Resolve the localhost web-UI port from `CONSTRUCT_WEBUI_PORT`, falling back
-/// to [`DEFAULT_WEBUI_PORT`] when the var is unset or unparseable.
+/// Default port for the model-route proxy. Override with `[router] port`
+/// in config.toml, or let the daemon auto-pick and persist under
+/// [`Paths::router_port_file`].
+pub const DEFAULT_ROUTER_PORT: u16 = 8917;
+
+/// Env var that pins the localhost web-UI port (no auto-fallback).
+pub const WEBUI_PORT_ENV: &str = "CONSTRUCT_WEBUI_PORT";
+
+/// Read a port written by a previous bind of this home, if any.
+pub fn read_persisted_port(path: &std::path::Path) -> Option<u16> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    raw.trim().parse::<u16>().ok().filter(|p| *p != 0)
+}
+
+/// Persist the port a listener actually bound so the next daemon start
+/// for this home reclaims it. Best-effort: a write failure only means
+/// the next boot falls back to the compiled default.
+pub fn write_persisted_port(path: &std::path::Path, port: u16) -> std::io::Result<()> {
+    if port == 0 {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("port.tmp");
+    std::fs::write(&tmp, format!("{port}\n"))?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Preferred localhost web-UI port for this process, without binding.
+///
+/// Precedence: `CONSTRUCT_WEBUI_PORT` env (explicit pin) → persisted
+/// [`Paths::webui_port_file`] → [`DEFAULT_WEBUI_PORT`].
 pub fn local_webui_port() -> u16 {
-    std::env::var("CONSTRUCT_WEBUI_PORT")
+    local_webui_port_for(&Paths::discover())
+}
+
+/// Like [`local_webui_port`] against an already-resolved [`Paths`].
+pub fn local_webui_port_for(paths: &Paths) -> u16 {
+    if let Some(port) = std::env::var(WEBUI_PORT_ENV)
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(DEFAULT_WEBUI_PORT)
+        .filter(|p| *p != 0)
+    {
+        return port;
+    }
+    read_persisted_port(&paths.webui_port_file()).unwrap_or(DEFAULT_WEBUI_PORT)
+}
+
+/// True when the operator pinned the web-UI port via env — the daemon
+/// must not auto-fallback or overwrite the persisted file.
+pub fn local_webui_port_explicit() -> bool {
+    std::env::var(WEBUI_PORT_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .filter(|p| *p != 0)
+        .is_some()
 }
 
 /// The resolved localhost web-UI URL (`http://127.0.0.1:<port>/`).
 pub fn local_webui_url() -> String {
-    format!("http://127.0.0.1:{}/", local_webui_port())
+    local_webui_url_for(&Paths::discover())
+}
+
+/// Like [`local_webui_url`] against an already-resolved [`Paths`].
+pub fn local_webui_url_for(paths: &Paths) -> String {
+    format!("http://127.0.0.1:{}/", local_webui_port_for(paths))
+}
+
+/// Preferred router port before binding.
+///
+/// Precedence: explicit `configured` value → persisted
+/// [`Paths::router_port_file`] → [`DEFAULT_ROUTER_PORT`].
+/// A configured `Some(0)` means "ask the OS" (tests) and skips the file.
+pub fn preferred_router_port(paths: &Paths, configured: Option<u16>) -> u16 {
+    match configured {
+        Some(port) => port,
+        None => read_persisted_port(&paths.router_port_file()).unwrap_or(DEFAULT_ROUTER_PORT),
+    }
 }
 
 /// Resolve a sibling binary (an adapter, `construct-mcp`, etc.) by name.
@@ -271,5 +359,57 @@ mod tests {
         assert_eq!(paths.state_dir, PathBuf::from("/test/home/state"));
         assert_eq!(paths.data_dir, PathBuf::from("/test/home/data"));
         assert_eq!(paths.runtime_dir, PathBuf::from("/override/run"));
+    }
+
+    #[test]
+    fn persisted_port_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("router.port");
+        write_persisted_port(&path, 9123).unwrap();
+        assert_eq!(read_persisted_port(&path), Some(9123));
+        // Zero is never a real bound port; refuse to write it.
+        write_persisted_port(&path, 0).unwrap();
+        assert_eq!(read_persisted_port(&path), Some(9123));
+        // Junk is ignored.
+        std::fs::write(&path, "not-a-port\n").unwrap();
+        assert_eq!(read_persisted_port(&path), None);
+    }
+
+    #[test]
+    fn preferred_router_port_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: dir.path().to_path_buf(),
+            state_dir: dir.path().to_path_buf(),
+            data_dir: dir.path().to_path_buf(),
+            runtime_dir: dir.path().to_path_buf(),
+        };
+        // No file, no pin → compiled default.
+        assert_eq!(preferred_router_port(&paths, None), DEFAULT_ROUTER_PORT);
+        // Persisted file wins over the default.
+        write_persisted_port(&paths.router_port_file(), 9333).unwrap();
+        assert_eq!(preferred_router_port(&paths, None), 9333);
+        // Explicit config pin wins over the file.
+        assert_eq!(preferred_router_port(&paths, Some(9444)), 9444);
+        // Explicit 0 (tests) is honored literally.
+        assert_eq!(preferred_router_port(&paths, Some(0)), 0);
+    }
+
+    #[test]
+    fn local_webui_port_prefers_env_then_file() {
+        let _guard = EnvGuard::lock(&[WEBUI_PORT_ENV]);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: dir.path().to_path_buf(),
+            state_dir: dir.path().to_path_buf(),
+            data_dir: dir.path().to_path_buf(),
+            runtime_dir: dir.path().to_path_buf(),
+        };
+        assert_eq!(local_webui_port_for(&paths), DEFAULT_WEBUI_PORT);
+        write_persisted_port(&paths.webui_port_file(), 6001).unwrap();
+        assert_eq!(local_webui_port_for(&paths), 6001);
+        std::env::set_var(WEBUI_PORT_ENV, "6002");
+        assert_eq!(local_webui_port_for(&paths), 6002);
+        assert!(local_webui_port_explicit());
     }
 }

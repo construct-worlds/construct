@@ -23,7 +23,7 @@ from the buttons in the dialog.
 | `/remote-control debug` | Alias for `/remote-control` — kept because the plain dialog is now the local-only resting state. |
 | `CONSTRUCT_REMOTE_WS_PORT=<port>` | Start the remote WebSocket listener on daemon boot for scripted/headless use. |
 | `CONSTRUCT_REMOTE_PROVIDER=<cloudflare\|construct\|none>` | Tunnel provider for the boot-time listener above. Defaults to `cloudflare`. |
-| `CONSTRUCT_WEBUI_PORT=<port>` | Override the always-on localhost web UI port. Defaults to `5746`. |
+| `CONSTRUCT_WEBUI_PORT=<port>` | Pin the always-on localhost web UI port (no auto-fallback). When unset, the daemon reclaims `$runtime_dir/webui.port` or defaults to `5746`, picking a free port if busy. |
 
 ## The tunnel
 
