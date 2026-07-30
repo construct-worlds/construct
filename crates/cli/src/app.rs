@@ -34266,6 +34266,133 @@ mod tests {
         server.abort();
     }
 
+    /// Name step on a tall terminal: LAN QR stays for the side-by-side
+    /// layout (same breathing room as the chooser), form text is inset
+    /// from the border, and Enter remains clickable.
+    #[tokio::test]
+    async fn remote_name_dialog_keeps_qr_layout_and_padding() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.remote_control_popup = Some(RemoteControlPopup::Name(RemoteControlName {
+            choose: RemoteControlChoose {
+                base: remote_ok_fixture(false),
+                options: vec![],
+                selected: 0,
+                active: None,
+            },
+            name: "quiet-river".into(),
+            pristine: true,
+        }));
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw name dialog");
+
+        let modal = app
+            .layout
+            .modal_area
+            .expect("name dialog should set modal_area");
+        let buf = terminal.backend().buffer();
+        let screen = rendered_text(buf);
+
+        // Shell padding gutter just inside the border.
+        let gutter = buf
+            .cell((modal.x + 1, modal.y + 1))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default();
+        assert!(
+            gutter.trim().is_empty(),
+            "cell just inside the border should be padding, not body text, got {gutter:?}"
+        );
+
+        // Focused form copy — no re-listed lan:/password: block.
+        assert!(
+            screen.contains("Choose your tunnel name:"),
+            "name prompt should render:\n{screen}"
+        );
+        assert!(
+            screen.contains("quiet-river"),
+            "suggested name should render:\n{screen}"
+        );
+        assert!(
+            !screen.contains("password:"),
+            "name step should not re-list LAN credentials:\n{screen}"
+        );
+
+        // Side-by-side QR makes the dialog roughly QR-tall (fixture is 10 rows).
+        assert!(
+            modal.height >= 12,
+            "with QR the name dialog should be at least QR-tall, got height {}",
+            modal.height
+        );
+
+        assert!(
+            app.layout.remote_control_hits.iter().any(|h| matches!(
+                h.action,
+                RemoteControlHitAction::Key(crossterm::event::KeyCode::Enter)
+            )),
+            "Enter hint should remain clickable on the name step"
+        );
+
+        server.abort();
+    }
+
+    /// On a short terminal the name step drops the QR (same threshold as
+    /// the chooser) but still keeps shell padding + a no-QR text indent so
+    /// the form does not sit flush on the frame.
+    #[tokio::test]
+    async fn remote_name_dialog_short_terminal_still_pads_without_qr() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.remote_control_popup = Some(RemoteControlPopup::Name(RemoteControlName {
+            choose: RemoteControlChoose {
+                base: remote_ok_fixture(false),
+                options: vec![],
+                selected: 0,
+                active: None,
+            },
+            name: "quiet-river".into(),
+            pristine: true,
+        }));
+
+        // Height 24 < 30 → no QR. Width still wide enough for the form.
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw name dialog");
+
+        let modal = app
+            .layout
+            .modal_area
+            .expect("name dialog should set modal_area");
+        let buf = terminal.backend().buffer();
+
+        // Content origin after border(1) + pad_left(3) + no_qr_indent(2).
+        let first = buf
+            .cell((modal.x + 1 + 3 + 2, modal.y + 1 + 1))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            first, "C",
+            "no-QR form should start after shell pad + indent ('Choose…')"
+        );
+
+        // Cells inside the left padding gutter stay blank.
+        for dx in 1..=3 {
+            let cell = buf
+                .cell((modal.x + dx, modal.y + 2))
+                .map(|c| c.symbol().to_string())
+                .unwrap_or_default();
+            assert!(
+                cell.trim().is_empty(),
+                "left padding gutter col +{dx} should be blank, got {cell:?}"
+            );
+        }
+
+        server.abort();
+    }
+
     /// Closing the dialog clears the click zones, so a stale zone can never
     /// dispatch against whatever renders next frame.
     #[tokio::test]
