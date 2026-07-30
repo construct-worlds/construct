@@ -5295,7 +5295,9 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
                     .fg(if deck.focus == DeckFocus::Categories {
                         app.theme.accent
                     } else {
-                        app.theme.muted
+                        // Same secondary chrome as lineage rails (theme.dim,
+                        // no Modifier::DIM) — border+DIM was unreadable.
+                        app.theme.dim
                     })
                     .add_modifier(Modifier::BOLD),
             ),
@@ -5306,7 +5308,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
                     .fg(if deck.focus == DeckFocus::Cards {
                         app.theme.accent
                     } else {
-                        app.theme.muted
+                        app.theme.dim
                     })
                     .add_modifier(Modifier::BOLD),
             ),
@@ -5324,7 +5326,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     // Generate shows this as soon as its left-column row is highlighted,
     // matching History (no separate "open the field" visual state).
     if show_text_input {
-        let (value, placeholder, active) = if generate_selected {
+        let (value, placeholder) = if generate_selected {
             (
                 deck.regenerate_query.as_deref().unwrap_or(""),
                 if generate_is_regen {
@@ -5332,30 +5334,19 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
                 } else {
                     "optional keywords to guide generation…"
                 },
-                deck.focus == DeckFocus::Cards
-                    || deck
-                        .regenerate_query
-                        .as_ref()
-                        .is_some_and(|q| !q.is_empty()),
             )
         } else {
-            (
-                deck.history_query.as_str(),
-                "type to search history…",
-                deck.focus == DeckFocus::Cards || !deck.history_query.is_empty(),
-            )
+            (deck.history_query.as_str(), "type to search history…")
         };
+        // Placeholders use theme.dim (lineage's secondary text) rather than
+        // muted/border + Modifier::DIM, which stacked too dark.
         let field_style = Style::default()
             .fg(if value.is_empty() {
-                app.theme.muted
+                app.theme.dim
             } else {
                 app.theme.text
             })
-            .add_modifier(if active {
-                Modifier::UNDERLINED
-            } else {
-                Modifier::UNDERLINED | Modifier::DIM
-            });
+            .add_modifier(Modifier::UNDERLINED);
         let display = if value.is_empty() {
             format!(" {placeholder}")
         } else {
@@ -5386,9 +5377,8 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
 
     let row_style = |enabled: bool, highlighted: bool, focused: bool| {
         if !enabled {
-            Style::default()
-                .fg(app.theme.border)
-                .add_modifier(Modifier::DIM)
+            // Match lineage's unselected-rail treatment: theme.dim only.
+            Style::default().fg(app.theme.dim)
         } else if highlighted && focused {
             Style::default()
                 .fg(app.theme.text)
@@ -5541,9 +5531,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         f.render_widget(
             Paragraph::new(Line::styled(
                 "no matching prompts",
-                Style::default()
-                    .fg(app.theme.border)
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(app.theme.dim),
             )),
             Rect {
                 x: cards_x,
@@ -5556,9 +5544,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         f.render_widget(
             Paragraph::new(Line::styled(
                 "no prompts in history yet",
-                Style::default()
-                    .fg(app.theme.border)
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(app.theme.dim),
             )),
             Rect {
                 x: cards_x,
@@ -5624,9 +5610,8 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     f.render_widget(
         Paragraph::new(Line::styled(
             truncate_to_width(hint, inner_w as usize),
-            Style::default()
-                .fg(app.theme.border)
-                .add_modifier(Modifier::DIM),
+            // Footer hints: lineage-style secondary text (theme.dim).
+            Style::default().fg(app.theme.dim),
         )),
         Rect {
             x: inner_x,
