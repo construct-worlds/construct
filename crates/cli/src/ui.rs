@@ -5594,7 +5594,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            " model routing ",
+            " model redirect ",
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -9523,7 +9523,7 @@ fn modeline_model_text(model: Option<&str>, effort: Option<&str>) -> String {
 
 /// The modeline's model indicator, including an armed route.
 ///
-/// A routed session shows `<origin> -> <routed>`: the harness keeps
+/// A routed session shows `<origin> → <routed>`: the harness keeps
 /// reporting its own model and never learns of the substitution
 /// (spec 0114), so showing only one of the two would be actively
 /// misleading — either hiding that routing is on, or hiding what the
@@ -9553,7 +9553,7 @@ fn modeline_model_route_text(
                 .as_deref()
                 .map(|m| modeline_model_text(Some(m), effort))
                 .unwrap_or(base);
-            format!("{origin} -> {}", route.model)
+            format!("{origin} → {}", route.model)
         }
     }
 }
@@ -21220,7 +21220,7 @@ mod tests {
                 None,
                 Some(&route("kimi", "kimi-k2.5", Some("claude-opus-5")))
             ),
-            "claude-opus-5 -> kimi-k2.5"
+            "claude-opus-5 → kimi-k2.5"
         );
     }
 
@@ -21233,11 +21233,11 @@ mod tests {
                 None,
                 Some(&route("kimi", "kimi-k2.5", None))
             ),
-            "claude-opus-5 -> kimi-k2.5"
+            "claude-opus-5 → kimi-k2.5"
         );
         assert_eq!(
             modeline_model_route_text(None, None, Some(&route("kimi", "kimi-k2.5", None))),
-            "- -> kimi-k2.5"
+            "- → kimi-k2.5"
         );
     }
 
