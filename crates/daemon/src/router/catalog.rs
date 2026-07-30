@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
-use super::{oauth::OauthProvider, provider_dialect, ArmedRoute, Dialect, Router};
+use super::{oauth, oauth::OauthProvider, profile_effort_support, ArmedRoute, EffortSupport, Router};
 
 // The id codec is a wire contract shared with clients (they decode ids for
 // display, spec 0158), so it lives in the protocol crate. Re-exported here
@@ -33,7 +33,7 @@ pub struct PublishedModel {
     /// (OpenAI Responses today); targets whose reasoning controls are a
     /// different shape advertise a single provider-default level instead
     /// of a selector that would silently do nothing.
-    pub effort_selectable: bool,
+    pub effort: EffortSupport,
 }
 
 impl Router {
@@ -56,7 +56,7 @@ impl Router {
                     id: published_model_id_for_harness(harness, provider.name(), &model),
                     route: provider.name().to_string(),
                     model,
-                    effort_selectable: provider.dialect() == Dialect::OpenAiResponses,
+                    effort: oauth::effort_support(*provider),
                 });
             }
         }
@@ -69,8 +69,7 @@ impl Router {
                     id: published_model_id_for_harness(harness, route, &model),
                     route: route.clone(),
                     model,
-                    effort_selectable: provider_dialect(&profile.provider)
-                        == Some(Dialect::OpenAiResponses),
+                    effort: profile_effort_support(&profile.provider),
                 });
             }
         }
@@ -309,27 +308,25 @@ pub fn build_codex_catalog(
                 .copied()
                 .unwrap_or(100 + ranks.len() + index)
         });
-        entry["default_reasoning_level"] = Value::String("medium".to_string());
-        entry["supported_reasoning_levels"] = if model.effort_selectable {
-            // The target accepts the effort knob verbatim, so the picker
-            // choice is real: Codex sends it as `reasoning.effort` and the
-            // router forwards or re-emits it unchanged. The set is the
-            // conservative intersection every OpenAI reasoning model
-            // accepts; per-model refinement needs capability metadata the
-            // route registry does not carry yet.
-            json!([
+        let (default_level, levels) = match model.effort {
+            EffortSupport::Verbatim => ("medium", json!([
                 {"effort": "low", "description": "Fastest, minimal reasoning"},
                 {"effort": "medium", "description": "Balanced reasoning"},
                 {"effort": "high", "description": "Deepest reasoning, slower"}
-            ])
-        } else {
-            // Advertising a selector the route cannot honor would let the
-            // user pick levels that silently do nothing.
-            json!([{
+            ])),
+            EffortSupport::Thinking => ("minimal", json!([
+                {"effort": "minimal", "description": "No extended thinking"},
+                {"effort": "low", "description": "Extended thinking, 4k token budget"},
+                {"effort": "medium", "description": "Extended thinking, 12k token budget"},
+                {"effort": "high", "description": "Extended thinking, 24k token budget"}
+            ])),
+            EffortSupport::Unsupported => ("medium", json!([{
                 "effort": "medium",
                 "description": "Provider-default reasoning through Construct"
-            }])
+            }])),
         };
+        entry["default_reasoning_level"] = Value::String(default_level.to_string());
+        entry["supported_reasoning_levels"] = levels;
         // Route profiles currently carry no capability metadata. Advertise a
         // conservative text/tool surface until the shared registry grows
         // explicit per-model capabilities.
@@ -386,7 +383,7 @@ mod tests {
             id: published_model_id("claude-oauth", "opus"),
             route: "claude-oauth".into(),
             model: "opus".into(),
-            effort_selectable: false,
+            effort: EffortSupport::Unsupported,
         };
         let catalog = build_codex_catalog(baseline(), &[route.clone()], &[]).unwrap();
         let models = catalog["models"].as_array().unwrap();
@@ -419,7 +416,7 @@ mod tests {
             id: published_model_id("codex-oauth", "gpt-5.2-codex"),
             route: "codex-oauth".into(),
             model: "gpt-5.2-codex".into(),
-            effort_selectable: true,
+            effort: EffortSupport::Verbatim,
         };
         let catalog = build_codex_catalog(baseline(), &[route], &[]).unwrap();
         let levels = catalog["models"][1]["supported_reasoning_levels"]
@@ -433,18 +430,37 @@ mod tests {
     }
 
     #[test]
+    fn thinking_route_advertises_off_and_budget_levels() {
+        let route = PublishedModel {
+            id: published_model_id("claude-oauth", "opus"),
+            route: "claude-oauth".into(),
+            model: "opus".into(),
+            effort: EffortSupport::Thinking,
+        };
+        let catalog = build_codex_catalog(baseline(), &[route], &[]).unwrap();
+        let levels = catalog["models"][1]["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|level| level["effort"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(levels, vec!["minimal", "low", "medium", "high"]);
+        assert_eq!(catalog["models"][1]["default_reasoning_level"], "minimal");
+    }
+
+    #[test]
     fn configured_feature_order_controls_priorities() {
         let a = PublishedModel {
             id: published_model_id("a", "one"),
             route: "a".into(),
             model: "one".into(),
-            effort_selectable: true,
+            effort: EffortSupport::Verbatim,
         };
         let b = PublishedModel {
             id: published_model_id("b", "two"),
             route: "b".into(),
             model: "two".into(),
-            effort_selectable: false,
+            effort: EffortSupport::Unsupported,
         };
         let catalog =
             build_codex_catalog(baseline(), &[a, b], &["b/two".into(), "a/one".into()]).unwrap();
