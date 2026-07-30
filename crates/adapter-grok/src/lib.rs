@@ -926,6 +926,89 @@ fn spawn_interactive_transcript_watcher(
     });
 }
 
+/// How the interactive Grok process is bound to a native session id.
+///
+/// Grok has no originator tag (unlike Codex), so without an explicit
+/// `--session-id` / `-r` the adapter used to discover "whichever session dir
+/// under this cwd is newest." That heuristic is fine for mid-session
+/// `/clear` detection once we already know our id, but it is fatal on first
+/// spawn in a shared cwd: an older orphan conversation (e.g. a short
+/// `echo "yes"` test from weeks ago) can win the mtime race, get written to
+/// `grok_session_id.txt`, and then poison every later same-harness fork —
+/// the client skips the portable transcript seed for natively-forking
+/// harnesses (spec 0031), so the fork inherits only that orphan's history.
+///
+/// Pre-minting a UUID with `--session-id` on first spawn (matching Claude)
+/// makes the binding authoritative from process start. Discovery then only
+/// rebinds onto directories that appear *after* spawn (`/clear`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InteractiveIdentity {
+    /// Args that select/create the native session (`-r`, `--fork-session`,
+    /// `--session-id`).
+    args: Vec<String>,
+    /// Native id this construct session owns (pre-minted, resumed, or forked).
+    session_id: Option<String>,
+    /// Parent native id when this launch is a same-harness fork.
+    fork_parent_id: Option<String>,
+    /// Skip already-projected transcript lines. Only true on daemon resume —
+    /// a native fork must project the inherited parent history into the new
+    /// construct transcript, and a fresh pre-mint has nothing to skip.
+    skip_existing: bool,
+}
+
+fn plan_interactive_identity(
+    resuming: bool,
+    persisted_id: Option<String>,
+    fork_from: Option<String>,
+    mint_id: impl FnOnce() -> String,
+) -> InteractiveIdentity {
+    if resuming {
+        let mut args = Vec::new();
+        if let Some(sid) = persisted_id.as_ref() {
+            args.push("-r".into());
+            args.push(sid.clone());
+        }
+        return InteractiveIdentity {
+            args,
+            session_id: persisted_id,
+            fork_parent_id: None,
+            skip_existing: true,
+        };
+    }
+
+    if let Some(parent) = fork_from.filter(|s| !s.is_empty()) {
+        // Same-harness fork: resume the parent's native session AS A NEW one
+        // (`--fork-session`), named up front (`--session-id`) so this
+        // session's own id file is correct immediately (the daemon read the
+        // parent's id — spec 0031/0078).
+        let new_id = mint_id();
+        return InteractiveIdentity {
+            args: vec![
+                "-r".into(),
+                parent.clone(),
+                "--fork-session".into(),
+                "--session-id".into(),
+                new_id.clone(),
+            ],
+            session_id: Some(new_id),
+            fork_parent_id: Some(parent),
+            // Forked history lives in the new native session file and must
+            // be projected — this is a brand-new construct session.
+            skip_existing: false,
+        };
+    }
+
+    // Fresh interactive spawn: pre-mint so we never bind to an unrelated
+    // pre-existing session dir under this cwd via newest-mtime discovery.
+    let new_id = mint_id();
+    InteractiveIdentity {
+        args: vec!["--session-id".into(), new_id.clone()],
+        session_id: Some(new_id),
+        fork_parent_id: None,
+        skip_existing: false,
+    }
+}
+
 async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     let command = command_override();
     let mut args = command.args.clone();
@@ -939,31 +1022,30 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     args.extend(grok_allow_args());
 
     let resuming = std::env::var("CONSTRUCT_RESUME").as_deref() == Ok("1");
-    let mut grok_session_id = if resuming { read_conv_id() } else { None };
-    let mut fork_parent_id: Option<String> = None;
+    // Fork hint is first-launch only. The daemon persists start.json env
+    // across resume; re-honoring it would fork the parent again instead of
+    // resuming this session's own captured native id (same as Claude).
+    let fork_from = (!resuming)
+        .then(|| {
+            std::env::var("CONSTRUCT_GROK_FORK_FROM")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .flatten();
+    let identity = plan_interactive_identity(
+        resuming,
+        if resuming { read_conv_id() } else { None },
+        fork_from,
+        || uuid::Uuid::new_v4().to_string(),
+    );
+    args.extend(identity.args.iter().cloned());
+    if let Some(id) = identity.session_id.as_ref() {
+        // Persist before spawn so a crash mid-start still leaves a usable id,
+        // and so sibling exclusion sees us immediately.
+        write_conv_id(id);
+    }
 
-    if let Some(sid) = &grok_session_id {
-        args.push("-r".into());
-        args.push(sid.clone());
-    } else if !resuming {
-        if let Some(parent) = std::env::var("CONSTRUCT_GROK_FORK_FROM")
-            .ok()
-            .filter(|s| !s.is_empty())
-        {
-            // Same-harness fork: resume the parent's native session AS A
-            // NEW one (`--fork-session`), named up front (`--session-id`)
-            // so this session's own id file is correct immediately (the
-            // daemon read the parent's id — spec 0031/0078).
-            let new_id = uuid::Uuid::new_v4().to_string();
-            args.push("-r".into());
-            args.push(parent.clone());
-            args.push("--fork-session".into());
-            args.push("--session-id".into());
-            args.push(new_id.clone());
-            write_conv_id(&new_id);
-            grok_session_id = Some(new_id);
-            fork_parent_id = Some(parent);
-        }
+    if !resuming {
         if let Some(prompt) = params.prompt.as_ref().filter(|s| !s.trim().is_empty()) {
             args.push(prompt.clone());
         }
@@ -993,28 +1075,21 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
     };
 
     let cwd = PathBuf::from(&params.cwd);
-    // Continuous discovery: Grok has no originator tag, so we track the
-    // newest session dir under this cwd. That covers first spawn *and*
-    // mid-session /clear (a fresh dir with a newer mtime).
-    let attached_to_existing = grok_session_id.is_some();
-    let mut never_rebind_onto: HashSet<String> = fork_parent_id.into_iter().collect();
-    if attached_to_existing {
-        // Snapshot synchronously, before spawning the PTY. On bulk daemon
-        // restart every Grok process shares the cwd-level native-session
-        // directory, and resume itself can make a sibling directory newest.
-        // Persisted sibling metadata is a useful live safeguard, but the
-        // stronger restart invariant is that no directory which predates
-        // this resumed adapter can represent its future `/clear`.
-        never_rebind_onto.extend(existing_session_ids(&cwd));
-        if let Some(own_id) = grok_session_id.as_ref() {
-            never_rebind_onto.remove(own_id);
-        }
+    // Continuous discovery covers mid-session /clear (a fresh dir with a
+    // newer mtime). Pre-mint / resume / fork all give us a known id up front,
+    // so we always snapshot pre-existing dirs into the exclusion set: none of
+    // them can be our future `/clear`, and none of them may steal our binding.
+    let mut never_rebind_onto: HashSet<String> =
+        identity.fork_parent_id.into_iter().collect();
+    never_rebind_onto.extend(existing_session_ids(&cwd));
+    if let Some(own_id) = identity.session_id.as_ref() {
+        never_rebind_onto.remove(own_id);
     }
     spawn_interactive_transcript_watcher(
-        grok_session_id,
+        identity.session_id,
         cwd,
         ctx.emit.clone(),
-        attached_to_existing,
+        identity.skip_existing,
         never_rebind_onto,
         params.model.clone(),
     );
@@ -1208,6 +1283,81 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fresh_interactive_launch_premints_session_id() {
+        // First spawn must pin a UUID with `--session-id` rather than
+        // discovering "newest under cwd" — that discovery is what bound
+        // live construct sessions onto orphan `echo "yes"` conversations
+        // and made same-harness forks inherit only that orphan history.
+        let planned = plan_interactive_identity(false, None, None, || {
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into()
+        });
+        assert_eq!(
+            planned.args,
+            vec![
+                "--session-id".to_string(),
+                "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+            ]
+        );
+        assert_eq!(
+            planned.session_id.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+        assert!(planned.fork_parent_id.is_none());
+        assert!(
+            !planned.skip_existing,
+            "fresh sessions have no prior construct transcript to skip"
+        );
+    }
+
+    #[test]
+    fn native_fork_launch_keeps_parent_and_projects_history() {
+        let planned = plan_interactive_identity(
+            false,
+            None,
+            Some("parent-native-id".into()),
+            || "fork-native-id".into(),
+        );
+        assert_eq!(
+            planned.args,
+            vec![
+                "-r".to_string(),
+                "parent-native-id".into(),
+                "--fork-session".into(),
+                "--session-id".into(),
+                "fork-native-id".into(),
+            ]
+        );
+        assert_eq!(planned.session_id.as_deref(), Some("fork-native-id"));
+        assert_eq!(planned.fork_parent_id.as_deref(), Some("parent-native-id"));
+        assert!(
+            !planned.skip_existing,
+            "a native fork is a new construct session: inherited parent \
+             history must be projected into its transcript (skip_existing \
+             was previously true because the pre-minted id made the adapter \
+             look 'attached', which dropped forked history from chat view)"
+        );
+    }
+
+    #[test]
+    fn resume_launch_skips_existing_and_ignores_fork_hint() {
+        // plan_interactive_identity itself does not see the fork env; the
+        // caller clears fork_from when resuming. Assert the resume shape.
+        let planned = plan_interactive_identity(
+            true,
+            Some("persisted-native-id".into()),
+            None, // caller must pass None on resume
+            || panic!("resume must not mint a new id"),
+        );
+        assert_eq!(
+            planned.args,
+            vec!["-r".to_string(), "persisted-native-id".into()]
+        );
+        assert_eq!(planned.session_id.as_deref(), Some("persisted-native-id"));
+        assert!(planned.skip_existing);
+        assert!(planned.fork_parent_id.is_none());
+    }
+
     #[test]
     fn newest_dir_discovery_skips_fork_sessions() {
         // A fork (`--fork-session`) creates a NEW session dir in the same

@@ -80,6 +80,11 @@ can and cannot cross the boundary.
   even into one of these harnesses. `antigravity` has no native fork
   primitive (only in-place `--conversation` resume, which continues rather
   than branches), so it always keeps the seed too.
+- Grok's native id must be authoritative before any same-harness fork reads
+  it: interactive Grok sessions pre-mint with `--session-id` at first spawn
+  (spec 0159). Newest-mtime discovery is only for mid-session `/clear`, not
+  the initial bind — otherwise a shared-cwd orphan conversation can be what
+  the fork inherits while the portable seed is skipped.
 
 ## Non-Goals
 
