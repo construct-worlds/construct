@@ -174,7 +174,9 @@ grok-oauth   = "grok-4.5"
   with no translator. When the fix is signing in, the menu offers it
   directly: press Enter (or click the reason) and Construct opens a new
   shell session running the owning CLI's login command — sign in there
-  (the CLI opens its own browser page), then reopen the menu.
+  (the CLI opens its own browser page). Construct detects the credential
+  landing and closes and archives the login session automatically; a
+  login that fails stays open so you can read what went wrong.
 - **A redirect is armed but reported unproven** — the harness resolved
   its endpoint through a channel that ignores the proxy environment. The
   session keeps working exactly as before; Construct reports what it

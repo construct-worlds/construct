@@ -134,7 +134,7 @@ impl OauthProvider {
     /// The exact command that signs in. Most CLIs run their login flow on
     /// launch when the credential is missing or expired; Codex has a
     /// dedicated subcommand that exits once the login lands.
-    fn login_command(self) -> String {
+    pub fn login_command(self) -> String {
         match self {
             OauthProvider::Codex => "codex login".to_string(),
             _ => self.owning_cli().to_string(),

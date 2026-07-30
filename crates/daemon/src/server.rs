@@ -1448,6 +1448,13 @@ async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
+    dispatch_entry!(ipc_method::ROUTER_LOGIN, {
+        let p = params!(req, construct_protocol::RouterLoginParams);
+        match manager.start_login_session(p).await {
+            Ok(sid) => Response::ok(req.id.clone(), json!({ "session_id": sid })),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
     dispatch_entry!(ipc_method::SESSION_TOOL_DECISION, {
         let p = params!(req, SessionToolDecisionParams);
         match manager

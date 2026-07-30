@@ -211,37 +211,20 @@ impl App {
         true
     }
 
-    /// Sign in to a blocked subscription target by running the owning
-    /// CLI's login command in a new shell session (spec 0117: the owning
-    /// tool stays the credential's only writer — Construct just makes
-    /// reaching for it one keypress). The session is selected so the
-    /// user lands in the login flow; the CLI opens its own browser page.
+    /// Sign in to a blocked subscription target by asking the daemon to
+    /// run the owning CLI's login command in a new shell session
+    /// (spec 0117: the owning tool stays the credential's only writer —
+    /// Construct just makes reaching for it one keypress). The session is
+    /// selected so the user lands in the login flow; the CLI opens its
+    /// own browser page, and the daemon archives the session on its own
+    /// the moment the credential lands.
     async fn start_route_login(&mut self, route: String, command: String) {
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string());
         let (cols, rows) = self.active_pane_size();
-        let params = construct_protocol::CreateSessionParams {
-            harness: "shell".into(),
-            cwd,
-            prompt: Some(command.clone()),
-            model: None,
-            title: Some(format!("{route} login")),
-            mode: None,
-            pty_size: Some(construct_protocol::PtySize {
-                cols: cols.max(20),
-                rows: rows.max(5),
-            }),
-            worktree: false,
-            env: std::collections::HashMap::new(),
-            args: Vec::new(),
-            kind: construct_protocol::SessionKind::User,
-            parent_session_id: None,
-            group_id: None,
-            position_after_session_id: None,
-            forked_from: None,
+        let pty = construct_protocol::PtySize {
+            cols: cols.max(20),
+            rows: rows.max(5),
         };
-        match self.client.create(params).await {
+        match self.client.router_login(&route, Some(pty)).await {
             Ok(id) => {
                 if !self.histories.contains_key(&id) {
                     self.histories
@@ -251,7 +234,7 @@ impl App {
                 self.sync_active_window_selection();
                 self.focus = PaneFocus::View;
                 self.set_status(format!(
-                    "running `{command}` — sign in there, then reopen the model router"
+                    "running `{command}` — sign in there; the session closes itself once the login lands"
                 ));
             }
             Err(e) => self.set_status(format!("could not start `{command}`: {e}")),

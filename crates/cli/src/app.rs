@@ -16236,9 +16236,9 @@ mod tests {
                                 "unavailable_reason": unavailable_reason,
                                 "active": Value::Null,
                             }),
-                            // Enough of session.create for the login-action
+                            // Enough of router.login for the login-action
                             // flow to complete against this mock.
-                            ipc_method::SESSION_CREATE => serde_json::json!({
+                            ipc_method::ROUTER_LOGIN => serde_json::json!({
                                 "session_id": "s-login",
                             }),
                             _ => Value::Null,
