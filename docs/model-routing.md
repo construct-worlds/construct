@@ -50,6 +50,18 @@ can read, or a configured endpoint with its key present. A fresh machine
 with no logins and no profiles has nothing to offer, so pickers stay
 native-only until a login or profile exists.
 
+### Summary of route targets
+
+| Target | Type | Wire Dialect | Backend Endpoint | Credential Source |
+| :--- | :--- | :--- | :--- | :--- |
+| `claude-oauth` | Subscription Login | Anthropic Messages | `https://api.anthropic.com/v1/messages` | Auto-discovered from Claude CLI store (read-only token) |
+| `codex-oauth` | Subscription Login | OpenAI Responses | `https://chatgpt.com/backend-api/codex/responses` | Auto-discovered from Codex CLI store (read-only token) |
+| `grok-oauth` | Subscription Login | OpenAI Chat Completions | `https://api.x.ai/v1/chat/completions` | Auto-discovered from Grok CLI store (read-only token) |
+| `kimi-oauth` | Subscription Login | Anthropic Messages | `https://api.kimi.com/coding/v1/messages` | Auto-discovered from Kimi CLI store (read-only token) |
+| `[smith.models.<name>]` | Declared Endpoint | Configured (`openai`, `anthropic`, `responses`, `gemini`, `azure`) | Configured `base_url` | Declared in `config.toml` (`api_key_env` / `api_key`) |
+
+*Note: Antigravity OAuth logins are not offered as route targets because their backend uses a Gemini-shaped protocol with no proxy translator.*
+
 ## Redirect
 
 Click the model name in the modeline (the status bar above the input) to
@@ -115,6 +127,23 @@ session list, and web UI display it decoded as `model · route`
 Publication is session-local and never edits the harness's persistent
 configuration. Turning it off (`publish_models = false`) affects new
 sessions only.
+
+## Harness routing support
+
+The table below summarizes router capability across all supported harness adapters: whether Construct can redirect model traffic (transparent proxy interception) and whether Construct publishes route targets into the harness's native model picker.
+
+| Harness | Adapter | Redirect Support | Native Picker Integration | Intercept Hosts & Trust Channel | Integration Details |
+| :--- | :--- | :---: | :---: | :--- | :--- |
+| **Claude Code** | `claude` | ✅ Yes | ✅ Yes | `api.anthropic.com`<br>(`NODE_EXTRA_CA_CERTS`, additive) | Publishes Anthropic loopback gateway; entries appear in `/model` as `<model> · <route> · Construct`. |
+| **Codex** | `codex` | ✅ Yes | ✅ Yes | `chatgpt.com`, `api.openai.com`<br>(`SSL_CERT_FILE`, replacing bundle) | Publishes session-local model catalog; entries appear in `/model` and native subagent scheduler as `<model> · <route>`. |
+| **Grok** | `grok` | ✅ Yes | ❌ No | `cli-chat-proxy.grok.com`<br>(`SSL_CERT_FILE`, additive) | Probe-verified interception of native Grok CLI traffic when redirected. |
+| **Pi** | `pi` | ✅ Yes | ❌ No | `chatgpt.com`<br>(`NODE_EXTRA_CA_CERTS`, additive) | Probe-verified interception of native Pi CLI traffic when redirected. |
+| **Hermes** | `hermes` | ✅ Yes | ❌ No | `inference-api.nousresearch.com`<br>(`SSL_CERT_FILE`, replacing bundle) | Probe-verified interception of native Hermes CLI traffic when redirected. |
+| **OpenCode** | `opencode` | ❌ No | ❌ No | Pass-through only | Endpoint host varies per user configuration (no fixed intercept host). |
+| **Kimi** | `kimi` | ❌ No | ❌ No | None | No proxy routing probe or native picker catalog injection. |
+| **Antigravity** | `antigravity` | ❌ No | ❌ No | None | Backend uses Gemini-shaped protocol with no proxy translator. |
+| **Smith** | `smith` | N/A | N/A | Direct provider calls | Built-in multi-provider harness; selects models directly via `config.toml` profiles or `/model`. |
+| **Shell** | `shell` | N/A | N/A | N/A | Non-LLM interactive terminal session. |
 
 ## Precedence
 
