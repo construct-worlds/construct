@@ -261,7 +261,7 @@ pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
                 .collect::<Vec<_>>()),
         );
     }
-    if let Some(choice) = &req.tool_choice {
+    if let Some(choice) = req.tool_choice.as_ref().filter(|_| !req.tools.is_empty()) {
         out.insert(
             "tool_choice".into(),
             match choice {
@@ -672,6 +672,17 @@ mod tests {
         assert_eq!(messages[0]["tool_calls"][0]["function"]["name"], "ls");
         assert_eq!(messages[1]["role"], "tool");
         assert_eq!(messages[1]["tool_call_id"], "t1");
+    }
+
+    #[test]
+    fn omits_tool_choice_when_no_translatable_tools_remain() {
+        let req = CanonRequest {
+            tool_choice: Some(CanonToolChoice::Auto),
+            ..Default::default()
+        };
+        let out = emit_request(&req, "grok-4.5");
+        assert!(out.get("tools").is_none());
+        assert!(out.get("tool_choice").is_none());
     }
 
     #[test]

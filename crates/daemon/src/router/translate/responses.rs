@@ -298,7 +298,7 @@ pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
                 .collect::<Vec<_>>()),
         );
     }
-    if let Some(choice) = &req.tool_choice {
+    if let Some(choice) = req.tool_choice.as_ref().filter(|_| !req.tools.is_empty()) {
         out.insert(
             "tool_choice".into(),
             match choice {

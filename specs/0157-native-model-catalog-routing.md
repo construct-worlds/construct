@@ -74,6 +74,8 @@ origin-safety rule in [0113](0113-model-routing-is-proxy-transported.md).
   The pin remains unchanged for native model ids and future requests.
 - Catalog-enabled sessions inspect only the harness's fixed model host.
   Other destinations remain blind tunnels.
+- Request compression is decoded before model-id inspection and translation,
+  then forwarded with framing that matches the decoded body.
 - After inspecting a native request with no pin, Construct normally
   reconstructs it to the observed origin and preserves end-to-end credentials
   while removing proxy and hop-by-hop headers. Claude subscription sessions

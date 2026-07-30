@@ -62,6 +62,7 @@ eventsource-stream = "0.2"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 qrcode = { version = "0.14", default-features = false }
 httparse = "1"
+zstd = "0.13"
 wstunnel = { git = "https://github.com/erebe/wstunnel.git", rev = "5cac9a52338a21e67254cea5d749f9cc170193be", default-features = false, features = ["clap", "ring"] }
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
