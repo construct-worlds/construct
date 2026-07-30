@@ -1304,6 +1304,7 @@ async fn web_client_loads_and_websocket_connects() {
                 suggestionsById: new Map(state.suggestionsById),
               };
               let detachedThroughHidden = false;
+              let inertAssigned = false;
               try {
                 state.currentId = 's-suggestion-focus';
                 state.sessions = [{
@@ -1334,6 +1335,14 @@ async fn web_client_loads_and_websocket_connects() {
                     detachedThroughHidden = !!hidden;
                     if (hidden && document.activeElement === inputEl) inputEl.blur();
                   },
+                });
+                // Assigning `inert` has also been observed to drop the caret.
+                // The deck must not touch it; trap assignments so the test
+                // fails closed if a future change reintroduces them.
+                Object.defineProperty(suggestDeckEl, 'inert', {
+                  configurable: true,
+                  get: () => false,
+                  set: () => { inertAssigned = true; },
                 });
 
                 updateSuggestOrb();
@@ -1382,18 +1391,49 @@ async fn web_client_loads_and_websocket_connects() {
                 const focusedWhileHidden = document.activeElement === inputEl;
                 const hiddenStyle = getComputedStyle(suggestDeckEl);
 
+                // Simulate a browser that blurs the caret when suggestion
+                // availability flips, and verify withPreservedTypingFocus
+                // puts it back (composer path; terminal uses term.focus()).
+                inputEl.focus();
+                const realFocus = inputEl.focus.bind(inputEl);
+                let restoreCount = 0;
+                inputEl.focus = function (...args) {
+                  restoreCount += 1;
+                  return realFocus(...args);
+                };
+                // Force a transition even if already hidden: flip available
+                // then unavailable while a hostile blur runs mid-update.
+                state.sessions[0].state = 'awaiting_input';
+                const origToggle = suggestDeckEl.classList.toggle.bind(suggestDeckEl.classList);
+                suggestDeckEl.classList.toggle = function (token, force) {
+                  const out = origToggle(token, force);
+                  if (token === 'is-available') inputEl.blur();
+                  return out;
+                };
+                updateSuggestOrb();
+                const focusedAfterHostileShow = document.activeElement === inputEl;
+                state.sessions[0].state = 'running';
+                updateSuggestOrb();
+                const focusedAfterHostileHide = document.activeElement === inputEl;
+                suggestDeckEl.classList.toggle = origToggle;
+                inputEl.focus = realFocus;
+
                 return {
                   focusedWhileShown,
                   focusedWhileHidden,
                   focusedAfterFanOpen,
                   focusedAfterRedeal,
                   focusedAfterHistory,
+                  focusedAfterHostileShow,
+                  focusedAfterHostileHide,
+                  restoreCount,
                   shownVisibility,
                   hiddenVisibility: hiddenStyle.visibility,
                   hiddenDisplay: hiddenStyle.display,
                   detachedThroughHidden,
+                  inertAssigned,
                   ariaHidden: suggestDeckEl.getAttribute('aria-hidden'),
-                  inert: suggestDeckEl.inert,
+                  hasInertAttr: suggestDeckEl.hasAttribute('inert'),
                   fanDisplay,
                   fanVisibility,
                   fanHasHiddenAttr: suggestFanEl.hasAttribute('hidden'),
@@ -1410,6 +1450,7 @@ async fn web_client_loads_and_websocket_connects() {
                 };
               } finally {
                 delete suggestDeckEl.hidden;
+                delete suggestDeckEl.inert;
                 state.currentId = saved.currentId;
                 state.sessions = saved.sessions;
                 state.mode = saved.mode;
@@ -1420,7 +1461,11 @@ async fn web_client_loads_and_websocket_connects() {
                 suggestDeckEl.className = saved.deckClass;
                 if (saved.deckAriaHidden === null) suggestDeckEl.removeAttribute('aria-hidden');
                 else suggestDeckEl.setAttribute('aria-hidden', saved.deckAriaHidden);
-                suggestDeckEl.inert = saved.deckInert;
+                if (saved.deckInert) suggestDeckEl.inert = true;
+                else {
+                  suggestDeckEl.inert = false;
+                  suggestDeckEl.removeAttribute('inert');
+                }
                 suggestDeckEl.toggleAttribute('hidden', saved.deckHiddenAttribute);
                 suggestFanEl.className = saved.fanClass;
                 suggestStackEl.className = saved.stackClass;
@@ -1457,6 +1502,14 @@ async fn web_client_loads_and_websocket_connects() {
         "opening history must preserve the typing caret: {suggestion_focus:?}"
     );
     assert_eq!(
+        suggestion_focus["focusedAfterHostileShow"], true,
+        "caret must be restored if availability show blurs it: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["focusedAfterHostileHide"], true,
+        "caret must be restored if availability hide blurs it: {suggestion_focus:?}"
+    );
+    assert_eq!(
         suggestion_focus["shownVisibility"], "visible",
         "awaiting-input sessions should reveal the mounted suggestion deck: {suggestion_focus:?}"
     );
@@ -1472,8 +1525,15 @@ async fn web_client_loads_and_websocket_connects() {
         suggestion_focus["detachedThroughHidden"], false,
         "availability changes must not mutate the deck's hidden property: {suggestion_focus:?}"
     );
+    assert_eq!(
+        suggestion_focus["inertAssigned"], false,
+        "suggestion availability must never assign element.inert: {suggestion_focus:?}"
+    );
+    assert_eq!(
+        suggestion_focus["hasInertAttr"], false,
+        "suggestion deck must not carry the inert attribute: {suggestion_focus:?}"
+    );
     assert_eq!(suggestion_focus["ariaHidden"], "true");
-    assert_eq!(suggestion_focus["inert"], true);
     assert_ne!(
         suggestion_focus["fanDisplay"], "none",
         "fan open/close must not display-detach: {suggestion_focus:?}"
