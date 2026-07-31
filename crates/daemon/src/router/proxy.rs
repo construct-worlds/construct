@@ -487,7 +487,10 @@ where
 
     // A published picker id is an explicit request-scoped route and wins
     // over the session's manually pinned default. Native model ids retain
-    // the pin, or pass through to the original host when no pin exists.
+    // the pin, or pass through to the original host when no pin exists —
+    // except for the harness's own internal seats, which pass through even
+    // under a pin because the pin was never a statement about them
+    // (spec 0166).
     let requested_model = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .and_then(|value| {
@@ -500,6 +503,25 @@ where
         match requested_model.as_deref() {
             Some(model) => match router.resolve_published_model(&ctx.harness_name, model) {
                 Ok(Some(route)) => Some(route),
+                Ok(None) if ctx.is_role_model(model) => {
+                    // An internal seat the harness filled for itself — the
+                    // approval reviewer, not the model the user picked. The
+                    // pin says which model does this session's work; it does
+                    // not say the reviewer should stop being the reviewer.
+                    // Substituting here hands a role-specific prompt to a
+                    // model chosen for an unrelated job (spec 0166).
+                    if let Some(route) = pinned_route.as_ref() {
+                        tracing::info!(
+                            session = %ctx.session_id,
+                            requested_model = %model,
+                            pinned_route = %route.name,
+                            pinned_model = %route.model,
+                            "internal-seat model passes through to its native provider \
+                             instead of this session's pinned route"
+                        );
+                    }
+                    None
+                }
                 Ok(None) => {
                     if pinned_route.is_some() || !construct_gateway_auth {
                         pinned_route
@@ -568,6 +590,23 @@ where
             }
         };
     };
+
+    // A substituted model is invisible from inside the harness: it keeps
+    // recording the model it asked for, whatever the router sent. Leave a
+    // record on our side so a session running on something other than what
+    // its transcript claims is diagnosable (spec 0166).
+    if let Some(requested) = requested_model
+        .as_deref()
+        .filter(|model| *model != route.model)
+    {
+        tracing::info!(
+            session = %ctx.session_id,
+            requested_model = %requested,
+            route = %route.name,
+            model = %route.model,
+            "request routed to a substituted model"
+        );
+    }
 
     // Same dialect → redirect the bytes. Different dialect → rebuild the
     // request and re-encode the response stream (spec 0116).
@@ -1548,6 +1587,7 @@ mod tests {
             ca: Arc::new(RouterCa::load_or_create(&dir.path().join("router")).unwrap()),
             upstream_proxy: None,
             catalog_enabled: std::sync::atomic::AtomicBool::new(false),
+            role_models: std::collections::HashSet::new(),
             route: std::sync::RwLock::new(None),
             route_epoch: std::sync::atomic::AtomicU64::new(0),
             observed: std::sync::atomic::AtomicBool::new(false),

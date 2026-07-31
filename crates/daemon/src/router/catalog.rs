@@ -5,7 +5,7 @@
 //! the proxy can select a route per request instead of pinning the whole
 //! session to one target.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -134,6 +134,22 @@ impl Router {
         self.resolve(&route, harness, Some(&model)).map(Some)
     }
 
+    /// Native models the harness selects for itself rather than offering to
+    /// the user: the approval reviewer, and anything else the vendor ships
+    /// hidden from the picker. Read from the harness's own catalog, so the
+    /// set follows the vendor instead of a slug list we would have to chase.
+    pub fn native_role_models(&self, harness: &str) -> Result<HashSet<String>> {
+        if harness != "codex" {
+            return Ok(HashSet::new());
+        }
+        let source = active_codex_catalog_source()?;
+        let raw = std::fs::read(&source)
+            .with_context(|| format!("read Codex model catalog {}", source.display()))?;
+        let baseline: Value = serde_json::from_slice(&raw)
+            .with_context(|| format!("parse Codex model catalog {}", source.display()))?;
+        Ok(role_model_slugs(&baseline))
+    }
+
     pub fn write_codex_catalog(&self, session_id: &str) -> Result<PathBuf> {
         let source = active_codex_catalog_source()?;
         let raw = std::fs::read(&source)
@@ -204,6 +220,29 @@ fn active_codex_catalog_source() -> Result<PathBuf> {
 
 fn selector(route: &str, model: &str) -> String {
     format!("{route}/{model}")
+}
+
+/// Slugs a Codex catalog marks as not picker-visible. `visibility` is the
+/// vendor's own statement about whether a user can choose the model, which
+/// is exactly the line between a model the session runs on and a model the
+/// harness fills an internal seat with. An entry that omits the field is
+/// treated as selectable: over-applying the pin is the current behavior,
+/// and a missing field is not evidence of an internal seat.
+fn role_model_slugs(catalog: &Value) -> HashSet<String> {
+    let Some(models) = catalog.get("models").and_then(Value::as_array) else {
+        return HashSet::new();
+    };
+    models
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("visibility")
+                .and_then(Value::as_str)
+                .is_some_and(|visibility| !visibility.eq_ignore_ascii_case("list"))
+        })
+        .filter_map(|entry| entry.get("slug").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
 }
 
 fn feature_ranks(models: &[PublishedModel], configured: &[String]) -> BTreeMap<String, usize> {
@@ -395,6 +434,45 @@ mod tests {
                 "web_search_tool_type": "text_and_image"
             }]
         })
+    }
+
+    /// The reviewer seat is the case this exists for: Codex ships it
+    /// hidden, so `visibility` is the vendor telling us the user never
+    /// chose it and a session pin was never a statement about it.
+    #[test]
+    fn hidden_catalog_entries_are_role_models_and_listed_ones_are_not() {
+        let catalog = json!({
+            "models": [
+                {"slug": "gpt-5.6-sol", "visibility": "list"},
+                {"slug": "codex-auto-review", "visibility": "hide"},
+                {"slug": "no-visibility-field"},
+            ]
+        });
+        let roles = role_model_slugs(&catalog);
+        assert!(roles.contains("codex-auto-review"));
+        assert!(!roles.contains("gpt-5.6-sol"));
+        // Absent evidence is not evidence of an internal seat: an entry
+        // without the field keeps following the pin, as it does today.
+        assert!(!roles.contains("no-visibility-field"));
+    }
+
+    #[test]
+    fn a_catalog_without_models_yields_no_role_models() {
+        assert!(role_model_slugs(&json!({})).is_empty());
+    }
+
+    /// Routed entries are published for the picker, so they must never be
+    /// mistaken for internal seats and skip their own route.
+    #[test]
+    fn published_routed_entries_are_never_role_models() {
+        let route = PublishedModel {
+            id: published_model_id("claude-oauth", "opus"),
+            route: "claude-oauth".into(),
+            model: "opus".into(),
+            effort: EffortSupport::Unsupported,
+        };
+        let catalog = build_codex_catalog(baseline(), &[route.clone()], &[]).unwrap();
+        assert!(!role_model_slugs(&catalog).contains(&route.id));
     }
 
     #[test]
