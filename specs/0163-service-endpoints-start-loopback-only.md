@@ -7,7 +7,8 @@ Scope: The initial service-endpoint ingress boundary.
 
 ## Decision
 
-Services are daemon-owned definitions. In v1 they are declared in TOML and
+Services are daemon-owned definitions. In v1 each service is declared in its
+own `services/<name>.toml` file under the Construct configuration directory and
 expose a generic HTTP webhook only on loopback. A service owns its instruction,
 harness, model, working directory, and routing policy; a channel supplies the
 transport-specific credential and listener configuration.
@@ -29,6 +30,8 @@ visible and recoverable in the fleet.
 ## Consequences
 
 - Service keys and session mappings survive daemon restart.
+- Service definitions can be created, edited, and removed atomically without
+  rewriting the global Construct configuration.
 - Bearer credentials are service-scoped and never logged.
 - A future tunnel route, plugin channel, synchronous reply mechanism, or TUI
   editor extends this boundary; none is implied by enabling a service.

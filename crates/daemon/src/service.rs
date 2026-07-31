@@ -1,11 +1,10 @@
 //! Loopback-only v1 service ingress.
 //!
-//! Service definitions live in `[services.<name>]` in config.toml. This
+//! Service definitions live in `services/<name>.toml` in the config dir. This
 //! module intentionally owns no public exposure: tunnels and non-HTTP
 //! channels are separate capabilities, so enabling a service cannot make a
 //! machine reachable from the internet by accident.
 
-use crate::config::{ServiceConfig, ServiceRouting};
 use crate::session::SessionManager;
 use anyhow::{anyhow, Context, Result};
 use construct_protocol::{CreateSessionParams, SessionKind};
@@ -19,6 +18,86 @@ use tokio::sync::Mutex;
 
 const MAX_HTTP_BYTES: usize = 1024 * 1024;
 const REQUEST_DEDUP_CAP: usize = 4096;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceConfig {
+    #[serde(default)]
+    pub instruction: String,
+    #[serde(default = "default_service_harness")]
+    pub harness: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_service_cwd")]
+    pub cwd: String,
+    #[serde(default)]
+    pub routing: ServiceRouting,
+    #[serde(default)]
+    pub channels: BTreeMap<String, ServiceChannelConfig>,
+}
+
+fn default_service_harness() -> String {
+    "smith".to_string()
+}
+
+fn default_service_cwd() -> String {
+    ".".to_string()
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServiceRouting {
+    PerEvent,
+    #[default]
+    SessionKey,
+    Single,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelConfig {
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub port: Option<u16>,
+    pub token: Option<String>,
+}
+
+pub fn load_definitions(dir: &std::path::Path) -> Result<BTreeMap<String, ServiceConfig>> {
+    let mut services = BTreeMap::new();
+    if !dir.exists() {
+        return Ok(services);
+    }
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("toml") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        validate_service_name(name)?;
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("read service definition {}", path.display()))?;
+        let definition = toml::from_str(&raw)
+            .with_context(|| format!("parse service definition {}", path.display()))?;
+        services.insert(name.to_string(), definition);
+    }
+    Ok(services)
+}
+
+fn validate_service_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-');
+    if valid {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid service name `{name}`"))
+    }
+}
 
 pub fn spawn_all(
     manager: Arc<SessionManager>,
@@ -309,21 +388,32 @@ mod tests {
     }
 
     #[test]
-    fn service_config_accepts_all_v1_routing_modes() {
-        let config: crate::config::Config = toml::from_str(
+    fn service_config_accepts_v1_routing_mode() {
+        let service: ServiceConfig = toml::from_str(
             r#"
-            [services.alerts]
             instruction = "triage alert"
             harness = "smith"
             routing = "session-key"
-            [services.alerts.channels.http]
+            [channels.http]
             port = 8787
             token = "secret"
             "#,
         )
         .unwrap();
-        let service = &config.services["alerts"];
         assert_eq!(service.routing, ServiceRouting::SessionKey);
         assert_eq!(service.channels["http"].port, Some(8787));
+    }
+
+    #[test]
+    fn loads_one_toml_document_per_service() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("alerts.toml"),
+            "harness = \"smith\"\n[channels.http]\nport = 8787\ntoken = \"secret\"\n",
+        )
+        .unwrap();
+        let services = load_definitions(dir.path()).unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services["alerts"].channels["http"].port, Some(8787));
     }
 }

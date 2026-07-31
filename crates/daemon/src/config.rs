@@ -414,29 +414,6 @@ enabled = true
 # grok-oauth   = "grok-4.5"
 # kimi-oauth   = "k3"
 #
-# ---------------------------------------------------------------------------
-# Service endpoints (v1: loopback HTTP ingress)
-# ---------------------------------------------------------------------------
-# A service turns a harness into a locally reachable webhook consumer. It is
-# deliberately loopback-only; publishing through a named tunnel is a later,
-# explicit action. Each service currently supports one built-in `http`
-# channel. The bearer token is a secret: put it in a protected config file or
-# inject it through your config-management system, and never reuse it.
-#
-# [services.release-assistant]
-# instruction = "Answer release questions from the checked-out repository."
-# harness = "smith"
-# model = "openai:gpt-5.5"
-# cwd = "/path/to/repository"
-# routing = "session-key" # session-key | per-event | single
-#
-# [services.release-assistant.channels.http]
-# port = 8787
-# token = "replace-with-a-long-random-secret"
-#
-# POST http://127.0.0.1:8787/svc/release-assistant
-# Authorization: Bearer <token>
-# {"message":"what changed?", "session_key":"customer-42", "request_id":"optional-id"}
 "#;
 
 /// Kept for backwards-compat: `construct daemon default-config` and any
@@ -524,56 +501,6 @@ pub struct Config {
     /// `[smith.models.*]` profiles (spec 0030).
     #[serde(default)]
     pub smith: SmithConfig,
-    /// Declarative, daemon-owned service endpoints. Each service owns its
-    /// agent behaviour while `channels` are ingress transports.
-    #[serde(default)]
-    pub services: BTreeMap<String, ServiceConfig>,
-}
-
-/// A first v1 service definition. The generic HTTP channel is intentionally
-/// small: it is the compatibility floor for webhook producers while channel
-/// plugins and the interactive editor are built on top.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ServiceConfig {
-    #[serde(default)]
-    pub instruction: String,
-    #[serde(default = "default_service_harness")]
-    pub harness: String,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default = "default_service_cwd")]
-    pub cwd: String,
-    #[serde(default)]
-    pub routing: ServiceRouting,
-    #[serde(default)]
-    pub channels: BTreeMap<String, ServiceChannelConfig>,
-}
-
-fn default_service_harness() -> String { "smith".to_string() }
-fn default_service_cwd() -> String { ".".to_string() }
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum ServiceRouting {
-    /// A new session per delivery; suitable for independent jobs.
-    PerEvent,
-    /// An event-provided key selects a persistent conversation.
-    #[default]
-    SessionKey,
-    /// All deliveries share one persistent conversation.
-    Single,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ServiceChannelConfig {
-    /// `http` is currently the only built-in channel. Other names are
-    /// retained in configuration for future plugin-provided transports.
-    #[serde(default)]
-    pub kind: Option<String>,
-    /// Loopback port. A service never binds a LAN/public listener itself.
-    pub port: Option<u16>,
-    /// Bearer credential. Never logged by the daemon.
-    pub token: Option<String>,
 }
 
 /// Next-prompt suggestion generation (spec 0109).

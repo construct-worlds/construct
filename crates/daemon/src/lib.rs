@@ -164,7 +164,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             .with_plugin_verb_dirs(plugin_set.verb_dirs())
             .with_plugin_template_dirs(plugin_set.template_dirs()),
     );
-    let service_definitions = config.services.clone();
+    let service_definitions = service::load_definitions(&paths.services_dir())?;
     let (manager, remote_rx, mut restart_rx) =
         session::SessionManager::new(storage.clone(), Arc::new(config), paths.runtime_dir.clone())
             .await
