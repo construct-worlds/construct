@@ -114,6 +114,24 @@ impl SuggestDeck {
         }
     }
 
+    /// Seed the Generate keyword field from an existing session draft. This
+    /// is intentionally local UI state: opening the deck must not consume or
+    /// alter the draft in the harness editor.
+    fn prefill_generate_keywords(&mut self, categories: &[DeckRow], keywords: String) -> bool {
+        let Some(index) = categories
+            .iter()
+            .position(|row| matches!(row, DeckRow::Generate { .. }))
+        else {
+            return false;
+        };
+        self.category_selected = index;
+        self.card_selected = 0;
+        self.card_scroll = 0;
+        self.focus = DeckFocus::Cards;
+        self.regenerate_query = Some(keywords);
+        true
+    }
+
     /// Keep `selected` inside the viewport of `scroll` given `visible` rows.
     pub fn ensure_visible(scroll: &mut usize, selected: usize, len: usize, visible: usize) {
         if visible == 0 || len == 0 {
@@ -357,10 +375,34 @@ impl App {
     /// an unfocused split can open its own deck without borrowing another's
     /// hand / pending state.
     pub(super) async fn toggle_suggest_deck(&mut self) {
-        self.toggle_suggest_deck_for(None).await;
+        let draft_keywords = self
+            .selected_id()
+            .and_then(|id| self.suggestion_draft_keywords(&id))
+            .filter(|keywords| !keywords.is_empty());
+        self.toggle_suggest_deck_for_with_keywords(None, draft_keywords)
+            .await;
+    }
+
+    pub(super) fn suggestion_draft_keywords(&self, session_id: &str) -> Option<String> {
+        self.prompt_drafts
+            .get(session_id)
+            .map(|draft| draft.buf.as_str())
+            .or_else(|| self.editor_states.get(session_id).map(|editor| editor.buf.as_str()))
+            .map(str::trim)
+            .filter(|keywords| !keywords.is_empty())
+            .map(str::to_string)
     }
 
     pub(super) async fn toggle_suggest_deck_for(&mut self, session_id: Option<String>) {
+        self.toggle_suggest_deck_for_with_keywords(session_id, None)
+            .await;
+    }
+
+    async fn toggle_suggest_deck_for_with_keywords(
+        &mut self,
+        session_id: Option<String>,
+        draft_keywords: Option<String>,
+    ) {
         let target = session_id.or_else(|| self.selected_id());
         let Some(id) = target else {
             self.set_status("no session selected".to_string());
@@ -384,12 +426,16 @@ impl App {
         if let Ok(r) = self.client.prompt_history_list(Some(50)).await {
             self.prompt_history = r.entries;
         }
-        let deck = SuggestDeck::open(id);
+        let mut deck = SuggestDeck::open(id);
         // fan_rows always yields at least History + Generate (or a spinner
         // while a prior request is still in flight).
         if self.suggest_categories(&deck).is_empty() {
             self.set_status("no suggestions yet — send a prompt first".to_string());
             return;
+        }
+        if let Some(keywords) = draft_keywords {
+            let categories = self.suggest_categories(&deck);
+            deck.prefill_generate_keywords(&categories, keywords);
         }
         self.suggest_deck = Some(deck);
     }
@@ -976,7 +1022,6 @@ mod tests {
             })
             .collect()
     }
-
     #[test]
     fn fan_orders_top_verbs_history() {
         let h = hand();
@@ -1032,6 +1077,28 @@ mod tests {
         SuggestDeck::clamp_scroll(&mut scroll, 3, 5);
         assert_eq!(scroll, 0, "clamp when content fits the viewport");
     }
+
+    #[test]
+    fn draft_keywords_open_generate_without_consuming_the_draft() {
+        let categories = fan_rows(None, 0, false);
+        let mut deck = SuggestDeck::open("s1".into());
+
+        assert!(deck.prefill_generate_keywords(&categories, "test the CLI".into()));
+        assert_eq!(deck.category_selected, 1);
+        assert_eq!(deck.focus, DeckFocus::Cards);
+        assert_eq!(deck.regenerate_query.as_deref(), Some("test the CLI"));
+    }
+
+    #[test]
+    fn draft_keywords_do_not_open_a_missing_generate_row() {
+        let categories = fan_rows(None, 0, true);
+        let mut deck = SuggestDeck::open("s1".into());
+
+        assert!(!deck.prefill_generate_keywords(&categories, "test the CLI".into()));
+        assert_eq!(deck.focus, DeckFocus::Categories);
+        assert!(deck.regenerate_query.is_none());
+    }
+
 
     #[test]
     fn max_right_rows_uses_tallest_category() {

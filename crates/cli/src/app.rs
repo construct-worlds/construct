@@ -1951,6 +1951,11 @@ pub struct App {
     /// from the adapter (currently smith interactive). Drives the
     /// fixed bottom input pane.
     pub editor_states: HashMap<String, EditorState>,
+    /// Client-side mirror of a prompt draft typed into a captured PTY. It
+    /// closes the short gap before an adapter's next `EditorState` event, and
+    /// lets the suggestion deck offer draft keywords for harnesses that do
+    /// not expose an editor state.
+    pub prompt_drafts: HashMap<String, PromptDraft>,
     /// Per-session live agent status, fed by `SessionEvent::AgentStatus`
     /// and rendered above queued input while a turn is active.
     pub agent_statuses: HashMap<String, construct_protocol::AgentStatus>,
@@ -2160,6 +2165,98 @@ pub struct EditorState {
     pub buf: String,
     pub cursor: usize,
     pub completions: Vec<String>,
+}
+
+/// Optimistic client-side copy of an awaiting PTY prompt. This bridges the
+/// event-loop delay before an adapter confirms its editor state, so it must
+/// retain cursor position and apply the usual line-editing keys.
+#[derive(Debug, Clone, Default)]
+pub struct PromptDraft {
+    pub buf: String,
+    pub cursor: usize,
+}
+
+impl PromptDraft {
+    fn from_editor(editor: Option<&EditorState>) -> Self {
+        editor.map_or_else(Self::default, |state| Self {
+            buf: state.buf.clone(),
+            cursor: state.cursor.min(state.buf.chars().count()),
+        })
+    }
+
+    fn insert(&mut self, text: &str) {
+        let at = byte_pos(&self.buf, self.cursor);
+        self.buf.insert_str(at, text);
+        self.cursor += text.chars().count();
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let end = byte_pos(&self.buf, self.cursor);
+        self.cursor -= 1;
+        self.buf.drain(byte_pos(&self.buf, self.cursor)..end);
+    }
+
+    fn delete(&mut self) {
+        if self.cursor >= self.buf.chars().count() {
+            return;
+        }
+        let start = byte_pos(&self.buf, self.cursor);
+        self.buf
+            .drain(start..byte_pos(&self.buf, self.cursor.saturating_add(1)));
+    }
+
+    fn delete_to_start(&mut self) {
+        self.buf.drain(..byte_pos(&self.buf, self.cursor));
+        self.cursor = 0;
+    }
+
+    fn delete_to_end(&mut self) {
+        self.buf.truncate(byte_pos(&self.buf, self.cursor));
+    }
+
+    fn delete_word_backward(&mut self) {
+        let chars: Vec<char> = self.buf.chars().collect();
+        let mut start = self.cursor.min(chars.len());
+        while start > 0 && chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        self.buf
+            .drain(byte_pos(&self.buf, start)..byte_pos(&self.buf, self.cursor));
+        self.cursor = start;
+    }
+
+    fn apply_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Char(c) if !ctrl && !alt => self.insert(&c.to_string()),
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Char('h') if ctrl => self.backspace(),
+            KeyCode::Delete => self.delete(),
+            KeyCode::Char('d') if ctrl => self.delete(),
+            KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Char('b') if ctrl => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Right => self.cursor = (self.cursor + 1).min(self.buf.chars().count()),
+            KeyCode::Char('f') if ctrl => {
+                self.cursor = (self.cursor + 1).min(self.buf.chars().count())
+            }
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::Char('a') if ctrl => self.cursor = 0,
+            KeyCode::End => self.cursor = self.buf.chars().count(),
+            KeyCode::Char('e') if ctrl => self.cursor = self.buf.chars().count(),
+            KeyCode::Char('k') if ctrl => self.delete_to_end(),
+            KeyCode::Char('u') if ctrl => self.delete_to_start(),
+            KeyCode::Char('w') if ctrl => self.delete_word_backward(),
+            _ => return false,
+        }
+        true
+    }
 }
 
 /// The operator's latest finalized utterance, typewritten over the matrix
@@ -4788,6 +4885,7 @@ async fn run_with_socket_initial_selection(
         pinned_card_drag: None,
         list_collapsed: persisted.list_collapsed,
         editor_states: HashMap::new(),
+        prompt_drafts: HashMap::new(),
         agent_statuses: HashMap::new(),
         pending_tool_approvals: HashMap::new(),
         browser_previews: HashMap::new(),
@@ -6262,12 +6360,51 @@ impl App {
                 let active_window = Some(self.active_window_id);
                 self.set_scrollback_for_window(active_window, 0);
                 if let Some(id) = self.selected_id() {
+                    self.insert_prompt_draft(&id, &text);
                     let bytes = self.encode_paste_for_pty(&id, text);
                     self.queue_pty_input(id, bytes, "pty_input");
                 }
             }
             None => {}
         }
+    }
+
+    /// Mirror ordinary prompt typing before the asynchronous PTY round trip
+    /// reports it back. This makes a following `C-x .` see the text the user
+    /// has just entered instead of waiting for the adapter event loop.
+    fn record_prompt_draft_key(&mut self, key: KeyEvent) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        if !self
+            .sessions
+            .iter()
+            .any(|session| {
+                session.id == id
+                    && session.state == construct_protocol::SessionState::AwaitingInput
+            })
+        {
+            return;
+        }
+        match key.code {
+            KeyCode::Enter => {
+                self.prompt_drafts.remove(&id);
+            }
+            _ => {
+                let initial = PromptDraft::from_editor(self.editor_states.get(&id));
+                let draft = self.prompt_drafts.entry(id).or_insert(initial);
+                draft.apply_key(key);
+            }
+        }
+    }
+
+    fn insert_prompt_draft(&mut self, session_id: &str, text: &str) {
+        let initial = PromptDraft::from_editor(self.editor_states.get(session_id));
+        let draft = self
+            .prompt_drafts
+            .entry(session_id.to_string())
+            .or_insert(initial);
+        draft.insert(text);
     }
 
     /// Encode pasted text for forwarding to a child PTY. If the child has
@@ -8752,6 +8889,13 @@ impl App {
                             completions,
                         } = &payload.event
                         {
+                            self.prompt_drafts.insert(
+                                payload.session_id.clone(),
+                                PromptDraft {
+                                    buf: buf.clone(),
+                                    cursor: *cursor,
+                                },
+                            );
                             self.editor_states.insert(
                                 payload.session_id.clone(),
                                 EditorState {
@@ -11224,6 +11368,7 @@ impl App {
                 return;
             }
             if self.chord_state.is_empty() && !is_ctrl_x {
+                self.record_prompt_draft_key(key);
                 self.forward_key_to_selected_pty(key);
                 return;
             }
@@ -15092,6 +15237,7 @@ mod tests {
             remote_control_popup: None,
             remote_control_task: None,
             editor_states: HashMap::new(),
+            prompt_drafts: HashMap::new(),
             agent_statuses: HashMap::new(),
             pending_tool_approvals: HashMap::new(),
             browser_previews: HashMap::new(),
@@ -32851,6 +32997,36 @@ mod tests {
         );
         assert_eq!(deck.regenerate_query.as_deref(), Some("docs"));
         server.abort();
+    }
+
+    #[test]
+    fn prompt_draft_tracks_common_line_editing_keys() {
+        let mut draft = PromptDraft {
+            buf: "alpha beta".into(),
+            cursor: "alpha beta".chars().count(),
+        };
+
+        draft.cursor = 5; // before the space
+        draft.insert("-");
+        draft.cursor = 0;
+        draft.delete_to_end();
+        assert!(draft.buf.is_empty(), "C-a then C-k clears the whole line");
+
+        draft.insert("alpha beta");
+        draft.delete_word_backward();
+        assert_eq!(draft.buf, "alpha ", "C-w deletes the preceding word");
+        draft.backspace();
+        assert_eq!(draft.buf, "alpha", "Backspace deletes before the cursor");
+        draft.cursor = 0;
+        draft.delete();
+        assert_eq!(draft.buf, "lpha", "C-d/Delete deletes at the cursor");
+        draft.cursor = draft.buf.chars().count();
+        draft.delete_to_start();
+        assert!(draft.buf.is_empty(), "C-u clears to the line start");
+
+        draft.insert("testx");
+        assert!(draft.apply_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        assert_eq!(draft.buf, "test", "plain Backspace is mirrored");
     }
 
     /// Spec 0109 "typing always wins": a key the deck doesn't use closes
