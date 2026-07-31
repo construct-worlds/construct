@@ -22,9 +22,12 @@ turn's user message (spec 0163).
 Boundary recording is limited to sessions whose rendered history the
 client synthesizes itself — the items model: interactive smith and
 headless harnesses. Raw-PTY sessions get no inline boundary anchors; for
-them the per-turn fork surface is the turn picker (keyboard, palette, and
-the session menu's "fork from turn"), which reads turns straight from the
-transcript and works for every harness and every existing session.
+them the per-turn fork surface is the fork flow's turn stage: there is
+ONE fork entry point, and when the session has past user turns it opens
+with a turn picker (a "now" row preselected, so accepting the defaults
+still forks from the present) before the harness picker. The turn list
+reads straight from the transcript, so it works for every harness and
+every existing session.
 
 ## Reason
 

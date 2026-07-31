@@ -19,16 +19,14 @@ pub enum KeyAction {
     OpenNewSession,
     OpenDeleteConfirm,
     OpenRename,
-    /// Open the harness picker for a fork, pre-filled with the selected
-    /// session's current harness. Enter accepts the same-harness default;
-    /// editing or completion selects a different harness. No separate initial
-    /// prompt is required. Bound to `C-x f` (emacs) / `f` (vim).
+    /// Open the fork flow for the selected session. When the session has
+    /// past user turns, a turn picker comes first (spec 0163) with "now —
+    /// fork from the present" preselected, so Enter keeps the head-fork
+    /// default while earlier turns are one keystroke away; the harness
+    /// picker follows, pre-filled with the source harness. Sessions with
+    /// no turns skip straight to the harness picker. Bound to `C-x f`
+    /// (emacs) / `f` (vim).
     OpenFork,
-    /// Open the turn picker for an anchored fork (spec 0163): pick one of
-    /// the selected session's past turns, then the harness picker opens
-    /// with the branch point locked to just before that turn. Bound to
-    /// `C-x F` (emacs) / `F` (vim) — the shifted variant of plain fork.
-    OpenForkTurn,
     /// Merge the selected fork's result into its parent and archive the fork.
     /// Unbound from a dedicated chord — folded into `OpenDeleteConfirm` (`C-x k`
     /// / `dd`) as `[m] merge and archive`, and into the session title menu.
@@ -354,10 +352,8 @@ fn emacs() -> Keymap {
         // Refresh moved to the command palette (M-x refresh) — it's rarely
         // needed since the daemon pushes state changes automatically.
         (Chord(vec![ctrl('x'), ch('r')]), OpenRename),
-        // Unified fork picker; Enter accepts the source harness default.
+        // Unified fork flow: turn picker (when turns exist), then harness.
         (Chord(vec![ctrl('x'), ch('f')]), OpenFork),
-        // Anchored fork: pick a past turn first, then the harness picker.
-        (Chord(vec![ctrl('x'), shift('F')]), OpenForkTurn),
         // Merge is no longer a dedicated chord — forked sessions get
         // `[m] merge and archive` on the `C-x k` end prompt instead.
         // Pin / unpin selected session (or all members of a selected group)
@@ -434,10 +430,9 @@ fn vim() -> Keymap {
         (Chord(vec![ctrl('c')]), Interrupt),
         // `r` opens the rename minibuffer; refresh moved to M-x refresh.
         (Chord(vec![ch('r')]), OpenRename),
-        // Unified fork picker; uppercase `O` is intentionally unbound.
+        // Unified fork flow (turn picker + harness picker); uppercase `O`
+        // is intentionally unbound.
         (Chord(vec![ch('f')]), OpenFork),
-        // Anchored fork: pick a past turn first, then the harness picker.
-        (Chord(vec![shift('F')]), OpenForkTurn),
         // Merge has no dedicated vim chord either — forked sessions get
         // `[m] merge and archive` on the `dd` / `C-x k` end prompt.
         (Chord(vec![ch('v')]), ToggleView),
@@ -860,14 +855,23 @@ mod tests {
     }
 
     #[test]
-    fn shifted_fork_chord_opens_the_turn_picker() {
-        // The shifted fork chord was retired with the old "tracked fork"
-        // flavor; it now belongs to the anchored fork's turn picker
-        // (spec 0163) — the shifted variant of plain fork.
-        let emacs = default_for(Profile::Emacs);
-        assert_action(&emacs, vec![ctrl('x'), shift('F')], KeyAction::OpenForkTurn);
+    fn shifted_fork_shortcut_is_removed() {
+        // There is exactly ONE fork flow: `C-x f` / `f` (turn picker when
+        // turns exist, then harness picker). The shifted chord — retired
+        // with the old "tracked fork" flavor, briefly revived for a
+        // separate turn-picker action — must stay unbound.
+        for profile in [Profile::Emacs, Profile::Vim] {
+            let km = default_for(profile);
+            assert!(matches!(
+                resolve(&km, vec![ctrl('x'), shift('F')]),
+                KeymapResult::Unhandled
+            ));
+        }
         let vim = default_for(Profile::Vim);
-        assert_action(&vim, vec![shift('F')], KeyAction::OpenForkTurn);
+        assert!(matches!(
+            resolve(&vim, vec![shift('F')]),
+            KeymapResult::Unhandled
+        ));
     }
 
     #[test]

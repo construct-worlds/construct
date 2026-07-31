@@ -1284,9 +1284,6 @@ pub struct DynamicUiHover {
 pub enum SessionTitleMenuAction {
     Rename,
     Fork,
-    /// Anchored fork (spec 0163): opens the turn picker first, then the
-    /// harness picker with the branch point locked to the chosen turn.
-    ForkTurn,
     ProgramTerminalMode,
     SplitHorizontal,
     SplitVertical,
@@ -1299,10 +1296,9 @@ pub enum SessionTitleMenuAction {
 }
 
 impl SessionTitleMenuAction {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 9] = [
         Self::Rename,
         Self::Fork,
-        Self::ForkTurn,
         Self::ProgramTerminalMode,
         Self::SplitHorizontal,
         Self::SplitVertical,
@@ -1316,7 +1312,6 @@ impl SessionTitleMenuAction {
         match self {
             Self::Rename => "rename",
             Self::Fork => "fork",
-            Self::ForkTurn => "fork from turn",
             Self::ProgramTerminalMode => "program mode",
             Self::SplitHorizontal => "split horizontal",
             Self::SplitVertical => "split vertical",
@@ -4422,16 +4417,23 @@ pub fn harness_picker_entries(
     entries
 }
 
-/// One row of the anchored fork's turn picker (spec 0163): a user turn of
-/// the source transcript, carrying the branch point selecting it locks in.
+/// How long `OpenFork` waits for the source transcript before opening the
+/// harness picker without a turn stage. The fork keybinding must never
+/// feel blocked on a slow daemon round-trip.
+const FORK_TURN_FETCH_TIMEOUT_MS: u64 = 800;
+
+/// One row of the fork flow's turn picker (spec 0163): a user turn of the
+/// source transcript, carrying the branch point selecting it locks in —
+/// or the "now" row (`anchor_seq: None`), which forks from the present.
 #[derive(Debug, Clone)]
 pub struct TurnPickerEntry {
-    /// 1-based turn number (the k-th user message).
+    /// 1-based turn number (the k-th user message); 0 for the "now" row.
     pub turn: usize,
     /// The anchor forking this turn RETRIES: the last transcript seq
     /// before the turn's user message — everything earlier is carried,
     /// the turn itself and everything after is branched away from.
-    pub anchor_seq: u64,
+    /// `None` is the "now" row: an ordinary head fork.
+    pub anchor_seq: Option<u64>,
     /// Wall-clock label for the turn's user message (`HH:MM`).
     pub at_label: String,
     /// First line of the user message, for recognizing the turn.
@@ -4460,7 +4462,7 @@ pub fn turn_picker_entries_from_transcript(
                 .to_string();
             entries.push(TurnPickerEntry {
                 turn: entries.len() + 1,
-                anchor_seq: ev.seq.saturating_sub(1),
+                anchor_seq: Some(ev.seq.saturating_sub(1)),
                 at_label: ev
                     .at
                     .with_timezone(&chrono::Local)
@@ -11707,34 +11709,39 @@ impl App {
                     self.set_status("fork: no session selected".to_string());
                     return;
                 };
-                self.open_fork_harness_picker(id, None).await;
-            }
-            OpenForkTurn => {
-                let Some(id) = self.selected_id() else {
-                    self.set_status("fork from turn: no session selected".to_string());
-                    return;
-                };
                 if !self.sessions.iter().any(|s| s.id == id) {
-                    self.set_status("fork from turn: source disappeared".to_string());
+                    self.set_status("fork: source disappeared".to_string());
                     return;
                 }
-                let entries = match self.client.transcript(&id, 0, None).await {
-                    Ok(tr) => turn_picker_entries_from_transcript(&tr.events),
-                    Err(e) => {
-                        self.set_status(format!("fork from turn: transcript failed: {e}"));
-                        return;
-                    }
+                // One fork flow: when the session has past user turns, the
+                // turn picker comes first (spec 0163) — with "now" appended
+                // and preselected, so Enter-Enter still forks from the
+                // present. A slow or failed transcript fetch, or a session
+                // with no turns, degrades to the harness picker directly
+                // (the pre-anchor behavior), never to a blocked keybinding.
+                let transcript = tokio::time::timeout(
+                    std::time::Duration::from_millis(FORK_TURN_FETCH_TIMEOUT_MS),
+                    self.client.transcript(&id, 0, None),
+                )
+                .await;
+                let mut entries = match transcript {
+                    Ok(Ok(tr)) => turn_picker_entries_from_transcript(&tr.events),
+                    _ => Vec::new(),
                 };
                 if entries.is_empty() {
-                    self.set_status("fork from turn: no user turns in transcript".to_string());
+                    self.open_fork_harness_picker(id, None).await;
                     return;
                 }
-                // Most-recent turn preselected — retrying the latest
-                // exchange is the common case.
+                entries.push(TurnPickerEntry {
+                    turn: 0,
+                    anchor_seq: None,
+                    at_label: String::new(),
+                    preview: "fork from the present".to_string(),
+                });
                 self.turn_picker_selected = entries.len() - 1;
                 self.turn_picker_entries = entries;
                 self.minibuffer = Some(Minibuffer {
-                    prompt: "Fork from turn: ".to_string(),
+                    prompt: "Fork session: ".to_string(),
                     input: String::new(),
                     cursor: 0,
                     intent: MinibufferIntent::ForkTurnPick {
@@ -12798,7 +12805,6 @@ impl App {
             "delete" | "kill" | "rm" => self.run_action(KeyAction::OpenDeleteConfirm).await,
             "rename" => self.run_action(KeyAction::OpenRename).await,
             "fork" => self.run_action(KeyAction::OpenFork).await,
-            "fork-from-turn" | "fork-turn" => self.run_action(KeyAction::OpenForkTurn).await,
             "program" | "edit-program" => self.run_action(KeyAction::OpenProgram).await,
             "zoom" | "fullscreen" => self.run_action(KeyAction::ToggleZoom).await,
             "rain" | "matrix" | "matrix-rain" => {
@@ -35047,7 +35053,8 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].turn, 1);
         assert_eq!(
-            entries[0].anchor_seq, 0,
+            entries[0].anchor_seq,
+            Some(0),
             "retrying the first turn carries nothing"
         );
         assert_eq!(
@@ -35056,7 +35063,8 @@ mod tests {
         );
         assert_eq!(entries[1].turn, 2);
         assert_eq!(
-            entries[1].anchor_seq, 5,
+            entries[1].anchor_seq,
+            Some(5),
             "anchor is the seq just before the turn's user message"
         );
     }
@@ -35076,13 +35084,13 @@ mod tests {
         app.turn_picker_entries = vec![
             TurnPickerEntry {
                 turn: 1,
-                anchor_seq: 0,
+                anchor_seq: Some(0),
                 at_label: "10:00".into(),
                 preview: "fix the bug".into(),
             },
             TurnPickerEntry {
                 turn: 2,
-                anchor_seq: 5,
+                anchor_seq: Some(5),
                 at_label: "10:05".into(),
                 preview: "now the tests".into(),
             },
@@ -35114,6 +35122,36 @@ mod tests {
             app.turn_picker_entries.is_empty(),
             "picker state cleared on hand-off"
         );
+
+        // The appended "now" row (anchor None) hands over a plain head
+        // fork — the unified C-x f flow's Enter-Enter default.
+        app.turn_picker_entries = vec![TurnPickerEntry {
+            turn: 0,
+            anchor_seq: None,
+            at_label: String::new(),
+            preview: "fork from the present".into(),
+        }];
+        app.turn_picker_selected = 0;
+        app.minibuffer = Some(Minibuffer {
+            prompt: "Fork session: ".to_string(),
+            input: String::new(),
+            cursor: 0,
+            intent: MinibufferIntent::ForkTurnPick {
+                source_session_id: "s1".to_string(),
+            },
+            error: None,
+        });
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
+        assert!(matches!(
+            &minibuffer.intent,
+            MinibufferIntent::ForkSessionHarness {
+                source_session_id,
+                at_seq: None,
+            } if source_session_id == "s1"
+        ));
+        assert_eq!(minibuffer.prompt, "Fork session: ");
         server.abort();
     }
 

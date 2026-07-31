@@ -242,7 +242,7 @@ impl App {
                     if let Some(entry) = picked {
                         self.minibuffer = None;
                         self.turn_picker_entries = Vec::new();
-                        self.open_fork_harness_picker(source_session_id, Some(entry.anchor_seq))
+                        self.open_fork_harness_picker(source_session_id, entry.anchor_seq)
                             .await;
                     }
                 }

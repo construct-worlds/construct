@@ -1754,9 +1754,13 @@ fn render_turn_picker(f: &mut Frame, area: Rect, app: &mut App) {
     };
     let end = (start + visible_rows).min(entries.len());
     let turn_width = entries
-        .last()
-        .map(|e| format!("#{}", e.turn).len())
-        .unwrap_or(2);
+        .iter()
+        .map(|e| match e.anchor_seq {
+            Some(_) => format!("#{}", e.turn).len(),
+            None => "now".len(),
+        })
+        .max()
+        .unwrap_or(3);
 
     let mut hits: Vec<TurnRowHit> = Vec::new();
     for (screen_row, entry) in entries[start..end].iter().enumerate() {
@@ -1776,7 +1780,11 @@ fn render_turn_picker(f: &mut Frame, area: Rect, app: &mut App) {
             Style::default().fg(app.theme.text)
         };
         let marker = if highlighted { "› " } else { "  " };
-        let turn = format!("#{}", entry.turn);
+        let turn = match entry.anchor_seq {
+            Some(_) => format!("#{}", entry.turn),
+            // The appended head-fork row (spec 0163): no turn ordinal.
+            None => "now".to_string(),
+        };
         let fixed = 2 + turn_width + 2 + entry.at_label.len() + 2;
         let preview_width = (area.width as usize).saturating_sub(fixed);
         let preview = truncate_to_width(&entry.preview, preview_width);
@@ -1800,7 +1808,7 @@ fn render_turn_picker(f: &mut Frame, area: Rect, app: &mut App) {
     // Prompt row under the menu, mirroring the harness picker's input row.
     if area.height > 0 {
         let y = area.y + area.height - 1;
-        let hint = "Fork from turn: pick the turn to retry (Enter picks, Esc cancels)";
+        let hint = "Fork: pick the turn to retry — or now (Enter picks, Esc cancels)";
         f.render_widget(
             Paragraph::new(hint).style(Style::default().fg(app.theme.dim)),
             Rect::new(area.x, y, area.width, 1),
@@ -6373,8 +6381,6 @@ fn session_title_menu_action_label(
         (SessionTitleMenuAction::Rename, Profile::Vim) => Some("r"),
         (SessionTitleMenuAction::Fork, Profile::Emacs) => Some("C-x f"),
         (SessionTitleMenuAction::Fork, Profile::Vim) => Some("f"),
-        (SessionTitleMenuAction::ForkTurn, Profile::Emacs) => Some("C-x F"),
-        (SessionTitleMenuAction::ForkTurn, Profile::Vim) => Some("F"),
         (SessionTitleMenuAction::ProgramTerminalMode, _) => Some("C-x Space"),
         (SessionTitleMenuAction::SplitHorizontal, Profile::Emacs) => Some("C-x 3"),
         (SessionTitleMenuAction::SplitHorizontal, Profile::Vim) => Some("C-w v"),
@@ -11474,8 +11480,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     C-x C-o         focus session terminal / refocus Program
     C-x d           show diff
     C-x r           rename selected session (clears title on empty submit)
-    C-x f           fork selected session (harness picker; same is default)
-    C-x F           fork from a past turn (turn picker, then harness picker)
+    C-x f           fork selected session (pick a turn or now, then harness)
     Tab (on list)   focus lineage section
     C-x k [m]       on a fork: merge result into parent and archive
     C-c C-c         interrupt
@@ -11550,8 +11555,7 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
     C-x C-o         focus session terminal / refocus Program
     g d             show diff
     r               rename selected session (clears title on empty submit)
-    f               fork selected session (harness picker; same is default)
-    F               fork from a past turn (turn picker, then harness picker)
+    f               fork selected session (pick a turn or now, then harness)
     Tab (on list)   focus lineage section
     m               merge the selected fork (take result, or discard)
     C-c             interrupt
