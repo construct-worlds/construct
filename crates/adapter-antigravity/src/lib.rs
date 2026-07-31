@@ -48,7 +48,9 @@
 //! `CONSTRUCT_ANTIGRAVITY_BIN` (binary, default `agy`),
 //! `CONSTRUCT_ANTIGRAVITY_MODE` (`interactive`|`headless`).
 
-use construct_adapter_common::context_breakdown::{estimate_tokens_from_chars, BreakdownGate};
+use construct_adapter_common::context_breakdown::{
+    estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin,
+};
 use construct_adapter_common::{
     antigravity_transcript_path, drive_turn, next_native_seq, TurnOutcome,
 };
@@ -633,6 +635,7 @@ fn spawn_interactive_transcript_watcher(
         let mut last_gen_idx: i64 = -1;
         let mut gen_metadata_error_logged = false;
         let mut breakdown_gate = BreakdownGate::default();
+        let mut overhead_pin = FixedOverheadPin::default();
         let mut tick_count: u64 = 0;
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -772,11 +775,23 @@ fn spawn_interactive_transcript_watcher(
                                     });
                                     let chars = transcript_conversation_chars(&tp);
                                     if chars > 0 {
-                                        let segments = vec![ContextSegment::new(
+                                        // Differential fixed-overhead pin
+                                        // (spec 0156), held across polls:
+                                        // lands on the first poll where a
+                                        // generation row and a conversation
+                                        // estimate coexist. Measures the
+                                        // prefix (system prompt, tools)
+                                        // that never reaches agy's
+                                        // transcript surface.
+                                        let estimated = estimate_tokens_from_chars(chars);
+                                        overhead_pin.observe(last.prompt_side(), estimated);
+                                        let mut segments: Vec<ContextSegment> =
+                                            overhead_pin.segment().into_iter().collect();
+                                        segments.push(ContextSegment::new(
                                             "messages",
-                                            estimate_tokens_from_chars(chars),
+                                            estimated,
                                             true,
-                                        )];
+                                        ));
                                         if breakdown_gate.changed(&segments) {
                                             emit.emit(SessionEvent::ContextBreakdown { segments });
                                         }

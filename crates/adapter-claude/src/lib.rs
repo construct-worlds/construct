@@ -21,7 +21,9 @@
 
 #[cfg(test)]
 use construct_adapter_common::claude_project_slug;
-use construct_adapter_common::context_breakdown::{estimate_tokens_from_chars, BreakdownGate};
+use construct_adapter_common::context_breakdown::{
+    estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin,
+};
 use construct_adapter_common::{
     claude_transcript_path, drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome,
 };
@@ -1427,15 +1429,23 @@ fn emit_claude_context_breakdown(path: &Path, gate: &mut BreakdownGate, emit: &E
 }
 
 fn claude_breakdown_segments(text: &str) -> Vec<ContextSegment> {
-    let chars = claude_transcript_content_chars(text);
-    vec![ContextSegment::new(
+    let (chars, pin) = claude_transcript_scan(text);
+    let mut segments: Vec<ContextSegment> = pin.segment().into_iter().collect();
+    segments.push(ContextSegment::new(
         "messages",
         estimate_tokens_from_chars(chars),
         true,
-    )]
+    ));
+    segments
 }
 
-/// Content chars of the conversation records currently in the window.
+/// One walk over the transcript: the content chars of the conversation
+/// records currently in the window, plus the differential fixed-overhead
+/// pin (spec 0156) landed on the current epoch's first assistant usage.
+/// The pin observes *before* the assistant record's own chars are counted
+/// — its usage's prompt side is what the model was sent, which excludes
+/// that record's output.
+///
 /// Record shapes verified against real transcripts under
 /// `~/.claude/projects/` on this machine: conversation rows are
 /// `type: "user" | "assistant"` with `message.content` either a plain
@@ -1445,8 +1455,9 @@ fn claude_breakdown_segments(text: &str) -> Vec<ContextSegment> {
 /// later records (plus the compact summary, itself a user record) are in
 /// the window; `isSidechain: true` rows belong to subagent conversations,
 /// not this window.
-fn claude_transcript_content_chars(text: &str) -> usize {
+fn claude_transcript_scan(text: &str) -> (usize, FixedOverheadPin) {
     let mut chars = 0usize;
+    let mut pin = FixedOverheadPin::default();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -1455,19 +1466,36 @@ fn claude_transcript_content_chars(text: &str) -> usize {
             && v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
         {
             chars = 0;
+            pin.reset();
             continue;
         }
         if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             continue;
         }
-        if matches!(
-            v.get("type").and_then(Value::as_str),
-            Some("user" | "assistant")
-        ) {
-            chars += claude_message_content_chars(v.get("message"));
+        match v.get("type").and_then(Value::as_str) {
+            Some("assistant") => {
+                if let Some(prompt_side) = claude_prompt_side(&v) {
+                    pin.observe(prompt_side, estimate_tokens_from_chars(chars));
+                }
+                chars += claude_message_content_chars(v.get("message"));
+            }
+            Some("user") => chars += claude_message_content_chars(v.get("message")),
+            _ => {}
         }
     }
-    chars
+    (chars, pin)
+}
+
+/// Prompt side of an assistant record's `message.usage` — the same
+/// arithmetic `claude_usage_from_assistant` feeds the gauge, minus the
+/// event plumbing. `None` when the record carries no (or all-zero) usage.
+fn claude_prompt_side(v: &Value) -> Option<u64> {
+    let usage = v.get("message")?.get("usage")?;
+    let field = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let prompt_side = field("input_tokens")
+        .saturating_add(field("cache_read_input_tokens"))
+        .saturating_add(field("cache_creation_input_tokens"));
+    (prompt_side > 0).then_some(prompt_side)
 }
 
 fn claude_message_content_chars(msg: Option<&Value>) -> usize {
@@ -2291,7 +2319,7 @@ mod tests {
         // "hi there" (8) + "okay" (4) + {"command":"ls"} serialized (16)
         // + "out" (3) + "abcde" (5); thinking, image, and sidechain rows
         // contribute nothing.
-        assert_eq!(claude_transcript_content_chars(transcript), 36);
+        assert_eq!(claude_transcript_scan(transcript).0, 36);
         assert_eq!(
             claude_breakdown_segments(transcript),
             vec![ContextSegment::new(
@@ -2316,7 +2344,43 @@ mod tests {
             r#"{"type":"user","isSidechain":false,"isCompactSummary":true,"message":{"role":"user","content":"abc"}}"#,
             "\n",
         );
-        assert_eq!(claude_transcript_content_chars(transcript), 3);
+        assert_eq!(claude_transcript_scan(transcript).0, 3);
+    }
+
+    #[test]
+    fn context_breakdown_pins_fixed_overhead_on_epoch_first_usage() {
+        use construct_adapter_common::context_breakdown::FIXED_OVERHEAD_LABEL;
+        // 35 chars of user content (~10 tokens) precede the first assistant
+        // usage; its prompt side (5000) pins the residual at 4990. The
+        // later, larger usage (9000) must not move the pin.
+        let transcript = concat!(
+            r#"{"type":"user","isSidechain":false,"message":{"role":"user","content":"01234567890123456789012345678901234"}}"#,
+            "\n",
+            r#"{"type":"assistant","isSidechain":false,"message":{"id":"m1","role":"assistant","usage":{"input_tokens":4000,"cache_creation_input_tokens":1000},"content":[{"type":"text","text":"ok"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","isSidechain":false,"message":{"id":"m2","role":"assistant","usage":{"input_tokens":9000},"content":[{"type":"text","text":"more"}]}}"#,
+            "\n",
+        );
+        let segments = claude_breakdown_segments(transcript);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0], ContextSegment::new(FIXED_OVERHEAD_LABEL, 4990, true));
+        assert_eq!(segments[1].label, "messages");
+
+        // A compaction starts a new epoch: the pin re-measures on the first
+        // usage after the boundary (7-char summary ≈ 2 tokens, 6000 − 2).
+        let compacted = format!(
+            "{transcript}{}",
+            concat!(
+                r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto"}}"#,
+                "\n",
+                r#"{"type":"user","isSidechain":false,"isCompactSummary":true,"message":{"role":"user","content":"summary"}}"#,
+                "\n",
+                r#"{"type":"assistant","isSidechain":false,"message":{"id":"m3","role":"assistant","usage":{"input_tokens":6000},"content":[{"type":"text","text":"hi"}]}}"#,
+                "\n",
+            )
+        );
+        let segments = claude_breakdown_segments(&compacted);
+        assert_eq!(segments[0], ContextSegment::new(FIXED_OVERHEAD_LABEL, 5998, true));
     }
 
     #[test]

@@ -42,6 +42,27 @@ Rules:
   table or a hardcoded guess.
 - **Report on change, not per poll**, at the same cadence as the
   context-usage gauge.
+- **Differential segments are a sanctioned technique.** An adapter may
+  report a `fixed overhead` segment measured as the difference between the
+  harness-reported gauge and the sum of its estimated segments, *pinned at
+  the first gauge report of a context epoch* — the moment the conversation
+  (and therefore the char-heuristic error) is smallest. The fixed prefix
+  does not change within an epoch, so the epoch-first residual stays valid
+  as the conversation grows; re-deriving it later would re-absorb exactly
+  the estimate drift the pin avoids. This is how a harness whose fixed
+  prefix (system prompt, tool/MCP schemas, skills listings) never reaches
+  any adapter-readable surface still gets a labeled row instead of a
+  meaningless *unaccounted* remainder. Rules: the minuend must be the
+  harness-reported gauge (never itself an estimate); the segment is
+  real-minus-estimate and therefore stays `estimated`; the pin resets
+  whenever the epoch changes (compaction, clear, session rebind); an
+  adapter that cannot see a conversation estimate at all must not pin — a
+  residual measured against nothing is just the gauge restated. Adapters
+  with an on-disk usage history (transcripts, rollouts, wire logs) derive
+  the pin statelessly from the epoch's first usage record so restarts and
+  re-scans agree; adapters with snapshot-only gauges hold the pin in
+  memory and accept that a restart mid-conversation re-measures at the
+  current turn.
 
 ## Reason
 
@@ -89,10 +110,10 @@ designed data path" — this event is that path.
 - Smith reports `system prompt`, `project guide`, `skills`, `tools`, and
   `messages`, all estimated (char heuristic), and the tooltip shows each
   with a `~` plus computed free space.
-- The Claude adapter reports a single estimated `messages` segment derived
-  from its native transcript; the tooltip shows `~ messages`, an
-  `unaccounted` remainder (system prompt + tools it cannot see), and free
-  space.
+- The Claude adapter reports an estimated `messages` segment derived from
+  its native transcript, plus a differential `fixed overhead` segment (the
+  system prompt + tools it cannot see, measured at the epoch's first
+  usage record); the tooltip shows both with a `~`, plus free space.
 - Grok reports `system prompt` (from the prompt file its CLI writes to
   disk) and `messages`, both estimated.
 - The shell harness reports nothing; hovering its gauge shows nothing new.

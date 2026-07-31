@@ -13,7 +13,7 @@
 //! full command prefix, falling back to `CONSTRUCT_GROK_BIN` for a binary path.
 
 use construct_adapter_common::{
-    context_breakdown::{estimate_tokens_from_chars, BreakdownGate},
+    context_breakdown::{estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin},
     drive_turn, grok_transcript_path, next_native_seq, spawn_stderr_log, TurnOutcome,
 };
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
@@ -824,6 +824,7 @@ fn spawn_interactive_transcript_watcher(
         // Breakdown (spec 0156): recomputed from the session dir on the
         // same poll as the gauge, reported only when it changes.
         let mut breakdown_gate = BreakdownGate::default();
+        let mut overhead_pin = FixedOverheadPin::default();
         loop {
             tick.tick().await;
             ticks_since_sibling_refresh += 1;
@@ -860,7 +861,28 @@ fn spawn_interactive_transcript_watcher(
                         });
                     }
                 }
-                let segments = grok_context_breakdown(&cwd, root_id);
+                let mut segments = grok_context_breakdown(&cwd, root_id);
+                // Differential fixed-overhead pin (spec 0156): grok's gauge
+                // is a live snapshot with no on-disk history, so the pin is
+                // held across polls and lands on the first poll where both
+                // the gauge and a conversation estimate exist — requiring
+                // the `messages` segment keeps a not-yet-flushed
+                // chat_history.jsonl from inflating the residual. What it
+                // measures is the tool schemas (the system prompt has its
+                // own file, and so its own segment).
+                if let Some((used, _)) = observed {
+                    if segments.iter().any(|s| s.label == "messages") {
+                        let estimated = segments.iter().map(|s| s.tokens).sum();
+                        overhead_pin.observe(used, estimated);
+                    }
+                }
+                if let Some(seg) = overhead_pin.segment() {
+                    let at = segments
+                        .iter()
+                        .position(|s| s.label == "messages")
+                        .unwrap_or(segments.len());
+                    segments.insert(at, seg);
+                }
                 if !segments.is_empty() && breakdown_gate.changed(&segments) {
                     emit.emit(SessionEvent::ContextBreakdown { segments });
                 }
@@ -919,6 +941,8 @@ fn spawn_interactive_transcript_watcher(
                         next_update_line = 0;
                         last_context = None;
                         breakdown_gate = BreakdownGate::default();
+                        // New native session, new context epoch: re-measure.
+                        overhead_pin.reset();
                     }
                 }
             }
