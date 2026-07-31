@@ -103,7 +103,10 @@ from burning tokens.
   same whether the row is merely highlighted or fully focused — header,
   keyword field, and a highlighted `[ generate ]` / `[ regenerate ]`
   action chip. Left arrow leaves the keyword field back to the category
-  list; both Escape and `C-g` close the deck. Web may differ.
+  list; both Escape and `C-g` close the deck. The Web UI follows the
+  same on-demand rule: its suggestion control opens a fan containing
+  History and Generate (Regenerate when a hand is cached), and only the
+  explicit Generate action calls for a new hand.
   When the keyboard chord (`C-x .`) opens the TUI deck while the
   session's visible prompt contains a non-blank draft, the deck opens
   directly on Generate with that draft prefilled as keyword guidance.

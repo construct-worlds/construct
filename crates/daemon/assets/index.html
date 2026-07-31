@@ -3282,10 +3282,10 @@
 
       <!--
         Suggestion deck (spec 0109): shown while the selected session is
-        awaiting input. The orb requests generation via `session.suggest`
-        (the daemon generates with the session's own harness); the dealt
-        hand arrives as a broadcast `suggestions` event and opens as a
-        fan of verb chips, then a card list per verb. Picking anything
+        awaiting input. The orb opens a fan with History and an explicit
+        Generate action; the dealt hand arrives as a broadcast
+        `suggestions` event and adds prompt / verb chips, then a card list
+        per verb. Picking anything
         lands in the composer for review when one is on screen, else
         sends directly through `session.input`. Never modal: it hides
         while the session runs and closes on any outside tap.
@@ -11417,9 +11417,10 @@ async function loadOlderTranscriptPage(id, pane, options = {}) {
 
 // ── Suggestion deck (spec 0109) ────────────────────────────────────
 // The orb sits bottom-right of the session view while the selected
-// session awaits input. Click → `session.suggest` (the daemon
-// generates with the session's own harness) → the broadcast
-// `suggestions` event deals a hand → verb-chip fan → card list.
+// session awaits input. Click opens a fan with History plus an explicit
+// Generate action. Generate → `session.suggest` (the daemon generates
+// with the session's own harness) → the broadcast `suggestions` event
+// deals a hand → verb-chip fan → card list.
 // Accepting fills the composer when one is visible (review before
 // send), else sends through `session.input`. A new turn invalidates
 // the hand; the deck is never modal.
@@ -11671,10 +11672,11 @@ function updateSuggestOrb() {
   });
 }
 function suggestFanItems() {
-  // A fan can open before the hand arrives (generation in flight): it
-  // then holds just the prompt-history chip, so past prompts are
-  // reachable while the spinner runs (spec 0155).
+  // History and Generate are present before a hand exists. While a
+  // deliberate request is in flight, keep history available but replace
+  // Generate with the orb spinner (specs 0109/0155).
   const hand = state.suggestionsById.get(state.currentId) || null;
+  const pending = suggestPendingActive(state.currentId);
   const items = [];
   if (hand && hand.top) {
     const verbs = hand.verbs || [];
@@ -11692,11 +11694,16 @@ function suggestFanItems() {
       });
     }
   }
-  if ((state.promptHistory || []).length) {
+  items.push({
+    label: "history ›",
+    cls: "suggest-chip",
+    act: () => openHistoryStack(),
+  });
+  if (!pending) {
     items.push({
-      label: "history ›",
+      label: hand ? "regenerate" : "generate",
       cls: "suggest-chip",
-      act: () => openHistoryStack(),
+      act: () => requestSuggestions(),
     });
   }
   return items;
@@ -11719,21 +11726,26 @@ function renderSuggestFan() {
     }
     suggestFanEl.innerHTML = "";
     const total = items.length;
-    // Chips sweep a quarter arc around the orb center: the top pick sits
-    // at the smallest angle (just above the orb), verbs fan out toward
-    // horizontal-left. Right edges anchor to the arc; the pop-in stagger
-    // reveals outward from the orb.
+    // The idle History + Generate menu is a compact vertical pair above the
+    // orb. Generated hands use the wider quarter arc: the top pick sits at
+    // the smallest angle (just above the orb), and verbs fan leftward.
+    // Right edges anchor to the arc; the pop-in stagger reveals outward.
     const radius = Math.min(185, Math.max(120, window.innerWidth * 0.32));
     // Arc positions first, then a de-conflict pass: chips near the top of
     // the arc compress vertically, so walk outward from the orb keeping a
     // minimum vertical gap between neighbors.
-    const pos = items.map((_, k) => {
-      const th = ((8 + (total === 1 ? 40 : k * (84 / (total - 1)))) * Math.PI) / 180;
-      return {
-        right: Math.round(radius * Math.sin(th)) - 20,
-        bottom: Math.round(radius * Math.cos(th) * 0.72),
-      };
-    });
+    const pos = total <= 2
+      ? items.map((_, k) => ({
+          right: 18,
+          bottom: 58 + (total - 1 - k) * 42,
+        }))
+      : items.map((_, k) => {
+          const th = ((8 + k * (84 / (total - 1))) * Math.PI) / 180;
+          return {
+            right: Math.round(radius * Math.sin(th)) - 20,
+            bottom: Math.round(radius * Math.cos(th) * 0.72),
+          };
+        });
     for (let k = pos.length - 2; k >= 0; k--) {
       if (pos[k].bottom - pos[k + 1].bottom < 40) pos[k].bottom = pos[k + 1].bottom + 40;
     }
@@ -11854,28 +11866,17 @@ function sendSuggestion(text) {
     console.error("suggestion send failed", e),
   );
 }
-async function suggestOrbClick() {
+async function requestSuggestions() {
   const sid = state.currentId;
   if (!sid) return;
-  const historyRefresh = refreshPromptHistory();
-  if (state.suggestionsById.get(sid)) {
-    if (suggestDeckIsOpen()) closeSuggestDeck();
-    else renderSuggestFan();
-    return;
-  }
   if (suggestPendingActive(sid)) {
-    // Generation already running: the orb still toggles the fan so the
-    // history chip stays reachable while the spinner turns.
-    if (suggestDeckIsOpen()) closeSuggestDeck();
-    else renderSuggestFan();
     return;
   }
+  // Regeneration replaces the old hand only after the user explicitly
+  // chooses it. The history fan stays open while the spinner turns.
+  state.suggestionsById.delete(sid);
   state.suggestPendingById.set(sid, Date.now());
   updateSuggestOrb();
-  // Deal the history-only fan as soon as the entries are in (a local
-  // round-trip) — the generated hand joins it when the broadcast
-  // arrives.
-  await historyRefresh;
   renderSuggestFan();
   try {
     const r = await rpc("session.suggest", { session_id: sid });
@@ -11888,6 +11889,18 @@ async function suggestOrbClick() {
     updateSuggestOrb();
     console.error("session.suggest failed", e);
   }
+}
+function suggestOrbClick() {
+  const sid = state.currentId;
+  if (!sid) return;
+  if (suggestDeckIsOpen()) {
+    closeSuggestDeck();
+    return;
+  }
+  // Opening is intentionally cheap and side-effect free: users can browse
+  // prompt history or decide whether to request a generated hand.
+  renderSuggestFan();
+  refreshPromptHistory();
 }
 suggestKeepFocusOnPress(suggestOrbEl);
 suggestKeepFocusOnPress(suggestBackEl);
