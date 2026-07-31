@@ -13,6 +13,10 @@ expose a generic HTTP webhook only on loopback. A service owns its instruction,
 harness, model, working directory, and routing policy; a channel supplies the
 transport-specific credential and listener configuration.
 
+The TUI lists services in a dedicated sidebar section between session rows and
+lineage. Creating or selecting a service opens one editor for the full
+definition; edits continue to preserve the one-file-per-service boundary.
+
 The HTTP channel accepts authenticated JSON deliveries and routes them into
 ordinary headless Construct sessions. `session-key` routing persists the
 key-to-session mapping, `single` uses one shared mapping, and `per-event`
@@ -33,8 +37,8 @@ visible and recoverable in the fleet.
 - Service definitions can be created, edited, and removed atomically without
   rewriting the global Construct configuration.
 - Bearer credentials are service-scoped and never logged.
-- A future tunnel route, plugin channel, synchronous reply mechanism, or TUI
-  editor extends this boundary; none is implied by enabling a service.
+- A future tunnel route, plugin channel, or synchronous reply mechanism extends
+  this boundary; none is implied by enabling a service.
 - V1 does not promise runtime definition reload, sandbox-policy enforcement,
   channel plugins, response streaming, or public exposure.
 

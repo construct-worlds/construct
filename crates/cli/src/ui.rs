@@ -304,6 +304,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.main_window_dividers.clear();
     app.layout.session_title_name_hits.clear();
     app.layout.session_harness_hits.clear();
+    app.layout.service_area = None;
+    app.layout.service_add_hit = None;
+    app.layout.service_row_hits.clear();
     app.layout.list_visible_rows.clear();
     app.layout.list_mode_toggle_hit = None;
     // Cleared here rather than in `render_sessions`, which the collapsed and
@@ -516,18 +519,109 @@ fn finish_frame(f: &mut Frame, app: &mut App) {
     render_suggest_deck_card_preview(f, app);
     render_suggest_affordance_tooltip(f, app);
 
-    // The session-picker dialog and the `/configure` dialog are the topmost
+    // Session picker, configure, and service editor are topmost modals.
     // modals — drawn last so they sit over every base view (including
     // zoomed layouts, which return through here) and before
-    // `capture_frame_text` so they land in the frame snapshot. The two are
+    // `capture_frame_text` so they land in the frame snapshot. They are
     // mutually exclusive in practice (nothing opens one while the other is
     // already up), so render order between them doesn't matter.
     render_session_picker(f, app);
     render_configure_popup(f, app);
+    render_service_dialog(f, app);
     capture_frame_text(f, app);
     render_hovered_url(f, app);
     render_text_selection(f, app);
     paint_default_backgrounds(f, app.theme.background);
+}
+
+fn render_service_dialog(f: &mut Frame, app: &mut App) {
+    let Some(dialog) = app.service_dialog.clone() else {
+        return;
+    };
+    let area = f.area();
+    let width = 88u16.min(area.width.saturating_sub(4)).max(30);
+    let height = 18u16.min(area.height.saturating_sub(2)).max(12);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border_focused))
+        .title(dialog.title());
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+    app.layout.modal_area = Some(popup);
+
+    let labels = [
+        "Name",
+        "Instruction",
+        "Harness",
+        "Model",
+        "Working dir",
+        "Routing",
+        "HTTP port",
+        "State",
+    ];
+    let mut lines = Vec::with_capacity(14);
+    for (index, label) in labels.iter().enumerate() {
+        let selected = index == dialog.selected_field;
+        let locked = index == 0 && dialog.mode == crate::app::ServiceDialogMode::Edit;
+        let suffix = match index {
+            5 => "  ←/→ cycle",
+            7 => "  Space toggle",
+            _ if locked => "  locked",
+            _ => "",
+        };
+        let value = dialog.field_value(index);
+        let marker = if selected { "›" } else { " " };
+        let text = format!("{marker} {label:<12} {value}{suffix}");
+        let mut style = Style::default().fg(if locked {
+            app.theme.dim
+        } else {
+            app.theme.text
+        });
+        if selected {
+            style = style
+                .fg(app.theme.highlight_fg)
+                .bg(app.theme.highlight_bg);
+        }
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    lines.push(Line::from(""));
+    if let Some(token) = &dialog.new_token {
+        lines.push(Line::from(vec![
+            Span::styled("Token (shown once)  ", Style::default().fg(app.theme.warning)),
+            Span::styled(token.clone(), Style::default().fg(app.theme.text)),
+        ]));
+    }
+    if let Some(note) = &dialog.note {
+        lines.push(Line::from(Span::styled(
+            note.clone(),
+            Style::default().fg(if dialog.confirm_delete {
+                app.theme.danger
+            } else {
+                app.theme.dim
+            }),
+        )));
+    }
+    let footer = if dialog.mode == crate::app::ServiceDialogMode::Create {
+        "Tab/↑/↓ field · Enter/C-s create · Esc cancel"
+    } else {
+        "Tab/↑/↓ field · Enter/C-s save · C-r rotate token · C-d delete · Esc close"
+    };
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        footer,
+        Style::default().fg(app.theme.dim),
+    )));
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 fn paint_default_backgrounds(f: &mut Frame, background: Option<Color>) {
@@ -2943,9 +3037,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     // Tutorial pane highlight (spec 0077, step 4 "get around"): reuses
     // `pane_border_style`'s focused styling as the highlight rather than
     // inventing new styling.
-    // Exactly one sidebar region reads as keyboard-focused at a time: the
-    // session rows OR the lineage section (whose header highlights via
-    // `lineage_focused` in `render_lineage_section`).
+    // Exactly one sidebar region reads as keyboard-focused at a time:
+    // session rows, services, or lineage.
     let focused = app.session_rows_focused() || app.tutorial_wants_list_highlight();
     // Collapsed render path: a thin column with a `»` expand glyph
     // on the top border. Anywhere inside the pane click-expands. Keyed off
@@ -3321,13 +3414,15 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 > list_items_area.width as usize
         })
         .unwrap_or(false);
-    let (list_items_area, lineage_rect) = split_lineage_section(
+    let (list_and_services_area, lineage_rect) = split_lineage_section(
         list_items_area,
         lineage.as_ref().map(|(_, rows)| rows.len()).unwrap_or(0),
         app.lineage_collapsed,
         app.lineage_h,
         lineage_h_scrollbar,
     );
+    let (list_items_area, service_rect) =
+        split_service_section(list_and_services_area, app.services.len());
     let max_scroll = app.list_max_scroll(&app_items, list_items_area.height as usize);
     // A pending scroll request (a fleet-panel row click) is resolved here,
     // not where it was made: selecting a session changes the lineage
@@ -3488,10 +3583,126 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         hit_y = hit_y.saturating_add(app.list_item_display_height(item) as u16);
     }
     clear_pane_side_borders(f, area, app);
+    if let Some(rect) = service_rect {
+        render_service_section(f, rect, app);
+    }
     if let (Some(rect), Some((id, mut rows))) = (lineage_rect, lineage) {
         render_lineage_section(f, rect, app, &id, &mut rows);
     }
     render_matrix_rain(f, matrix_area, app);
+}
+
+/// Carve a compact services section from the bottom of the session-row
+/// region. The header is always present when space permits, so a fleet with
+/// no services still exposes the `+` create affordance. At most four service
+/// rows are shown; the section remains intentionally quieter than the
+/// session list and never squeezes that list below its minimum height.
+fn split_service_section(list: Rect, service_count: usize) -> (Rect, Option<Rect>) {
+    let available = list
+        .height
+        .saturating_sub(crate::app::SESSION_LIST_H_MIN);
+    if available == 0 {
+        return (list, None);
+    }
+    let desired = (service_count.saturating_add(1)).min(5) as u16;
+    let height = desired.max(1).min(available);
+    let rows = Rect {
+        height: list.height - height,
+        ..list
+    };
+    let section = Rect {
+        x: list.x,
+        y: list.y + list.height - height,
+        width: list.width,
+        height,
+    };
+    (rows, Some(section))
+}
+
+fn render_service_section(f: &mut Frame, rect: Rect, app: &mut App) {
+    app.layout.service_area = Some(rect);
+    let focused = app.focus == PaneFocus::List && app.service_focused;
+    let rule_color = if focused {
+        app.theme.border_focused
+    } else {
+        app.theme.border
+    };
+    let width = rect.width as usize;
+    let mut header = "─ services ".to_string();
+    if header.chars().count() < width.saturating_sub(3) {
+        header.push_str(&"─".repeat(
+            width
+                .saturating_sub(3)
+                .saturating_sub(header.chars().count()),
+        ));
+    }
+    header.push_str(" + ");
+    header = header.chars().take(width).collect();
+    let mut lines = vec![Line::from(Span::styled(
+        format!("{header:<width$}"),
+        Style::default().fg(rule_color),
+    ))];
+    if rect.width >= 3 {
+        app.layout.service_add_hit = Some(Rect {
+            x: rect.x + rect.width - 3,
+            y: rect.y,
+            width: 3,
+            height: 1,
+        });
+    }
+
+    let visible = rect.height.saturating_sub(1) as usize;
+    app.service_selected = app
+        .service_selected
+        .min(app.services.len().saturating_sub(1));
+    let visible_start = if app.service_focused && visible > 0 {
+        app.service_selected.saturating_sub(visible - 1)
+    } else {
+        0
+    };
+    for (index, service) in app
+        .services
+        .iter()
+        .enumerate()
+        .skip(visible_start)
+        .take(visible)
+    {
+        let status = if service.paused { "○" } else { "●" };
+        let model = service
+            .model
+            .as_deref()
+            .map(|model| format!(" · {model}"))
+            .unwrap_or_default();
+        let raw = format!(" {status} {} · {}{model}", service.name, service.harness);
+        let mut text: String = raw.chars().take(width).collect();
+        let text_width = text.chars().count();
+        if text_width < width {
+            text.push_str(&" ".repeat(width - text_width));
+        }
+        let selected = focused && index == app.service_selected;
+        let mut style = Style::default().fg(if service.paused {
+            app.theme.dim
+        } else {
+            app.theme.text
+        });
+        if selected {
+            style = style
+                .fg(app.theme.highlight_fg)
+                .bg(app.theme.highlight_bg);
+        }
+        lines.push(Line::from(Span::styled(text, style)));
+        app.layout.service_row_hits.push(crate::app::ServiceRowHit {
+            index,
+            name: service.name.clone(),
+            area: Rect {
+                x: rect.x,
+                y: rect.y + 1 + (index - visible_start) as u16,
+                width: rect.width,
+                height: 1,
+            },
+        });
+    }
+    f.render_widget(Paragraph::new(lines), rect);
 }
 
 /// Carve the sidebar's lineage section (spec 0081) from the bottom of the

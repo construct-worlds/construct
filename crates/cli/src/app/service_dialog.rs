@@ -1,0 +1,441 @@
+//! Service sidebar focus and create/edit dialog.
+
+use super::*;
+
+const FIELD_COUNT: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceDialogMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceDialog {
+    pub mode: ServiceDialogMode,
+    pub service: ServiceSummary,
+    pub selected_field: usize,
+    pub note: Option<String>,
+    pub new_token: Option<String>,
+    pub confirm_delete: bool,
+}
+
+impl ServiceDialog {
+    pub fn title(&self) -> &'static str {
+        match self.mode {
+            ServiceDialogMode::Create => " create service ",
+            ServiceDialogMode::Edit => " edit service ",
+        }
+    }
+
+    pub fn field_value(&self, field: usize) -> String {
+        match field {
+            0 => self.service.name.clone(),
+            1 => self.service.instruction.replace('\n', " ↵ "),
+            2 => self.service.harness.clone(),
+            3 => self.service.model.clone().unwrap_or_default(),
+            4 => self.service.cwd.clone(),
+            5 => self.service.routing.clone(),
+            6 => self
+                .service
+                .http_port
+                .map(|port| port.to_string())
+                .unwrap_or_default(),
+            7 => {
+                if self.service.paused {
+                    "paused".to_string()
+                } else {
+                    "serving".to_string()
+                }
+            }
+            _ => String::new(),
+        }
+    }
+}
+
+fn default_service(app: &App, suggested: String) -> ServiceSummary {
+    let selected = app.selected_session();
+    ServiceSummary {
+        name: suggested,
+        instruction: String::new(),
+        harness: selected
+            .map(|session| session.harness.clone())
+            .unwrap_or_else(|| "smith".to_string()),
+        model: selected.and_then(|session| session.model.clone()),
+        cwd: selected
+            .map(|session| session.cwd.clone())
+            .unwrap_or_else(|| ".".to_string()),
+        routing: "session-key".to_string(),
+        paused: false,
+        http_port: Some(8787),
+        has_http_token: false,
+    }
+}
+
+fn valid_service_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
+impl App {
+    pub async fn refresh_services(&mut self) {
+        match self.client.list_services().await {
+            Ok(mut services) => {
+                services.sort_by(|a, b| a.name.cmp(&b.name));
+                self.services = services;
+                self.service_selected = self
+                    .service_selected
+                    .min(self.services.len().saturating_sub(1));
+            }
+            Err(error) => self.set_status(format!("services refresh failed: {error}")),
+        }
+    }
+
+    pub fn open_new_service_dialog(&mut self, suggested: impl Into<String>) {
+        let suggested = suggested.into();
+        self.configure_popup = None;
+        self.session_picker = None;
+        self.service_dialog = Some(ServiceDialog {
+            mode: ServiceDialogMode::Create,
+            service: default_service(self, suggested),
+            selected_field: 0,
+            note: Some(
+                "Saved as its own TOML file. Restart the daemon before it serves.".to_string(),
+            ),
+            new_token: None,
+            confirm_delete: false,
+        });
+    }
+
+    pub fn open_edit_service_dialog(&mut self, name: &str) -> bool {
+        let Some(service) = self
+            .services
+            .iter()
+            .find(|service| service.name == name)
+            .cloned()
+        else {
+            self.set_status(format!("service {name} not found"));
+            return false;
+        };
+        self.configure_popup = None;
+        self.session_picker = None;
+        self.service_dialog = Some(ServiceDialog {
+            mode: ServiceDialogMode::Edit,
+            service,
+            selected_field: 1,
+            note: Some(
+                "Changes persist immediately; restart the daemon to apply them.".to_string(),
+            ),
+            new_token: None,
+            confirm_delete: false,
+        });
+        true
+    }
+
+    pub(super) fn activate_service_focus(&mut self) -> bool {
+        if self.layout.service_area.is_none() {
+            return false;
+        }
+        self.focus = PaneFocus::List;
+        self.lineage_focused = false;
+        self.service_focused = true;
+        self.service_selected = self
+            .service_selected
+            .min(self.services.len().saturating_sub(1));
+        true
+    }
+
+    pub(super) async fn handle_service_focus_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.service_focused = false;
+                true
+            }
+            KeyCode::Tab => {
+                self.service_focused = false;
+                if !self.activate_lineage_focus() {
+                    self.focus = PaneFocus::List;
+                }
+                true
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('p') => {
+                if !self.services.is_empty() {
+                    self.service_selected = self
+                        .service_selected
+                        .checked_sub(1)
+                        .unwrap_or(self.services.len() - 1);
+                }
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !self.services.is_empty() {
+                    self.service_selected = (self.service_selected + 1) % self.services.len();
+                }
+                true
+            }
+            KeyCode::Char('n') => {
+                self.open_new_service_dialog("service");
+                true
+            }
+            KeyCode::Enter => {
+                if let Some(name) = self
+                    .services
+                    .get(self.service_selected)
+                    .map(|service| service.name.clone())
+                {
+                    self.open_edit_service_dialog(&name);
+                } else {
+                    self.open_new_service_dialog("service");
+                }
+                true
+            }
+            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => false,
+            _ => {
+                if self.chord_state.is_empty() {
+                    self.service_focused = false;
+                }
+                false
+            }
+        }
+    }
+
+    fn edit_service_dialog_text(&mut self, mut edit: impl FnMut(&mut String)) {
+        let Some(dialog) = self.service_dialog.as_mut() else {
+            return;
+        };
+        if dialog.mode == ServiceDialogMode::Edit && dialog.selected_field == 0 {
+            dialog.note = Some("Service names cannot be changed after creation.".to_string());
+            return;
+        }
+        match dialog.selected_field {
+            0 => edit(&mut dialog.service.name),
+            1 => edit(&mut dialog.service.instruction),
+            2 => edit(&mut dialog.service.harness),
+            3 => {
+                let mut value = dialog.service.model.take().unwrap_or_default();
+                edit(&mut value);
+                dialog.service.model = (!value.is_empty()).then_some(value);
+            }
+            4 => edit(&mut dialog.service.cwd),
+            6 => {
+                let mut value = dialog
+                    .service
+                    .http_port
+                    .map(|port| port.to_string())
+                    .unwrap_or_default();
+                edit(&mut value);
+                dialog.service.http_port = value.parse::<u16>().ok().filter(|port| *port > 0);
+            }
+            _ => {}
+        }
+        dialog.note = None;
+        dialog.new_token = None;
+        dialog.confirm_delete = false;
+    }
+
+    pub(super) fn insert_service_dialog_text(&mut self, text: &str) -> bool {
+        if self.service_dialog.is_none() {
+            return false;
+        }
+        let sanitized = text.replace(['\r', '\n'], " ");
+        self.edit_service_dialog_text(|value| value.push_str(&sanitized));
+        true
+    }
+
+    fn cycle_service_dialog_value(&mut self, reverse: bool) {
+        let Some(dialog) = self.service_dialog.as_mut() else {
+            return;
+        };
+        match dialog.selected_field {
+            5 => {
+                const ROUTING: [&str; 3] = ["session-key", "per-event", "single"];
+                let current = ROUTING
+                    .iter()
+                    .position(|value| *value == dialog.service.routing)
+                    .unwrap_or(0);
+                let next = if reverse {
+                    current.checked_sub(1).unwrap_or(ROUTING.len() - 1)
+                } else {
+                    (current + 1) % ROUTING.len()
+                };
+                dialog.service.routing = ROUTING[next].to_string();
+            }
+            7 => dialog.service.paused = !dialog.service.paused,
+            _ => {}
+        }
+        dialog.note = None;
+        dialog.confirm_delete = false;
+    }
+
+    async fn save_service_dialog(&mut self, rotate_token: bool) {
+        let Some(dialog) = self.service_dialog.clone() else {
+            return;
+        };
+        let service = dialog.service;
+        let validation_error = if !valid_service_name(&service.name) {
+            Some("Name must be 1–32 lowercase letters, digits, or interior hyphens.")
+        } else if service.harness.trim().is_empty() {
+            Some("Harness cannot be empty.")
+        } else if service.cwd.trim().is_empty() {
+            Some("Working directory cannot be empty.")
+        } else if !matches!(
+            service.routing.as_str(),
+            "session-key" | "per-event" | "single"
+        ) {
+            Some("Routing must be session-key, per-event, or single.")
+        } else if service.http_port.is_none() {
+            Some("HTTP port must be between 1 and 65535.")
+        } else {
+            None
+        };
+        if let Some(message) = validation_error {
+            if let Some(dialog) = self.service_dialog.as_mut() {
+                dialog.note = Some(message.to_string());
+            }
+            return;
+        }
+
+        match self
+            .client
+            .put_service(construct_protocol::ServicePutParams {
+                service,
+                rotate_token,
+            })
+            .await
+        {
+            Ok(result) => {
+                let name = result.service.name.clone();
+                self.refresh_services().await;
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    dialog.mode = ServiceDialogMode::Edit;
+                    dialog.service = result.service;
+                    dialog.new_token = result.new_token;
+                    dialog.confirm_delete = false;
+                    dialog.note = Some(if dialog.new_token.is_some() {
+                        "Saved. Copy the token now; it is shown only once. Restart to apply."
+                            .to_string()
+                    } else {
+                        "Saved. Restart the daemon to apply changes.".to_string()
+                    });
+                }
+                self.service_selected = self
+                    .services
+                    .iter()
+                    .position(|service| service.name == name)
+                    .unwrap_or(0);
+            }
+            Err(error) => {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    dialog.note = Some(format!("Save failed: {error}"));
+                }
+            }
+        }
+    }
+
+    async fn delete_service_dialog(&mut self) {
+        let Some(name) = self
+            .service_dialog
+            .as_ref()
+            .map(|dialog| dialog.service.name.clone())
+        else {
+            return;
+        };
+        match self.client.delete_service(name.clone()).await {
+            Ok(()) => {
+                self.service_dialog = None;
+                self.refresh_services().await;
+                self.set_status(format!(
+                    "{name} deleted; restart daemon to withdraw the endpoint"
+                ));
+            }
+            Err(error) => {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    dialog.note = Some(format!("Delete failed: {error}"));
+                    dialog.confirm_delete = false;
+                }
+            }
+        }
+    }
+
+    pub(super) async fn handle_service_dialog_key(&mut self, key: KeyEvent) -> bool {
+        let Some(snapshot) = self.service_dialog.clone() else {
+            return false;
+        };
+        if snapshot.confirm_delete {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => self.delete_service_dialog().await,
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        dialog.confirm_delete = false;
+                        dialog.note = Some("Delete cancelled.".to_string());
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('s') => {
+                    self.save_service_dialog(false).await;
+                    return true;
+                }
+                KeyCode::Char('r') if snapshot.mode == ServiceDialogMode::Edit => {
+                    self.save_service_dialog(true).await;
+                    return true;
+                }
+                KeyCode::Char('d') if snapshot.mode == ServiceDialogMode::Edit => {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        dialog.confirm_delete = true;
+                        dialog.note = Some(
+                            "Delete this service? Enter/y confirms; Esc/n cancels.".to_string(),
+                        );
+                    }
+                    return true;
+                }
+                KeyCode::Char('x') => {
+                    // Preserve global C-x chords by closing and falling back.
+                    self.service_dialog = None;
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        match key.code {
+            KeyCode::Esc => self.service_dialog = None,
+            KeyCode::Enter => self.save_service_dialog(false).await,
+            KeyCode::Tab | KeyCode::Down => {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    dialog.selected_field = (dialog.selected_field + 1) % FIELD_COUNT;
+                }
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    dialog.selected_field = dialog
+                        .selected_field
+                        .checked_sub(1)
+                        .unwrap_or(FIELD_COUNT - 1);
+                }
+            }
+            KeyCode::Left => self.cycle_service_dialog_value(true),
+            KeyCode::Right | KeyCode::Char(' ') if matches!(snapshot.selected_field, 5 | 7) => {
+                self.cycle_service_dialog_value(false)
+            }
+            KeyCode::Backspace => self.edit_service_dialog_text(|value| {
+                value.pop();
+            }),
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                self.edit_service_dialog_text(|value| value.push(ch));
+            }
+            _ => {}
+        }
+        true
+    }
+}

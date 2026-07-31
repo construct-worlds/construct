@@ -13,8 +13,8 @@
 //!   or whenever it has lineage to show — no hover trigger, no pin. It follows
 //!   the list selection like a detail panel (master–detail), and a click on its
 //!   header collapses it to just that header row.
-//! - `Tab`, while the list pane holds focus, moves keyboard focus between
-//!   the session rows and the lineage section.
+//! - `Tab`, while the list pane holds focus, moves keyboard focus through
+//!   session rows, services, and the lineage section.
 
 use super::*;
 use crate::lineage::LineageRow;
@@ -96,12 +96,11 @@ impl App {
         true
     }
 
-    /// Whether the session ROWS (not the lineage section) should read as
-    /// the keyboard-focused sidebar region. Exactly one of the two sidebar
-    /// regions highlights at a time: focusing the lineage section takes the
-    /// highlight off the sessions title bar, and vice versa.
+    /// Whether the session ROWS should read as the keyboard-focused sidebar
+    /// region. Service or lineage focus takes the highlight off the sessions
+    /// title bar.
     pub(crate) fn session_rows_focused(&self) -> bool {
-        self.focus == PaneFocus::List && !self.lineage_focused
+        self.focus == PaneFocus::List && !self.service_focused && !self.lineage_focused
     }
 
     /// Test helper for toggling lineage focus; keyboard entry is scoped to
@@ -136,6 +135,7 @@ impl App {
             .position(|&idx| rows[idx].session_id() == Some(id.as_str()))
             .unwrap_or(0);
         self.focus = PaneFocus::List;
+        self.service_focused = false;
         self.lineage_focused = true;
         if !self.restore_lineage_scroll_for_selected_session() {
             self.lineage_follow_selection = true;

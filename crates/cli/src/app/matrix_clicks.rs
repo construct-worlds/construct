@@ -265,6 +265,37 @@ impl App {
                 }
             }
         }
+        if self
+            .layout
+            .service_add_hit
+            .is_some_and(|area| Self::rect_contains(area, col, row))
+        {
+            self.service_focused = true;
+            self.lineage_focused = false;
+            self.open_new_service_dialog("service");
+            return;
+        }
+        if let Some((index, name)) = self
+            .layout
+            .service_row_hits
+            .iter()
+            .find(|hit| hit.contains(col, row))
+            .map(|hit| (hit.index, hit.name.clone()))
+        {
+            self.service_selected = index;
+            self.service_focused = true;
+            self.lineage_focused = false;
+            self.open_edit_service_dialog(&name);
+            return;
+        }
+        if self
+            .layout
+            .service_area
+            .is_some_and(|area| Self::rect_contains(area, col, row))
+        {
+            self.activate_service_focus();
+            return;
+        }
         // Lineage section (spec 0081): the header's mode toggle, the header
         // itself (collapse), a session box (jump), then anywhere else inside
         // the section (keyboard focus) — all before the generic focus/row
@@ -328,6 +359,7 @@ impl App {
         // region also settles the sidebar's sub-focus back on the rows
         // (the lineage-section arms above returned before this point).
         self.lineage_focused = false;
+        self.service_focused = false;
         self.collapse_orchestrator_panel_on_focus_change();
         // Collapsed list pane: any click in the pane (border or
         // body) just re-expands. Don't try to interpret as a row /
