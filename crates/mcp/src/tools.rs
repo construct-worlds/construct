@@ -427,7 +427,7 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "construct_fork_session",
-            "Fork an existing session into a NEW sibling session backed by `harness` (which may differ from the source's). The fork inherits the source's working directory and group and runs independently — NOT a child/subagent, and the original session is left untouched (a session's own harness can't be changed in place). Unless `seed:false` (or the target is the `shell` harness), the fork is seeded with a summary of the source transcript so an agent harness can continue the prior context. Use this to continue a conversation under a different harness or model. Returns the new session_id.",
+            "Fork an existing session into a NEW sibling session backed by `harness` (which may differ from the source's). The fork inherits the source's working directory and group and runs independently — NOT a child/subagent, and the original session is left untouched (a session's own harness can't be changed in place). Unless `seed:false` (or the target is the `shell` harness), the fork is seeded with a summary of the source transcript so an agent harness can continue the prior context. Pass `at_seq` (a transcript seq from construct_get_transcript) to branch from that point in the conversation instead of the tail: the fork carries only events up to and including it. Use this to continue a conversation under a different harness or model, or to retry from an earlier turn. Returns the new session_id.",
             json!({
                 "type": "object",
                 "properties": {
@@ -435,7 +435,12 @@ pub fn catalog() -> Vec<Value> {
                     "harness":           { "type": "string" },
                     "model":             { "type": "string" },
                     "prompt":            { "type": "string" },
-                    "seed":              { "type": "boolean" }
+                    "seed":              { "type": "boolean" },
+                    "at_seq": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Fork anchor: last transcript seq (inclusive) carried into the fork. Omit — or pass a value at/past the tail — to fork from the present."
+                    }
                 },
                 "required": ["source_session_id", "harness"]
             }),
@@ -1329,6 +1334,7 @@ pub async fn call(
                 prompt: arg_str(&args, "prompt").ok(),
                 seed: args.get("seed").and_then(|v| v.as_bool()).unwrap_or(true),
                 pty_size: None,
+                at_seq: args.get("at_seq").and_then(|v| v.as_u64()),
                 ..Default::default()
             };
             let sid = client.fork_session(&source, &harness, opts).await?;

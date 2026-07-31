@@ -268,7 +268,10 @@ impl App {
         // names its own route, so an armed redirect would otherwise appear
         // to do nothing (spec 0158): say so instead of reporting a silent
         // no-op.
-        let inert = route.is_some().then(|| self.session_native_selection(&session_id)).flatten();
+        let inert = route
+            .is_some()
+            .then(|| self.session_native_selection(&session_id))
+            .flatten();
         match self.client.set_route(&session_id, route, model).await {
             Ok(()) => match inert {
                 Some((native_route, native_model)) => self.set_status(format!(
@@ -510,8 +513,7 @@ impl RouteMenu {
         let Some((_, model)) = &self.native else {
             return false;
         };
-        self.target_is_native(self.selected)
-            && self.models().get(index).is_some_and(|m| m == model)
+        self.target_is_native(self.selected) && self.models().get(index).is_some_and(|m| m == model)
     }
 
     /// One line explaining the native marker, shown under the body while
@@ -586,10 +588,7 @@ impl RouteMenu {
         let blocker_w = self
             .focused_login_blocker_prefix()
             .map(|p| p.chars().count() + "login".len())
-            .or_else(|| {
-                self.focused_blocker()
-                    .map(|b| b.chars().count().min(40))
-            })
+            .or_else(|| self.focused_blocker().map(|b| b.chars().count().min(40)))
             .unwrap_or(0);
         let models_w = self
             .routes
@@ -635,7 +634,11 @@ impl RouteMenu {
         self.target_col_w = target_col_w;
 
         self.desc_lines = self.description(width.saturating_sub(2)).len() as u16;
-        let reason_rows = if self.unavailable_reason.is_some() { 1 } else { 0 };
+        let reason_rows = if self.unavailable_reason.is_some() {
+            1
+        } else {
+            0
+        };
         let native_rows = if self.native.is_some() { 1 } else { 0 };
         // Cap popup height independently of content so a huge model catalog
         // cannot cover the whole frame; content still sizes up to this.
@@ -740,9 +743,17 @@ impl RouteMenu {
         }
         let first = self.area.y.saturating_add(1);
         let body_start = first.saturating_add(self.header_rows());
-        let last = self.area.y.saturating_add(self.area.height).saturating_sub(1);
+        let last = self
+            .area
+            .y
+            .saturating_add(self.area.height)
+            .saturating_sub(1);
         if row >= body_start && row < last {
-            let divider = self.area.x.saturating_add(1).saturating_add(self.target_col_w);
+            let divider = self
+                .area
+                .x
+                .saturating_add(1)
+                .saturating_add(self.target_col_w);
             if col <= divider {
                 // Temporarily treat as targets for this wheel.
                 let prev = self.focus;
@@ -784,7 +795,11 @@ impl RouteMenu {
         if self.visible_body_rows > 0 && visible >= self.visible_body_rows {
             return None;
         }
-        let divider = self.area.x.saturating_add(1).saturating_add(self.target_col_w);
+        let divider = self
+            .area
+            .x
+            .saturating_add(1)
+            .saturating_add(self.target_col_w);
         if col <= divider {
             let index = visible + self.target_scroll;
             (index < self.routes.len()).then_some(RouteHit::Target(index + 1))
@@ -806,7 +821,11 @@ impl RouteMenu {
 mod tests {
     use super::*;
 
-    fn option(name: &str, models: &[&str], reason: Option<&str>) -> construct_protocol::RouteOption {
+    fn option(
+        name: &str,
+        models: &[&str],
+        reason: Option<&str>,
+    ) -> construct_protocol::RouteOption {
         construct_protocol::RouteOption {
             name: name.to_string(),
             dialect: "anthropic".to_string(),
@@ -847,7 +866,10 @@ mod tests {
         assert!(m.target_enabled(0));
         assert!(!m.target_descends(0), "Default has no models to move into");
         assert!(!m.target_enabled(1), "an unusable target is not selectable");
-        assert!(m.target_is_active(0), "no route armed means Default is current");
+        assert!(
+            m.target_is_active(0),
+            "no route armed means Default is current"
+        );
     }
 
     /// The model column previews the highlighted target without committing
@@ -932,7 +954,11 @@ mod tests {
         m.selected = 1;
         assert_eq!(m.focused_login_command().as_deref(), Some("kimi"));
         m.selected = 2;
-        assert_eq!(m.focused_login_command(), None, "usable targets offer models, not sign-in");
+        assert_eq!(
+            m.focused_login_command(),
+            None,
+            "usable targets offer models, not sign-in"
+        );
     }
 
     /// The model column condenses the daemon's long reason into a short
@@ -997,7 +1023,10 @@ mod tests {
     /// A target that cannot be used shows why, in place of models.
     #[test]
     fn an_unusable_target_shows_its_reason_instead_of_models() {
-        let mut m = menu(vec![option("glm", &["glm-5"], Some("GLM_API_KEY is not set"))], None);
+        let mut m = menu(
+            vec![option("glm", &["glm-5"], Some("GLM_API_KEY is not set"))],
+            None,
+        );
         m.selected = 1;
         assert_eq!(m.focused_blocker(), Some("GLM_API_KEY is not set"));
     }
@@ -1110,7 +1139,10 @@ mod tests {
         assert!(m2.target_is_native(1));
         assert!(!m2.target_is_active(1), "native pick is not the pin");
         let note = m2.native_note().unwrap();
-        assert!(note.contains("gpt-5.5") && note.contains("codex-oauth"), "{note}");
+        assert!(
+            note.contains("gpt-5.5") && note.contains("codex-oauth"),
+            "{note}"
+        );
         // The note occupies a real row: same menu without it is one shorter.
         let mut bare = m2.clone();
         bare.native = None;
@@ -1173,10 +1205,7 @@ mod tests {
         let body = first + m.header_rows();
         let divider = m.area.x + 1 + m.target_col_w;
         // Top visible model row is absolute index 3.
-        assert_eq!(
-            m.hit_at(divider + 2, body),
-            Some(RouteHit::Model(3))
-        );
+        assert_eq!(m.hit_at(divider + 2, body), Some(RouteHit::Model(3)));
         // Wheel over the model column advances model_scroll.
         assert!(m.scroll_at(divider + 2, body, 1));
         assert_eq!(m.model_scroll, 4);

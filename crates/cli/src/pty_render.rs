@@ -62,6 +62,21 @@ pub enum Item {
         text: String,
         break_before: bool,
     },
+    /// Zero-height marker for where a user turn begins in the rendered
+    /// history (spec 0163): anchors the hover `⑂` fork affordance and
+    /// carries the branch point forking that turn retries. Derived from
+    /// the transcript's user `Message` events interleaved with the PTY
+    /// stream — fed only to items-model sessions (interactive smith,
+    /// headless), never to raw-PTY sessions (which would lose their
+    /// fast-path/shadow rendering, and whose alt-screen children repaint
+    /// rows too freely to anchor anything).
+    TurnBoundary {
+        /// Last transcript seq carried into a fork of this turn (the
+        /// seq just before the turn's user message).
+        anchor_seq: u64,
+        /// 1-based user-turn ordinal, for the affordance label.
+        turn: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +115,17 @@ pub struct BlockHitRect {
     pub header_row: u16,
 }
 
+/// Screen row a turn boundary lands on in the current render — the
+/// anchor for the hover `⑂` fork affordance. Row semantics match
+/// [`BlockHitRect`]: relative to the rendered area's top.
+#[derive(Debug, Clone)]
+pub struct TurnMark {
+    pub anchor_seq: u64,
+    /// 1-based user-turn ordinal.
+    pub turn: usize,
+    pub row: u16,
+}
+
 pub struct RenderOutput<'a> {
     /// Borrowed from the `ItemHistory`'s cached parser — lifetime is
     /// tied to the `&mut self` of [`ItemHistory::replay`]. Callers
@@ -107,6 +133,9 @@ pub struct RenderOutput<'a> {
     /// directly); they never need to own a [`vt100::Parser`].
     pub screen: &'a vt100::Screen,
     pub blocks: Vec<BlockHitRect>,
+    /// Visible turn boundaries (items-model sessions only; empty on the
+    /// fast and shadow paths).
+    pub turn_marks: Vec<TurnMark>,
     /// Maximum scrollback offset accepted by the parser for this render.
     /// The visible `screen.scrollback()` is the current viewport; this value
     /// represents the full scrollable history extent for overlay scrollbars.
@@ -280,6 +309,8 @@ struct ItemLayout {
     end_col: usize,
     /// Tool-block hit-rect metadata, empty for plain PTY chunks.
     blocks: Vec<BlockLayout>,
+    /// `(anchor_seq, turn)` for zero-height turn-boundary items.
+    turn: Option<(u64, usize)>,
 }
 
 #[derive(Clone)]
@@ -310,6 +341,9 @@ fn suffix_rebuild_start(layouts: &[ItemLayout], changed_idx: usize, rows: u16) -
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ItemSig {
     Chunk(usize),
+    /// Turn boundaries are immutable and zero-height; the anchor alone
+    /// identifies one.
+    Turn(u64),
     Block {
         call_id: String,
         has_output: bool,
@@ -335,6 +369,7 @@ impl ItemSig {
         match item {
             Item::PtyChunk(b) => ItemSig::Chunk(b.len()),
             Item::ToolBlock(b) => block_sig(b),
+            Item::TurnBoundary { anchor_seq, .. } => ItemSig::Turn(*anchor_seq),
             Item::Message {
                 kind,
                 text,
@@ -916,6 +951,28 @@ impl ItemHistory {
         self.dirty = true;
     }
 
+    /// Record a user-turn boundary (spec 0163) at the current point in
+    /// the items sequence. `anchor_seq` is the fork anchor retrying this
+    /// turn. Idempotent per anchor so live + rehydrate paths can both
+    /// feed without double markers.
+    pub fn feed_turn_boundary(&mut self, anchor_seq: u64) {
+        if self
+            .items
+            .iter()
+            .any(|it| matches!(it, Item::TurnBoundary { anchor_seq: a, .. } if *a == anchor_seq))
+        {
+            return;
+        }
+        let turn = 1 + self
+            .items
+            .iter()
+            .filter(|it| matches!(it, Item::TurnBoundary { .. }))
+            .count();
+        self.flush_chunk();
+        self.items.push(Item::TurnBoundary { anchor_seq, turn });
+        self.dirty = true;
+    }
+
     fn find_block_mut(&mut self, call_id: &str) -> Option<&mut ToolBlock> {
         self.items.iter_mut().rev().find_map(|it| match it {
             Item::ToolBlock(b) if b.call_id == call_id => Some(b),
@@ -997,6 +1054,7 @@ impl ItemHistory {
             return RenderOutput {
                 screen: self.shadow_parser.screen(),
                 blocks: Vec::new(),
+                turn_marks: Vec::new(),
                 max_scrollback,
             };
         }
@@ -1174,6 +1232,7 @@ impl ItemHistory {
         RenderOutput {
             screen: cache.parser.screen(),
             blocks: Vec::new(),
+            turn_marks: Vec::new(),
             max_scrollback,
         }
     }
@@ -1310,6 +1369,7 @@ impl ItemHistory {
                                 lines: flushed_lines + metrics.lines,
                                 end_col: metrics.end_col,
                                 blocks: Vec::new(),
+                                turn: None,
                             }
                         } else {
                             cursor_col = flushed_end_col;
@@ -1317,6 +1377,7 @@ impl ItemHistory {
                                 lines: flushed_lines,
                                 end_col: flushed_end_col,
                                 blocks: Vec::new(),
+                                turn: None,
                             }
                         }
                     } else if idx >= start_processing_at {
@@ -1327,6 +1388,7 @@ impl ItemHistory {
                             lines: metrics.lines,
                             end_col: metrics.end_col,
                             blocks: Vec::new(),
+                            turn: None,
                         }
                     } else {
                         let metrics = visible_metrics_from_col(b, cols, cursor_col);
@@ -1335,6 +1397,7 @@ impl ItemHistory {
                             lines: metrics.lines,
                             end_col: metrics.end_col,
                             blocks: Vec::new(),
+                            turn: None,
                         }
                     }
                 }
@@ -1356,6 +1419,7 @@ impl ItemHistory {
                             bg_cols: synth.bg_button_cols,
                             kill_cols: synth.kill_button_cols,
                         }],
+                        turn: None,
                     }
                 }
                 Item::Message {
@@ -1373,8 +1437,17 @@ impl ItemHistory {
                         lines: metrics.lines,
                         end_col: metrics.end_col,
                         blocks: Vec::new(),
+                        turn: None,
                     }
                 }
+                // Zero-height: contributes no bytes and no rows, only a
+                // position for the ⑂ affordance.
+                Item::TurnBoundary { anchor_seq, turn } => ItemLayout {
+                    lines: 0,
+                    end_col: cursor_col,
+                    blocks: Vec::new(),
+                    turn: Some((*anchor_seq, *turn)),
+                },
             };
             cache.item_layouts.push(layout);
         }
@@ -1382,10 +1455,14 @@ impl ItemHistory {
         // Cumulative line positions + block-span hit rects, summed from
         // the (mostly cached) per-item layouts. O(items), no byte scan.
         let mut block_spans: Vec<BlockSpan> = Vec::new();
+        let mut turn_spans: Vec<(u64, usize, usize)> = Vec::new();
         let mut abs_line: usize = 0;
         for layout in &cache.item_layouts {
             let start = abs_line;
             abs_line += layout.lines;
+            if let Some((anchor_seq, turn)) = layout.turn {
+                turn_spans.push((anchor_seq, turn, start));
+            }
             for bl in &layout.blocks {
                 block_spans.push(BlockSpan {
                     call_id: bl.call_id.clone(),
@@ -1467,10 +1544,25 @@ impl ItemHistory {
             });
         }
 
+        let turn_marks: Vec<TurnMark> = turn_spans
+            .into_iter()
+            .filter_map(|(anchor_seq, turn, abs_row)| {
+                if abs_row < visible_top || abs_row >= visible_top + rows as usize {
+                    return None;
+                }
+                Some(TurnMark {
+                    anchor_seq,
+                    turn,
+                    row: (abs_row - visible_top) as u16,
+                })
+            })
+            .collect();
+
         self.dirty = false;
         RenderOutput {
             screen: cache.parser.screen(),
             blocks,
+            turn_marks,
             max_scrollback,
         }
     }
@@ -2137,6 +2229,41 @@ mod tests {
             "pin reusing cached size should avoid the rebuild thrash: \
              fixed={fixed_us}us thrash={thrash_us}us"
         );
+    }
+
+    #[test]
+    fn turn_boundaries_record_rows_and_dedupe() {
+        let mut h = ItemHistory::new();
+        h.feed_pty(b"one\r\n");
+        h.feed_turn_boundary(3);
+        // Live + rehydrate paths may both feed the same anchor — idempotent.
+        h.feed_turn_boundary(3);
+        h.feed_pty(b"two\r\nthree\r\n");
+        h.feed_turn_boundary(9);
+        h.feed_pty(b"four\r\n");
+
+        let out = h.replay(80, 24, 0);
+        let marks: Vec<(u64, usize, u16)> = out
+            .turn_marks
+            .iter()
+            .map(|m| (m.anchor_seq, m.turn, m.row))
+            .collect();
+        assert_eq!(
+            marks,
+            vec![(3, 1, 1), (9, 2, 3)],
+            "one boundary per anchor, at the row where the turn begins"
+        );
+    }
+
+    #[test]
+    fn turn_boundaries_do_not_leave_the_raw_pty_fast_path_marks_empty() {
+        // A raw-PTY session (no boundaries fed) keeps using the fast path
+        // and reports no marks — the affordance only exists for
+        // items-model sessions.
+        let mut h = ItemHistory::new();
+        h.feed_pty(b"plain\r\n");
+        let out = h.replay(80, 24, 0);
+        assert!(out.turn_marks.is_empty());
     }
 
     #[test]

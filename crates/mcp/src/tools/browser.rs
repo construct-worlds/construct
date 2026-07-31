@@ -1,10 +1,10 @@
 //! Chrome DevTools browser tools exposed through construct-mcp so every harness
 //! with injected MCP can browse and refresh the TUI browser preview overlay.
 
-use construct_client::Client;
-use construct_protocol::{BrowserPreview, SessionEvent};
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
+use construct_client::Client;
+use construct_protocol::{BrowserPreview, SessionEvent};
 use futures::{SinkExt, StreamExt};
 use image::GenericImageView;
 use serde_json::{json, Value};

@@ -97,8 +97,7 @@ impl App {
             .expanded_attachments
             .drain()
             .partition(|(key, _)| current_keys.contains(key));
-        let mut claimed: std::collections::HashSet<_> =
-            kept.iter().map(|(key, _)| *key).collect();
+        let mut claimed: std::collections::HashSet<_> = kept.iter().map(|(key, _)| *key).collect();
         popup.expanded_attachments.extend(kept);
         let mut migrated = false;
         for (old_key, (path, rows)) in orphans {

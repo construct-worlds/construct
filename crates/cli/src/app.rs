@@ -39,8 +39,8 @@ mod program_popup;
 pub mod route_menu;
 mod session_picker;
 mod session_title_menu;
-pub mod suggest_deck;
 mod session_title_rename;
+pub mod suggest_deck;
 mod tutorial;
 pub use configure::{
     feature_guidance, harness_guidance, no_agent_harness_available, smith_method_guidance,
@@ -49,9 +49,9 @@ pub use configure::{
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
 };
-pub use tutorial::TutorialState;
 #[cfg(test)]
 pub use tutorial::Step1Phase;
+pub use tutorial::TutorialState;
 
 pub const TERMINAL_SCROLLBAR_TTL: Duration = Duration::from_millis(1200);
 pub(crate) const DYNAMIC_UI_AUTOHIDE_SECS: u64 = 15;
@@ -1022,6 +1022,17 @@ pub enum MinibufferIntent {
     /// `client.fork_session` directly, with no separate initial-prompt stage.
     ForkSessionHarness {
         source_session_id: String,
+        /// Branch point for an anchored fork (spec 0163): the last
+        /// transcript seq carried into the fork. `None` forks from the
+        /// present (the plain-fork path).
+        at_seq: Option<u64>,
+    },
+    /// First stage of an anchored fork (spec 0163): pick one of the source
+    /// session's past turns from `App::turn_picker_entries`. Enter locks
+    /// the branch point to just before the chosen turn and moves on to the
+    /// `ForkSessionHarness` picker.
+    ForkTurnPick {
+        source_session_id: String,
     },
     /// Second stage of the new-session wizard when the user typed `group`:
     /// asks for the group's name.
@@ -1443,6 +1454,12 @@ pub struct App {
     /// Fork pickers open with the source harness pre-filled but still show
     /// every harness. Once the user edits the query, the menu filters by it.
     pub harness_picker_filter_active: bool,
+    /// The anchored fork's turn picker (spec 0163): one entry per user turn
+    /// of the source transcript, filled when the `ForkTurnPick` minibuffer
+    /// opens and cleared with it.
+    pub turn_picker_entries: Vec<TurnPickerEntry>,
+    /// Keyboard highlight within the turn picker.
+    pub turn_picker_selected: usize,
     /// Rotation index into the idle minibuffer placeholder's context hint
     /// pool: advances by the shown-window size every
     /// `MINIBUFFER_HINT_ROTATE_EVERY`, or immediately whenever
@@ -1609,6 +1626,10 @@ pub struct App {
     /// after each `replay`. Mouse clicks in the PTY pane consult
     /// this to toggle the right block.
     pub block_hits: HashMap<String, Vec<crate::pty_render::BlockHitRect>>,
+    /// Screen-space `⑂` fork anchors per session (spec 0163), refreshed
+    /// each frame the session pane renders — the turn-boundary counterpart
+    /// to `block_hits`, but stored in absolute screen coordinates.
+    pub turn_mark_hits: HashMap<String, Vec<TurnMarkHit>>,
     /// Screen rects of the matrix-rain horizontal reveal words rendered
     /// this frame, each tagged with the session that produced the word.
     /// Written by `render_matrix_rain`, consumed by mouse hover (tooltip)
@@ -2141,6 +2162,9 @@ struct SessionHydrationRequest {
     /// their conversation as structured Message/Reasoning events, which
     /// replay folds into the items history; PTY-backed sessions don't.
     is_headless: bool,
+    /// Whether replay records user-turn boundaries (spec 0163) — true for
+    /// items-model sessions only (see `session_records_turn_boundaries`).
+    record_turn_boundaries: bool,
 }
 
 struct PtyInputJob {
@@ -2430,6 +2454,7 @@ async fn load_session_hydration(req: SessionHydrationRequest) -> Result<SessionH
                 &mut agent_status,
                 &mut ui_panels,
                 req.is_headless,
+                req.record_turn_boundaries,
             );
             let (cols, rows) = req.terminal_pane_size;
             let pre_render = h.replay(cols.max(1), rows.max(1), 0);
@@ -3698,6 +3723,10 @@ pub struct LayoutSnapshot {
     /// dispatch exactly as the matching keypress would, via whichever of the
     /// two keyboard mechanisms (`MinibufferChoiceAction`) the intent uses.
     pub minibuffer_choice_hits: Vec<MinibufferChoiceHit>,
+    /// Clickable rows of the anchored fork's turn picker
+    /// (`MinibufferIntent::ForkTurnPick`, spec 0163). Click → select that
+    /// turn and submit, exactly as Enter on it would.
+    pub minibuffer_turn_hits: Vec<TurnRowHit>,
     /// Bounds of the topmost modal/dialog rendered in the last frame.
     /// Mouse clicks outside this rect dismiss the modal instead of
     /// falling through to panes underneath it.
@@ -3923,7 +3952,6 @@ impl MainSlideState {
             .clamp(0.0, 1.0);
         self.from + (target - self.from) * progress
     }
-
 }
 
 /// Vertical translation applied to the main block's recorded geometry once the
@@ -4106,6 +4134,7 @@ impl LayoutSnapshot {
             tutorial_card_area: _,
             minibuffer_harness_hits: _,
             minibuffer_choice_hits: _,
+            minibuffer_turn_hits: _,
             remote_control_hits: _,
             configure_tab_hits: _,
             // Consumed inside the main block's own render pass (or carries no
@@ -4386,6 +4415,93 @@ pub fn harness_picker_entries(
     // order within each availability group.
     entries.sort_by_key(|entry| !entry.available);
     entries
+}
+
+/// How long `OpenFork` waits for the source transcript before opening the
+/// harness picker without a turn stage. The fork keybinding must never
+/// feel blocked on a slow daemon round-trip.
+const FORK_TURN_FETCH_TIMEOUT_MS: u64 = 800;
+
+/// One row of the fork flow's turn picker (spec 0163): a user turn of the
+/// source transcript, carrying the branch point selecting it locks in —
+/// or the "now" row (`anchor_seq: None`), which forks from the present.
+#[derive(Debug, Clone)]
+pub struct TurnPickerEntry {
+    /// 1-based turn number (the k-th user message); 0 for the "now" row.
+    pub turn: usize,
+    /// The anchor forking this turn RETRIES: the last transcript seq
+    /// before the turn's user message — everything earlier is carried,
+    /// the turn itself and everything after is branched away from.
+    /// `None` is the "now" row: an ordinary head fork.
+    pub anchor_seq: Option<u64>,
+    /// Wall-clock label for the turn's user message (`HH:MM`).
+    pub at_label: String,
+    /// First line of the user message, for recognizing the turn.
+    pub preview: String,
+}
+
+/// Build the turn picker's rows from a source transcript: one entry per
+/// user `Message` event, anchored just before it. The transcript's event
+/// seqs are authoritative — no re-numbering.
+pub fn turn_picker_entries_from_transcript(
+    events: &[construct_protocol::TimestampedEvent],
+) -> Vec<TurnPickerEntry> {
+    use construct_protocol::{MessageRole, SessionEvent};
+    let mut entries = Vec::new();
+    for ev in events {
+        if let SessionEvent::Message {
+            role: MessageRole::User,
+            text,
+        } = &ev.event
+        {
+            let preview = text
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("")
+                .to_string();
+            entries.push(TurnPickerEntry {
+                turn: entries.len() + 1,
+                anchor_seq: Some(ev.seq.saturating_sub(1)),
+                at_label: ev
+                    .at
+                    .with_timezone(&chrono::Local)
+                    .format("%H:%M")
+                    .to_string(),
+                preview,
+            });
+        }
+    }
+    entries
+}
+
+/// Screen-space hit zone of a hover `⑂` fork anchor in a session pane
+/// (spec 0163). Absolute screen coordinates, rebuilt every rendered frame.
+#[derive(Debug, Clone)]
+pub struct TurnMarkHit {
+    pub anchor_seq: u64,
+    /// 1-based user-turn ordinal (for the tooltip label).
+    pub turn: usize,
+    pub y: u16,
+    pub x_start: u16,
+    /// Exclusive end column of the glyph zone.
+    pub x_end: u16,
+    /// The pane row's full x-range — hover anywhere on the row reveals
+    /// the glyph.
+    pub row_x_start: u16,
+    pub row_x_end: u16,
+}
+
+/// One clickable row of the anchored fork's turn picker — the turn-picker
+/// counterpart to `HarnessHit`.
+#[derive(Debug, Clone)]
+pub struct TurnRowHit {
+    /// Index into `App::turn_picker_entries`.
+    pub index: usize,
+    pub x_start: u16,
+    /// Exclusive end column.
+    pub x_end: u16,
+    pub y: u16,
 }
 
 /// One clickable choice label within a minibuffer confirm/approval prompt
@@ -4758,6 +4874,8 @@ async fn run_with_socket_initial_selection(
         minibuffer: None,
         harness_picker_selected: 0,
         harness_picker_filter_active: false,
+        turn_picker_entries: Vec::new(),
+        turn_picker_selected: 0,
         minibuffer_hint_offset: 0,
         minibuffer_hint_rotated_at: None,
         minibuffer_hint_context: None,
@@ -4809,6 +4927,7 @@ async fn run_with_socket_initial_selection(
         histories: HashMap::new(),
         terminal_replayed_sessions_this_frame: HashSet::new(),
         block_hits: HashMap::new(),
+        turn_mark_hits: HashMap::new(),
         matrix_reveal_hits: Vec::new(),
         orchestrator_desired_size: None,
         tasks_popup: None,
@@ -6376,14 +6495,9 @@ impl App {
         let Some(id) = self.selected_id() else {
             return;
         };
-        if !self
-            .sessions
-            .iter()
-            .any(|session| {
-                session.id == id
-                    && session.state == construct_protocol::SessionState::AwaitingInput
-            })
-        {
+        if !self.sessions.iter().any(|session| {
+            session.id == id && session.state == construct_protocol::SessionState::AwaitingInput
+        }) {
             return;
         }
         match key.code {
@@ -7084,7 +7198,27 @@ impl App {
                 .session_pane_size(id)
                 .unwrap_or_else(|| self.active_pane_size()),
             is_headless,
+            record_turn_boundaries: self.session_records_turn_boundaries(id),
         }
+    }
+
+    /// Whether a session's rendered history records user-turn boundaries
+    /// (the hover `⑂` fork anchors, spec 0163). Items-model sessions only:
+    /// interactive smith and headless harnesses, whose histories the TUI
+    /// synthesizes itself. Raw-PTY sessions (claude/codex/shell terminals)
+    /// are excluded — a boundary item would evict them from the fast
+    /// renderer and shadow-scrollback paths, and their alt-screen children
+    /// repaint rows too freely for a content-anchored icon to be truthful.
+    /// The hidden orchestrator is excluded too: it isn't forkable UI.
+    fn session_records_turn_boundaries(&self, session_id: &str) -> bool {
+        if self.orchestrator_id.as_deref() == Some(session_id) {
+            return false;
+        }
+        self.sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .map(|s| crate::ui::is_headless(s) || s.harness == "smith")
+            .unwrap_or(false)
     }
 
     fn main_window_sessions_needing_hydration(&self) -> Vec<String> {
@@ -7825,6 +7959,7 @@ impl App {
                     &mut replayed_agent_status,
                     &mut replayed_ui_panels,
                     is_headless,
+                    self.session_records_turn_boundaries(id),
                 );
             }
             Err(e) => {
@@ -8675,6 +8810,7 @@ impl App {
                         if matches!(payload.event, SessionEvent::Reset) {
                             self.histories.remove(&payload.session_id);
                             self.block_hits.remove(&payload.session_id);
+                            self.turn_mark_hits.remove(&payload.session_id);
                             self.editor_states.remove(&payload.session_id);
                             self.agent_statuses.remove(&payload.session_id);
                             self.pending_tool_approvals.remove(&payload.session_id);
@@ -8863,6 +8999,19 @@ impl App {
                                 .find(|s| s.id == payload.session_id)
                                 .map(crate::ui::is_headless)
                                 .unwrap_or(false);
+                            // A user message opens a turn — record the fork
+                            // anchor (spec 0163) at this point in the items
+                            // sequence, for items-model sessions only (see
+                            // `session_records_turn_boundaries`).
+                            if matches!(kind, crate::pty_render::MessageKind::User)
+                                && self.session_records_turn_boundaries(&payload.session_id)
+                            {
+                                let history = self
+                                    .histories
+                                    .entry(payload.session_id.clone())
+                                    .or_default();
+                                history.feed_turn_boundary(payload.seq.saturating_sub(1));
+                            }
                             if headless {
                                 let history = self
                                     .histories
@@ -9587,6 +9736,7 @@ impl App {
         }
         self.histories.remove(id);
         self.block_hits.remove(id);
+        self.turn_mark_hits.remove(id);
         self.pending_tool_approvals.remove(id);
         self.ui_panels.remove(id);
         self.pty_activity.remove(id);
@@ -10657,6 +10807,11 @@ impl App {
                     height: view.height.saturating_sub(2),
                 };
                 if let Some(id) = self.selected_id() {
+                    // The hover `⑂` fork anchor (spec 0163) sits on top of
+                    // the PTY content, so it wins over the block toggle.
+                    if self.try_fork_turn_mark_at(&id, col, row).await {
+                        return;
+                    }
                     if self.try_toggle_block_at(&id, inner, col, row).await {
                         return;
                     }
@@ -10706,6 +10861,26 @@ impl App {
         ) {
             self.minibuffer = None;
         }
+    }
+
+    /// Hit-test (col, row) against the session's hover `⑂` fork anchors
+    /// (spec 0163). A click on a revealed glyph opens the fork harness
+    /// picker with the branch point locked to that turn. Returns true if
+    /// the click was consumed.
+    async fn try_fork_turn_mark_at(&mut self, session_id: &str, col: u16, row: u16) -> bool {
+        let hit = match self.turn_mark_hits.get(session_id) {
+            Some(hits) => hits
+                .iter()
+                .find(|h| h.y == row && col >= h.x_start && col < h.x_end)
+                .cloned(),
+            None => return false,
+        };
+        let Some(hit) = hit else {
+            return false;
+        };
+        self.open_fork_harness_picker(session_id.to_string(), Some(hit.anchor_seq))
+            .await;
+        true
     }
 
     /// Hit-test (col, row) against the most recent `block_hits` for
@@ -11534,30 +11709,42 @@ impl App {
                     self.set_status("fork: no session selected".to_string());
                     return;
                 };
-                let Some(source) = self.sessions.iter().find(|s| s.id == id).cloned() else {
+                if !self.sessions.iter().any(|s| s.id == id) {
                     self.set_status("fork: source disappeared".to_string());
                     return;
-                };
-                if self.harnesses.is_empty() {
-                    self.harnesses = self.client.harnesses().await.unwrap_or_default();
                 }
-                let input = if source.harness == "antigravity" {
-                    "agy".to_string()
-                } else {
-                    source.harness
+                // One fork flow: when the session has past user turns, the
+                // turn picker comes first (spec 0163) — with "now" appended
+                // and preselected, so Enter-Enter still forks from the
+                // present. A slow or failed transcript fetch, or a session
+                // with no turns, degrades to the harness picker directly
+                // (the pre-anchor behavior), never to a blocked keybinding.
+                let transcript = tokio::time::timeout(
+                    std::time::Duration::from_millis(FORK_TURN_FETCH_TIMEOUT_MS),
+                    self.client.transcript(&id, 0, None),
+                )
+                .await;
+                let mut entries = match transcript {
+                    Ok(Ok(tr)) => turn_picker_entries_from_transcript(&tr.events),
+                    _ => Vec::new(),
                 };
-                let entries = harness_picker_entries(&self.harnesses, true, "", false);
-                self.harness_picker_selected = entries
-                    .iter()
-                    .position(|entry| entry.name == input)
-                    .unwrap_or(0);
-                self.harness_picker_filter_active = false;
-                let cursor = input.chars().count();
+                if entries.is_empty() {
+                    self.open_fork_harness_picker(id, None).await;
+                    return;
+                }
+                entries.push(TurnPickerEntry {
+                    turn: 0,
+                    anchor_seq: None,
+                    at_label: String::new(),
+                    preview: "fork from the present".to_string(),
+                });
+                self.turn_picker_selected = entries.len() - 1;
+                self.turn_picker_entries = entries;
                 self.minibuffer = Some(Minibuffer {
                     prompt: "Fork session: ".to_string(),
-                    input,
-                    cursor,
-                    intent: MinibufferIntent::ForkSessionHarness {
+                    input: String::new(),
+                    cursor: 0,
+                    intent: MinibufferIntent::ForkTurnPick {
                         source_session_id: id,
                     },
                     error: None,
@@ -13351,8 +13538,23 @@ pub fn apply_transcript_to_local_state(
     agent_status: &mut Option<construct_protocol::AgentStatus>,
     ui_panels: &mut HashMap<String, construct_protocol::UiPanel>,
     is_headless: bool,
+    record_turn_boundaries: bool,
 ) {
     for ev in events {
+        // A user message opens a turn — mirror the live notification
+        // handler's boundary feed (spec 0163) so rehydrated histories
+        // carry the same ⑂ anchors. The transcript's persisted event
+        // order is the same interleaving the live path saw, so the
+        // boundary lands at the same point in the items sequence.
+        if record_turn_boundaries {
+            if let SessionEvent::Message {
+                role: construct_protocol::MessageRole::User,
+                ..
+            } = &ev.event
+            {
+                history.feed_turn_boundary(ev.seq.saturating_sub(1));
+            }
+        }
         match &ev.event {
             // TaskStart is the PRIMARY block-creation event for
             // current smith sessions — it carries the explicit
@@ -14949,6 +15151,7 @@ mod tests {
             shortcut_hints: Vec::new(),
             tutorial_card_area: None,
             minibuffer_harness_hits: Vec::new(),
+            minibuffer_turn_hits: Vec::new(),
             minibuffer_choice_hits: Vec::new(),
             modal_area: None,
             remote_control_hits: Vec::new(),
@@ -15111,6 +15314,8 @@ mod tests {
             minibuffer: None,
             harness_picker_selected: 0,
             harness_picker_filter_active: false,
+            turn_picker_entries: Vec::new(),
+            turn_picker_selected: 0,
             minibuffer_hint_offset: 0,
             minibuffer_hint_rotated_at: None,
             minibuffer_hint_context: None,
@@ -15161,6 +15366,7 @@ mod tests {
             histories: HashMap::new(),
             terminal_replayed_sessions_this_frame: HashSet::new(),
             block_hits: HashMap::new(),
+            turn_mark_hits: HashMap::new(),
             matrix_reveal_hits: Vec::new(),
             orchestrator_desired_size: None,
             terminal_pane_size: (80, 24),
@@ -32441,8 +32647,7 @@ mod tests {
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("hover draw");
         assert!(
-            rendered_text(terminal.backend().buffer())
-                .contains("Open prompt suggestions · C-x ."),
+            rendered_text(terminal.backend().buffer()).contains("Open prompt suggestions · C-x ."),
             "hovering the chord should explain its action"
         );
 
@@ -32522,7 +32727,9 @@ mod tests {
             for x in chip_start..chip_start + chip_width {
                 let cell = buffer.cell((x, hit.area.y)).expect("chip cell");
                 assert!(
-                    cell.style().bg.is_some_and(|bg| bg != ratatui::style::Color::Reset),
+                    cell.style()
+                        .bg
+                        .is_some_and(|bg| bg != ratatui::style::Color::Reset),
                     "chip cell {x} (incl. interior spaces) must have a filled background"
                 );
             }
@@ -32536,11 +32743,11 @@ mod tests {
             assert_eq!(left_space.symbol(), " ", "space before glyph");
             assert_eq!(right_space.symbol(), " ", "space after trailing '.'");
             for x in [hit.area.x, hit.area.right().saturating_sub(1)] {
-                let cell = buffer
-                    .cell((x, hit.area.y))
-                    .expect("exterior padding cell");
+                let cell = buffer.cell((x, hit.area.y)).expect("exterior padding cell");
                 assert!(
-                    cell.style().bg.is_none_or(|bg| bg == ratatui::style::Color::Reset),
+                    cell.style()
+                        .bg
+                        .is_none_or(|bg| bg == ratatui::style::Color::Reset),
                     "exterior padding cell {x} stays transparent"
                 );
             }
@@ -32603,7 +32810,10 @@ mod tests {
             })
             .await;
         }
-        let deck = app.suggest_deck.as_ref().expect("category click keeps deck open");
+        let deck = app
+            .suggest_deck
+            .as_ref()
+            .expect("category click keeps deck open");
         assert_eq!(deck.category_selected, 1);
         assert_eq!(deck.focus, DeckFocus::Categories);
 
@@ -32744,9 +32954,7 @@ mod tests {
         app.suggestion_hands.insert(
             "s1".into(),
             construct_protocol::SuggestionHand {
-                top: construct_protocol::SuggestionCard {
-                    text: long.into(),
-                },
+                top: construct_protocol::SuggestionCard { text: long.into() },
                 verbs: vec![],
             },
         );
@@ -32865,10 +33073,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE))
             .await;
         let deck = app.suggest_deck.as_ref().expect("deck stays open");
-        assert_eq!(
-            deck.focus,
-            crate::app::suggest_deck::DeckFocus::Cards
-        );
+        assert_eq!(deck.focus, crate::app::suggest_deck::DeckFocus::Cards);
         assert!(matches!(
             app.suggest_categories(deck).get(deck.category_selected),
             Some(crate::app::suggest_deck::DeckRow::History { .. })
@@ -32952,22 +33157,19 @@ mod tests {
             deck.regenerate_query.is_none(),
             "Left exits the keyword surface"
         );
-        assert_eq!(
-            deck.focus,
-            crate::app::suggest_deck::DeckFocus::Categories
-        );
+        assert_eq!(deck.focus, crate::app::suggest_deck::DeckFocus::Categories);
 
         // Re-open and C-g cancel closes the deck entirely.
         app.on_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE))
             .await;
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .await;
-        app.on_key(KeyEvent::new(
-            KeyCode::Char('g'),
-            KeyModifiers::CONTROL,
-        ))
-        .await;
-        assert!(app.suggest_deck.is_none(), "C-g closes keyword input and deck");
+        app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .await;
+        assert!(
+            app.suggest_deck.is_none(),
+            "C-g closes keyword input and deck"
+        );
         server.abort();
     }
 
@@ -34799,14 +35001,157 @@ mod tests {
         let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
         assert!(matches!(
             &minibuffer.intent,
-            MinibufferIntent::ForkSessionHarness { source_session_id }
-                if source_session_id == "s1"
+            MinibufferIntent::ForkSessionHarness {
+                source_session_id,
+                at_seq: None,
+            } if source_session_id == "s1"
         ));
         assert_eq!(minibuffer.input, "shell");
         assert_eq!(minibuffer.cursor, "shell".chars().count());
         assert_eq!(minibuffer.prompt, "Fork session: ");
         assert_eq!(app.harness_picker_selected, 0);
         assert!(!app.harness_picker_filter_active);
+        server.abort();
+    }
+
+    #[test]
+    fn turn_picker_entries_anchor_just_before_each_user_turn() {
+        let ev = |seq: u64, event: construct_protocol::SessionEvent| {
+            serde_json::from_value::<construct_protocol::TimestampedEvent>(serde_json::json!({
+                "seq": seq,
+                "at": "2026-07-31T10:00:00Z",
+                "event": serde_json::to_value(&event).unwrap(),
+            }))
+            .unwrap()
+        };
+        use construct_protocol::{MessageRole, SessionEvent};
+        let events = vec![
+            ev(
+                1,
+                SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: "  \n  fix the bug\nmore detail".into(),
+                },
+            ),
+            ev(
+                2,
+                SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text: "done".into(),
+                },
+            ),
+            ev(5, SessionEvent::Pty { data: "x".into() }),
+            ev(
+                6,
+                SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: "now the tests".into(),
+                },
+            ),
+        ];
+        let entries = turn_picker_entries_from_transcript(&events);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].turn, 1);
+        assert_eq!(
+            entries[0].anchor_seq,
+            Some(0),
+            "retrying the first turn carries nothing"
+        );
+        assert_eq!(
+            entries[0].preview, "fix the bug",
+            "preview is the first non-empty line, trimmed"
+        );
+        assert_eq!(entries[1].turn, 2);
+        assert_eq!(
+            entries[1].anchor_seq,
+            Some(5),
+            "anchor is the seq just before the turn's user message"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_picker_enter_locks_the_anchor_into_the_fork_picker() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (mut app, _dir, server) = captured_app().await;
+        app.harnesses = vec![construct_protocol::HarnessInfo {
+            name: "shell".to_string(),
+            available: true,
+            detail: None,
+            binary: None,
+            description: None,
+            capabilities: Default::default(),
+        }];
+        app.turn_picker_entries = vec![
+            TurnPickerEntry {
+                turn: 1,
+                anchor_seq: Some(0),
+                at_label: "10:00".into(),
+                preview: "fix the bug".into(),
+            },
+            TurnPickerEntry {
+                turn: 2,
+                anchor_seq: Some(5),
+                at_label: "10:05".into(),
+                preview: "now the tests".into(),
+            },
+        ];
+        app.turn_picker_selected = 1;
+        app.minibuffer = Some(Minibuffer {
+            prompt: "Fork from turn: ".to_string(),
+            input: String::new(),
+            cursor: 0,
+            intent: MinibufferIntent::ForkTurnPick {
+                source_session_id: "s1".to_string(),
+            },
+            error: None,
+        });
+
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
+        assert!(matches!(
+            &minibuffer.intent,
+            MinibufferIntent::ForkSessionHarness {
+                source_session_id,
+                at_seq: Some(5),
+            } if source_session_id == "s1"
+        ));
+        assert_eq!(minibuffer.prompt, "Fork from turn: ");
+        assert!(
+            app.turn_picker_entries.is_empty(),
+            "picker state cleared on hand-off"
+        );
+
+        // The appended "now" row (anchor None) hands over a plain head
+        // fork — the unified C-x f flow's Enter-Enter default.
+        app.turn_picker_entries = vec![TurnPickerEntry {
+            turn: 0,
+            anchor_seq: None,
+            at_label: String::new(),
+            preview: "fork from the present".into(),
+        }];
+        app.turn_picker_selected = 0;
+        app.minibuffer = Some(Minibuffer {
+            prompt: "Fork session: ".to_string(),
+            input: String::new(),
+            cursor: 0,
+            intent: MinibufferIntent::ForkTurnPick {
+                source_session_id: "s1".to_string(),
+            },
+            error: None,
+        });
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
+        assert!(matches!(
+            &minibuffer.intent,
+            MinibufferIntent::ForkSessionHarness {
+                source_session_id,
+                at_seq: None,
+            } if source_session_id == "s1"
+        ));
+        assert_eq!(minibuffer.prompt, "Fork session: ");
         server.abort();
     }
 
@@ -40518,6 +40863,7 @@ mod tests {
             needs_history: true,
             terminal_pane_size: (80, 24),
             is_headless: false,
+            record_turn_boundaries: false,
         }));
 
         tokio::time::timeout(std::time::Duration::from_secs(1), transcript_seen_rx.recv())
@@ -40663,6 +41009,7 @@ mod tests {
             needs_history: true,
             terminal_pane_size: (80, 24),
             is_headless: true,
+            record_turn_boundaries: true,
         })
         .await
         .expect("headless hydration should succeed");
@@ -40688,6 +41035,7 @@ mod tests {
             needs_history: true,
             terminal_pane_size: (80, 24),
             is_headless: false,
+            record_turn_boundaries: false,
         })
         .await
         .expect("hydration should succeed");
@@ -40754,6 +41102,7 @@ mod tests {
             &mut status,
             &mut ui_panels,
             false,
+            false,
         );
 
         // The render must include the synthesized header for the
@@ -40780,6 +41129,65 @@ mod tests {
              Without it, fresh-TUI bootstrap of an existing smith session \
              rebuilds history with no tool blocks. Got render:\n{text}",
         );
+    }
+
+    /// Rehydration mirrors the live path's turn-boundary feed (spec 0163):
+    /// with `record_turn_boundaries`, every user message stamps a `⑂`
+    /// anchor whose seq is the event just before it; without the flag,
+    /// none appear.
+    #[test]
+    fn transcript_replay_records_turn_boundaries_when_asked() {
+        use chrono::Utc;
+        use construct_protocol::{MessageRole, SessionEvent, TimestampedEvent};
+        fn ev(seq: u64, event: SessionEvent) -> TimestampedEvent {
+            TimestampedEvent {
+                seq,
+                at: Utc::now(),
+                event,
+            }
+        }
+        let events = vec![
+            ev(
+                1,
+                SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: "first ask".into(),
+                },
+            ),
+            ev(
+                2,
+                SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text: "answer".into(),
+                },
+            ),
+            ev(
+                5,
+                SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: "second ask".into(),
+                },
+            ),
+        ];
+        for (record, expect) in [(true, vec![(0u64, 1usize), (4, 2)]), (false, Vec::new())] {
+            let mut history = crate::pty_render::ItemHistory::new();
+            apply_transcript_to_local_state(
+                &events,
+                &mut history,
+                &mut None,
+                &mut None,
+                &mut HashMap::new(),
+                true,
+                record,
+            );
+            let out = history.replay(80, 24, 0);
+            let marks: Vec<(u64, usize)> = out
+                .turn_marks
+                .iter()
+                .map(|m| (m.anchor_seq, m.turn))
+                .collect();
+            assert_eq!(marks, expect, "record_turn_boundaries={record}");
+        }
     }
 
     /// Headless sessions carry their conversation as structured
@@ -40824,6 +41232,7 @@ mod tests {
                 &mut status,
                 &mut HashMap::new(),
                 is_headless,
+                false,
             );
             let out = history.replay(80, 24, 0);
             (0..24u16)
@@ -40903,6 +41312,7 @@ mod tests {
             &mut status,
             &mut ui_panels,
             false,
+            false,
         );
 
         let screen_rows = 24u16;
@@ -40967,6 +41377,7 @@ mod tests {
             &mut editor,
             &mut status,
             &mut ui_panels,
+            false,
             false,
         );
 
@@ -41053,6 +41464,7 @@ mod tests {
             &mut editor,
             &mut status,
             &mut panels,
+            false,
             false,
         );
         assert!(!panels.contains_key("task"));
@@ -41174,6 +41586,7 @@ mod tests {
             &mut editor_state,
             &mut agent_status,
             &mut ui_panels,
+            false,
             false,
         );
 

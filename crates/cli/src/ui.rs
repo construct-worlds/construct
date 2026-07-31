@@ -5,8 +5,8 @@ use crate::app::{
     ConfigureTab, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
     MinibufferChoiceAction, MinibufferChoiceHit, MinibufferIntent, PaneFocus, RemoteControlHit,
     RemoteControlHitAction, ScreenPoint, Selection, SessionTitleMenuAction, TextSelectionRange,
-    ViewMode, WindowDividerHit, WindowPaneHit, WindowSplitDirection, ZoomMode, CONFIGURE_TABS,
-    PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS, PROGRAM_CLIP_HOVER_PREVIEW_COLS,
+    TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit, WindowSplitDirection, ZoomMode,
+    CONFIGURE_TABS, PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS, PROGRAM_CLIP_HOVER_PREVIEW_COLS,
     PROGRAM_CLIP_HOVER_PREVIEW_ROWS, PROGRAM_COLLAB_CURSOR_TTL_MS, PROGRAM_CONTENT_PADDING_X,
     PROGRAM_CONTENT_PADDING_Y, PROGRAM_REVEAL_MS,
 };
@@ -1736,6 +1736,85 @@ fn harness_hover_tooltip_rect(anchor_x: u16, anchor_y: u16, w: u16, h: u16, tota
 }
 
 const HARNESS_PICKER_MAX_ROWS: usize = 8;
+
+/// Render the anchored fork's turn picker (spec 0163) as a completion menu
+/// above its prompt row — same shape as the harness picker: one row per
+/// past user turn, keyboard highlight, hover, click-to-pick.
+fn render_turn_picker(f: &mut Frame, area: Rect, app: &mut App) {
+    let entries = &app.turn_picker_entries;
+    let (hovered_x, hovered_y) = app.mouse_pos.unwrap_or((u16::MAX, u16::MAX));
+    let selected = app
+        .turn_picker_selected
+        .min(entries.len().saturating_sub(1));
+    let visible_rows = area.height.saturating_sub(1) as usize;
+    let start = if selected >= visible_rows {
+        selected + 1 - visible_rows
+    } else {
+        0
+    };
+    let end = (start + visible_rows).min(entries.len());
+    let turn_width = entries
+        .iter()
+        .map(|e| match e.anchor_seq {
+            Some(_) => format!("#{}", e.turn).len(),
+            None => "now".len(),
+        })
+        .max()
+        .unwrap_or(3);
+
+    let mut hits: Vec<TurnRowHit> = Vec::new();
+    for (screen_row, entry) in entries[start..end].iter().enumerate() {
+        let y = area.y + screen_row as u16;
+        let hovered = hovered_y == y && hovered_x >= area.x && hovered_x < area.right();
+        let highlighted = screen_row + start == selected;
+        let row_style = if highlighted {
+            Style::default()
+                .fg(app.theme.highlight_fg)
+                .bg(app.theme.highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else if hovered {
+            Style::default()
+                .fg(app.theme.text)
+                .bg(app.theme.inactive_highlight_bg)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        let marker = if highlighted { "› " } else { "  " };
+        let turn = match entry.anchor_seq {
+            Some(_) => format!("#{}", entry.turn),
+            // The appended head-fork row (spec 0163): no turn ordinal.
+            None => "now".to_string(),
+        };
+        let fixed = 2 + turn_width + 2 + entry.at_label.len() + 2;
+        let preview_width = (area.width as usize).saturating_sub(fixed);
+        let preview = truncate_to_width(&entry.preview, preview_width);
+        let line = format!(
+            "{marker}{turn:<turn_width$}  {at}  {preview}",
+            at = entry.at_label,
+        );
+        f.render_widget(
+            Paragraph::new(line).style(row_style),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        hits.push(TurnRowHit {
+            index: screen_row + start,
+            x_start: area.x,
+            x_end: area.right(),
+            y,
+        });
+    }
+    app.layout.minibuffer_turn_hits = hits;
+
+    // Prompt row under the menu, mirroring the harness picker's input row.
+    if area.height > 0 {
+        let y = area.y + area.height - 1;
+        let hint = "Fork: pick the turn to retry — or now (Enter picks, Esc cancels)";
+        f.render_widget(
+            Paragraph::new(hint).style(Style::default().fg(app.theme.dim)),
+            Rect::new(area.x, y, area.width, 1),
+        );
+    }
+}
 
 /// Render the harness picker as a filterable completion menu above its input
 /// row. Each visible row is clickable and carries the same availability
@@ -5152,9 +5231,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     );
     let generate_is_regen = matches!(
         categories.get(deck.category_selected),
-        Some(DeckRow::Generate {
-            regenerate: true
-        })
+        Some(DeckRow::Generate { regenerate: true })
     );
     // Generate owns the right column (keyword field + action button); do not
     // paint verb/history cards underneath it.
@@ -5221,9 +5298,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     // across every category, then cap so huge hands cannot cover the pane.
     let body_rows = (categories.len().max(max_right).max(1) as u16).min(SUGGEST_DECK_MAX_BODY);
     // border + column headings + reserved input strip + body + footer
-    let wanted_h = body_rows
-        .saturating_add(4)
-        .saturating_add(reserve_input);
+    let wanted_h = body_rows.saturating_add(4).saturating_add(reserve_input);
     let hint_y = pane
         .area
         .y
@@ -5235,10 +5310,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         return;
     }
     let area = Rect {
-        x: bounds
-            .x
-            .saturating_add(bounds.width)
-            .saturating_sub(width),
+        x: bounds.x.saturating_add(bounds.width).saturating_sub(width),
         y: hint_y.saturating_sub(height),
         width,
         height,
@@ -5363,10 +5435,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         field.push_str(&" ".repeat(pad));
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(
-                    fit_cell("", category_w as usize),
-                    Style::default(),
-                ),
+                Span::styled(fit_cell("", category_w as usize), Style::default()),
                 Span::styled("│", Style::default().fg(app.theme.border)),
                 Span::styled(field, field_style),
             ])),
@@ -5427,10 +5496,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
     for row in 0..visible_rows {
         let y = body_y.saturating_add(row as u16);
         f.render_widget(
-            Paragraph::new(Line::styled(
-                "│",
-                Style::default().fg(app.theme.border),
-            )),
+            Paragraph::new(Line::styled("│", Style::default().fg(app.theme.border))),
             Rect {
                 x: divider_x,
                 y,
@@ -5449,11 +5515,9 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
             width: category_w,
             height: 1,
         };
-        let hovered = app
-            .mouse_pos
-            .is_some_and(|(mx, my)| mx >= row_area.x
-                && mx < row_area.x + row_area.width
-                && my == row_area.y);
+        let hovered = app.mouse_pos.is_some_and(|(mx, my)| {
+            mx >= row_area.x && mx < row_area.x + row_area.width && my == row_area.y
+        });
         // Digit accelerators still refer to absolute 1-based indices.
         let prefix = if index < 9 {
             format!("{} ", index + 1)
@@ -5509,9 +5573,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
             let y = body_y.saturating_add(start as u16);
             let chip_focused = deck.focus == DeckFocus::Cards;
             let chip_hovered = app.mouse_pos.is_some_and(|(mx, my)| {
-                mx >= chip_x
-                    && mx < chip_x.saturating_add(chip_w_u16)
-                    && my == y
+                mx >= chip_x && mx < chip_x.saturating_add(chip_w_u16) && my == y
             });
             // Always paint as a highlighted action chip; deepen when the
             // right column (or pointer) owns focus so activation reads clearly.
@@ -5582,11 +5644,9 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
                 width: card_w,
                 height: 1,
             };
-            let hovered = app
-                .mouse_pos
-                .is_some_and(|(mx, my)| mx >= row_area.x
-                    && mx < row_area.x + row_area.width
-                    && my == row_area.y);
+            let hovered = app.mouse_pos.is_some_and(|(mx, my)| {
+                mx >= row_area.x && mx < row_area.x + row_area.width && my == row_area.y
+            });
             // History entries use the same digit prefixes as verb cards so
             // 1–9 accelerators stay discoverable in both right-column lists.
             let prefix = if index < 9 {
@@ -5594,10 +5654,7 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
             } else {
                 "  ".to_string()
             };
-            let text = truncate_to_width(
-                &format!("{prefix}{}", card_label(row)),
-                card_w as usize,
-            );
+            let text = truncate_to_width(&format!("{prefix}{}", card_label(row)), card_w as usize);
             f.render_widget(
                 Paragraph::new(Line::styled(
                     text,
@@ -5722,16 +5779,10 @@ fn render_suggest_deck_card_preview(f: &mut Frame, app: &App) {
     }
 
     let total = f.area();
-    let max_inner_w = (total.width.saturating_sub(4) as usize)
-        .min(56)
-        .max(20);
+    let max_inner_w = (total.width.saturating_sub(4) as usize).min(56).max(20);
     let mut lines: Vec<String> = split_preserve_empty_lines(full_text)
         .into_iter()
-        .flat_map(|line| {
-            wrap_text(line, max_inner_w)
-                .into_iter()
-                .map(|w| w.text)
-        })
+        .flat_map(|line| wrap_text(line, max_inner_w).into_iter().map(|w| w.text))
         .collect();
     if lines.is_empty() {
         return;
@@ -5755,9 +5806,7 @@ fn render_suggest_deck_card_preview(f: &mut Frame, app: &App) {
         .max()
         .unwrap_or(0)
         .max(1);
-    let width = (content_w as u16)
-        .saturating_add(2)
-        .min(total.width.max(1));
+    let width = (content_w as u16).saturating_add(2).min(total.width.max(1));
     let height = (lines.len() as u16)
         .saturating_add(2)
         .min(total.height.max(1));
@@ -5774,12 +5823,7 @@ fn render_suggest_deck_card_preview(f: &mut Frame, app: &App) {
         .border_style(Style::default().fg(app.theme.accent_alt));
     let body: Vec<Line> = lines
         .into_iter()
-        .map(|line| {
-            Line::from(Span::styled(
-                line,
-                Style::default().fg(app.theme.text),
-            ))
-        })
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(app.theme.text))))
         .collect();
     f.render_widget(Clear, rect);
     f.render_widget(
@@ -5985,10 +6029,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
     );
 
     // Target column (scrolled).
-    for (paint_i, offset) in (menu.target_scroll..)
-        .take(visible_body)
-        .enumerate()
-    {
+    for (paint_i, offset) in (menu.target_scroll..).take(visible_body).enumerate() {
         if offset >= menu.routes.len() {
             break;
         }
@@ -6071,9 +6112,10 @@ fn render_route_menu(f: &mut Frame, app: &App) {
             let login_hovered = app.mouse_pos.is_some_and(|(mx, my)| {
                 my == body_start
                     && mx >= model_x.saturating_add(prefix_cells as u16)
-                    && mx < model_x
-                        .saturating_add(prefix_cells as u16)
-                        .saturating_add(login_cells as u16)
+                    && mx
+                        < model_x
+                            .saturating_add(prefix_cells as u16)
+                            .saturating_add(login_cells as u16)
             });
             // Whole right-column body is the hit target (see hit_at); the
             // word itself is the visual affordance.
@@ -6088,10 +6130,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
                     .add_modifier(Modifier::UNDERLINED)
             };
             let line = Line::from(vec![
-                Span::styled(
-                    format!(" {prefix}"),
-                    Style::default().fg(app.theme.muted),
-                ),
+                Span::styled(format!(" {prefix}"), Style::default().fg(app.theme.muted)),
                 Span::styled(login_label.to_string(), login_style),
             ]);
             f.render_widget(
@@ -6125,10 +6164,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         }
     } else {
         let models = menu.models();
-        for (paint_i, index) in (menu.model_scroll..)
-            .take(visible_body)
-            .enumerate()
-        {
+        for (paint_i, index) in (menu.model_scroll..).take(visible_body).enumerate() {
             let Some(model) = models.get(index) else {
                 break;
             };
@@ -7123,6 +7159,10 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
         id.clone(),
         translate_block_hits(out.blocks, paint_row_offset, paint_area.height),
     );
+    app.turn_mark_hits.insert(
+        id.clone(),
+        translate_turn_marks(&out.turn_marks, paint_row_offset, paint_area),
+    );
     let terminal_scrollbar = render_terminal_scrollbar(
         f,
         chat_area,
@@ -7133,6 +7173,7 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
     );
     app.set_scrollback_for_window(window_id, clamped_scrollback);
     app.layout.terminal_scrollbar = terminal_scrollbar;
+    render_turn_mark_affordances(f, app, &id);
     // If this session has an open Program view, the Program renderer owns the
     // sticky-widget body at the top layer. Rendering it here too paints the
     // same widget underneath the Program over the terminal, so skip the
@@ -10767,6 +10808,16 @@ pub fn compute_minibuffer_height(app: &App, total_h: u16) -> u16 {
             .clamp(1, HARNESS_PICKER_MAX_ROWS) as u16;
         return (row_count + 1).min(total_h.saturating_sub(2).max(1));
     }
+    if matches!(
+        app.minibuffer.as_ref().map(|m| &m.intent),
+        Some(MinibufferIntent::ForkTurnPick { .. })
+    ) {
+        let row_count = app
+            .turn_picker_entries
+            .len()
+            .clamp(1, HARNESS_PICKER_MAX_ROWS) as u16;
+        return (row_count + 1).min(total_h.saturating_sub(2).max(1));
+    }
     let is_orch = matches!(
         app.minibuffer.as_ref().map(|m| &m.intent),
         Some(MinibufferIntent::Orchestrator)
@@ -10829,6 +10880,7 @@ fn zoom_hint_label(profile: Profile, unzoom: bool) -> &'static str {
 fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.minibuffer_harness_hits.clear();
     app.layout.minibuffer_choice_hits.clear();
+    app.layout.minibuffer_turn_hits.clear();
 
     // Orchestrator panel: events above, input row at the bottom.
     if matches!(
@@ -10849,6 +10901,12 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
         ) {
             let mb_clone = mb.clone();
             render_harness_picker(f, area, app, &mb_clone);
+            return;
+        }
+        // Anchored fork's turn picker (spec 0163): same completion-menu
+        // shape as the harness picker, one row per past user turn.
+        if matches!(mb.intent, MinibufferIntent::ForkTurnPick { .. }) {
+            render_turn_picker(f, area, app);
             return;
         }
         // Confirm/approval prompts: render the y/N (or richer) choice
@@ -11422,7 +11480,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     C-x C-o         focus session terminal / refocus Program
     C-x d           show diff
     C-x r           rename selected session (clears title on empty submit)
-    C-x f           fork selected session (harness picker; same is default)
+    C-x f           fork selected session (pick a turn or now, then harness)
     Tab (on list)   focus lineage section
     C-x k [m]       on a fork: merge result into parent and archive
     C-c C-c         interrupt
@@ -11497,7 +11555,7 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
     C-x C-o         focus session terminal / refocus Program
     g d             show diff
     r               rename selected session (clears title on empty submit)
-    f               fork selected session (harness picker; same is default)
+    f               fork selected session (pick a turn or now, then harness)
     Tab (on list)   focus lineage section
     m               merge the selected fork (take result, or discard)
     C-c             interrupt
@@ -12285,6 +12343,83 @@ pub fn pin_tile_layout(area: Rect, n: usize) -> Vec<Rect> {
 /// entirely above the visible slice are dropped; partially-visible ones
 /// are clipped. Header/button hit zones only survive if the header row
 /// itself is visible. A `row_offset` of 0 is the identity transform.
+/// Map replay-relative turn-boundary rows (spec 0163) to absolute
+/// screen-space hit zones within the painted pane area. The `⑂` glyph
+/// zone hugs the pane's right edge on the boundary row.
+fn translate_turn_marks(
+    marks: &[crate::pty_render::TurnMark],
+    row_offset: u16,
+    paint_area: Rect,
+) -> Vec<crate::app::TurnMarkHit> {
+    marks
+        .iter()
+        .filter_map(|m| {
+            if m.row < row_offset {
+                return None;
+            }
+            let rel = m.row - row_offset;
+            if rel >= paint_area.height || paint_area.width < 8 {
+                return None;
+            }
+            let y = paint_area.y + rel;
+            let x_end = paint_area.right();
+            Some(crate::app::TurnMarkHit {
+                anchor_seq: m.anchor_seq,
+                turn: m.turn,
+                y,
+                x_start: x_end.saturating_sub(3),
+                x_end,
+                row_x_start: paint_area.x,
+                row_x_end: x_end,
+            })
+        })
+        .collect()
+}
+
+/// Hover affordance for the pane's turn boundaries: pointing at a turn's
+/// row reveals a `⑂` at the right edge; pointing at the glyph itself
+/// highlights it and shows the fork tooltip. Click dispatch lives in
+/// `App::try_fork_turn_mark_at`.
+fn render_turn_mark_affordances(f: &mut Frame, app: &mut App, session_id: &str) {
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    let Some(hits) = app.turn_mark_hits.get(session_id) else {
+        return;
+    };
+    let mut tooltip: Option<(u16, u16, usize)> = None;
+    for hit in hits {
+        if my != hit.y || mx < hit.row_x_start || mx >= hit.row_x_end {
+            continue;
+        }
+        let on_glyph = mx >= hit.x_start && mx < hit.x_end;
+        let style = if on_glyph {
+            Style::default()
+                .fg(app.theme.highlight_fg)
+                .bg(app.theme.highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.dim)
+        };
+        f.render_widget(
+            Paragraph::new(" ⑂ ").style(style),
+            Rect::new(hit.x_start, hit.y, hit.x_end - hit.x_start, 1),
+        );
+        if on_glyph {
+            tooltip = Some((hit.x_start, hit.y, hit.turn));
+        }
+    }
+    if let Some((x, y, turn)) = tooltip {
+        render_button_tooltip(
+            f,
+            &app.theme,
+            &format!(" fork from turn #{turn} "),
+            x,
+            y.saturating_sub(2),
+        );
+    }
+}
+
 fn translate_block_hits(
     blocks: Vec<crate::pty_render::BlockHitRect>,
     row_offset: u16,
@@ -12914,8 +13049,8 @@ pub fn full_event_label(ev: &SessionEvent) -> String {
             {
                 format!("tool {tool}{id}")
             } else {
-                let args_s = serde_json::to_string_pretty(args)
-                    .unwrap_or_else(|_| args.to_string());
+                let args_s =
+                    serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
                 format!("tool {tool}{id}\n{args_s}")
             }
         }

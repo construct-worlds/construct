@@ -19,10 +19,13 @@ pub enum KeyAction {
     OpenNewSession,
     OpenDeleteConfirm,
     OpenRename,
-    /// Open the harness picker for a fork, pre-filled with the selected
-    /// session's current harness. Enter accepts the same-harness default;
-    /// editing or completion selects a different harness. No separate initial
-    /// prompt is required. Bound to `C-x f` (emacs) / `f` (vim).
+    /// Open the fork flow for the selected session. When the session has
+    /// past user turns, a turn picker comes first (spec 0163) with "now —
+    /// fork from the present" preselected, so Enter keeps the head-fork
+    /// default while earlier turns are one keystroke away; the harness
+    /// picker follows, pre-filled with the source harness. Sessions with
+    /// no turns skip straight to the harness picker. Bound to `C-x f`
+    /// (emacs) / `f` (vim).
     OpenFork,
     /// Merge the selected fork's result into its parent and archive the fork.
     /// Unbound from a dedicated chord — folded into `OpenDeleteConfirm` (`C-x k`
@@ -349,7 +352,7 @@ fn emacs() -> Keymap {
         // Refresh moved to the command palette (M-x refresh) — it's rarely
         // needed since the daemon pushes state changes automatically.
         (Chord(vec![ctrl('x'), ch('r')]), OpenRename),
-        // Unified fork picker; Enter accepts the source harness default.
+        // Unified fork flow: turn picker (when turns exist), then harness.
         (Chord(vec![ctrl('x'), ch('f')]), OpenFork),
         // Merge is no longer a dedicated chord — forked sessions get
         // `[m] merge and archive` on the `C-x k` end prompt instead.
@@ -427,7 +430,8 @@ fn vim() -> Keymap {
         (Chord(vec![ctrl('c')]), Interrupt),
         // `r` opens the rename minibuffer; refresh moved to M-x refresh.
         (Chord(vec![ch('r')]), OpenRename),
-        // Unified fork picker; uppercase `O` is intentionally unbound.
+        // Unified fork flow (turn picker + harness picker); uppercase `O`
+        // is intentionally unbound.
         (Chord(vec![ch('f')]), OpenFork),
         // Merge has no dedicated vim chord either — forked sessions get
         // `[m] merge and archive` on the `dd` / `C-x k` end prompt.
@@ -852,6 +856,10 @@ mod tests {
 
     #[test]
     fn shifted_fork_shortcut_is_removed() {
+        // There is exactly ONE fork flow: `C-x f` / `f` (turn picker when
+        // turns exist, then harness picker). The shifted chord — retired
+        // with the old "tracked fork" flavor, briefly revived for a
+        // separate turn-picker action — must stay unbound.
         for profile in [Profile::Emacs, Profile::Vim] {
             let km = default_for(profile);
             assert!(matches!(
@@ -859,6 +867,11 @@ mod tests {
                 KeymapResult::Unhandled
             ));
         }
+        let vim = default_for(Profile::Vim);
+        assert!(matches!(
+            resolve(&vim, vec![shift('F')]),
+            KeymapResult::Unhandled
+        ));
     }
 
     #[test]
