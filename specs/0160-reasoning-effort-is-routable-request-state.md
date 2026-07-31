@@ -66,3 +66,10 @@ silently ignores would misrepresent what the user selected.
 - Mapping effort onto Gemini or other unverified provider controls.
 - Surfacing effort in Claude Code's gateway model list, which has no effort
   dimension.
+
+## Related
+
+- [0165](0165-pin-router-selects-reasoning-effort.md) — Construct's pin
+  dialog may store a preferred effort on the durable session pin and inject
+  it on pin-routed requests; native catalog picks still own effort via the
+  request body as defined here.

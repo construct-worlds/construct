@@ -616,7 +616,13 @@ where
         }
     };
 
-    if route.needs_rebuild() || client_dialect != route.target_dialect {
+    // A pin-chosen effort must be injected into the request body, which the
+    // byte-forward path does not do — rebuild whenever the pin names one
+    // (spec 0165).
+    if route.needs_rebuild()
+        || client_dialect != route.target_dialect
+        || route.pin_effort.is_some()
+    {
         ctx.mark_observed();
         let streaming = wants_stream(&body);
         return match forward_translated(body, &route, client_dialect).await {
@@ -963,6 +969,12 @@ async fn forward_translated(
     let source: serde_json::Value =
         serde_json::from_slice(&body).context("parse intercepted request body")?;
     let mut canon = translate::parse_request(client_dialect, &source);
+    // Durable pin effort overrides the harness body on pin-routed turns
+    // (spec 0165). Catalog-resolved arms leave pin_effort empty so the
+    // request body remains the authority.
+    if let Some(effort) = route.pin_effort.as_ref() {
+        canon.reasoning_effort = Some(effort.clone());
+    }
     let kimi_effort = match route.effort {
         // Kimi K3 is always-thinking and accepts its scale separately from
         // the Anthropic `thinking` object. Remove the canonical value so the

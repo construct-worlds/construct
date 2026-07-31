@@ -2838,6 +2838,13 @@ pub struct SessionRoute {
     pub name: String,
     /// Model the route substitutes into outbound requests.
     pub model: String,
+    /// Optional pin-chosen reasoning effort applied on pin-routed requests
+    /// when the target advertises a real effort scale (spec 0160/0165).
+    /// Absent when the pin did not choose one, or the target has no
+    /// selectable scale. Distinct from [`SessionSummary::effort`], which is
+    /// the harness-observed live tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// The model the harness itself last reported, captured when the
     /// route was armed. Lets a client render `<origin> → <routed>` even
     /// though the harness keeps reporting its own model (spec 0114).
@@ -2862,6 +2869,11 @@ pub struct SessionSetRouteParams {
     /// configured or default model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Pin-chosen reasoning effort for this route. `None` leaves the
+    /// harness request body as the source of effort (or the target
+    /// default). Rejected when the target does not advertise that level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// Params for `router.login`.
@@ -2899,6 +2911,12 @@ pub struct RouteOption {
     /// client offers these as a second step after picking the target.
     #[serde(default)]
     pub models: Vec<String>,
+    /// Selectable reasoning-effort levels keyed by model name (spec 0160 /
+    /// 0165). A missing key or empty list means the target has no real
+    /// effort scale for that model — the picker omits the third column.
+    /// Single-level "provider default" advertisements are not listed here.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub efforts: std::collections::BTreeMap<String, Vec<String>>,
     /// Endpoint host, for display. Never carries a credential.
     pub base_url: String,
     /// `None` when the route is selectable. `Some(reason)` when it is

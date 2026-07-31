@@ -5931,9 +5931,27 @@ fn render_route_menu(f: &mut Frame, app: &App) {
     let target_w = menu.target_col_w.min(inner_w);
     let divider_x = inner_x.saturating_add(target_w);
     let model_x = divider_x.saturating_add(1);
-    let model_w = inner_w.saturating_sub(target_w).saturating_sub(1);
+    let show_effort = menu.any_effort_column();
+    let model_w = if show_effort {
+        menu.model_col_w
+            .min(inner_w.saturating_sub(target_w).saturating_sub(2))
+    } else {
+        inner_w.saturating_sub(target_w).saturating_sub(1)
+    };
+    let effort_divider_x = model_x.saturating_add(model_w);
+    let effort_x = effort_divider_x.saturating_add(1);
+    let effort_w = if show_effort {
+        inner_w
+            .saturating_sub(target_w)
+            .saturating_sub(model_w)
+            .saturating_sub(2)
+    } else {
+        0
+    };
 
     let targets_focused = menu.focus == crate::app::route_menu::RouteFocus::Targets;
+    let models_focused = menu.focus == crate::app::route_menu::RouteFocus::Models;
+    let efforts_focused = menu.focus == crate::app::route_menu::RouteFocus::Efforts;
     // Highlight wins over "disabled": a login-blocked target is still a
     // navigable row (arrow / hover / Enter-to-sign-in), so selection and
     // mouse hover must light it the same way as a healthy row. Unselected
@@ -6090,7 +6108,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
         );
     }
 
-    // Column divider, spanning the two-column body only.
+    // Column dividers spanning the body.
     for paint_i in 0..visible_body {
         let row = body_start.saturating_add(paint_i as u16);
         if row >= last_row {
@@ -6105,6 +6123,17 @@ fn render_route_menu(f: &mut Frame, app: &App) {
                 height: 1,
             },
         );
+        if show_effort && effort_w > 0 {
+            f.render_widget(
+                Paragraph::new(Line::styled("│", Style::default().fg(app.theme.border))),
+                Rect {
+                    x: effort_divider_x,
+                    y: row,
+                    width: 1,
+                    height: 1,
+                },
+            );
+        }
     }
 
     // Model column, or why this target cannot be used.
@@ -6126,7 +6155,7 @@ fn render_route_menu(f: &mut Frame, app: &App) {
                             .saturating_add(prefix_cells as u16)
                             .saturating_add(login_cells as u16)
             });
-            // Whole right-column body is the hit target (see hit_at); the
+            // Whole model-column body is the hit target (see hit_at); the
             // word itself is the visual affordance.
             let login_style = if login_hovered {
                 Style::default()
@@ -6181,13 +6210,13 @@ fn render_route_menu(f: &mut Frame, app: &App) {
             if row >= last_row {
                 break;
             }
-            let hovered = app
-                .mouse_pos
-                .is_some_and(|(mx, my)| my == row && mx > divider_x);
+            let hovered = app.mouse_pos.is_some_and(|(mx, my)| {
+                my == row && mx > divider_x && (!show_effort || mx <= effort_divider_x)
+            });
             let style = row_style(
                 true,
                 index == menu.model_selected || hovered,
-                !targets_focused || hovered,
+                models_focused || hovered,
             );
             let marker = if menu.model_is_active(index) {
                 "*"
@@ -6196,11 +6225,20 @@ fn render_route_menu(f: &mut Frame, app: &App) {
             } else {
                 " "
             };
-            let label = truncate(model, model_w.saturating_sub(4) as usize);
+            let has_efforts = menu.efforts_for_model(model).len() > 1;
+            let chevron = if has_efforts && index == menu.model_selected {
+                "›"
+            } else if has_efforts {
+                " "
+            } else {
+                " "
+            };
+            let label_budget = model_w.saturating_sub(5) as usize;
+            let label = truncate(model, label_budget);
             let pad = (model_w as usize)
                 .saturating_sub(UnicodeWidthStr::width(label.as_str()))
-                .saturating_sub(4);
-            let line = format!(" {marker} {label}{} ", " ".repeat(pad));
+                .saturating_sub(5);
+            let line = format!(" {marker} {label}{}{chevron} ", " ".repeat(pad));
             f.render_widget(
                 Paragraph::new(Line::styled(line, style)),
                 Rect {
@@ -6210,6 +6248,49 @@ fn render_route_menu(f: &mut Frame, app: &App) {
                     height: 1,
                 },
             );
+        }
+    }
+
+    // Effort column (third): only when some target advertises a real scale.
+    if show_effort && effort_w > 0 && menu.focused_blocker().is_none() {
+        let efforts = menu.efforts_for_selected_model();
+        if efforts.len() > 1 {
+            for (paint_i, index) in (menu.effort_scroll..).take(visible_body).enumerate() {
+                let Some(effort) = efforts.get(index) else {
+                    break;
+                };
+                let row = body_start.saturating_add(paint_i as u16);
+                if row >= last_row {
+                    break;
+                }
+                let hovered = app
+                    .mouse_pos
+                    .is_some_and(|(mx, my)| my == row && mx > effort_divider_x);
+                let style = row_style(
+                    true,
+                    index == menu.effort_selected || hovered,
+                    efforts_focused || hovered,
+                );
+                let marker = if menu.effort_is_active(index) {
+                    "*"
+                } else {
+                    " "
+                };
+                let label = truncate(effort, effort_w.saturating_sub(4) as usize);
+                let pad = (effort_w as usize)
+                    .saturating_sub(UnicodeWidthStr::width(label.as_str()))
+                    .saturating_sub(4);
+                let line = format!(" {marker} {label}{} ", " ".repeat(pad));
+                f.render_widget(
+                    Paragraph::new(Line::styled(line, style)),
+                    Rect {
+                        x: effort_x,
+                        y: row,
+                        width: effort_w,
+                        height: 1,
+                    },
+                );
+            }
         }
     }
 
@@ -9921,7 +10002,10 @@ fn modeline_model_route_text(
                 .as_deref()
                 .map(|m| modeline_model_text(Some(m), effort))
                 .unwrap_or(base);
-            format!("{origin} → {}", route.model)
+            // Pin-chosen effort lives on the route (spec 0165); show it on
+            // the routed side so the substitution is the whole story.
+            let routed = modeline_model_text(Some(&route.model), route.effort.as_deref());
+            format!("{origin} → {routed}")
         }
     }
 }
@@ -21759,6 +21843,7 @@ mod tests {
         construct_protocol::SessionRoute {
             name: name.to_string(),
             model: model.to_string(),
+            effort: None,
             origin_model: origin.map(str::to_string),
             observed: false,
         }
@@ -21789,6 +21874,17 @@ mod tests {
                 Some(&route("kimi", "kimi-k2.5", Some("claude-opus-5")))
             ),
             "claude-opus-5 → kimi-k2.5"
+        );
+    }
+
+    /// Pin-chosen effort sits on the routed side of the arrow (spec 0165).
+    #[test]
+    fn modeline_model_route_text_shows_pin_effort_on_the_routed_side() {
+        let mut r = route("codex-oauth", "gpt-5.6-sol", Some("claude-opus-5"));
+        r.effort = Some("high".into());
+        assert_eq!(
+            modeline_model_route_text(Some("claude-opus-5"), None, Some(&r)),
+            "claude-opus-5 → gpt-5.6-sol (high)"
         );
     }
 

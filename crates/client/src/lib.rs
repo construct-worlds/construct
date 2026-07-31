@@ -966,11 +966,13 @@ impl Client {
     }
     /// Arm, change (`Some(name)`) or clear (`None`) a session's model
     /// route. Applies to the running session — no restart (spec 0114).
+    /// `effort` is the optional pin-chosen reasoning tier (spec 0165).
     pub async fn set_route(
         &self,
         id: &str,
         route: Option<String>,
         model: Option<String>,
+        effort: Option<String>,
     ) -> Result<()> {
         let _: serde_json::Value = self
             .request(
@@ -979,6 +981,7 @@ impl Client {
                     session_id: id.to_string(),
                     route,
                     model,
+                    effort,
                 },
             )
             .await?;
