@@ -386,7 +386,7 @@ impl App {
     pub(super) fn suggestion_draft_keywords(&self, session_id: &str) -> Option<String> {
         self.prompt_drafts
             .get(session_id)
-            .map(String::as_str)
+            .map(|draft| draft.buf.as_str())
             .or_else(|| self.editor_states.get(session_id).map(|editor| editor.buf.as_str()))
             .map(str::trim)
             .filter(|keywords| !keywords.is_empty())
