@@ -474,6 +474,7 @@ impl App {
                     Selection::ArchivedRow(
                         ArchiveSection::Ungrouped | ArchiveSection::Children(_),
                     )
+                    | Selection::Service(_)
                     | Selection::None => None,
                 };
                 let params = construct_protocol::CreateSessionParams {

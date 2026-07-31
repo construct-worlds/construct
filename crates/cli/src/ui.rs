@@ -519,7 +519,7 @@ fn finish_frame(f: &mut Frame, app: &mut App) {
     render_suggest_deck_card_preview(f, app);
     render_suggest_affordance_tooltip(f, app);
 
-    // Session picker, configure, and service editor are topmost modals.
+    // Session picker and configure are topmost modals.
     // modals — drawn last so they sit over every base view (including
     // zoomed layouts, which return through here) and before
     // `capture_frame_text` so they land in the frame snapshot. They are
@@ -527,183 +527,10 @@ fn finish_frame(f: &mut Frame, app: &mut App) {
     // already up), so render order between them doesn't matter.
     render_session_picker(f, app);
     render_configure_popup(f, app);
-    render_service_dialog(f, app);
     capture_frame_text(f, app);
     render_hovered_url(f, app);
     render_text_selection(f, app);
     paint_default_backgrounds(f, app.theme.background);
-}
-
-fn render_service_dialog(f: &mut Frame, app: &mut App) {
-    let Some(dialog) = app.service_dialog.clone() else {
-        return;
-    };
-    let area = f.area();
-    let width = 112u16.min(area.width.saturating_sub(4));
-    let height = 22u16.min(area.height.saturating_sub(2));
-    if width < 36 || height < 14 {
-        return;
-    }
-    let popup = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
-    f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.border_focused))
-        .padding(ratatui::widgets::Padding::new(3, 3, 1, 1))
-        .title(dialog.title());
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
-    app.layout.modal_area = Some(popup);
-
-    let labels = [
-        "Name",
-        "Instruction",
-        "Harness",
-        "Model",
-        "Working dir",
-        "Routing",
-        "HTTP port",
-        "State",
-    ];
-    let mut field_lines = Vec::with_capacity(labels.len());
-    for (index, label) in labels.iter().enumerate() {
-        let selected = index == dialog.selected_field;
-        let locked = index == 0 && dialog.mode == crate::app::ServiceDialogMode::Edit;
-        let suffix = match index {
-            5 => "  ←/→ cycle",
-            7 => "  Space toggle",
-            _ if locked => "  locked",
-            _ => "",
-        };
-        let value = dialog.field_value(index);
-        let marker = if selected { "›" } else { " " };
-        let text = format!("{marker} {label:<12} {value}{suffix}");
-        let mut style = Style::default().fg(if locked {
-            app.theme.dim
-        } else {
-            app.theme.text
-        });
-        if selected {
-            style = style.fg(app.theme.highlight_fg).bg(app.theme.highlight_bg);
-        }
-        field_lines.push(Line::from(Span::styled(text, style)));
-    }
-
-    let (help_title, help_body, help_hint) = service_dialog_field_help(&dialog);
-    let help_lines = vec![
-        Line::from(Span::styled(
-            help_title,
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(help_body, Style::default().fg(app.theme.text))),
-        Line::from(""),
-        Line::from(Span::styled(help_hint, Style::default().fg(app.theme.dim))),
-    ];
-
-    let wide = inner.width >= 72;
-    let body_chunks = if wide {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(8),
-                Constraint::Length(1),
-                Constraint::Min(3),
-            ])
-            .split(inner)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(8),
-                Constraint::Length(5),
-                Constraint::Min(1),
-            ])
-            .split(inner)
-    };
-
-    if wide {
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(56),
-                Constraint::Length(3),
-                Constraint::Min(24),
-            ])
-            .split(body_chunks[0]);
-        f.render_widget(Paragraph::new(field_lines), columns[0]);
-        let divider_x = columns[1].x.saturating_add(columns[1].width / 2);
-        for y in columns[1].top()..columns[1].bottom() {
-            f.buffer_mut()
-                .set_string(divider_x, y, "│", Style::default().fg(app.theme.border));
-        }
-        f.render_widget(
-            Paragraph::new(help_lines).wrap(Wrap { trim: false }),
-            columns[2],
-        );
-    } else {
-        f.render_widget(Paragraph::new(field_lines), body_chunks[0]);
-        f.render_widget(
-            Paragraph::new(help_lines).wrap(Wrap { trim: false }),
-            body_chunks[1],
-        );
-    }
-
-    let lower = body_chunks[2];
-    let footer = if dialog.mode == crate::app::ServiceDialogMode::Create {
-        "Tab/↑/↓ field · Enter/C-s create · Esc cancel"
-    } else {
-        "Tab/↑/↓ field · Enter/C-s save · C-r rotate token · C-d delete · Esc close"
-    };
-    let footer_h = if footer.chars().count() > lower.width as usize {
-        2
-    } else {
-        1
-    }
-    .min(lower.height);
-    let lower_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(footer_h)])
-        .split(lower);
-    let mut status_lines = Vec::with_capacity(3);
-    if let Some(token) = &dialog.new_token {
-        status_lines.push(Line::from(vec![
-            Span::styled(
-                "Token (shown once)  ",
-                Style::default().fg(app.theme.warning),
-            ),
-            Span::styled(token.clone(), Style::default().fg(app.theme.text)),
-        ]));
-    }
-    if let Some(note) = &dialog.note {
-        status_lines.push(Line::from(Span::styled(
-            note.clone(),
-            Style::default().fg(if dialog.confirm_delete {
-                app.theme.danger
-            } else {
-                app.theme.dim
-            }),
-        )));
-    }
-    f.render_widget(
-        Paragraph::new(status_lines).wrap(Wrap { trim: false }),
-        lower_chunks[0],
-    );
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            footer,
-            Style::default().fg(app.theme.dim),
-        )))
-        .wrap(Wrap { trim: false }),
-        lower_chunks[1],
-    );
 }
 
 fn service_dialog_field_help(
@@ -6167,6 +5994,7 @@ fn render_main_transitions(f: &mut Frame, app: &App) {
             Some(Selection::Session(id)) => hash_str(&id),
             Some(Selection::Group(id)) => hash_str(&id) ^ 0x67726f7570,
             Some(Selection::ArchivedRow(_)) => 0x617263,
+            Some(Selection::Service(id)) => hash_str(&id) ^ 0x73657276696365,
             Some(Selection::None) | None => 0x5e5510,
         };
         render_glitch_overlay(f, pane.inner_area, &app.theme, seed, amount);
@@ -7959,6 +7787,10 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         clear_pane_side_borders(f, area, app);
         return;
     }
+    if let Some(name) = app.selection.service_name().map(str::to_owned) {
+        render_service_view(f, area, app, &name, last_focused);
+        return;
+    }
     let summary = app.selected_session().cloned();
     let group = app.selected_group().cloned();
     // Width budgets for fitting the title onto the top border.
@@ -8083,6 +7915,213 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         ViewMode::Terminal => render_terminal_for_window(f, inner, app, window_id),
         ViewMode::Chat => render_chat(f, inner, app),
     }
+}
+
+/// Render a service as a normal split-pane surface. The editor state is the
+/// same editor state used before the service view existed, but the service now owns the whole
+/// pane: its definition and contextual help stay visible while the operator
+/// edits it, and the lower section gives the service's routed sessions a
+/// direct entry point.
+fn render_service_view(
+    f: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    name: &str,
+    focused: bool,
+) {
+    let Some(summary) = app
+        .services
+        .iter()
+        .find(|service| service.name == name)
+        .cloned()
+        .or_else(|| {
+            app.service_dialog
+                .as_ref()
+                .filter(|dialog| dialog.service.name == name)
+                .map(|dialog| dialog.service.clone())
+        })
+    else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(pane_border_style(&app.theme, focused))
+            .title(format!(" service: {name} "));
+        f.render_widget(
+            Paragraph::new("service definition is no longer available")
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    };
+
+    let fallback = crate::app::ServiceDialog {
+        mode: crate::app::ServiceDialogMode::Edit,
+        service: summary.clone(),
+        selected_field: 0,
+        note: None,
+        new_token: None,
+        confirm_delete: false,
+    };
+    let dialog = app
+        .service_dialog
+        .as_ref()
+        .filter(|dialog| dialog.service.name == name)
+        .unwrap_or(&fallback);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border_style(&app.theme, focused))
+        .padding(ratatui::widgets::Padding::new(2, 2, 1, 1))
+        .title(format!(" service: {} ", summary.name));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 36 || inner.height < 8 {
+        return;
+    }
+
+    let labels = [
+        "Name",
+        "Instruction",
+        "Harness",
+        "Model",
+        "Working dir",
+        "Routing",
+        "HTTP port",
+        "State",
+    ];
+    let mut field_lines = Vec::with_capacity(labels.len());
+    for (index, label) in labels.iter().enumerate() {
+        let selected = app.service_dialog.as_ref().is_some_and(|current| {
+            current.service.name == name && current.selected_field == index
+        });
+        let locked = index == 0 && dialog.mode == crate::app::ServiceDialogMode::Edit;
+        let suffix = match index {
+            5 => "  ←/→ cycle",
+            7 => "  Space toggle",
+            _ if locked => "  locked",
+            _ => "",
+        };
+        let value = dialog.field_value(index);
+        let marker = if selected { "›" } else { " " };
+        let mut style = Style::default().fg(if locked {
+            app.theme.dim
+        } else {
+            app.theme.text
+        });
+        if selected {
+            style = style.fg(app.theme.highlight_fg).bg(app.theme.highlight_bg);
+        }
+        field_lines.push(Line::from(Span::styled(
+            format!("{marker} {label:<12} {value}{suffix}"),
+            style,
+        )));
+    }
+
+    let (help_title, help_body, help_hint) = service_dialog_field_help(dialog);
+    let help_lines = vec![
+        Line::from(Span::styled(
+            help_title,
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(help_body, Style::default().fg(app.theme.text))),
+        Line::from(""),
+        Line::from(Span::styled(help_hint, Style::default().fg(app.theme.dim))),
+    ];
+
+    let top_h = 9.min(inner.height.saturating_sub(4));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top_h),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
+        .split(inner);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(56),
+            Constraint::Length(3),
+            Constraint::Min(20),
+        ])
+        .split(chunks[0]);
+    f.render_widget(Paragraph::new(field_lines), columns[0]);
+    let divider_x = columns[1].x.saturating_add(columns[1].width / 2);
+    for y in columns[1].top()..columns[1].bottom() {
+        f.buffer_mut()
+            .set_string(divider_x, y, "│", Style::default().fg(app.theme.border));
+    }
+    f.render_widget(
+        Paragraph::new(help_lines).wrap(Wrap { trim: false }),
+        columns[2],
+    );
+
+    let service_prefix = format!("service:{}", name);
+    let routed: Vec<_> = app
+        .sessions
+        .iter()
+        .filter(|session| {
+            session
+                .title
+                .as_deref()
+                .is_some_and(|title| title == service_prefix || title.starts_with(&format!("{service_prefix}:")))
+        })
+        .collect();
+    let mut activity = vec![Line::from(vec![
+        Span::styled(
+            "Activity  ",
+            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} routed session{}", routed.len(), if routed.len() == 1 { "" } else { "s" }),
+            Style::default().fg(app.theme.text),
+        ),
+    ])];
+    if routed.is_empty() {
+        activity.push(Line::from(Span::styled(
+            "No requests have created a session yet.",
+            Style::default().fg(app.theme.dim),
+        )));
+    } else {
+        for session in routed.iter().take(chunks[2].height.saturating_sub(3) as usize) {
+            let label = session.title.as_deref().unwrap_or(&session.id);
+            activity.push(Line::from(vec![
+                Span::styled(format!("  {} ", session_status_glyph(app, session)), state_style(&app.theme, session.state)),
+                Span::styled(label, Style::default().fg(app.theme.text)),
+                Span::styled(format!("  {}", session.state.label()), Style::default().fg(app.theme.dim)),
+            ]));
+        }
+    }
+    if let Some(token) = &dialog.new_token {
+        activity.push(Line::from(Span::styled(
+            format!("Token (shown once): {token}"),
+            Style::default().fg(app.theme.warning),
+        )));
+    }
+    if let Some(note) = &dialog.note {
+        activity.push(Line::from(Span::styled(
+            note.clone(),
+            Style::default().fg(if dialog.confirm_delete { app.theme.danger } else { app.theme.dim }),
+        )));
+    }
+    let editing = app
+        .service_dialog
+        .as_ref()
+        .is_some_and(|current| current.service.name == name);
+    let footer = if !editing {
+        "Enter/e edit · C-x keeps global commands"
+    } else if dialog.mode == crate::app::ServiceDialogMode::Create {
+        "Enter/C-s save · Esc close · C-x keeps global commands"
+    } else {
+        "Enter/C-s save · C-r rotate token · C-d delete · Esc close"
+    };
+    activity.push(Line::from(Span::styled(footer, Style::default().fg(app.theme.dim))));
+    f.render_widget(
+        Paragraph::new(activity).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
 }
 
 fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {

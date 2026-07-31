@@ -1,4 +1,4 @@
-//! Service sidebar focus and create/edit dialog.
+//! Service sidebar focus and the inline service-view editor.
 
 use super::*;
 
@@ -21,13 +21,6 @@ pub struct ServiceDialog {
 }
 
 impl ServiceDialog {
-    pub fn title(&self) -> &'static str {
-        match self.mode {
-            ServiceDialogMode::Create => " create service ",
-            ServiceDialogMode::Edit => " edit service ",
-        }
-    }
-
     pub fn field_value(&self, field: usize) -> String {
         match field {
             0 => self.service.name.clone(),
@@ -96,23 +89,22 @@ impl App {
         }
     }
 
-    pub fn open_new_service_dialog(&mut self, suggested: impl Into<String>) {
+    pub fn open_new_service_view(&mut self, suggested: impl Into<String>) {
         let suggested = suggested.into();
         self.configure_popup = None;
         self.session_picker = None;
+        self.select_service(suggested.clone());
         self.service_dialog = Some(ServiceDialog {
             mode: ServiceDialogMode::Create,
             service: default_service(self, suggested),
             selected_field: 0,
-            note: Some(
-                "Saved as its own TOML file. Restart the daemon before it serves.".to_string(),
-            ),
+            note: Some("Enter saves this service as its own TOML file.".to_string()),
             new_token: None,
             confirm_delete: false,
         });
     }
 
-    pub fn open_edit_service_dialog(&mut self, name: &str) -> bool {
+    pub fn open_edit_service_view(&mut self, name: &str) -> bool {
         let Some(service) = self
             .services
             .iter()
@@ -124,13 +116,12 @@ impl App {
         };
         self.configure_popup = None;
         self.session_picker = None;
+        self.select_service(name.to_string());
         self.service_dialog = Some(ServiceDialog {
             mode: ServiceDialogMode::Edit,
             service,
             selected_field: 1,
-            note: Some(
-                "Changes persist immediately; restart the daemon to apply them.".to_string(),
-            ),
+            note: Some("Changes apply after the daemon restarts.".to_string()),
             new_token: None,
             confirm_delete: false,
         });
@@ -177,7 +168,7 @@ impl App {
                 true
             }
             KeyCode::Char('n') => {
-                self.open_new_service_dialog("service");
+                self.open_new_service_view("service");
                 true
             }
             KeyCode::Enter => {
@@ -186,9 +177,9 @@ impl App {
                     .get(self.service_selected)
                     .map(|service| service.name.clone())
                 {
-                    self.open_edit_service_dialog(&name);
+                    self.open_edit_service_view(&name);
                 } else {
-                    self.open_new_service_dialog("service");
+                    self.open_new_service_view("service");
                 }
                 true
             }
@@ -345,8 +336,17 @@ impl App {
         };
         match self.client.delete_service(name.clone()).await {
             Ok(()) => {
+                let was_selected = self.selection.service_name() == Some(name.as_str());
+                if self.main_windows.clear_service(&name) {
+                    self.push_layout();
+                }
                 self.service_dialog = None;
                 self.refresh_services().await;
+                if was_selected {
+                    self.selection = Selection::None;
+                    self.ensure_selection_valid();
+                    self.sync_active_window_selection();
+                }
                 self.set_status(format!(
                     "{name} deleted; restart daemon to withdraw the endpoint"
                 ));

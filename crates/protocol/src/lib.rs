@@ -3766,15 +3766,16 @@ pub enum LayoutSplitDirection {
 
 /// The shared split layout: a recursive binary tree of panes.
 ///
-/// A leaf is a *pane*, and a pane shows at most one session. Ratios are
+/// A leaf is a *pane*, and a pane shows at most one session or service. Ratios are
 /// percentages rather than absolute sizes precisely so the tree is
 /// client-agnostic — the same 60/40 split is meaningful in an 80-column
 /// terminal and in a 3440px browser window.
 ///
-/// `session_id` is optional because a pane can legitimately be empty: a TUI
-/// window whose selection is a group header or an archived-row disclosure
-/// has no session to show, and a freshly split pane may not have picked one
-/// yet. Clients must treat `None` as "empty pane", never as an error.
+/// `session_id` and `service_name` are optional because a pane can
+/// legitimately be empty: a TUI window whose selection is a group header or
+/// an archived-row disclosure has no view to show, and a freshly split pane
+/// may not have picked one yet. At most one is present. Clients must treat
+/// both absent as "empty pane", never as an error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LayoutNode {
@@ -3785,6 +3786,8 @@ pub enum LayoutNode {
         id: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service_name: Option<String>,
     },
     Split {
         direction: LayoutSplitDirection,
@@ -3800,6 +3803,7 @@ impl Default for LayoutNode {
         Self::Leaf {
             id: 1,
             session_id: None,
+            service_name: None,
         }
     }
 }
@@ -3869,11 +3873,21 @@ impl LayoutNode {
 
     pub fn session_for_leaf(&self, target: u64) -> Option<&str> {
         match self {
-            Self::Leaf { id, session_id } if *id == target => session_id.as_deref(),
+            Self::Leaf { id, session_id, .. } if *id == target => session_id.as_deref(),
             Self::Leaf { .. } => None,
             Self::Split { first, second, .. } => first
                 .session_for_leaf(target)
                 .or_else(|| second.session_for_leaf(target)),
+        }
+    }
+
+    pub fn service_for_leaf(&self, target: u64) -> Option<&str> {
+        match self {
+            Self::Leaf { id, service_name, .. } if *id == target => service_name.as_deref(),
+            Self::Leaf { .. } => None,
+            Self::Split { first, second, .. } => first
+                .service_for_leaf(target)
+                .or_else(|| second.service_for_leaf(target)),
         }
     }
 
@@ -4365,6 +4379,7 @@ mod layout_tests {
         LayoutNode::Leaf {
             id,
             session_id: session.map(str::to_string),
+            service_name: None,
         }
     }
 
@@ -4387,6 +4402,20 @@ mod layout_tests {
         assert!(!json.contains("null"));
         let back: LayoutNode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, tree);
+    }
+
+    #[test]
+    fn service_leaf_round_trips_and_is_not_a_session() {
+        let tree = LayoutNode::Leaf {
+            id: 4,
+            session_id: None,
+            service_name: Some("assistant".to_string()),
+        };
+        let json = serde_json::to_string(&tree).unwrap();
+        assert!(json.contains("service_name"));
+        let back: LayoutNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.service_for_leaf(4), Some("assistant"));
+        assert_eq!(back.session_for_leaf(4), None);
     }
 
     #[test]

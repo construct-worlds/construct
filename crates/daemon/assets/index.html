@@ -695,6 +695,53 @@
     font-style: italic;
     font-size: 13px;
   }
+  .service-list {
+    flex: 0 0 auto;
+    border-top: 1px solid var(--border);
+    background: var(--bg-elev);
+  }
+  .service-list-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 12px 5px;
+    color: var(--fg-dim);
+    font: 11px var(--mono);
+    text-transform: lowercase;
+    letter-spacing: .04em;
+  }
+  .service-list-head button {
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    font: 18px/1 var(--mono);
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  .service-list-head button:hover { color: var(--fg); }
+  .service-list-body {
+    max-height: 180px;
+    overflow-y: auto;
+    padding: 0 6px 6px;
+  }
+  .service-list-body .empty { padding: 5px 8px 8px; }
+  .service-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 1px 2px;
+    padding: 6px 7px;
+    border-radius: 7px;
+    color: var(--fg-dim);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .service-row:hover { background: var(--bg-elev-2); color: var(--fg); }
+  .service-row.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--fg); }
+  .service-row .service-dot { color: var(--ok); }
+  .service-row.paused .service-dot { color: var(--fg-faint); }
+  .service-row .service-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .service-row .service-meta { color: var(--fg-faint); font: 10px var(--mono); }
 
   .view {
     position: relative;
@@ -762,6 +809,83 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+  .service-view {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    padding: clamp(16px, 3vw, 36px);
+    color: var(--fg);
+  }
+  .service-view[hidden] { display: none; }
+  .service-view-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 22px;
+  }
+  .service-view-kicker { color: var(--accent); font: 11px var(--mono); letter-spacing: .12em; }
+  .service-view h2 { margin: 4px 0 0; font-size: clamp(22px, 3vw, 34px); font-weight: 500; }
+  .service-view-actions { display: flex; gap: 8px; }
+  .service-view-actions button,
+  .service-view-footer button {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 12px;
+    background: var(--bg-elev);
+    color: var(--fg-dim);
+    cursor: pointer;
+  }
+  .service-view-actions button:hover { color: var(--fg); border-color: var(--accent); }
+  .service-view-actions .danger { color: var(--err); }
+  .service-view-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(220px, .85fr);
+    gap: 1px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    overflow: hidden;
+    background: var(--border);
+  }
+  .service-definition, .service-help { padding: 16px 18px; background: var(--bg-elev); min-height: 190px; }
+  .service-field { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border-faint); }
+  .service-field:last-child { border-bottom: 0; }
+  .service-field-label { color: var(--fg-faint); font: 11px var(--mono); }
+  .service-field-value { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
+  .service-field-value input,
+  .service-field-value textarea,
+  .service-field-value select {
+    width: 100%; box-sizing: border-box; border: 1px solid var(--border);
+    border-radius: 5px; padding: 5px 7px; background: var(--bg);
+    color: var(--fg); font: inherit; resize: vertical;
+  }
+  .service-field-value textarea { min-height: 54px; }
+  .service-field-value input:focus,
+  .service-field-value textarea:focus,
+  .service-field-value select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  .service-field-value input[readonly], .service-field-value textarea[readonly] { border-color: transparent; background: transparent; padding-left: 0; }
+  .service-check { display: flex; align-items: center; gap: 7px; color: var(--fg-dim); }
+  .service-field-value.muted { color: var(--fg-dim); }
+  .service-help h3 { margin: 0 0 10px; color: var(--accent); font: 600 12px var(--mono); }
+  .service-help p { margin: 0; color: var(--fg-dim); line-height: 1.55; font-size: 13px; }
+  .service-help .hint { margin-top: 16px; color: var(--fg-faint); font: 11px var(--mono); }
+  .service-activity { margin-top: 18px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-elev); }
+  .service-activity h3 { margin: 0 0 10px; font: 600 12px var(--mono); color: var(--accent); }
+  .service-session-link { display: flex; gap: 10px; padding: 6px 0; color: var(--fg-dim); cursor: pointer; border-bottom: 1px solid var(--border-faint); }
+  .service-session-link:hover { color: var(--fg); }
+  .service-session-link .service-session-state { color: var(--ok); }
+  .service-view-footer { margin-top: 12px; color: var(--fg-faint); font: 11px var(--mono); white-space: pre-wrap; }
+  .service-pane-mirror { flex: 1; padding: 24px; background: var(--bg-elev); color: var(--fg-dim); }
+  .service-pane-mirror-kicker { color: var(--accent); font: 10px var(--mono); letter-spacing: .1em; }
+  .service-pane-mirror h3 { margin: 5px 0 12px; color: var(--fg); font-size: 18px; font-weight: 500; }
+  .service-pane-mirror p { margin: 6px 0; font-size: 12px; }
+  @media (max-width: 720px) {
+    .service-view-grid { grid-template-columns: 1fr; }
+    .service-definition, .service-help { min-height: 0; }
+    .service-view-header { margin-bottom: 14px; }
+    .service-view { padding: 18px 14px; }
   }
   .pane-grid {
     flex: 1 1 0;
@@ -3060,6 +3184,15 @@
       <aside class="session-list" id="sessionList">
         <div class="empty">connecting…</div>
       </aside>
+      <section class="service-list" id="serviceList" aria-label="services">
+        <div class="service-list-head">
+          <span>services</span>
+          <button type="button" id="newServiceBtn" aria-label="create service">+</button>
+        </div>
+        <div class="service-list-body" id="serviceListBody">
+          <div class="empty">no services</div>
+        </div>
+      </section>
       <!--
         The old shared action toolbar is gone: reorder is drag-and-drop
         on the rows themselves, pin/rename live in the title bar, and
@@ -3220,6 +3353,25 @@
       <div class="inline-widget-backdrop" id="inlineWidgetBackdrop" hidden></div>
       <section class="session-widgets" id="sessionWidgets" hidden></section>
       <div class="editor-state" id="editorState" hidden></div>
+      <section class="service-view" id="serviceView" hidden aria-label="service view">
+        <div class="service-view-header">
+          <div>
+            <div class="service-view-kicker">SERVICE</div>
+            <h2 id="serviceViewTitle"></h2>
+          </div>
+          <div class="service-view-actions">
+            <button type="button" id="serviceEditBtn">Edit</button>
+            <button type="button" id="serviceRotateBtn">Rotate token</button>
+            <button type="button" id="serviceDeleteBtn" class="danger">Delete</button>
+          </div>
+        </div>
+        <div class="service-view-grid">
+          <div class="service-definition" id="serviceDefinition"></div>
+          <aside class="service-help" id="serviceHelp"></aside>
+        </div>
+        <div class="service-activity" id="serviceActivity"></div>
+        <div class="service-view-footer" id="serviceViewFooter"></div>
+      </section>
       <!--
         Composer: two submit-style buttons. "Insert" writes the
         textarea contents into the session as keystrokes — for
@@ -3464,6 +3616,9 @@ const transcriptEl = $("transcript");
 let activeTranscriptEl = null;
 const mainEl = document.querySelector("main");
 const sessionListEl = $("sessionList");
+const serviceListEl = $("serviceList");
+const serviceListBodyEl = $("serviceListBody");
+const newServiceBtn = $("newServiceBtn");
 const sessionListResizerEl = $("sessionListResizer");
 const sessionTitleEl = $("sessionTitle");
 const sessionRuntimeEl = $("sessionRuntime");
@@ -3522,6 +3677,15 @@ const browserPreviewEl = $("browserPreview");
 const browserPreviewImgEl = $("browserPreviewImg");
 const browserPreviewCaptionEl = $("browserPreviewCaption");
 const browserPreviewCloseEl = $("browserPreviewClose");
+const serviceViewEl = $("serviceView");
+const serviceViewTitleEl = $("serviceViewTitle");
+const serviceDefinitionEl = $("serviceDefinition");
+const serviceHelpEl = $("serviceHelp");
+const serviceActivityEl = $("serviceActivity");
+const serviceViewFooterEl = $("serviceViewFooter");
+const serviceEditBtn = $("serviceEditBtn");
+const serviceRotateBtn = $("serviceRotateBtn");
+const serviceDeleteBtn = $("serviceDeleteBtn");
 /** Autohide timer for the browser-preview overlay (mirrors the TUI's
  *  ~7s timeout). Hover pins it (clears the timer); the × dismisses. */
 let browserPreviewHideTimer = null;
@@ -3766,9 +3930,27 @@ function sessionIdFromLocation() {
   return null;
 }
 
+function serviceNameFromLocation() {
+  const parts = location.pathname.split("/").filter(Boolean);
+  if (parts.length === 2 && parts[0] === "services" && parts[1]) {
+    try { return decodeURIComponent(parts[1]); } catch { return parts[1]; }
+  }
+  return null;
+}
+
 function setLocationSessionId(id, { replace = false } = {}) {
   const url = new URL(location.href);
   url.pathname = id ? `/s/${encodeURIComponent(id)}` : "/";
+  url.hash = "";
+  const next = url.pathname + url.search + url.hash;
+  if (next === location.pathname + location.search + location.hash) return;
+  if (replace) history.replaceState(null, "", next);
+  else history.pushState(null, "", next);
+}
+
+function setLocationServiceName(name, { replace = false } = {}) {
+  const url = new URL(location.href);
+  url.pathname = name ? `/services/${encodeURIComponent(name)}` : "/";
   url.hash = "";
   const next = url.pathname + url.search + url.hash;
   if (next === location.pathname + location.search + location.hash) return;
@@ -3789,6 +3971,7 @@ const state = {
   pending: new Map(),
   reconnectDelay: 1000,
   sessions: [], // [{id, title, harness, state, group_id, position, ...}]
+  services: [],
   harnesses: [],
   groups: [],   // [{id, name, position, collapsed}], TUI-style ordering
   subagentCollapsed: new Set(),
@@ -3796,6 +3979,11 @@ const state = {
   showArchivedGroups: new Set(),
   showArchivedSubagents: new Set(),
   currentId: null,
+  currentServiceName: null,
+  serviceDraft: null,
+  serviceEditing: false,
+  serviceField: "instruction",
+  serviceNewToken: null,
   // Per-session transcript items (the rows we've rendered). Keyed by
   // session_id so switching sessions is just a re-render of cached
   // events. Cleared on explicit `Reset` events from the adapter.
@@ -3865,6 +4053,7 @@ const state = {
   // first session.list snapshot can honor a refresh/deep link before the
   // normal first-session fallback runs.
   urlRequestedSessionId: sessionIdFromLocation(),
+  urlRequestedServiceName: serviceNameFromLocation(),
   // Current view mode — "chat" (headless transcript + composer)
   // or "terminal" (xterm.js mounted to a PTY-backed session). Set by
   // `selectSession` based on `has_pty` plus the session mode.
@@ -4434,6 +4623,10 @@ setInterval(() => {
 }, 30000);
 
 function refreshCurrentSessionAfterReconnect() {
+  if (state.currentServiceName) {
+    renderServiceView();
+    return;
+  }
   if (!state.currentId) return;
   const s = state.sessions.find((x) => x.id === state.currentId);
   renderViewModeToggle(s);
@@ -4483,11 +4676,13 @@ async function refreshSessions(startingLayoutTree = null) {
     // `project/state`, `project/deleted` — the
     // existing `handleNotification` path updates the caches and
     // re-renders.
-    const [list, groups] = await Promise.all([
+    const [list, groups, services] = await Promise.all([
       rpc("session.list", null),
       rpc("project.list", null).catch(() => []),
+      rpc("service.list", null).catch(() => []),
     ]);
     state.sessions = Array.isArray(list) ? list : [];
+    state.services = Array.isArray(services) ? services : [];
     // The orchestrator session ("operator") used to be filtered out
     // to mirror the TUI, which surfaces it via a special
     // minibuffer panel instead of the list. The web client
@@ -4495,11 +4690,36 @@ async function refreshSessions(startingLayoutTree = null) {
     // top — `orderedItems` pins it ahead of everything else.
     state.groups = Array.isArray(groups) ? groups : [];
     renderSessions();
+    renderServices();
+    if (state.currentServiceName && !state.services.some((service) => service.name === state.currentServiceName)) {
+      const deletedName = state.currentServiceName;
+      clearServiceFromLayout(deletedName);
+      state.currentServiceName = null;
+      state.urlRequestedServiceName = null;
+      state.serviceDraft = null;
+      state.serviceEditing = false;
+      state.serviceNewToken = null;
+      serviceViewEl.hidden = true;
+      const fallback = orderedSessions().find((session) => session.kind !== "orchestrator") || orderedSessions()[0];
+      if (fallback) selectSession(fallback.id, { replaceUrl: true });
+      return;
+    }
+    if (state.currentServiceName) {
+      renderServiceView();
+      renderPaneGrid();
+    }
+    const requestedService = state.urlRequestedServiceName
+      ? state.services.find((service) => service.name === state.urlRequestedServiceName)
+      : null;
+    if (requestedService && state.currentServiceName !== requestedService.name) {
+      selectService(requestedService.name, { replaceUrl: true });
+      return;
+    }
     // Auto-select the first *user* session; operator is shown but
     // shouldn't be the default landing — most phone visits are
     // to look at a real workload, not the dispatcher. Fall back
     // to operator only when there are no user sessions yet.
-    if (!state.currentId) {
+    if (!state.currentId && !state.currentServiceName) {
       const ordered = orderedSessions();
       const requested = state.urlRequestedSessionId
         ? ordered.find((s) => s.id === state.urlRequestedSessionId)
@@ -4511,6 +4731,16 @@ async function refreshSessions(startingLayoutTree = null) {
       const layoutSessionId = state.layout.tree
         ? focusedPaneSessionId() || layoutStartingSessionId()
         : layoutStartingSessionId(startingLayoutTree);
+      const layoutServiceName = state.layout.tree
+        ? focusedPaneServiceName() || layoutStartingServiceName()
+        : layoutStartingServiceName(startingLayoutTree);
+      const fromLayoutService = layoutServiceName
+        ? state.services.find((service) => service.name === layoutServiceName)
+        : null;
+      if (fromLayoutService) {
+        selectService(fromLayoutService.name, { replaceUrl: true, fromPane: true });
+        return;
+      }
       const fromLayout = layoutSessionId
         ? ordered.find((s) => s.id === layoutSessionId)
         : null;
@@ -4530,6 +4760,276 @@ async function refreshSessions(startingLayoutTree = null) {
     sessionListEl.innerHTML = `<div class="empty">${escape(e.message)}</div>`;
   }
 }
+
+function renderServices() {
+  if (!serviceListBodyEl) return;
+  if (!state.services.length) {
+    serviceListBodyEl.innerHTML = `<div class="empty">no services</div>`;
+    return;
+  }
+  serviceListBodyEl.replaceChildren(...state.services.map((service) => {
+    const row = document.createElement("div");
+    row.className = "service-row" +
+      (service.paused ? " paused" : "") +
+      (state.currentServiceName === service.name ? " active" : "");
+    row.dataset.serviceName = service.name;
+    row.innerHTML =
+      `<span class="service-dot">${service.paused ? "○" : "●"}</span>` +
+      `<span class="service-name">${escape(service.name)}</span>` +
+      `<span class="service-meta">${escape(service.harness || "")}</span>`;
+    return row;
+  }));
+}
+
+function serviceFieldHelp(field, service) {
+  const route = service?.routing || "session-key";
+  const descriptions = {
+    name: ["Service name", "Stable identifier used in the service URL and TOML filename.", "Locked after creation."],
+    instruction: ["Instruction", "Prepended to every incoming message. Define the service role, boundaries, and response behavior here.", "Applies after daemon restart."],
+    harness: ["Harness", "Agent harness used for new service sessions, such as smith, claude, or codex.", "Applies after daemon restart."],
+    model: ["Model", "Optional model override passed to the harness. Blank uses the harness default.", "Applies after daemon restart."],
+    cwd: ["Working directory", "Directory where service sessions start and relative paths resolve.", "Applies after daemon restart."],
+    routing: ["Routing", route === "per-event" ? "Creates a fresh session for every accepted request." : route === "single" ? "Routes every request into one shared session." : "Reuses one session for each caller-supplied session_key.", "Applies after daemon restart."],
+    http_port: ["HTTP port", "Loopback port for the generic HTTP channel. It must be unique among services.", "Applies after daemon restart."],
+    paused: ["State", "Paused services refuse new requests while keeping their definition and history.", "Applies after daemon restart."],
+  };
+  return descriptions[field] || descriptions.instruction;
+}
+
+function serviceDraftFrom(service) {
+  return {
+    name: service?.name || "service",
+    instruction: service?.instruction || "",
+    harness: service?.harness || "smith",
+    model: service?.model || "",
+    cwd: service?.cwd || ".",
+    routing: service?.routing || "session-key",
+    paused: !!service?.paused,
+    http_port: service?.http_port || 8787,
+    has_http_token: !!service?.has_http_token,
+  };
+}
+
+function renderServiceView() {
+  if (!serviceViewEl) return;
+  const name = state.currentServiceName;
+  const service = name && state.services.find((item) => item.name === name);
+  if (!name || (!service && !state.serviceDraft)) {
+    serviceViewEl.hidden = true;
+    return;
+  }
+  const draft = state.serviceDraft && state.serviceDraft.name === name
+    ? state.serviceDraft
+    : serviceDraftFrom(service);
+  serviceViewEl.hidden = false;
+  serviceViewTitleEl.textContent = draft.name;
+  const editing = !!state.serviceEditing;
+  const field = (key, label, value, multiline = false) => {
+    const locked = key === "name" && !!service;
+    const readOnly = !editing || locked;
+    const control = multiline
+      ? `<textarea data-service-field="${key}" ${readOnly ? "readonly" : ""}>${escape(value || "")}</textarea>`
+      : `<input data-service-field="${key}" value="${attr(value ?? "")}" ${readOnly ? "readonly" : ""} />`;
+    return `<div class="service-field"><label class="service-field-label" for="service-field-${key}">${label}</label><div class="service-field-value">${control}</div></div>`;
+  };
+  const route = editing
+    ? `<select data-service-field="routing"><option value="session-key" ${draft.routing === "session-key" ? "selected" : ""}>session-key</option><option value="per-event" ${draft.routing === "per-event" ? "selected" : ""}>per-event</option><option value="single" ${draft.routing === "single" ? "selected" : ""}>single</option></select>`
+    : escape(draft.routing);
+  const paused = editing
+    ? `<label class="service-check"><input type="checkbox" data-service-field="paused" ${draft.paused ? "checked" : ""}> paused</label>`
+    : (draft.paused ? "paused" : "serving");
+  serviceDefinitionEl.innerHTML =
+    field("name", "Name", draft.name) +
+    field("instruction", "Instruction", draft.instruction, true) +
+    field("harness", "Harness", draft.harness) +
+    field("model", "Model", draft.model) +
+    field("cwd", "Working dir", draft.cwd) +
+    `<div class="service-field"><label class="service-field-label">Routing</label><div class="service-field-value">${route}</div></div>` +
+    field("http_port", "HTTP port", draft.http_port) +
+    `<div class="service-field"><label class="service-field-label">State</label><div class="service-field-value">${paused}</div></div>`;
+  const selected = state.serviceField || "instruction";
+  const help = serviceFieldHelp(selected, draft);
+  serviceHelpEl.innerHTML = `<h3>${escape(help[0])}</h3><p>${escape(help[1])}</p><p class="hint">${escape(help[2])}</p><p class="hint">Each service persists in its own TOML file.</p>`;
+  const routed = state.sessions.filter((session) => {
+    const title = session.title || "";
+    return title === `service:${name}` || title.startsWith(`service:${name}:`);
+  });
+  serviceActivityEl.innerHTML = `<h3>Activity · ${routed.length} routed session${routed.length === 1 ? "" : "s"}</h3>` +
+    (routed.length ? routed.map((session) => `<div class="service-session-link" data-session-id="${attr(session.id)}"><span class="service-session-state">${escape(session.state || "idle")}</span><span>${escape(session.title || session.id)}</span></div>`).join("") : `<div class="service-view-footer">No requests have created a session yet.</div>`);
+  const tokenNote = state.serviceNewToken ? `Token (shown once): ${state.serviceNewToken}` : "";
+  serviceViewFooterEl.textContent = editing
+    ? `Enter saves · Esc cancels${tokenNote ? `\n${tokenNote}` : ""}`
+    : `HTTP loopback :${draft.http_port} · ${draft.has_http_token ? "token configured" : "token not configured"}${tokenNote ? `\n${tokenNote}` : ""}`;
+  serviceEditBtn.textContent = editing ? "Save" : "Edit";
+  serviceRotateBtn.hidden = !service;
+  serviceDeleteBtn.hidden = !service;
+  serviceDefinitionEl.querySelectorAll("[data-service-field]").forEach((control) => {
+    control.id = `service-field-${control.dataset.serviceField}`;
+    control.addEventListener("focus", () => {
+      state.serviceField = control.dataset.serviceField;
+      const helpNow = serviceFieldHelp(state.serviceField, state.serviceDraft || draft);
+      serviceHelpEl.innerHTML = `<h3>${escape(helpNow[0])}</h3><p>${escape(helpNow[1])}</p><p class="hint">${escape(helpNow[2])}</p><p class="hint">Each service persists in its own TOML file.</p>`;
+    });
+    control.addEventListener("input", () => {
+      if (!state.serviceDraft) return;
+      const key = control.dataset.serviceField;
+      state.serviceDraft[key] = key === "http_port" ? Number(control.value) || 0 : control.value;
+      if (key === "paused") state.serviceDraft[key] = !!control.checked;
+      state.serviceField = key;
+      const helpNow = serviceFieldHelp(key, state.serviceDraft);
+      serviceHelpEl.innerHTML = `<h3>${escape(helpNow[0])}</h3><p>${escape(helpNow[1])}</p><p class="hint">${escape(helpNow[2])}</p><p class="hint">Each service persists in its own TOML file.</p>`;
+    });
+    control.addEventListener("change", () => control.dispatchEvent(new Event("input")));
+  });
+}
+
+async function selectService(name, { replaceUrl = false, fromPane = false } = {}) {
+  const service = state.services.find((item) => item.name === name);
+  if (!service) return;
+  if (!fromPane) setFocusedPaneService(name);
+  state.currentServiceName = name;
+  state.currentId = null;
+  state.urlRequestedServiceName = name;
+  state.urlRequestedSessionId = null;
+  state.serviceDraft = null;
+  state.serviceEditing = false;
+  state.serviceNewToken = null;
+  state.serviceField = "instruction";
+  setLocationServiceName(name, { replace: replaceUrl });
+  serviceTitleAndChrome(name);
+  renderSessions();
+  renderServices();
+  enterServiceView();
+  if (isNarrowLayout()) setSessionListVisible(false, false);
+}
+
+function serviceTitleAndChrome(name) {
+  sessionTitleEl.textContent = name ? `service · ${name}` : "";
+  sessionRuntimeEl.hidden = true;
+  viewModeToggleEl.hidden = true;
+  sessionMenuOverlayEl.hidden = true;
+}
+
+function enterServiceView() {
+  leaveProgramView();
+  state.mode = "service";
+  transcriptEl.hidden = true;
+  terminalWrapEl.hidden = true;
+  terminalScrollOverlayEl.hidden = true;
+  terminalWidgetControlsEl.hidden = true;
+  sessionWidgetsEl.hidden = true;
+  composerEl.hidden = true;
+  if (typeof vkbdEl !== "undefined" && vkbdEl) vkbdEl.hidden = true;
+  renderServiceView();
+  refreshSessionActions();
+}
+
+async function saveServiceDraft() {
+  if (!state.serviceDraft) return;
+  const previousName = state.currentServiceName;
+  const service = { ...state.serviceDraft, model: state.serviceDraft.model || null, http_port: Number(state.serviceDraft.http_port) || null };
+  try {
+    const result = await rpc("service.put", { service, rotate_token: false });
+    state.services = state.services.filter((item) => item.name !== service.name).concat(result.service).sort((a, b) => a.name.localeCompare(b.name));
+    if (previousName && previousName !== result.service.name) {
+      renameServiceInLayout(previousName, result.service.name);
+    }
+    state.currentServiceName = result.service.name;
+    state.urlRequestedServiceName = result.service.name;
+    setLocationServiceName(result.service.name, { replace: true });
+    state.serviceDraft = { ...result.service };
+    state.serviceEditing = false;
+    state.serviceNewToken = result.new_token || null;
+    renderServices();
+    renderServiceView();
+  } catch (e) {
+    serviceViewFooterEl.textContent = `Save failed: ${e.message}`;
+  }
+}
+
+function beginNewService() {
+  let name = "service";
+  let suffix = 2;
+  while (state.services.some((service) => service.name === name)) name = `service-${suffix++}`;
+  state.serviceDraft = serviceDraftFrom({ name });
+  state.serviceEditing = true;
+  state.currentServiceName = name;
+  state.urlRequestedServiceName = name;
+  state.currentId = null;
+  setFocusedPaneService(name);
+  state.serviceField = "name";
+  setLocationServiceName(name);
+  serviceTitleAndChrome(name);
+  enterServiceView();
+  renderServices();
+}
+
+serviceListBodyEl.addEventListener("click", (event) => {
+  const row = event.target.closest(".service-row");
+  if (row) selectService(row.dataset.serviceName);
+});
+newServiceBtn.addEventListener("click", beginNewService);
+serviceEditBtn.addEventListener("click", () => {
+  if (!state.currentServiceName) return;
+  if (state.serviceEditing) {
+    saveServiceDraft();
+    return;
+  }
+  const service = state.services.find((item) => item.name === state.currentServiceName);
+  if (!service) return;
+  state.serviceDraft = serviceDraftFrom(service);
+  state.serviceEditing = true;
+  state.serviceField = "instruction";
+  renderServiceView();
+  const input = serviceDefinitionEl.querySelector(`[data-service-field="${state.serviceField}"]`);
+  if (input) input.focus();
+});
+serviceRotateBtn.addEventListener("click", async () => {
+  const name = state.currentServiceName;
+  const service = name && state.services.find((item) => item.name === name);
+  if (!service || !window.confirm(`Rotate the HTTP token for '${name}'?`)) return;
+  try {
+    const result = await rpc("service.put", { service, rotate_token: true });
+    state.services = state.services.map((item) => item.name === name ? result.service : item);
+    state.serviceDraft = { ...result.service };
+    state.serviceNewToken = result.new_token || null;
+    renderServices();
+    renderServiceView();
+  } catch (e) {
+    serviceViewFooterEl.textContent = `Token rotation failed: ${e.message}`;
+  }
+});
+serviceDeleteBtn.addEventListener("click", async () => {
+  const name = state.currentServiceName;
+  if (!name || !state.services.some((service) => service.name === name)) return;
+  if (!window.confirm(`Delete service '${name}'?`)) return;
+  try {
+    await rpc("service.delete", { name });
+    clearServiceFromLayout(name);
+    state.services = state.services.filter((service) => service.name !== name);
+    state.currentServiceName = null;
+    state.serviceDraft = null;
+    state.serviceEditing = false;
+    state.serviceNewToken = null;
+    setLocationServiceName(null, { replace: true });
+    serviceViewEl.hidden = true;
+    serviceTitleAndChrome(null);
+    renderServices();
+    renderPaneGrid();
+    const first = state.services[0];
+    if (first) selectService(first.name, { replaceUrl: true });
+    else {
+      const firstSession = orderedSessions().find((session) => session.kind !== "orchestrator") || orderedSessions()[0];
+      if (firstSession) selectSession(firstSession.id, { replaceUrl: true });
+    }
+  } catch (e) {
+    serviceViewFooterEl.textContent = `Delete failed: ${e.message}`;
+  }
+});
+serviceActivityEl.addEventListener("click", (event) => {
+  const row = event.target.closest("[data-session-id]");
+  if (row) selectSession(row.dataset.sessionId);
+});
 
 /**
  * Compute the visible list ordering, matching the TUI's
@@ -5306,6 +5806,8 @@ function renderSessions() {
     prev = node;
   }
   for (const node of existing.values()) node.remove();
+  renderServices();
+  if (state.currentServiceName) renderServiceView();
   refreshSessionActions();
 }
 
@@ -5758,6 +6260,12 @@ async function selectSession(
     claimGeometry = true,
   } = {},
 ) {
+  state.currentServiceName = null;
+  state.urlRequestedServiceName = null;
+  state.urlRequestedSessionId = id;
+  state.serviceDraft = null;
+  state.serviceEditing = false;
+  state.serviceNewToken = null;
   rpc("session.mark_seen", { session_id: id }).catch(() => {});
   // Picking a session from the list points the FOCUSED pane at it, which is
   // shared state. `fromPane` is the one exception: focusing a pane already
@@ -5779,6 +6287,7 @@ async function selectSession(
   const focusTerminalAfterSwitch = !keepFocus && shouldFocusTerminalAfterSessionSwitch();
   state.currentId = id;
   setLocationSessionId(id, { replace: replaceUrl });
+  serviceViewEl.hidden = true;
   renderSessions();
   const s = state.sessions.find((x) => x.id === id);
   sessionTitleEl.textContent = s ? sessionViewTitle(s) : "";
@@ -10295,11 +10804,11 @@ function applySharedLayout(doc) {
   // which local pane held focus before refresh, so restore that pane first.
   const leaves = layoutLeaves(state.layout.tree);
   if (!leaves.some((l) => l.id === state.focusedPaneId)) {
-    const restoreSessionId = adoptingFirstLayout
-      ? state.urlRequestedSessionId || state.currentId
+    const restoreTarget = adoptingFirstLayout
+      ? { session: state.urlRequestedSessionId || state.currentId, service: state.urlRequestedServiceName || state.currentServiceName }
       : null;
-    const restored = restoreSessionId
-      ? leaves.find((l) => l.session_id === restoreSessionId)
+    const restored = restoreTarget
+      ? leaves.find((l) => (restoreTarget.service && l.service_name === restoreTarget.service) || (restoreTarget.session && l.session_id === restoreTarget.session))
       : null;
     state.focusedPaneId = restored
       ? restored.id
@@ -10314,11 +10823,15 @@ function applySharedLayout(doc) {
   // selection is local and stays put.
   if (splitLayoutActive()) {
     const focused = focusedPaneSessionId();
+    const focusedService = focusedPaneServiceName();
     // Do not bind the interactive surface until session.list has told us
     // whether this session is PTY-backed. Selecting against an empty metadata
     // cache guesses "chat" and leaves terminal sessions blank after refresh.
     const known = focused && state.sessions.some((s) => s.id === focused);
-    if (known && focused !== state.currentId) {
+    const serviceKnown = focusedService && state.services.some((service) => service.name === focusedService);
+    if (serviceKnown && focusedService !== state.currentServiceName) {
+      selectService(focusedService, { fromPane: true });
+    } else if (known && focused !== state.currentId) {
       selectSession(focused, { fromPane: true, claimGeometry: false });
     }
   }
@@ -10339,10 +10852,25 @@ function layoutStartingSessionId(tree = state.layout.tree) {
   return null;
 }
 
+function layoutStartingServiceName(tree = state.layout.tree) {
+  const leaves = layoutLeaves(tree);
+  for (const leaf of leaves) {
+    if (leaf.service_name && state.services.some((service) => service.name === leaf.service_name)) {
+      return leaf.service_name;
+    }
+  }
+  return null;
+}
+
 /** The focused pane's session — the one the singleton view stack shows. */
 function focusedPaneSessionId() {
   const leaf = layoutFindLeaf(state.layout.tree, state.focusedPaneId);
   return leaf ? leaf.session_id || null : null;
+}
+
+function focusedPaneServiceName() {
+  const leaf = layoutFindLeaf(state.layout.tree, state.focusedPaneId);
+  return leaf ? leaf.service_name || null : null;
 }
 
 /**
@@ -10362,15 +10890,78 @@ function setFocusedPaneSession(sessionId) {
   if (!focused) return false;
   if (focused.session_id === sessionId) return false;
   const previous = focused.session_id || null;
+  const previousService = focused.service_name || null;
   const other = layoutLeaves(tree).find(
     (l) => l.id !== focused.id && l.session_id === sessionId
   );
   if (other) {
     if (previous) other.session_id = previous;
+    else if (previousService) {
+      delete other.session_id;
+      other.service_name = previousService;
+    }
     else delete other.session_id;
+    delete other.service_name;
   }
+  delete focused.service_name;
   if (sessionId) focused.session_id = sessionId;
   else delete focused.session_id;
+  state.layout.tree = tree;
+  renderPaneGrid();
+  pushLayout(tree);
+  return true;
+}
+
+function setFocusedPaneService(serviceName) {
+  if (!splitLayoutActive() || !state.layout.tree) return false;
+  const tree = cloneLayout(state.layout.tree);
+  const focused = layoutFindLeaf(tree, state.focusedPaneId);
+  if (!focused || focused.service_name === serviceName) return false;
+  const previousSession = focused.session_id || null;
+  const previousService = focused.service_name || null;
+  const other = layoutLeaves(tree).find((leaf) => leaf.id !== focused.id && leaf.service_name === serviceName);
+  if (other) {
+    delete other.service_name;
+    if (previousSession) other.session_id = previousSession;
+    else if (previousService) other.service_name = previousService;
+    else delete other.session_id;
+  }
+  delete focused.session_id;
+  focused.service_name = serviceName;
+  state.layout.tree = tree;
+  renderPaneGrid();
+  pushLayout(tree);
+  return true;
+}
+
+function renameServiceInLayout(previousName, nextName) {
+  if (!splitLayoutAvailable() || !state.layout.tree || previousName === nextName) return false;
+  const tree = cloneLayout(state.layout.tree);
+  let changed = false;
+  for (const leaf of layoutLeaves(tree)) {
+    if (leaf.service_name === previousName) {
+      leaf.service_name = nextName;
+      changed = true;
+    }
+  }
+  if (!changed) return false;
+  state.layout.tree = tree;
+  renderPaneGrid();
+  pushLayout(tree);
+  return true;
+}
+
+function clearServiceFromLayout(serviceName) {
+  if (!splitLayoutAvailable() || !state.layout.tree) return false;
+  const tree = cloneLayout(state.layout.tree);
+  let changed = false;
+  for (const leaf of layoutLeaves(tree)) {
+    if (leaf.service_name === serviceName) {
+      delete leaf.service_name;
+      changed = true;
+    }
+  }
+  if (!changed) return false;
   state.layout.tree = tree;
   renderPaneGrid();
   pushLayout(tree);
@@ -10384,7 +10975,10 @@ function splitFocusedPane(direction) {
   // Until now this client's session was local (single pane). Splitting is
   // the moment it joins the shared layout, so publish what it is showing.
   const seed = layoutFindLeaf(tree, state.focusedPaneId);
-  if (seed && !seed.session_id && state.currentId) seed.session_id = state.currentId;
+  if (seed && !seed.session_id && !seed.service_name) {
+    if (state.currentId) seed.session_id = state.currentId;
+    else if (state.currentServiceName) seed.service_name = state.currentServiceName;
+  }
   const replaceLeaf = (node) => {
     if (node.kind === "leaf") {
       if (node.id !== state.focusedPaneId) return node;
@@ -10392,6 +10986,7 @@ function splitFocusedPane(direction) {
       // does; picking a different session in it is a separate gesture.
       const copy = { kind: "leaf", id: newId };
       if (node.session_id) copy.session_id = node.session_id;
+      if (node.service_name) copy.service_name = node.service_name;
       return {
         kind: "split",
         direction,
@@ -10462,7 +11057,9 @@ function focusPane(
     state.focusedPaneId = paneId;
     renderPaneGrid();
   }
-  if (selectSessionToo && leaf.session_id && leaf.session_id !== state.currentId) {
+  if (selectSessionToo && leaf.service_name && leaf.service_name !== state.currentServiceName) {
+    selectService(leaf.service_name, { fromPane: true });
+  } else if (selectSessionToo && leaf.session_id && leaf.session_id !== state.currentId) {
     // Moving focus to a pane means looking at its session, so the singleton
     // stack follows. `fromPane` stops selectSession from writing the session
     // straight back into the layout it just came from.
@@ -10633,10 +11230,15 @@ function renderPaneGrid() {
     head.className = "pane-head";
     const title = document.createElement("span");
     title.className = "pane-title";
+    const service = leaf.service_name
+      ? state.services.find((item) => item.name === leaf.service_name)
+      : null;
     const session = leaf.session_id
       ? state.sessions.find((s) => s.id === leaf.session_id)
       : null;
-    title.textContent = session
+    title.textContent = service
+      ? `service · ${service.name}`
+      : session
       ? sessionViewTitle(session)
       : leaf.session_id
         ? leaf.session_id
@@ -10721,6 +11323,16 @@ function buildMirror(leaf, { duplicate = false } = {}) {
   mirror.className = "pane-mirror";
   mirror.dataset.paneId = String(leaf.id);
   const id = leaf.session_id;
+  if (leaf.service_name) {
+    const service = state.services.find((item) => item.name === leaf.service_name);
+    const panel = document.createElement("div");
+    panel.className = "service-pane-mirror";
+    panel.innerHTML = service
+      ? `<div class="service-pane-mirror-kicker">SERVICE</div><h3>${escape(service.name)}</h3><p>${escape(service.routing || "session-key")} · ${escape(service.harness || "")}</p><p>${service.paused ? "paused" : "loopback endpoint ready"}</p>`
+      : `<p>service unavailable</p>`;
+    mirror.appendChild(panel);
+    return mirror;
+  }
   if (!id) {
     const empty = document.createElement("div");
     empty.className = "pane-empty";
@@ -15552,6 +16164,12 @@ document.addEventListener(
 // --- Boot ---------------------------------------------------------------
 
 window.addEventListener("popstate", () => {
+  const serviceName = serviceNameFromLocation();
+  state.urlRequestedServiceName = serviceName;
+  if (serviceName && state.services.some((service) => service.name === serviceName)) {
+    selectService(serviceName, { replaceUrl: true });
+    return;
+  }
   const id = sessionIdFromLocation();
   state.urlRequestedSessionId = id;
   if (!id || id === state.currentId) return;

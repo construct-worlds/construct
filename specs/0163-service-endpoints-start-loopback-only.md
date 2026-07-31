@@ -14,11 +14,18 @@ harness, model, working directory, and routing policy; a channel supplies the
 transport-specific credential and listener configuration.
 
 The TUI lists services in a dedicated sidebar section between lineage and the
-operator panel. Creating or selecting a service opens one editor for the full
-definition; edits continue to preserve the one-file-per-service boundary. The
-editor presents fields and focused-field guidance side by side with a padded
-interior, stacking the guidance below the fields only when the terminal is too
-narrow for two readable columns.
+operator panel. Creating or selecting a service opens a first-class service
+view in the active split, rather than a modal. The view presents fields and
+focused-field guidance side by side with a padded interior, stacking the
+guidance below the fields only when the terminal is too narrow for two readable
+columns. The same view exposes routed-session activity and keeps create/edit/
+delete actions in the view's normal focus lifecycle.
+
+The WebTUI mirrors this surface at `/services/<name>`. Its service list is
+below the session list, its wide layout uses the same definition/help columns,
+and narrow layouts stack those columns. A service may occupy a shared split
+pane alongside a session; a pane identity therefore carries either a session
+id or a service name, never an ambiguous URL or display label.
 
 The HTTP channel accepts authenticated JSON deliveries and routes them into
 ordinary headless Construct sessions. `session-key` routing persists the
@@ -47,6 +54,8 @@ visible and recoverable in the fleet.
 - Bearer credentials are service-scoped and never logged.
 - A future tunnel route, plugin channel, or synchronous reply mechanism extends
   this boundary; none is implied by enabling a service.
+- Service views participate in shared split layout state across TUI and
+  WebTUI, while keyboard/pointer focus remains client-local.
 - V1 does not promise runtime definition reload, sandbox-policy enforcement,
   channel plugins, response streaming, or public exposure.
 

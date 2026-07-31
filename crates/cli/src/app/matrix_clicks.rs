@@ -272,7 +272,7 @@ impl App {
         {
             self.service_focused = true;
             self.lineage_focused = false;
-            self.open_new_service_dialog("service");
+            self.open_new_service_view("service");
             return;
         }
         if let Some((index, name)) = self
@@ -285,7 +285,7 @@ impl App {
             self.service_selected = index;
             self.service_focused = true;
             self.lineage_focused = false;
-            self.open_edit_service_dialog(&name);
+            self.open_edit_service_view(&name);
             return;
         }
         if self
