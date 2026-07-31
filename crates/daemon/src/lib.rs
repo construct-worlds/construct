@@ -27,6 +27,7 @@ mod remote;
 mod remote_supervisor;
 mod router;
 mod server;
+mod service;
 mod session;
 mod storage;
 mod tunnel;
@@ -163,6 +164,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             .with_plugin_verb_dirs(plugin_set.verb_dirs())
             .with_plugin_template_dirs(plugin_set.template_dirs()),
     );
+    let service_definitions = config.services.clone();
     let (manager, remote_rx, mut restart_rx) =
         session::SessionManager::new(storage.clone(), Arc::new(config), paths.runtime_dir.clone())
             .await
@@ -233,6 +235,11 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
         });
     }
     manager.spawn_widget_watcher();
+    // Service endpoints are deliberately a separate, loopback-only ingress
+    // surface.  They do not reuse the remote-control listener: a service's
+    // bearer credential is scoped to that service, while remote control
+    // remains protected by its owner-login boundary.
+    service::spawn_all(manager.clone(), service_definitions, paths.data_dir.clone());
     // Loop scheduler: wakes every second, fires due loops by
     // calling `SessionManager::send_input`. Persisted per-session
     // in `sessions/<id>/loops.json`; daemon restart picks them
