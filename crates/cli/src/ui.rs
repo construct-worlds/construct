@@ -1813,7 +1813,11 @@ fn render_turn_picker(f: &mut Frame, area: Rect, app: &mut App) {
     // Prompt row under the menu, mirroring the harness picker's input row.
     if area.height > 0 {
         let y = area.y + area.height - 1;
-        let hint = "Fork: pick the turn to retry — or now (Enter picks, Esc cancels)";
+        let hint = if app.turn_picker_loading {
+            "Fork: loading past turns… (Enter forks from now, Esc cancels)"
+        } else {
+            "Fork: pick the turn to retry — or now (Enter picks, Esc cancels)"
+        };
         f.render_widget(
             Paragraph::new(hint).style(Style::default().fg(app.theme.dim)),
             Rect::new(area.x, y, area.width, 1),
@@ -10817,10 +10821,7 @@ pub fn compute_minibuffer_height(app: &App, total_h: u16) -> u16 {
         app.minibuffer.as_ref().map(|m| &m.intent),
         Some(MinibufferIntent::ForkTurnPick { .. })
     ) {
-        let row_count = app
-            .turn_picker_entries
-            .len()
-            .clamp(1, TURN_PICKER_MAX_ROWS) as u16;
+        let row_count = app.turn_picker_entries.len().clamp(1, TURN_PICKER_MAX_ROWS) as u16;
         return (row_count + 1).min(total_h.saturating_sub(2).max(1));
     }
     let is_orch = matches!(

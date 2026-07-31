@@ -81,6 +81,13 @@ pub(crate) enum SessionMutationResult {
         operation: &'static str,
         error: String,
     },
+    /// Background transcript fetch for the fork flow's turn picker
+    /// finished (spec 0163). Empty `entries` means no user turns (or the
+    /// fetch failed) — the picker just keeps its "now" row.
+    TurnEntriesLoaded {
+        session_id: String,
+        entries: Vec<TurnPickerEntry>,
+    },
 }
 
 /// Which pane currently owns the keyboard. `View` covers both the transcript
@@ -1460,6 +1467,10 @@ pub struct App {
     pub turn_picker_entries: Vec<TurnPickerEntry>,
     /// Keyboard highlight within the turn picker.
     pub turn_picker_selected: usize,
+    /// True while the background transcript fetch for an open turn picker
+    /// is still in flight — the hint row says so, and the arriving
+    /// `TurnEntriesLoaded` clears it.
+    pub turn_picker_loading: bool,
     /// Rotation index into the idle minibuffer placeholder's context hint
     /// pool: advances by the shown-window size every
     /// `MINIBUFFER_HINT_ROTATE_EVERY`, or immediately whenever
@@ -4417,11 +4428,6 @@ pub fn harness_picker_entries(
     entries
 }
 
-/// How long `OpenFork` waits for the source transcript before opening the
-/// harness picker without a turn stage. The fork keybinding must never
-/// feel blocked on a slow daemon round-trip.
-const FORK_TURN_FETCH_TIMEOUT_MS: u64 = 800;
-
 /// One row of the fork flow's turn picker (spec 0163): a user turn of the
 /// source transcript, carrying the branch point selecting it locks in —
 /// or the "now" row (`anchor_seq: None`), which forks from the present.
@@ -4438,6 +4444,17 @@ pub struct TurnPickerEntry {
     pub at_label: String,
     /// First line of the user message, for recognizing the turn.
     pub preview: String,
+}
+
+/// The turn picker's always-present head-fork row: selecting it forks
+/// from the present, exactly like the pre-anchor fork flow.
+pub fn turn_picker_now_row() -> TurnPickerEntry {
+    TurnPickerEntry {
+        turn: 0,
+        anchor_seq: None,
+        at_label: String::new(),
+        preview: "fork from the present".to_string(),
+    }
 }
 
 /// Build the turn picker's rows from a source transcript: one entry per
@@ -4876,6 +4893,7 @@ async fn run_with_socket_initial_selection(
         harness_picker_filter_active: false,
         turn_picker_entries: Vec::new(),
         turn_picker_selected: 0,
+        turn_picker_loading: false,
         minibuffer_hint_offset: 0,
         minibuffer_hint_rotated_at: None,
         minibuffer_hint_context: None,
@@ -5903,6 +5921,9 @@ async fn run_loop(
                             app.select_created_session(id);
                             app.sync_active_window_selection();
                             app.focus = PaneFocus::View;
+                        }
+                        SessionMutationResult::TurnEntriesLoaded { session_id, entries } => {
+                            app.apply_turn_entries_loaded(&session_id, entries);
                         }
                         SessionMutationResult::Forked { id, source_id, harness } => {
                             app.set_status(format!("forked {} → {} ({harness})", short_id(&source_id), short_id(&id)));
@@ -7219,6 +7240,35 @@ impl App {
             .find(|s| s.id == session_id)
             .map(|s| crate::ui::is_headless(s) || s.harness == "smith")
             .unwrap_or(false)
+    }
+
+    /// Deliver a finished background turn fetch (spec 0163) to the turn
+    /// picker — if it is still open for that same session. Late results
+    /// for a closed or re-targeted picker are dropped; an empty result
+    /// (no user turns, or the fetch failed) leaves just the "now" row.
+    pub(crate) fn apply_turn_entries_loaded(
+        &mut self,
+        session_id: &str,
+        entries: Vec<TurnPickerEntry>,
+    ) {
+        let still_open = matches!(
+            self.minibuffer.as_ref().map(|m| &m.intent),
+            Some(MinibufferIntent::ForkTurnPick { source_session_id })
+                if source_session_id == session_id
+        );
+        if !still_open {
+            return;
+        }
+        self.turn_picker_loading = false;
+        if entries.is_empty() {
+            return;
+        }
+        let mut all = entries;
+        all.push(turn_picker_now_row());
+        // Keep "now" preselected — the rows grew above it, and the user's
+        // Enter-Enter head-fork reflex must not suddenly pick a turn.
+        self.turn_picker_selected = all.len() - 1;
+        self.turn_picker_entries = all;
     }
 
     fn main_window_sessions_needing_hydration(&self) -> Vec<String> {
@@ -11713,41 +11763,40 @@ impl App {
                     self.set_status("fork: source disappeared".to_string());
                     return;
                 }
-                // One fork flow: when the session has past user turns, the
-                // turn picker comes first (spec 0163) — with "now" appended
-                // and preselected, so Enter-Enter still forks from the
-                // present. A slow or failed transcript fetch, or a session
-                // with no turns, degrades to the harness picker directly
-                // (the pre-anchor behavior), never to a blocked keybinding.
-                let transcript = tokio::time::timeout(
-                    std::time::Duration::from_millis(FORK_TURN_FETCH_TIMEOUT_MS),
-                    self.client.transcript(&id, 0, None),
-                )
-                .await;
-                let mut entries = match transcript {
-                    Ok(Ok(tr)) => turn_picker_entries_from_transcript(&tr.events),
-                    _ => Vec::new(),
-                };
-                if entries.is_empty() {
-                    self.open_fork_harness_picker(id, None).await;
-                    return;
-                }
-                entries.push(TurnPickerEntry {
-                    turn: 0,
-                    anchor_seq: None,
-                    at_label: String::new(),
-                    preview: "fork from the present".to_string(),
-                });
-                self.turn_picker_selected = entries.len() - 1;
-                self.turn_picker_entries = entries;
+                // One fork flow, and it opens INSTANTLY: the "now" row is
+                // always known, so the picker appears with it preselected
+                // (Enter-Enter still forks from the present, even before
+                // the history loads) while a background task fetches the
+                // transcript and streams the past-turn rows in via
+                // `SessionMutationResult::TurnEntriesLoaded`. Awaiting the
+                // fetch here froze the whole event loop for as long as the
+                // daemon round-trip + parse took.
+                self.turn_picker_entries = vec![turn_picker_now_row()];
+                self.turn_picker_selected = 0;
+                self.turn_picker_loading = true;
                 self.minibuffer = Some(Minibuffer {
                     prompt: "Fork session: ".to_string(),
                     input: String::new(),
                     cursor: 0,
                     intent: MinibufferIntent::ForkTurnPick {
-                        source_session_id: id,
+                        source_session_id: id.clone(),
                     },
                     error: None,
+                });
+                let socket = self.client.socket_path().to_path_buf();
+                let tx = self.session_mutation_tx.clone();
+                tokio::spawn(async move {
+                    let entries = match construct_client::Client::connect(&socket).await {
+                        Ok(client) => match client.transcript(&id, 0, None).await {
+                            Ok(tr) => turn_picker_entries_from_transcript(&tr.events),
+                            Err(_) => Vec::new(),
+                        },
+                        Err(_) => Vec::new(),
+                    };
+                    let _ = tx.send(SessionMutationResult::TurnEntriesLoaded {
+                        session_id: id,
+                        entries,
+                    });
                 });
             }
             OpenMerge => {
@@ -15316,6 +15365,7 @@ mod tests {
             harness_picker_filter_active: false,
             turn_picker_entries: Vec::new(),
             turn_picker_selected: 0,
+            turn_picker_loading: false,
             minibuffer_hint_offset: 0,
             minibuffer_hint_rotated_at: None,
             minibuffer_hint_context: None,
@@ -34986,6 +35036,7 @@ mod tests {
 
     #[tokio::test]
     async fn fork_picker_defaults_to_source_harness_without_prompt_stage() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let (mut app, _dir, server) = captured_app().await;
         app.harnesses = vec![construct_protocol::HarnessInfo {
             name: "shell".to_string(),
@@ -34998,6 +35049,23 @@ mod tests {
 
         app.run_action(KeyAction::OpenFork).await;
 
+        // The fork flow opens INSTANTLY on the turn stage: only the "now"
+        // row (preselected, loading in the background) — never blocked on
+        // the transcript fetch.
+        let minibuffer = app.minibuffer.as_ref().expect("turn picker");
+        assert!(matches!(
+            &minibuffer.intent,
+            MinibufferIntent::ForkTurnPick { source_session_id } if source_session_id == "s1"
+        ));
+        assert!(app.turn_picker_loading);
+        assert_eq!(app.turn_picker_entries.len(), 1);
+        assert!(app.turn_picker_entries[0].anchor_seq.is_none());
+        assert_eq!(app.turn_picker_selected, 0);
+
+        // Enter on "now" continues straight to the harness picker with the
+        // source harness pre-filled — Enter-Enter is still the head fork.
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
         assert!(matches!(
             &minibuffer.intent,
@@ -35011,6 +35079,69 @@ mod tests {
         assert_eq!(minibuffer.prompt, "Fork session: ");
         assert_eq!(app.harness_picker_selected, 0);
         assert!(!app.harness_picker_filter_active);
+        assert!(!app.turn_picker_loading, "hand-off clears the loading flag");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn turn_entries_arrive_without_blocking_and_respect_a_closed_picker() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.turn_picker_entries = vec![turn_picker_now_row()];
+        app.turn_picker_selected = 0;
+        app.turn_picker_loading = true;
+        app.minibuffer = Some(Minibuffer {
+            prompt: "Fork session: ".to_string(),
+            input: String::new(),
+            cursor: 0,
+            intent: MinibufferIntent::ForkTurnPick {
+                source_session_id: "s1".to_string(),
+            },
+            error: None,
+        });
+
+        // A result for a DIFFERENT session is dropped.
+        app.apply_turn_entries_loaded(
+            "someone-else",
+            vec![TurnPickerEntry {
+                turn: 1,
+                anchor_seq: Some(3),
+                at_label: "10:00".into(),
+                preview: "not ours".into(),
+            }],
+        );
+        assert_eq!(app.turn_picker_entries.len(), 1);
+        assert!(app.turn_picker_loading);
+
+        // The matching result lands above the "now" row, which stays
+        // preselected so Enter-Enter keeps meaning head fork.
+        app.apply_turn_entries_loaded(
+            "s1",
+            vec![TurnPickerEntry {
+                turn: 1,
+                anchor_seq: Some(3),
+                at_label: "10:00".into(),
+                preview: "fix the bug".into(),
+            }],
+        );
+        assert!(!app.turn_picker_loading);
+        assert_eq!(app.turn_picker_entries.len(), 2);
+        assert_eq!(app.turn_picker_entries[0].anchor_seq, Some(3));
+        assert!(app.turn_picker_entries[1].anchor_seq.is_none());
+        assert_eq!(app.turn_picker_selected, 1, "now stays preselected");
+
+        // After the picker closes, late results must not resurrect state.
+        app.minibuffer = None;
+        app.turn_picker_entries = Vec::new();
+        app.apply_turn_entries_loaded(
+            "s1",
+            vec![TurnPickerEntry {
+                turn: 1,
+                anchor_seq: Some(3),
+                at_label: "10:00".into(),
+                preview: "late".into(),
+            }],
+        );
+        assert!(app.turn_picker_entries.is_empty());
         server.abort();
     }
 
