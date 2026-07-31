@@ -7,9 +7,11 @@
 
 use crate::session::SessionManager;
 use anyhow::{anyhow, Context, Result};
-use construct_protocol::{CreateSessionParams, SessionKind};
+use construct_protocol::{
+    CreateSessionParams, MessageRole, SessionEvent, SessionKind, SessionState,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -237,7 +239,19 @@ pub fn spawn_all(
 
 #[derive(Default, Serialize, Deserialize)]
 struct PersistedState {
+    #[serde(default)]
     sessions: HashMap<String, String>,
+    /// Every session this service is allowed to expose through its result
+    /// endpoint. This is broader than `sessions`: per-event sessions have no
+    /// routing key but still need to remain queryable.
+    #[serde(default)]
+    owned_sessions: HashSet<String>,
+}
+
+impl PersistedState {
+    fn normalize_legacy_ownership(&mut self) {
+        self.owned_sessions.extend(self.sessions.values().cloned());
+    }
 }
 
 struct ServiceRuntime {
@@ -259,10 +273,11 @@ impl ServiceRuntime {
         data_dir: PathBuf,
     ) -> Arc<Self> {
         let state_path = data_dir.join("services").join(format!("{name}.json"));
-        let state = std::fs::read(&state_path)
+        let mut state: PersistedState = std::fs::read(&state_path)
             .ok()
             .and_then(|raw| serde_json::from_slice(&raw).ok())
             .unwrap_or_default();
+        state.normalize_legacy_ownership();
         Arc::new(Self {
             name,
             config,
@@ -315,17 +330,64 @@ impl ServiceRuntime {
                 .create(body.message, Some(format!("service:{}:{key}", self.name)))
                 .await?;
             state.sessions.insert(key, id.clone());
-            let snapshot = serde_json::to_vec_pretty(&*state)?;
-            drop(state);
-            if let Some(parent) = self.state_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::write(&self.state_path, snapshot).await?;
+            state.owned_sessions.insert(id.clone());
+            self.persist_state(&state).await?;
             Ok(id)
         } else {
-            self.create(body.message, Some(format!("service:{}", self.name)))
-                .await
+            let id = self
+                .create(body.message, Some(format!("service:{}", self.name)))
+                .await?;
+            let mut state = self.state.lock().await;
+            state.owned_sessions.insert(id.clone());
+            self.persist_state(&state).await?;
+            Ok(id)
         }
+    }
+
+    async fn persist_state(&self, state: &PersistedState) -> Result<()> {
+        let snapshot = serde_json::to_vec_pretty(state)?;
+        if let Some(parent) = self.state_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&self.state_path, snapshot).await?;
+        Ok(())
+    }
+
+    async fn session_result(&self, session_id: &str) -> Result<Option<serde_json::Value>> {
+        let owned = self
+            .state
+            .lock()
+            .await
+            .owned_sessions
+            .contains(session_id);
+        if !owned {
+            return Ok(None);
+        }
+        let Ok(detail) = self.manager.detail(session_id).await else {
+            return Ok(None);
+        };
+        let reply = detail.events.iter().rev().find_map(|event| {
+            if let SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text,
+            } = &event.event
+            {
+                Some(text.clone())
+            } else {
+                None
+            }
+        });
+        let ready = matches!(
+            detail.summary.state,
+            SessionState::AwaitingInput | SessionState::Done | SessionState::Errored
+        );
+        Ok(Some(serde_json::json!({
+            "service": self.name,
+            "session": session_id,
+            "status": detail.summary.state,
+            "ready": ready,
+            "reply": reply,
+        })))
     }
 
     async fn create(&self, message: String, title: Option<String>) -> Result<String> {
@@ -409,9 +471,10 @@ async fn handle(mut stream: TcpStream, runtime: Arc<ServiceRuntime>) -> Result<(
     let headers = std::str::from_utf8(&bytes[..end]).map_err(|_| anyhow!("invalid headers"))?;
     let mut lines = headers.split("\r\n");
     let request_line = lines.next().unwrap_or("");
-    if request_line != format!("POST /svc/{} HTTP/1.1", runtime.name) {
-        return respond(&mut stream, 405, "POST required").await;
-    }
+    let route = match parse_http_route(&runtime.name, request_line) {
+        Ok(route) => route,
+        Err((status, message)) => return respond(&mut stream, status, message).await,
+    };
     let authorized = lines
         .filter_map(|line| line.split_once(':'))
         .any(|(name, value)| {
@@ -421,21 +484,72 @@ async fn handle(mut stream: TcpStream, runtime: Arc<ServiceRuntime>) -> Result<(
     if !authorized {
         return respond(&mut stream, 401, "unauthorized").await;
     }
-    let result = match serde_json::from_slice::<ServiceRequest>(&bytes[end..]) {
-        Ok(request) => runtime.route(request).await,
-        Err(_) => Err(anyhow!("invalid JSON")),
-    };
-    match result {
-        Ok(session) => {
-            json_response(
-                &mut stream,
-                202,
-                &serde_json::json!({"accepted": true, "service": runtime.name, "session": session}),
-            )
-            .await
+    match route {
+        HttpRoute::Submit => {
+            let result = match serde_json::from_slice::<ServiceRequest>(&bytes[end..]) {
+                Ok(request) => runtime.route(request).await,
+                Err(_) => Err(anyhow!("invalid JSON")),
+            };
+            match result {
+                Ok(session) => {
+                    json_response(
+                        &mut stream,
+                        202,
+                        &serde_json::json!({
+                            "accepted": true,
+                            "service": runtime.name,
+                            "session": session,
+                        }),
+                    )
+                    .await
+                }
+                Err(error) => respond(&mut stream, 400, &error.to_string()).await,
+            }
         }
-        Err(error) => respond(&mut stream, 400, &error.to_string()).await,
+        HttpRoute::Session(session_id) => match runtime.session_result(&session_id).await? {
+            Some(result) => json_response(&mut stream, 200, &result).await,
+            None => respond(&mut stream, 404, "session not found").await,
+        },
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HttpRoute {
+    Submit,
+    Session(String),
+}
+
+fn parse_http_route(
+    service_name: &str,
+    request_line: &str,
+) -> std::result::Result<HttpRoute, (u16, &'static str)> {
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let target = parts.next().unwrap_or("");
+    let version = parts.next().unwrap_or("");
+    if parts.next().is_some() || !version.starts_with("HTTP/") {
+        return Err((400, "invalid request line"));
+    }
+    let submit = format!("/svc/{service_name}");
+    if target == submit {
+        return if method == "POST" {
+            Ok(HttpRoute::Submit)
+        } else {
+            Err((405, "POST required"))
+        };
+    }
+    let session_prefix = format!("{submit}/sessions/");
+    if let Some(session_id) = target.strip_prefix(&session_prefix) {
+        if session_id.is_empty() || session_id.contains('/') {
+            return Err((404, "not found"));
+        }
+        return if method == "GET" {
+            Ok(HttpRoute::Session(session_id.to_string()))
+        } else {
+            Err((405, "GET required"))
+        };
+    }
+    Err((404, "not found"))
 }
 
 fn find_headers_end(bytes: &[u8]) -> Option<usize> {
@@ -465,9 +579,11 @@ async fn json_response(
 ) -> Result<()> {
     let body = serde_json::to_vec(value)?;
     let reason = match status {
+        200 => "OK",
         202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
+        404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
         _ => "Error",
@@ -485,6 +601,39 @@ mod tests {
         let request = b"POST / HTTP/1.1\r\nContent-Length: 12\r\n\r\nhello world!";
         let end = find_headers_end(request).unwrap();
         assert_eq!(content_length(&request[..end]).unwrap(), 12);
+    }
+
+    #[test]
+    fn http_routes_distinguish_submit_result_method_and_wrong_service() {
+        assert_eq!(
+            parse_http_route("alerts", "POST /svc/alerts HTTP/1.1"),
+            Ok(HttpRoute::Submit)
+        );
+        assert_eq!(
+            parse_http_route("alerts", "GET /svc/alerts/sessions/s123 HTTP/1.1"),
+            Ok(HttpRoute::Session("s123".to_string()))
+        );
+        assert_eq!(
+            parse_http_route("alerts", "GET /svc/alerts HTTP/1.1"),
+            Err((405, "POST required"))
+        );
+        assert_eq!(
+            parse_http_route("alerts", "POST /svc/alerts/sessions/s123 HTTP/1.1"),
+            Err((405, "GET required"))
+        );
+        assert_eq!(
+            parse_http_route("alerts", "POST /svc/other HTTP/1.1"),
+            Err((404, "not found"))
+        );
+    }
+
+    #[test]
+    fn legacy_keyed_sessions_become_service_owned() {
+        let mut state: PersistedState =
+            serde_json::from_str(r#"{"sessions":{"incident-1":"s123"}}"#).unwrap();
+        assert!(state.owned_sessions.is_empty());
+        state.normalize_legacy_ownership();
+        assert!(state.owned_sessions.contains("s123"));
     }
 
     #[test]

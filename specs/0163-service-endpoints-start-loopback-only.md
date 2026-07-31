@@ -22,6 +22,9 @@ ordinary headless Construct sessions. `session-key` routing persists the
 key-to-session mapping, `single` uses one shared mapping, and `per-event`
 creates a fresh session. Service ingress acknowledges accepted work
 asynchronously; it does not hold the webhook connection for an agent turn.
+The acknowledgement's session id can be queried through an authenticated
+service-scoped result route. The result reports session status and the latest
+assistant reply; it does not expose the full fleet transcript.
 
 ## Reason
 
@@ -34,6 +37,8 @@ visible and recoverable in the fleet.
 ## Consequences
 
 - Service keys and session mappings survive daemon restart.
+- Service ownership of keyed and per-event sessions survives daemon restart,
+  so result reads remain scoped after recovery.
 - Service definitions can be created, edited, and removed atomically without
   rewriting the global Construct configuration.
 - Bearer credentials are service-scoped and never logged.
@@ -52,4 +57,6 @@ visible and recoverable in the fleet.
 
 A local monitor POSTs alerts with a constant session key to one loopback HTTP
 service. Every delivery enters the same headless session, which remains visible
-to the owner in the normal fleet UI.
+to the owner in the normal fleet UI. The caller polls
+`GET /svc/<service>/sessions/<session-id>` with the same bearer credential until
+`ready` is true, then reads `reply`.
