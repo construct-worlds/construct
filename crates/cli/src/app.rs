@@ -39,8 +39,8 @@ mod program_popup;
 pub mod route_menu;
 mod session_picker;
 mod session_title_menu;
-pub mod suggest_deck;
 mod session_title_rename;
+pub mod suggest_deck;
 mod tutorial;
 pub use configure::{
     feature_guidance, harness_guidance, no_agent_harness_available, smith_method_guidance,
@@ -49,9 +49,9 @@ pub use configure::{
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
 };
-pub use tutorial::TutorialState;
 #[cfg(test)]
 pub use tutorial::Step1Phase;
+pub use tutorial::TutorialState;
 
 pub const TERMINAL_SCROLLBAR_TTL: Duration = Duration::from_millis(1200);
 pub(crate) const DYNAMIC_UI_AUTOHIDE_SECS: u64 = 15;
@@ -1022,6 +1022,17 @@ pub enum MinibufferIntent {
     /// `client.fork_session` directly, with no separate initial-prompt stage.
     ForkSessionHarness {
         source_session_id: String,
+        /// Branch point for an anchored fork (spec 0163): the last
+        /// transcript seq carried into the fork. `None` forks from the
+        /// present (the plain-fork path).
+        at_seq: Option<u64>,
+    },
+    /// First stage of an anchored fork (spec 0163): pick one of the source
+    /// session's past turns from `App::turn_picker_entries`. Enter locks
+    /// the branch point to just before the chosen turn and moves on to the
+    /// `ForkSessionHarness` picker.
+    ForkTurnPick {
+        source_session_id: String,
     },
     /// Second stage of the new-session wizard when the user typed `group`:
     /// asks for the group's name.
@@ -1443,6 +1454,12 @@ pub struct App {
     /// Fork pickers open with the source harness pre-filled but still show
     /// every harness. Once the user edits the query, the menu filters by it.
     pub harness_picker_filter_active: bool,
+    /// The anchored fork's turn picker (spec 0163): one entry per user turn
+    /// of the source transcript, filled when the `ForkTurnPick` minibuffer
+    /// opens and cleared with it.
+    pub turn_picker_entries: Vec<TurnPickerEntry>,
+    /// Keyboard highlight within the turn picker.
+    pub turn_picker_selected: usize,
     /// Rotation index into the idle minibuffer placeholder's context hint
     /// pool: advances by the shown-window size every
     /// `MINIBUFFER_HINT_ROTATE_EVERY`, or immediately whenever
@@ -3698,6 +3715,10 @@ pub struct LayoutSnapshot {
     /// dispatch exactly as the matching keypress would, via whichever of the
     /// two keyboard mechanisms (`MinibufferChoiceAction`) the intent uses.
     pub minibuffer_choice_hits: Vec<MinibufferChoiceHit>,
+    /// Clickable rows of the anchored fork's turn picker
+    /// (`MinibufferIntent::ForkTurnPick`, spec 0163). Click → select that
+    /// turn and submit, exactly as Enter on it would.
+    pub minibuffer_turn_hits: Vec<TurnRowHit>,
     /// Bounds of the topmost modal/dialog rendered in the last frame.
     /// Mouse clicks outside this rect dismiss the modal instead of
     /// falling through to panes underneath it.
@@ -3923,7 +3944,6 @@ impl MainSlideState {
             .clamp(0.0, 1.0);
         self.from + (target - self.from) * progress
     }
-
 }
 
 /// Vertical translation applied to the main block's recorded geometry once the
@@ -4106,6 +4126,7 @@ impl LayoutSnapshot {
             tutorial_card_area: _,
             minibuffer_harness_hits: _,
             minibuffer_choice_hits: _,
+            minibuffer_turn_hits: _,
             remote_control_hits: _,
             configure_tab_hits: _,
             // Consumed inside the main block's own render pass (or carries no
@@ -4386,6 +4407,69 @@ pub fn harness_picker_entries(
     // order within each availability group.
     entries.sort_by_key(|entry| !entry.available);
     entries
+}
+
+/// One row of the anchored fork's turn picker (spec 0163): a user turn of
+/// the source transcript, carrying the branch point selecting it locks in.
+#[derive(Debug, Clone)]
+pub struct TurnPickerEntry {
+    /// 1-based turn number (the k-th user message).
+    pub turn: usize,
+    /// The anchor forking this turn RETRIES: the last transcript seq
+    /// before the turn's user message — everything earlier is carried,
+    /// the turn itself and everything after is branched away from.
+    pub anchor_seq: u64,
+    /// Wall-clock label for the turn's user message (`HH:MM`).
+    pub at_label: String,
+    /// First line of the user message, for recognizing the turn.
+    pub preview: String,
+}
+
+/// Build the turn picker's rows from a source transcript: one entry per
+/// user `Message` event, anchored just before it. The transcript's event
+/// seqs are authoritative — no re-numbering.
+pub fn turn_picker_entries_from_transcript(
+    events: &[construct_protocol::TimestampedEvent],
+) -> Vec<TurnPickerEntry> {
+    use construct_protocol::{MessageRole, SessionEvent};
+    let mut entries = Vec::new();
+    for ev in events {
+        if let SessionEvent::Message {
+            role: MessageRole::User,
+            text,
+        } = &ev.event
+        {
+            let preview = text
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("")
+                .to_string();
+            entries.push(TurnPickerEntry {
+                turn: entries.len() + 1,
+                anchor_seq: ev.seq.saturating_sub(1),
+                at_label: ev
+                    .at
+                    .with_timezone(&chrono::Local)
+                    .format("%H:%M")
+                    .to_string(),
+                preview,
+            });
+        }
+    }
+    entries
+}
+
+/// One clickable row of the anchored fork's turn picker — the turn-picker
+/// counterpart to `HarnessHit`.
+#[derive(Debug, Clone)]
+pub struct TurnRowHit {
+    /// Index into `App::turn_picker_entries`.
+    pub index: usize,
+    pub x_start: u16,
+    /// Exclusive end column.
+    pub x_end: u16,
+    pub y: u16,
 }
 
 /// One clickable choice label within a minibuffer confirm/approval prompt
@@ -4758,6 +4842,8 @@ async fn run_with_socket_initial_selection(
         minibuffer: None,
         harness_picker_selected: 0,
         harness_picker_filter_active: false,
+        turn_picker_entries: Vec::new(),
+        turn_picker_selected: 0,
         minibuffer_hint_offset: 0,
         minibuffer_hint_rotated_at: None,
         minibuffer_hint_context: None,
@@ -6376,14 +6462,9 @@ impl App {
         let Some(id) = self.selected_id() else {
             return;
         };
-        if !self
-            .sessions
-            .iter()
-            .any(|session| {
-                session.id == id
-                    && session.state == construct_protocol::SessionState::AwaitingInput
-            })
-        {
+        if !self.sessions.iter().any(|session| {
+            session.id == id && session.state == construct_protocol::SessionState::AwaitingInput
+        }) {
             return;
         }
         match key.code {
@@ -11534,30 +11615,37 @@ impl App {
                     self.set_status("fork: no session selected".to_string());
                     return;
                 };
-                let Some(source) = self.sessions.iter().find(|s| s.id == id).cloned() else {
-                    self.set_status("fork: source disappeared".to_string());
+                self.open_fork_harness_picker(id, None).await;
+            }
+            OpenForkTurn => {
+                let Some(id) = self.selected_id() else {
+                    self.set_status("fork from turn: no session selected".to_string());
                     return;
                 };
-                if self.harnesses.is_empty() {
-                    self.harnesses = self.client.harnesses().await.unwrap_or_default();
+                if !self.sessions.iter().any(|s| s.id == id) {
+                    self.set_status("fork from turn: source disappeared".to_string());
+                    return;
                 }
-                let input = if source.harness == "antigravity" {
-                    "agy".to_string()
-                } else {
-                    source.harness
+                let entries = match self.client.transcript(&id, 0, None).await {
+                    Ok(tr) => turn_picker_entries_from_transcript(&tr.events),
+                    Err(e) => {
+                        self.set_status(format!("fork from turn: transcript failed: {e}"));
+                        return;
+                    }
                 };
-                let entries = harness_picker_entries(&self.harnesses, true, "", false);
-                self.harness_picker_selected = entries
-                    .iter()
-                    .position(|entry| entry.name == input)
-                    .unwrap_or(0);
-                self.harness_picker_filter_active = false;
-                let cursor = input.chars().count();
+                if entries.is_empty() {
+                    self.set_status("fork from turn: no user turns in transcript".to_string());
+                    return;
+                }
+                // Most-recent turn preselected — retrying the latest
+                // exchange is the common case.
+                self.turn_picker_selected = entries.len() - 1;
+                self.turn_picker_entries = entries;
                 self.minibuffer = Some(Minibuffer {
-                    prompt: "Fork session: ".to_string(),
-                    input,
-                    cursor,
-                    intent: MinibufferIntent::ForkSessionHarness {
+                    prompt: "Fork from turn: ".to_string(),
+                    input: String::new(),
+                    cursor: 0,
+                    intent: MinibufferIntent::ForkTurnPick {
                         source_session_id: id,
                     },
                     error: None,
@@ -12618,6 +12706,7 @@ impl App {
             "delete" | "kill" | "rm" => self.run_action(KeyAction::OpenDeleteConfirm).await,
             "rename" => self.run_action(KeyAction::OpenRename).await,
             "fork" => self.run_action(KeyAction::OpenFork).await,
+            "fork-from-turn" | "fork-turn" => self.run_action(KeyAction::OpenForkTurn).await,
             "program" | "edit-program" => self.run_action(KeyAction::OpenProgram).await,
             "zoom" | "fullscreen" => self.run_action(KeyAction::ToggleZoom).await,
             "rain" | "matrix" | "matrix-rain" => {
@@ -14949,6 +15038,7 @@ mod tests {
             shortcut_hints: Vec::new(),
             tutorial_card_area: None,
             minibuffer_harness_hits: Vec::new(),
+            minibuffer_turn_hits: Vec::new(),
             minibuffer_choice_hits: Vec::new(),
             modal_area: None,
             remote_control_hits: Vec::new(),
@@ -15111,6 +15201,8 @@ mod tests {
             minibuffer: None,
             harness_picker_selected: 0,
             harness_picker_filter_active: false,
+            turn_picker_entries: Vec::new(),
+            turn_picker_selected: 0,
             minibuffer_hint_offset: 0,
             minibuffer_hint_rotated_at: None,
             minibuffer_hint_context: None,
@@ -32441,8 +32533,7 @@ mod tests {
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("hover draw");
         assert!(
-            rendered_text(terminal.backend().buffer())
-                .contains("Open prompt suggestions · C-x ."),
+            rendered_text(terminal.backend().buffer()).contains("Open prompt suggestions · C-x ."),
             "hovering the chord should explain its action"
         );
 
@@ -32522,7 +32613,9 @@ mod tests {
             for x in chip_start..chip_start + chip_width {
                 let cell = buffer.cell((x, hit.area.y)).expect("chip cell");
                 assert!(
-                    cell.style().bg.is_some_and(|bg| bg != ratatui::style::Color::Reset),
+                    cell.style()
+                        .bg
+                        .is_some_and(|bg| bg != ratatui::style::Color::Reset),
                     "chip cell {x} (incl. interior spaces) must have a filled background"
                 );
             }
@@ -32536,11 +32629,11 @@ mod tests {
             assert_eq!(left_space.symbol(), " ", "space before glyph");
             assert_eq!(right_space.symbol(), " ", "space after trailing '.'");
             for x in [hit.area.x, hit.area.right().saturating_sub(1)] {
-                let cell = buffer
-                    .cell((x, hit.area.y))
-                    .expect("exterior padding cell");
+                let cell = buffer.cell((x, hit.area.y)).expect("exterior padding cell");
                 assert!(
-                    cell.style().bg.is_none_or(|bg| bg == ratatui::style::Color::Reset),
+                    cell.style()
+                        .bg
+                        .is_none_or(|bg| bg == ratatui::style::Color::Reset),
                     "exterior padding cell {x} stays transparent"
                 );
             }
@@ -32603,7 +32696,10 @@ mod tests {
             })
             .await;
         }
-        let deck = app.suggest_deck.as_ref().expect("category click keeps deck open");
+        let deck = app
+            .suggest_deck
+            .as_ref()
+            .expect("category click keeps deck open");
         assert_eq!(deck.category_selected, 1);
         assert_eq!(deck.focus, DeckFocus::Categories);
 
@@ -32744,9 +32840,7 @@ mod tests {
         app.suggestion_hands.insert(
             "s1".into(),
             construct_protocol::SuggestionHand {
-                top: construct_protocol::SuggestionCard {
-                    text: long.into(),
-                },
+                top: construct_protocol::SuggestionCard { text: long.into() },
                 verbs: vec![],
             },
         );
@@ -32865,10 +32959,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE))
             .await;
         let deck = app.suggest_deck.as_ref().expect("deck stays open");
-        assert_eq!(
-            deck.focus,
-            crate::app::suggest_deck::DeckFocus::Cards
-        );
+        assert_eq!(deck.focus, crate::app::suggest_deck::DeckFocus::Cards);
         assert!(matches!(
             app.suggest_categories(deck).get(deck.category_selected),
             Some(crate::app::suggest_deck::DeckRow::History { .. })
@@ -32952,22 +33043,19 @@ mod tests {
             deck.regenerate_query.is_none(),
             "Left exits the keyword surface"
         );
-        assert_eq!(
-            deck.focus,
-            crate::app::suggest_deck::DeckFocus::Categories
-        );
+        assert_eq!(deck.focus, crate::app::suggest_deck::DeckFocus::Categories);
 
         // Re-open and C-g cancel closes the deck entirely.
         app.on_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE))
             .await;
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .await;
-        app.on_key(KeyEvent::new(
-            KeyCode::Char('g'),
-            KeyModifiers::CONTROL,
-        ))
-        .await;
-        assert!(app.suggest_deck.is_none(), "C-g closes keyword input and deck");
+        app.on_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .await;
+        assert!(
+            app.suggest_deck.is_none(),
+            "C-g closes keyword input and deck"
+        );
         server.abort();
     }
 
@@ -34799,14 +34887,125 @@ mod tests {
         let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
         assert!(matches!(
             &minibuffer.intent,
-            MinibufferIntent::ForkSessionHarness { source_session_id }
-                if source_session_id == "s1"
+            MinibufferIntent::ForkSessionHarness {
+                source_session_id,
+                at_seq: None,
+            } if source_session_id == "s1"
         ));
         assert_eq!(minibuffer.input, "shell");
         assert_eq!(minibuffer.cursor, "shell".chars().count());
         assert_eq!(minibuffer.prompt, "Fork session: ");
         assert_eq!(app.harness_picker_selected, 0);
         assert!(!app.harness_picker_filter_active);
+        server.abort();
+    }
+
+    #[test]
+    fn turn_picker_entries_anchor_just_before_each_user_turn() {
+        let ev = |seq: u64, event: construct_protocol::SessionEvent| {
+            serde_json::from_value::<construct_protocol::TimestampedEvent>(serde_json::json!({
+                "seq": seq,
+                "at": "2026-07-31T10:00:00Z",
+                "event": serde_json::to_value(&event).unwrap(),
+            }))
+            .unwrap()
+        };
+        use construct_protocol::{MessageRole, SessionEvent};
+        let events = vec![
+            ev(
+                1,
+                SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: "  \n  fix the bug\nmore detail".into(),
+                },
+            ),
+            ev(
+                2,
+                SessionEvent::Message {
+                    role: MessageRole::Assistant,
+                    text: "done".into(),
+                },
+            ),
+            ev(5, SessionEvent::Pty { data: "x".into() }),
+            ev(
+                6,
+                SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: "now the tests".into(),
+                },
+            ),
+        ];
+        let entries = turn_picker_entries_from_transcript(&events);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].turn, 1);
+        assert_eq!(
+            entries[0].anchor_seq, 0,
+            "retrying the first turn carries nothing"
+        );
+        assert_eq!(
+            entries[0].preview, "fix the bug",
+            "preview is the first non-empty line, trimmed"
+        );
+        assert_eq!(entries[1].turn, 2);
+        assert_eq!(
+            entries[1].anchor_seq, 5,
+            "anchor is the seq just before the turn's user message"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_picker_enter_locks_the_anchor_into_the_fork_picker() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (mut app, _dir, server) = captured_app().await;
+        app.harnesses = vec![construct_protocol::HarnessInfo {
+            name: "shell".to_string(),
+            available: true,
+            detail: None,
+            binary: None,
+            description: None,
+            capabilities: Default::default(),
+        }];
+        app.turn_picker_entries = vec![
+            TurnPickerEntry {
+                turn: 1,
+                anchor_seq: 0,
+                at_label: "10:00".into(),
+                preview: "fix the bug".into(),
+            },
+            TurnPickerEntry {
+                turn: 2,
+                anchor_seq: 5,
+                at_label: "10:05".into(),
+                preview: "now the tests".into(),
+            },
+        ];
+        app.turn_picker_selected = 1;
+        app.minibuffer = Some(Minibuffer {
+            prompt: "Fork from turn: ".to_string(),
+            input: String::new(),
+            cursor: 0,
+            intent: MinibufferIntent::ForkTurnPick {
+                source_session_id: "s1".to_string(),
+            },
+            error: None,
+        });
+
+        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
+        assert!(matches!(
+            &minibuffer.intent,
+            MinibufferIntent::ForkSessionHarness {
+                source_session_id,
+                at_seq: Some(5),
+            } if source_session_id == "s1"
+        ));
+        assert_eq!(minibuffer.prompt, "Fork from turn: ");
+        assert!(
+            app.turn_picker_entries.is_empty(),
+            "picker state cleared on hand-off"
+        );
         server.abort();
     }
 

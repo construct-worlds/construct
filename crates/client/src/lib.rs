@@ -1,26 +1,25 @@
 //! IPC client. JSON-RPC over a Unix socket to `agentd`.
 
+use anyhow::{anyhow, Context, Result};
 use construct_protocol::jsonrpc::{self, MessageKind};
 use construct_protocol::{
     ipc_method, transport, ChatViewerActiveResult, ClientView, CreateSessionParams, DiffResult,
-    ErrorObject, HarnessInfo, LayoutDocument, LayoutNode, LayoutSetParams, MoveDirection,
-    Notification, PingResult, ProgramCursorParams, ProgramCursorResult, ProgramEditParams,
-    ProgramExecuteParams, ProgramExecuteResult, ProgramGetParams, ProgramGetResult,
-    ProgramListTemplatesResult, ProgramListVerbsResult, ProgramUpdateActor, ProgramUpdateParams,
-    ProgramUpdateResult, ProgramVerbExecuteParams, ProgramVerbExecuteResult, FeaturesStatusResult,
+    ErrorObject, FeaturesStatusResult, HarnessInfo, LayoutDocument, LayoutNode, LayoutSetParams,
+    MoveDirection, Notification, PingResult, ProgramCursorParams, ProgramCursorResult,
+    ProgramEditParams, ProgramExecuteParams, ProgramExecuteResult, ProgramGetParams,
+    ProgramGetResult, ProgramListTemplatesResult, ProgramListVerbsResult, ProgramUpdateActor,
+    ProgramUpdateParams, ProgramUpdateResult, ProgramVerbExecuteParams, ProgramVerbExecuteResult,
     ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams, ProjectMoveParams,
     ProjectRenameParams, ProjectSetCollapsedParams, ProjectSummary, PtyReplayResult, PtySize,
-    Request, Response,
-    SearchParams, SearchResult, SessionAttachClipboardParams, SessionAttachClipboardResult,
-    SessionDetail, SessionEmitEventParams, SessionIdParams, SessionInputParams, SessionMoveParams,
-    SessionPtyInputParams, SessionPtyResizeParams, SessionSetApprovalModeParams,
-    SessionSetFocusedParams, SessionSetPinnedParams, SessionSetProjectParams,
-    SessionSetTitleParams, SessionSetViewParams, SessionSummary, SessionToolDecisionParams,
-    SetTerminalBackgroundParams, SmithAuthStatusResult, SmithSetAuthMethodParams,
-    SmithSetAuthMethodResult, SubscribeParams, TranscriptParams, TranscriptResult,
-    UsageQueryParams, UsageQueryResult,
+    Request, Response, SearchParams, SearchResult, SessionAttachClipboardParams,
+    SessionAttachClipboardResult, SessionDetail, SessionEmitEventParams, SessionIdParams,
+    SessionInputParams, SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams,
+    SessionSetApprovalModeParams, SessionSetFocusedParams, SessionSetPinnedParams,
+    SessionSetProjectParams, SessionSetTitleParams, SessionSetViewParams, SessionSummary,
+    SessionToolDecisionParams, SetTerminalBackgroundParams, SmithAuthStatusResult,
+    SmithSetAuthMethodParams, SmithSetAuthMethodResult, SubscribeParams, TranscriptParams,
+    TranscriptResult, UsageQueryParams, UsageQueryResult,
 };
-use anyhow::{anyhow, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -236,7 +235,8 @@ impl Client {
     }
 
     pub async fn harnesses(&self) -> Result<Vec<HarnessInfo>> {
-        let mut list: Vec<HarnessInfo> = self.request(ipc_method::HARNESS_LIST, &serde_json::Value::Null)
+        let mut list: Vec<HarnessInfo> = self
+            .request(ipc_method::HARNESS_LIST, &serde_json::Value::Null)
             .await?;
         for h in &mut list {
             if h.name == "antigravity" {
@@ -266,7 +266,11 @@ impl Client {
     /// Query (and optionally trigger a background refresh of) the cached
     /// usage-probe snapshot for `harness` (spec 0086). Never blocks on the
     /// probe itself — see [`UsageQueryResult`].
-    pub async fn usage_query(&self, harness: &str, allow_refresh: bool) -> Result<UsageQueryResult> {
+    pub async fn usage_query(
+        &self,
+        harness: &str,
+        allow_refresh: bool,
+    ) -> Result<UsageQueryResult> {
         self.request(
             ipc_method::USAGE_QUERY,
             &UsageQueryParams {
@@ -1019,7 +1023,11 @@ impl Client {
             .await?;
         Ok(r.session_id)
     }
-    pub async fn emit_event(&self, id: &str, event: construct_protocol::SessionEvent) -> Result<()> {
+    pub async fn emit_event(
+        &self,
+        id: &str,
+        event: construct_protocol::SessionEvent,
+    ) -> Result<()> {
         let _: serde_json::Value = self
             .request(
                 ipc_method::SESSION_EMIT_EVENT,
@@ -1055,7 +1063,10 @@ impl Client {
     ) -> Result<construct_protocol::Loop> {
         self.request(ipc_method::LOOP_CREATE, &params).await
     }
-    pub async fn loop_list(&self, session_id: Option<&str>) -> Result<Vec<construct_protocol::Loop>> {
+    pub async fn loop_list(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Vec<construct_protocol::Loop>> {
         let r: construct_protocol::LoopListResult = self
             .request(
                 ipc_method::LOOP_LIST,

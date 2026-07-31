@@ -48,13 +48,18 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Request {
-    Copy { data: String, mime: String },
+    Copy {
+        data: String,
+        mime: String,
+    },
     Paste,
     /// Read a local file for a drag-drop upload. Only ever sent for a path
     /// the user pasted/dropped into the TUI *and* explicitly confirmed
     /// (spec 0098); the agent additionally enforces the extension allowlist
     /// and size cap.
-    ReadFile { path: String },
+    ReadFile {
+        path: String,
+    },
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -135,8 +140,7 @@ fn roundtrip(sock: &Path, req: &Request) -> Result<Response> {
     let mut reader = BufReader::new(stream);
     let mut buf = String::new();
     reader.read_line(&mut buf).context("read bridge response")?;
-    let resp: Response =
-        serde_json::from_str(buf.trim()).context("parse bridge response")?;
+    let resp: Response = serde_json::from_str(buf.trim()).context("parse bridge response")?;
     if !resp.ok {
         anyhow::bail!(
             "bridge error: {}",
@@ -226,10 +230,7 @@ pub(crate) trait ClipboardBackend: Send + Sync + 'static {
     fn read_file(&self, path: &str) -> Result<PasteItem>;
 }
 
-pub(crate) async fn serve(
-    listener: tokio::net::UnixListener,
-    backend: Arc<dyn ClipboardBackend>,
-) {
+pub(crate) async fn serve(listener: tokio::net::UnixListener, backend: Arc<dyn ClipboardBackend>) {
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -394,8 +395,7 @@ impl ClipboardBackend for SystemClipboard {
                 path.display()
             );
         }
-        let meta = std::fs::metadata(path)
-            .with_context(|| format!("stat {}", path.display()))?;
+        let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
         if !meta.is_file() {
             anyhow::bail!("{} is not a regular file", path.display());
         }
@@ -407,8 +407,7 @@ impl ClipboardBackend for SystemClipboard {
                 MAX_ITEM_BYTES
             );
         }
-        let bytes =
-            std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
         Ok(PasteItem {
             bytes,
             mime: mime_for_path(path).to_string(),
@@ -537,8 +536,8 @@ fn macos_clipboard_file() -> Result<Option<PasteItem>> {
         return Ok(None);
     }
     let path = PathBuf::from(path);
-    let meta = std::fs::metadata(&path)
-        .with_context(|| format!("stat copied file {}", path.display()))?;
+    let meta =
+        std::fs::metadata(&path).with_context(|| format!("stat copied file {}", path.display()))?;
     if !meta.is_file() {
         return Ok(None);
     }
@@ -549,11 +548,9 @@ fn macos_clipboard_file() -> Result<Option<PasteItem>> {
             meta.len()
         );
     }
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("read copied file {}", path.display()))?;
-    let filename = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned());
+    let bytes =
+        std::fs::read(&path).with_context(|| format!("read copied file {}", path.display()))?;
+    let filename = path.file_name().map(|n| n.to_string_lossy().into_owned());
     let mime = mime_for_path(&path).to_string();
     Ok(Some(PasteItem {
         bytes,
@@ -948,7 +945,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("shot.png");
         std::fs::write(&img, b"fake-png").unwrap();
-        let item = SystemClipboard.read_file(&img.display().to_string()).unwrap();
+        let item = SystemClipboard
+            .read_file(&img.display().to_string())
+            .unwrap();
         assert_eq!(item.bytes, b"fake-png");
         assert_eq!(item.mime, "image/png");
         assert_eq!(item.filename.as_deref(), Some("shot.png"));
@@ -967,11 +966,10 @@ mod tests {
             paste: None,
         });
         let (_dir, sock) = start_bridge(backend).await;
-        let item =
-            tokio::task::spawn_blocking(move || read_file(&sock, "/tmp/drop.png"))
-                .await
-                .unwrap()
-                .expect("read_file succeeds");
+        let item = tokio::task::spawn_blocking(move || read_file(&sock, "/tmp/drop.png"))
+            .await
+            .unwrap()
+            .expect("read_file succeeds");
         assert_eq!(item.bytes, b"file:/tmp/drop.png");
         assert_eq!(item.filename.as_deref(), Some("dropped.png"));
     }

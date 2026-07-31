@@ -3827,11 +3827,7 @@ mod tests {
             flatten(&tree, &sessions, 9_000),
             flatten_rails(&tree, &sessions, 9_000).0,
         ] {
-            let text = rows
-                .iter()
-                .map(|r| r.text())
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = rows.iter().map(|r| r.text()).collect::<Vec<_>>().join("\n");
             assert!(
                 text.contains("⑂ 10 events back"),
                 "backdated branch is labeled with its reach: {text}"

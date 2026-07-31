@@ -350,9 +350,7 @@ impl App {
                 DeckRow::Verb { count, .. } => (*count).max(1),
                 // Size for the unfiltered history cap so type-ahead filtering
                 // does not shrink the popup either.
-                DeckRow::History { count } => (*count)
-                    .min(SUGGEST_HISTORY_DISPLAY_CAP)
-                    .max(1),
+                DeckRow::History { count } => (*count).min(SUGGEST_HISTORY_DISPLAY_CAP).max(1),
                 // Single-line `[ generate ]` action chip under the keyword field.
                 DeckRow::Generate { .. } => 1,
                 DeckRow::Generating => 1,
@@ -362,8 +360,6 @@ impl App {
         }
         max
     }
-
-
 
     /// `C-x .` / affordance click: toggle the deck for a specific session.
     /// Opening refreshes the global prompt history but does **not** start
@@ -387,7 +383,11 @@ impl App {
         self.prompt_drafts
             .get(session_id)
             .map(|draft| draft.buf.as_str())
-            .or_else(|| self.editor_states.get(session_id).map(|editor| editor.buf.as_str()))
+            .or_else(|| {
+                self.editor_states
+                    .get(session_id)
+                    .map(|editor| editor.buf.as_str())
+            })
             .map(str::trim)
             .filter(|keywords| !keywords.is_empty())
             .map(str::to_string)
@@ -473,9 +473,7 @@ impl App {
 
         // `C-g` is the terminal-wide cancel gesture; keep it exactly
         // equivalent to Escape even while either text surface is active.
-        if matches!(key.code, KeyCode::Esc)
-            || (ctrl && matches!(key.code, KeyCode::Char('g')))
-        {
+        if matches!(key.code, KeyCode::Esc) || (ctrl && matches!(key.code, KeyCode::Char('g'))) {
             self.suggest_deck = None;
             return true;
         }
@@ -523,9 +521,7 @@ impl App {
             match key.code {
                 KeyCode::Char(c) => {
                     if let Some(d) = self.suggest_deck.as_mut() {
-                        d.regenerate_query
-                            .get_or_insert_with(String::new)
-                            .push(c);
+                        d.regenerate_query.get_or_insert_with(String::new).push(c);
                         d.focus = DeckFocus::Cards;
                     }
                     return true;
@@ -661,10 +657,7 @@ impl App {
         let guidance = keywords.trim();
         match self
             .client
-            .suggest_with_keywords(
-                &deck.session_id,
-                (!guidance.is_empty()).then_some(guidance),
-            )
+            .suggest_with_keywords(&deck.session_id, (!guidance.is_empty()).then_some(guidance))
             .await
         {
             Ok(result) if result.started => {
@@ -789,12 +782,7 @@ impl App {
                 categories_len,
                 visible,
             );
-            SuggestDeck::ensure_visible(
-                &mut d.card_scroll,
-                d.card_selected,
-                cards_len,
-                visible,
-            );
+            SuggestDeck::ensure_visible(&mut d.card_scroll, d.card_selected, cards_len, visible);
         }
     }
 
@@ -888,8 +876,7 @@ impl App {
                     if let Some(d) = self.suggest_deck.as_mut() {
                         d.category_selected = index;
                         d.focus = DeckFocus::Cards;
-                        d.regenerate_query
-                            .get_or_insert_with(|| keywords.clone());
+                        d.regenerate_query.get_or_insert_with(|| keywords.clone());
                     }
                 }
                 self.regenerate_suggestions(keywords).await;
@@ -1098,7 +1085,6 @@ mod tests {
         assert_eq!(deck.focus, DeckFocus::Categories);
         assert!(deck.regenerate_query.is_none());
     }
-
 
     #[test]
     fn max_right_rows_uses_tallest_category() {

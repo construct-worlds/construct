@@ -207,6 +207,58 @@ impl App {
             return;
         }
 
+        // Anchored fork's turn picker (spec 0163): pure selection, no text
+        // editing — navigate, Enter locks the branch point and moves on to
+        // the harness picker, Esc cancels.
+        let turn_pick_intent = match self.minibuffer.as_ref().map(|m| &m.intent) {
+            Some(MinibufferIntent::ForkTurnPick { source_session_id }) => {
+                Some(source_session_id.clone())
+            }
+            _ => None,
+        };
+        if let Some(source_session_id) = turn_pick_intent {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let len = self.turn_picker_entries.len();
+            match key.code {
+                KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || ctrl => {
+                    if len > 0 {
+                        self.turn_picker_selected = if self.turn_picker_selected == 0 {
+                            len - 1
+                        } else {
+                            self.turn_picker_selected - 1
+                        };
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || ctrl => {
+                    if len > 0 {
+                        self.turn_picker_selected = (self.turn_picker_selected + 1) % len;
+                    }
+                }
+                KeyCode::Enter => {
+                    let picked = self
+                        .turn_picker_entries
+                        .get(self.turn_picker_selected.min(len.saturating_sub(1)))
+                        .cloned();
+                    if let Some(entry) = picked {
+                        self.minibuffer = None;
+                        self.turn_picker_entries = Vec::new();
+                        self.open_fork_harness_picker(source_session_id, Some(entry.anchor_seq))
+                            .await;
+                    }
+                }
+                KeyCode::Esc => {
+                    self.minibuffer = None;
+                    self.turn_picker_entries = Vec::new();
+                }
+                KeyCode::Char('g') if ctrl => {
+                    self.minibuffer = None;
+                    self.turn_picker_entries = Vec::new();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         let Some(mb) = self.minibuffer.as_mut() else {
             return;
         };
@@ -233,15 +285,11 @@ impl App {
                         mb.cursor = mb.input.chars().count();
                         mb.error = None;
                         self.harness_picker_filter_active = false;
-                        self.harness_picker_selected = harness_picker_entries(
-                            &self.harnesses,
-                            is_fork_harness,
-                            "",
-                            false,
-                        )
-                        .iter()
-                        .position(|candidate| candidate.name == entry.name)
-                        .unwrap_or_default();
+                        self.harness_picker_selected =
+                            harness_picker_entries(&self.harnesses, is_fork_harness, "", false)
+                                .iter()
+                                .position(|candidate| candidate.name == entry.name)
+                                .unwrap_or_default();
                     } else {
                         mb.error = Some("no matching harnesses".to_string());
                     }
@@ -463,14 +511,20 @@ impl App {
                     let _ = tx.send(event);
                 });
             }
-            MinibufferIntent::ForkSessionHarness { source_session_id } => {
+            MinibufferIntent::ForkSessionHarness {
+                source_session_id,
+                at_seq,
+            } => {
                 let harness = input.trim().to_string();
                 if harness.is_empty() {
                     return;
                 }
                 // Default options: seed the fork with the full source
-                // transcript (skipped for `shell` inside the client).
+                // transcript (skipped for `shell` inside the client). An
+                // anchored fork (spec 0163) carries its turn-picker branch
+                // point instead.
                 let mut opts = construct_client::ForkOptions::default();
+                opts.at_seq = at_seq;
                 let (cols, rows) = self.active_pane_size();
                 opts.pty_size = Some(construct_protocol::PtySize {
                     cols: cols.max(20),
@@ -504,6 +558,10 @@ impl App {
                     let _ = tx.send(event);
                 });
             }
+            // Selection-only prompt: submission happens through the
+            // dedicated key handler (Enter on a row), never through the
+            // text-input path.
+            MinibufferIntent::ForkTurnPick { .. } => {}
             MinibufferIntent::GroupDeleteConfirm { group_id } => {
                 let choice = parse_group_delete_choice(&input);
                 let delete_members = match choice {
@@ -880,6 +938,55 @@ impl App {
             construct_protocol::ForkMergeMode::Discard => "discarded",
         };
         self.set_status(format!("fork {verb}"));
+    }
+
+    /// Open the fork harness picker for `source_session_id`, pre-filled
+    /// with the source's harness so Enter accepts the same-harness
+    /// default. `at_seq` locks in an anchored branch point (spec 0163) —
+    /// the turn picker hands one over; the plain fork path passes `None`.
+    pub(crate) async fn open_fork_harness_picker(
+        &mut self,
+        source_session_id: String,
+        at_seq: Option<u64>,
+    ) {
+        let Some(source) = self
+            .sessions
+            .iter()
+            .find(|s| s.id == source_session_id)
+            .cloned()
+        else {
+            self.set_status("fork: source disappeared".to_string());
+            return;
+        };
+        if self.harnesses.is_empty() {
+            self.harnesses = self.client.harnesses().await.unwrap_or_default();
+        }
+        let input = if source.harness == "antigravity" {
+            "agy".to_string()
+        } else {
+            source.harness
+        };
+        let entries = harness_picker_entries(&self.harnesses, true, "", false);
+        self.harness_picker_selected = entries
+            .iter()
+            .position(|entry| entry.name == input)
+            .unwrap_or(0);
+        self.harness_picker_filter_active = false;
+        let cursor = input.chars().count();
+        let prompt = match at_seq {
+            Some(_) => "Fork from turn: ".to_string(),
+            None => "Fork session: ".to_string(),
+        };
+        self.minibuffer = Some(Minibuffer {
+            prompt,
+            input,
+            cursor,
+            intent: MinibufferIntent::ForkSessionHarness {
+                source_session_id,
+                at_seq,
+            },
+            error: None,
+        });
     }
 }
 

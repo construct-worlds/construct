@@ -12,11 +12,11 @@
 //!   `construct_whoami` tool). Set by the construct adapter when it spawns the
 //!   child CLI.
 
+use anyhow::Result;
 use construct_client::Client;
 use construct_protocol::jsonrpc::{self, error_codes, ErrorObject, MessageKind, Request, Response};
 use construct_protocol::paths::Paths;
 use construct_protocol::transport;
-use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::BufReader;

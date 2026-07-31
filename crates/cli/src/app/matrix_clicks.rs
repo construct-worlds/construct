@@ -27,6 +27,23 @@ impl App {
         let is_fork = match &mb.intent {
             MinibufferIntent::NewSessionHarness => false,
             MinibufferIntent::ForkSessionHarness { .. } => true,
+            // The turn picker wheels through its own selection.
+            MinibufferIntent::ForkTurnPick { .. } => {
+                let len = self.turn_picker_entries.len();
+                if len > 0 {
+                    let selected = self.turn_picker_selected.min(len - 1);
+                    self.turn_picker_selected = if direction < 0 {
+                        if selected == 0 {
+                            len - 1
+                        } else {
+                            selected - 1
+                        }
+                    } else {
+                        (selected + 1) % len
+                    };
+                }
+                return true;
+            }
             _ => return false,
         };
         let entries = harness_picker_entries(
@@ -124,6 +141,19 @@ impl App {
                         let intent = mb.intent.clone();
                         self.minibuffer = None;
                         self.run_minibuffer_submit(intent, hit.name).await;
+                        return;
+                    }
+                }
+            }
+            // Turn picker (spec 0163): clicking a row selects that turn and
+            // submits it, exactly as Enter on it would.
+            if matches!(mb.intent, MinibufferIntent::ForkTurnPick { .. }) {
+                let hits = self.layout.minibuffer_turn_hits.clone();
+                for hit in hits {
+                    if hit.y == row && col >= hit.x_start && col < hit.x_end {
+                        self.turn_picker_selected = hit.index;
+                        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+                        self.handle_minibuffer_key(key).await;
                         return;
                     }
                 }
