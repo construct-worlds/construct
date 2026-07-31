@@ -158,9 +158,7 @@ impl App {
             }
             KeyCode::Tab => {
                 self.service_focused = false;
-                if !self.activate_lineage_focus() {
-                    self.focus = PaneFocus::List;
-                }
+                self.focus = PaneFocus::List;
                 true
             }
             KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('p') => {

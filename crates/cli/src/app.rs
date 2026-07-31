@@ -3903,7 +3903,7 @@ pub struct LayoutSnapshot {
     /// can show the session's current model (and cached usage-probe data,
     /// spec 0086) on hover.
     pub session_harness_hits: Vec<SessionHarnessHit>,
-    /// Sidebar services section, between session rows and lineage.
+    /// Sidebar services section, between lineage and the operator panel.
     pub service_area: Option<ratatui::layout::Rect>,
     /// `+` create affordance in the services section header.
     pub service_add_hit: Option<ratatui::layout::Rect>,
@@ -10636,8 +10636,8 @@ impl App {
                 }
                 // Lineage section header: like the operator panel's title
                 // bar, dragging it adjusts the section height (the section
-                // is bottom-anchored above the operator, so dragging the
-                // header up grows it). The header's own buttons (collapse,
+                // is bottom-anchored above services, so dragging the header
+                // up grows it). The header's own buttons (collapse,
                 // mode toggle) are excluded so their clicks stay clicks.
                 if self.is_on_lineage_header_bar(ev.column, ev.row) {
                     let cur_h = self.layout.lineage_area.map(|a| a.height).unwrap_or(1);
@@ -11929,14 +11929,14 @@ impl App {
                 }
             }
             // Bare `Tab`, with the list pane focused, moves keyboard focus
-            // through the sidebar's sections: sessions → services → lineage
+            // through the sidebar's sections: sessions → lineage → services
             // → sessions. View-focused panes never reach here with a bare
             // Tab (PTY capture forwards it), keeping terminal completion.
             if key.modifiers.is_empty()
                 && matches!(key.code, KeyCode::Tab)
                 && self.focus == PaneFocus::List
             {
-                if self.activate_service_focus() || self.activate_lineage_focus() {
+                if self.activate_lineage_focus() || self.activate_service_focus() {
                     self.chord_label.clear();
                     return;
                 }
@@ -39983,7 +39983,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn services_render_between_session_rows_and_lineage() {
+    async fn services_render_between_lineage_and_operator() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
         app.services.push(service_summary_for_test("assistant"));
@@ -39994,8 +39994,13 @@ mod tests {
         let rows = app.layout.list_items_area.expect("session rows");
         let services = app.layout.service_area.expect("services section");
         let lineage = app.layout.lineage_area.expect("lineage section");
-        assert_eq!(rows.bottom(), services.y);
-        assert_eq!(services.bottom(), lineage.y);
+        assert_eq!(rows.bottom(), lineage.y);
+        assert_eq!(lineage.bottom(), services.y);
+        if let Some(operator) = app.layout.matrix_rain_area {
+            if operator.height > 0 {
+                assert_eq!(services.bottom(), operator.y);
+            }
+        }
         assert_eq!(app.layout.service_row_hits.len(), 1);
         let rendered = term
             .backend()
@@ -40008,6 +40013,34 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("services"));
         assert!(rendered.contains("assistant"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn bare_tab_follows_sidebar_visual_order() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        app.services.push(service_summary_for_test("assistant"));
+        app.focus = PaneFocus::List;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        assert!(app.lineage_focused);
+        assert!(!app.service_focused);
+
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        assert!(!app.lineage_focused);
+        assert!(app.service_focused);
+
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        assert!(!app.lineage_focused);
+        assert!(!app.service_focused);
+        assert_eq!(app.focus, PaneFocus::List);
         server.abort();
     }
 

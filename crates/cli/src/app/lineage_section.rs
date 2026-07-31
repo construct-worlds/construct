@@ -14,7 +14,7 @@
 //!   the list selection like a detail panel (master–detail), and a click on its
 //!   header collapses it to just that header row.
 //! - `Tab`, while the list pane holds focus, moves keyboard focus through
-//!   session rows, services, and the lineage section.
+//!   session rows, the lineage section, and services in visual order.
 
 use super::*;
 use crate::lineage::LineageRow;
@@ -290,10 +290,9 @@ impl App {
     /// the "a closing overlay never eats a live keystroke" rule, so e.g.
     /// `C-x C-c` still quits while the section is focused.
     ///
-    /// Esc and bare Tab both hand focus back to the session rows: Esc as the
-    /// universal "back out one level", Tab as the sessions⇄lineage focus
-    /// switch (its `App::on_key` intercept handles the sessions→lineage
-    /// direction).
+    /// Esc hands focus back to the session rows. Bare Tab advances to the
+    /// services section when present, then its handler completes the cycle
+    /// back to session rows.
     pub(super) async fn handle_lineage_focus_key(&mut self, key: KeyEvent) -> bool {
         if self.lineage_section_session().is_none() {
             // The section vanished under the focus (selection moved to a
@@ -333,9 +332,13 @@ impl App {
             // before its second key arrives would prevent global focus and
             // session commands such as `C-x o` from completing.
             KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => false,
-            // Bare Tab hands focus back to the session rows.
+            // Bare Tab advances downward in the sidebar to services, or back
+            // to the session rows when the services section is unavailable.
             KeyCode::Tab => {
                 self.lineage_focused = false;
+                if !self.activate_service_focus() {
+                    self.focus = PaneFocus::List;
+                }
                 true
             }
             _ => {

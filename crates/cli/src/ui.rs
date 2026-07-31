@@ -3397,8 +3397,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     let (list_items_area, matrix_area) =
         split_list_pane(inner, app.matrix_rain_hidden, app.matrix_rain_h);
     // Lineage section (spec 0081): the selected session's fork/subagent
-    // tree, carved from the bottom of the rows region so it sits between
-    // the session rows and the operator/matrix-rain panel.
+    // tree. Services are carved from the bottom first, then lineage from the
+    // remaining rows, yielding sessions → lineage → services → operator.
     let lineage = app
         .lineage_section_session()
         .map(|id| (id.clone(), app.lineage_section_rows(&id)));
@@ -3414,15 +3414,15 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 > list_items_area.width as usize
         })
         .unwrap_or(false);
-    let (list_and_services_area, lineage_rect) = split_lineage_section(
-        list_items_area,
+    let (list_and_lineage_area, service_rect) =
+        split_service_section(list_items_area, app.services.len());
+    let (list_items_area, lineage_rect) = split_lineage_section(
+        list_and_lineage_area,
         lineage.as_ref().map(|(_, rows)| rows.len()).unwrap_or(0),
         app.lineage_collapsed,
         app.lineage_h,
         lineage_h_scrollbar,
     );
-    let (list_items_area, service_rect) =
-        split_service_section(list_and_services_area, app.services.len());
     let max_scroll = app.list_max_scroll(&app_items, list_items_area.height as usize);
     // A pending scroll request (a fleet-panel row click) is resolved here,
     // not where it was made: selecting a session changes the lineage
@@ -3583,20 +3583,21 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         hit_y = hit_y.saturating_add(app.list_item_display_height(item) as u16);
     }
     clear_pane_side_borders(f, area, app);
-    if let Some(rect) = service_rect {
-        render_service_section(f, rect, app);
-    }
     if let (Some(rect), Some((id, mut rows))) = (lineage_rect, lineage) {
         render_lineage_section(f, rect, app, &id, &mut rows);
+    }
+    if let Some(rect) = service_rect {
+        render_service_section(f, rect, app);
     }
     render_matrix_rain(f, matrix_area, app);
 }
 
-/// Carve a compact services section from the bottom of the session-row
-/// region. The header is always present when space permits, so a fleet with
-/// no services still exposes the `+` create affordance. At most four service
-/// rows are shown; the section remains intentionally quieter than the
-/// session list and never squeezes that list below its minimum height.
+/// Carve a compact services section from the bottom of the sidebar content,
+/// immediately above the operator panel. The header is always present when
+/// space permits, so a fleet with no services still exposes the `+` create
+/// affordance. At most four service rows are shown; the section remains
+/// intentionally quieter than the session list and reserves the session
+/// list's minimum height before lineage takes its own bounded share.
 fn split_service_section(list: Rect, service_count: usize) -> (Rect, Option<Rect>) {
     let available = list
         .height
@@ -3758,7 +3759,8 @@ fn split_lineage_section(
 
 /// Render the sidebar's lineage section: a header bar (a `─` rule carrying
 /// the `⑂ lineage` label, the view-mode toggle, and a `−`/`+` collapse
-/// button — the same furniture as the operator panel's title bar below it)
+/// button — the same furniture as the operator panel's title bar lower in
+/// the sidebar)
 /// above the selected session's lineage diagram. Reuses
 /// `App::lineage_section_rows` (`crate::lineage::build_tree`/`flatten`
 /// underneath) for the tree and `render_lineage_row` for each row's

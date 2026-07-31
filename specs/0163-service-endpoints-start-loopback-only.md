@@ -13,8 +13,8 @@ expose a generic HTTP webhook only on loopback. A service owns its instruction,
 harness, model, working directory, and routing policy; a channel supplies the
 transport-specific credential and listener configuration.
 
-The TUI lists services in a dedicated sidebar section between session rows and
-lineage. Creating or selecting a service opens one editor for the full
+The TUI lists services in a dedicated sidebar section between lineage and the
+operator panel. Creating or selecting a service opens one editor for the full
 definition; edits continue to preserve the one-file-per-service boundary.
 
 The HTTP channel accepts authenticated JSON deliveries and routes them into
