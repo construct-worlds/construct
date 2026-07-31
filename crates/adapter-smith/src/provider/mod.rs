@@ -473,4 +473,5 @@ pub trait LlmProvider: Send + Sync {
     ) -> Result<ProviderTurn>;
 }
 
+#[allow(dead_code)]
 pub mod antigravity_oauth;

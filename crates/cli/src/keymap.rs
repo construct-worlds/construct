@@ -183,13 +183,6 @@ pub enum Profile {
 }
 
 impl Profile {
-    pub fn label(self) -> &'static str {
-        match self {
-            Profile::Emacs => "emacs",
-            Profile::Vim => "vim",
-        }
-    }
-
     pub fn from_env() -> Self {
         match std::env::var("CONSTRUCT_KEYMAP").as_deref() {
             Ok("vim") => Profile::Vim,

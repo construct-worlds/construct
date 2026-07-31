@@ -41,6 +41,7 @@ use tokio::sync::RwLock;
 
 /// Minimum interval; below this is just spam. Configurable for
 /// tests via `CONSTRUCT_LOOP_MIN_SECS`.
+#[cfg(test)]
 pub fn min_interval_secs() -> u64 {
     std::env::var("CONSTRUCT_LOOP_MIN_SECS")
         .ok()
@@ -49,6 +50,7 @@ pub fn min_interval_secs() -> u64 {
 }
 
 /// Maximum interval. Configurable via `CONSTRUCT_LOOP_MAX_SECS`.
+#[cfg(test)]
 pub fn max_interval_secs() -> u64 {
     std::env::var("CONSTRUCT_LOOP_MAX_SECS")
         .ok()
@@ -59,6 +61,7 @@ pub fn max_interval_secs() -> u64 {
 /// Clamp a desired interval to the configured bounds. Returns the
 /// resulting interval and a bool indicating whether it was
 /// clamped (caller surfaces the change in the tool result).
+#[cfg(test)]
 pub fn clamp_interval(secs: u64) -> (u64, bool) {
     let min = min_interval_secs();
     let max = max_interval_secs();
@@ -344,6 +347,7 @@ pub async fn run_scheduler(
 /// - `every 10s hi`           → 10s interval, no expiry
 /// - `30s for 5min check`     → 30s interval, expires in 5min, prompt="check"
 /// - `hello`                  → None (no interval token recognized)
+#[cfg(test)]
 pub fn parse_slash_spec(input: &str, now_ms: i64) -> Option<(LoopSpec, Option<i64>, String)> {
     let mut tokens = input.split_whitespace().peekable();
     // Strip optional "every"
@@ -372,6 +376,7 @@ pub fn parse_slash_spec(input: &str, now_ms: i64) -> Option<(LoopSpec, Option<i6
 /// Whitespace-stripped form only (the splitter handles spaces
 /// between tokens; `2 hours` arrives here as two tokens). Returns
 /// `None` if unrecognized.
+#[cfg(test)]
 fn parse_duration_secs(tok: &str) -> Option<u64> {
     // Find the boundary between digits and unit.
     let split_at = tok.find(|c: char| !c.is_ascii_digit())?;

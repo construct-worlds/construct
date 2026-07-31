@@ -29,10 +29,6 @@ use unicode_width::UnicodeWidthStr;
 
 const MATRIX_RAIN_RAMP_UP_SECS: f32 = 5.0;
 const MATRIX_RAIN_DECAY_SECS: f32 = 20.0;
-/// Brightness multiplier for the browser-preview wallpaper behind the
-/// matrix rain — kept very dim so the green rain clearly stays the
-/// foreground and the image reads as a faint backdrop.
-const MATRIX_WALLPAPER_DIM: f32 = 0.22;
 /// Seconds for a browser preview's top-to-bottom "dial-up" reveal on
 /// appear, and the top-to-bottom erase on disappear. Applies to both the
 /// terminal-view overlay and the matrix-rain wallpaper.
@@ -18632,7 +18628,7 @@ fn render_program_markdown_lines<'a>(
                 &[],
             )));
         } else {
-            let mut spans = render_program_inline_spans(
+            let spans = render_program_inline_spans(
                 app,
                 raw,
                 line_start,

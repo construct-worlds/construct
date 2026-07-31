@@ -192,6 +192,7 @@ fn parse_frontmatter_fields(frontmatter: &str) -> BTreeMap<String, String> {
 /// differently-named file. Malformed or unreadable files are skipped with a
 /// `tracing::warn!`, never a hard failure — one broken user file must not
 /// take down the whole list.
+#[cfg(test)]
 pub fn load_verbs(dir: &Path) -> Vec<ProgramVerb> {
     load_verbs_with_plugins(dir, &[])
 }

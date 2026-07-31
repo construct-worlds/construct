@@ -109,7 +109,7 @@ impl App {
                 .cloned()
             {
                 self.dynamic_ui_focused = Some((hit.session_id, hit.panel_id));
-                open_url(&hit.url);
+                let _ = open_url(&hit.url);
                 return true;
             }
             if Self::rect_contains(inline.area, col, row) {
@@ -155,7 +155,7 @@ impl App {
             .cloned()
         {
             self.dynamic_ui_focused = Some((hit.session_id, hit.panel_id));
-            open_url(&hit.url);
+            let _ = open_url(&hit.url);
             return true;
         }
         if let Some(hit) = self

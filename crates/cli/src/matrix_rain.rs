@@ -310,6 +310,8 @@ impl MatrixRain {
         );
     }
 
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub fn queue(
         &mut self,
         text: impl Into<String>,

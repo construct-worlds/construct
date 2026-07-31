@@ -1254,7 +1254,7 @@ async fn run_one_tool(
         base_hook_payload,
     )
     .await?;
-    let mut call = prepared.call;
+    let call = prepared.call;
     let args_summary = prepared.args_summary;
 
     let tool = registry

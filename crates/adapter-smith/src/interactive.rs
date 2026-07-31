@@ -43,13 +43,6 @@ impl<'a> Terminal<'a> {
     fn print(&self, s: &str) {
         self.write(s.as_bytes());
     }
-    fn newline(&self) {
-        self.write(b"\r\n");
-    }
-    fn prompt(&self) {
-        // Bold cyan `❯ `.
-        self.write(b"\r\n\x1b[1;36m\xe2\x9d\xaf \x1b[0m");
-    }
     /// Banner shown when the session starts.
     fn banner(&self, provider: &str, model: &str, mode: ApprovalMode) {
         let mode_badge = match mode.badge() {
@@ -60,78 +53,6 @@ impl<'a> Terminal<'a> {
             "\r\n\x1b[1;35msmith\x1b[0m  \x1b[2m{provider}:{model}\x1b[0m{mode_badge}\r\n",
         );
         self.write(banner.as_bytes());
-    }
-    fn tool_use(&self, name: &str, args_summary: &str) {
-        let line = format!("\r\n\x1b[1;32m→ {name}\x1b[0m\x1b[2m({args_summary})\x1b[0m\r\n");
-        self.write(line.as_bytes());
-    }
-    fn tool_result(&self, ok: bool, output: &str) {
-        let glyph = if ok {
-            "\x1b[1;32m✓\x1b[0m"
-        } else {
-            "\x1b[1;31m✗\x1b[0m"
-        };
-        // Print a short single-line preview of the result; full content
-        // is in the transcript (we also emit ToolResult).
-        let one_line: String = output
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(160)
-            .collect();
-        let line = format!("  {glyph}  \x1b[2m{one_line}\x1b[0m\r\n");
-        self.write(line.as_bytes());
-    }
-    /// Open a tool-block region in the PTY stream with a custom OSC
-    /// marker. Ratatui clients use this as a fence: the bytes between
-    /// the open and matching close are smith's truncated rendering,
-    /// which the items-model renderer skips in favor of synthesizing
-    /// its own representation from the structured `ToolUse` /
-    /// `ToolResult` events (and which can therefore expand/collapse
-    /// in place). Non-ratatui consumers (CLI tail, browser, MCP raw
-    /// view) see only the inline bytes — the OSC is invisible — so
-    /// their output stays sensible.
-    fn tool_block_open(&self, call_id: &str) {
-        let open = format!("\x1b]7700;open;call={}\x07", call_id);
-        self.write(open.as_bytes());
-    }
-    fn tool_block_close(&self, call_id: &str) {
-        let close = format!("\x1b]7700;close;call={}\x07", call_id);
-        self.write(close.as_bytes());
-    }
-    /// Render a tool's result body (glyph row + truncated preview +
-    /// optional `[+N lines — click to expand]` footer). Caller is
-    /// responsible for wrapping with [`tool_block_open`] /
-    /// [`tool_block_close`] — and typically writing a [`tool_use`]
-    /// header line in between so the entire block is fenced.
-    fn tool_result_body(&self, ok: bool, output: &str) {
-        let glyph = if ok {
-            "\x1b[1;32m✓\x1b[0m"
-        } else {
-            "\x1b[1;31m✗\x1b[0m"
-        };
-        let total_lines = output.lines().count();
-        for (i, line) in output.lines().take(TOOL_BLOCK_MAX_LINES).enumerate() {
-            let trimmed: String = line.chars().take(TOOL_BLOCK_MAX_COLS).collect();
-            if i == 0 {
-                let payload = format!("  {glyph}  \x1b[2m{trimmed}\x1b[0m\r\n");
-                self.write(payload.as_bytes());
-            } else {
-                let payload = format!("     \x1b[2m{trimmed}\x1b[0m\r\n");
-                self.write(payload.as_bytes());
-            }
-        }
-        if total_lines == 0 {
-            let payload = format!("  {glyph}  \x1b[2m(no output)\x1b[0m\r\n");
-            self.write(payload.as_bytes());
-        }
-        if total_lines > TOOL_BLOCK_MAX_LINES {
-            let remaining = total_lines - TOOL_BLOCK_MAX_LINES;
-            let footer =
-                format!("     \x1b[2;36m[+{remaining} lines — click to expand]\x1b[0m\r\n");
-            self.write(footer.as_bytes());
-        }
     }
     fn approval(&self, tool: &str, args_summary: &str, risk: ToolRisk, allow_auto_review: bool) {
         let risk_label = match risk {
@@ -152,56 +73,6 @@ impl<'a> Terminal<'a> {
     fn note(&self, msg: &str) {
         let line = format!("\r\n\x1b[2m{msg}\x1b[0m\r\n");
         self.write(line.as_bytes());
-    }
-    /// Inline acknowledgement that a user line was captured while the
-    /// agent was mid-turn — it'll fire on the next AwaitingInput.
-    /// Dim cyan so it reads as "future intent" rather than current
-    /// agent activity. Includes a leading + trailing CRLF so the
-    /// marker doesn't clobber whatever the agent is currently
-    /// writing on its line (there's still some visual artifact on
-    /// terminals with strict cursor tracking, but it's bounded to
-    /// one line of scrollback).
-    /// Recolor the `❯ ` prefix of the row immediately above the cursor
-    /// to "queued" white. Called after the user submits during a tool
-    /// run so the now-lifted line reads as pending in the queue. Uses
-    /// DECSC/DECRC (`ESC 7` / `ESC 8`) — the SCO `\x1b[s` / `\x1b[u`
-    /// pair isn't honored by every parser.
-    fn retro_color_queued_above(&self) {
-        // ESC 7 save, up 1, col 0, white ❯+space, ESC 8 restore.
-        self.write(b"\x1b7\x1b[1A\r\x1b[1;37m\xe2\x9d\xaf \x1b[0m\x1b8");
-    }
-    /// Walk `rows` lines upward from cursor, recoloring each `❯ ` to
-    /// gray (the "consumed / historical" color). Used when the agent
-    /// dequeues the queue at the start of its next turn.
-    fn retro_color_consumed(&self, rows: usize) {
-        if rows == 0 {
-            return;
-        }
-        let mut out: Vec<u8> = Vec::with_capacity(8 + rows * 16);
-        out.extend_from_slice(b"\x1b7");
-        for _ in 0..rows {
-            out.extend_from_slice(b"\x1b[1A\r\x1b[90m\xe2\x9d\xaf \x1b[0m");
-        }
-        out.extend_from_slice(b"\x1b8");
-        self.write(&out);
-    }
-    /// Wipe `rows` rendered queued lines plus the active editor line
-    /// below them. After this call the cursor is at column 0 of the
-    /// topmost erased row, ready for the editor's redraw to repaint
-    /// the active prompt with recalled content.
-    fn erase_queue_and_active(&self, rows: usize) {
-        if rows == 0 {
-            self.write(b"\r\x1b[2K");
-            return;
-        }
-        let cmd = format!("\x1b[{rows}A\r\x1b[J");
-        self.write(cmd.as_bytes());
-    }
-    /// Wipe the active editor row (so an agent-text stream below doesn't
-    /// land beside an orphan `❯`) and back up onto the line above so
-    /// the stream's leading `\r\n` lands on the just-cleared row.
-    fn erase_active_for_stream(&self) {
-        self.write(b"\r\x1b[2K\x1b[1A");
     }
     /// Echo a consumed line into the chat scrollback as a gray `❯`
     /// prompt — used at queue-dequeue to record "what the agent is
@@ -331,12 +202,6 @@ fn apply_pty_resize(cols: u16, pty_width: &mut usize) {
 /// (the full output is still in the transcript and in the model's
 /// context). Tuned to balance "I can see what the tool did" against
 /// "every read_file blowing out the scrollback."
-const TOOL_BLOCK_MAX_LINES: usize = 5;
-/// Per-line truncation inside a tool block, before the wrap math
-/// gets involved. Just a backstop against pathological single-line
-/// outputs from `shell` calls.
-const TOOL_BLOCK_MAX_COLS: usize = 200;
-
 /// Sink for the interactive mode: deltas go directly to the PTY (with
 /// dim-line styling for `Summary:` etc. + top/bottom/left/right padding
 /// around the whole response) and as Message events so the transcript
@@ -390,16 +255,6 @@ impl<'a> PtySink<'a> {
             in_reasoning: false,
         }
     }
-    /// Replay constructor — emits PTY bytes only, never `Message`
-    /// events. Used by the resize-redraw path where the messages are
-    /// already in the transcript.
-    fn new_replay(emit: &'a EventEmitter, width: usize) -> Self {
-        Self {
-            emit_messages: false,
-            ..Self::new(emit, width, now_ms())
-        }
-    }
-
     fn usable_width(&self) -> usize {
         self.width
             .saturating_sub(LEFT_MARGIN_CELLS + PAD_RIGHT)
@@ -854,10 +709,6 @@ impl LineEditor {
         self.hist_pos = None;
         self.saved.clear();
         self.queued_recall = None;
-    }
-
-    fn ascii_at(&self, n: usize) -> Option<char> {
-        self.buf.chars().nth(n)
     }
 
     fn move_left(&mut self) {
@@ -2028,20 +1879,6 @@ mod tests {
     }
 }
 
-/// Tri-state interrupt signal used during in-flight turns.
-#[derive(Default)]
-struct Interrupted {
-    flag: std::sync::atomic::AtomicBool,
-}
-impl Interrupted {
-    fn set(&self) {
-        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-    fn take(&self) -> bool {
-        self.flag.swap(false, std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
 /// Stand-in `provider` for the orchestrator exception (spec 0071): used
 /// while no model has resolved yet, so `provider: Box<dyn LlmProvider>`
 /// never needs to become `Option`-typed through the many helpers that take
@@ -2360,7 +2197,6 @@ pub async fn run(
                 &mut pty_width,
                 ambient_loop_enabled.then(|| obs_rx.as_mut()).flatten(),
                 &mut bg_completion_rx,
-                &tasks,
                 ambient_loop_enabled.then(|| ambient_loop.clone()).flatten(),
             )
             .await
@@ -3891,7 +3727,6 @@ async fn read_one_line(
     pty_width: &mut usize,
     mut obs_rx: Option<&mut tokio::sync::mpsc::UnboundedReceiver<crate::observe::Observation>>,
     bg_completion_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::tasks::BackgroundCompletion>,
-    tasks: &std::sync::Arc<crate::tasks::Tasks>,
     ambient_loop: Option<OperatorAmbientLoop>,
 ) -> ReadOutcome {
     loop {
@@ -4021,7 +3856,7 @@ async fn run_one_tool(
         base_hook_payload,
     )
     .await?;
-    let mut call = prepared.call;
+    let call = prepared.call;
     let args_summary = prepared.args_summary;
 
     let tool = registry

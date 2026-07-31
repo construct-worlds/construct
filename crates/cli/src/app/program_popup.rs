@@ -33,6 +33,7 @@ impl App {
 
     /// Path of the TUI's persisted program view state (spec 0099: expansion
     /// state is client-local; this file makes it survive TUI restarts).
+    #[cfg(not(test))]
     fn program_expanded_store_path() -> std::path::PathBuf {
         construct_protocol::paths::Paths::discover()
             .state_dir

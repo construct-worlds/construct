@@ -4185,7 +4185,7 @@ impl SessionManager {
                     self.handle_event(&entry, env.event).await;
                 }
                 AdapterMessage::Log {
-                    session_id: _,
+                    _session_id: _,
                     line,
                 } => {
                     tracing::info!(session = %entry.id, "adapter: {line}");

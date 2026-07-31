@@ -353,12 +353,6 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
     // Everything after the title cluster must hold still. The session name
     // itself legitimately changes, so the cluster's own width is not part of
     // the comparison — the controls that follow it are.
-    let header_js = "JSON.stringify(Array.from(
-         document.querySelectorAll('#viewModeToggle, #conn, #sessionRuntime')
-       ).map((e) => {
-         const r = e.getBoundingClientRect();
-         return [e.id, Math.round(r.left), Math.round(r.width)];
-       }))";
     let before_focus: String = page
         .evaluate(geometry_js)
         .await
@@ -903,19 +897,6 @@ async fn hover_split_button(page: &Page) {
         wired,
         "the tooltip must resolve its text from data-tip and have a :hover reveal rule"
     );
-}
-
-/// Focus the first pane in layout order, whichever it is.
-async fn focus_first_pane(page: &Page) {
-    let _ = page
-        .evaluate(
-            "(() => {
-               const p = document.querySelector('#paneGrid .pane');
-               if (p) p.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-               return true;
-             })()",
-        )
-        .await;
 }
 
 async fn save_screenshot(page: &Page, name: &str) {

@@ -189,6 +189,7 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
 /// Prune oldest turn pairs until the estimate is under budget. A turn
 /// pair is a User message + everything until the next User (or end).
 /// Returns the number of pruned turns for logging.
+#[cfg(test)]
 pub fn prune(messages: &mut Vec<Message>, provider: &str, model: &str) -> usize {
     let cap = (context_window_tokens(provider, model) as f64 * UTILIZATION) as usize;
     prune_to_budget(messages, cap)

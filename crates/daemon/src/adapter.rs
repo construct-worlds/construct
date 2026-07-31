@@ -25,7 +25,7 @@ type RpcResult = Result<serde_json::Value, ErrorObject>;
 pub enum AdapterMessage {
     Event(EventEnvelope),
     Log {
-        session_id: Option<String>,
+        _session_id: Option<String>,
         line: String,
     },
     Closed {
@@ -110,7 +110,7 @@ impl Adapter {
                             }
                             let _ = tx
                                 .send(AdapterMessage::Log {
-                                    session_id: None,
+                                    _session_id: None,
                                     line: trimmed,
                                 })
                                 .await;
@@ -185,7 +185,7 @@ impl Adapter {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("")
                                         .to_string();
-                                    let _ = tx.send(AdapterMessage::Log { session_id, line }).await;
+                                    let _ = tx.send(AdapterMessage::Log { _session_id: session_id, line }).await;
                                 }
                                 _ => {}
                             }
@@ -464,7 +464,7 @@ fn drain_stderr(stderr: tokio::process::ChildStderr, message_tx: mpsc::Sender<Ad
                     }
                     let _ = message_tx
                         .send(AdapterMessage::Log {
-                            session_id: None,
+                            _session_id: None,
                             line: trimmed,
                         })
                         .await;
@@ -556,7 +556,7 @@ async fn dispatch_adapter_message(
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let _ = tx.send(AdapterMessage::Log { session_id, line }).await;
+                    let _ = tx.send(AdapterMessage::Log { _session_id: session_id, line }).await;
                 }
                 _ => {}
             }

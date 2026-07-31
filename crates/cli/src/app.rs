@@ -49,7 +49,9 @@ pub use configure::{
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
 };
-pub use tutorial::{Step1Phase, TutorialState};
+pub use tutorial::TutorialState;
+#[cfg(test)]
+pub use tutorial::Step1Phase;
 
 pub const TERMINAL_SCROLLBAR_TTL: Duration = Duration::from_millis(1200);
 pub(crate) const DYNAMIC_UI_AUTOHIDE_SECS: u64 = 15;
@@ -1030,6 +1032,7 @@ pub enum MinibufferIntent {
         session_id: String,
         is_fork: bool,
     },
+    #[allow(dead_code)]
     MenuArchiveConfirm {
         session_id: String,
     },
@@ -1099,8 +1102,11 @@ pub enum MinibufferIntent {
     ApproveTool {
         session_id: String,
         call_id: String,
+        #[allow(dead_code)]
         tool: String,
+        #[allow(dead_code)]
         args_summary: String,
+        #[allow(dead_code)]
         risk: construct_protocol::ToolRisk,
         allow_auto_review: bool,
     },
@@ -3821,11 +3827,6 @@ impl MainSlideState {
         self.from + (target - self.from) * progress
     }
 
-    /// Whether the block is still moving — the render loop keeps drawing
-    /// until it settles.
-    pub fn animating(&self, now: Instant) -> bool {
-        (self.offset(now) - self.target as f32).abs() > f32::EPSILON
-    }
 }
 
 /// Vertical translation applied to the main block's recorded geometry once the
@@ -5821,6 +5822,7 @@ fn named_op_xy_session_slots(sessions: &[SessionSummary]) -> Vec<Option<String>>
         .collect()
 }
 
+#[cfg(test)]
 fn op_xy_session_feedback_state(session: Option<&SessionSummary>) -> crate::midi::FeedbackState {
     use construct_protocol::SessionState;
     let Some(session) = session else {
@@ -7499,13 +7501,6 @@ impl App {
             Selection::None => ArchiveSection::Ungrouped,
         };
         self.toggle_archive_section(&section);
-    }
-
-    /// Find the index of the currently-selected item in the materialized
-    /// list. Returns `None` if there is no selection or the item went away.
-    pub fn selected_list_index(&self) -> Option<usize> {
-        let items = self.list_items();
-        items.iter().position(|it| it.matches(&self.selection))
     }
 
     fn chat_scroll_line_count(&self) -> usize {
@@ -11252,14 +11247,6 @@ impl App {
 
     fn in_pty_session(&self) -> bool {
         self.selected_session().map(|s| s.has_pty).unwrap_or(false)
-    }
-
-    #[cfg(test)]
-    fn ui_panels_for_test(
-        &self,
-        session_id: &str,
-    ) -> Option<&HashMap<String, construct_protocol::UiPanel>> {
-        self.ui_panels.get(session_id)
     }
 
     fn global_action_while_inline(&mut self, key: KeyEvent) -> Option<KeyAction> {

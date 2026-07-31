@@ -10,7 +10,7 @@
 //! commands mutate the registry on disk and tell the user to restart the
 //! daemon (sessions survive a restart, so applying is cheap).
 
-use crate::config::{AdapterConfig, Config};
+use crate::config::Config;
 use anyhow::{bail, Context, Result};
 use construct_protocol::paths::Paths;
 use serde::{Deserialize, Serialize};
