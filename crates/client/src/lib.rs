@@ -481,17 +481,33 @@ impl Client {
 
         let mut prompt_parts: Vec<String> = Vec::new();
         let transcript_seq = self.transcript(source_id, 0, None).await.ok();
+        let total_seq = transcript_seq.as_ref().map(|t| t.total).unwrap_or(0);
+        // An anchor at or past the tail is the plain "fork from now" case.
+        let anchor = opts.at_seq.filter(|&s| s < total_seq);
         let source_is_terminal = src.has_pty && src.mode.as_deref() != Some("headless");
         // Native continuation only happens on the adapters' interactive
-        // paths, so a headless fork keeps the portable seed.
-        let native_fork =
-            harness == src.harness && harness_forks_natively(harness) && source_is_terminal;
+        // paths, so a headless fork keeps the portable seed. A mid-point
+        // anchor also rules it out: native fork primitives (`--fork-session`
+        // and friends) branch at the conversation head only, so an anchored
+        // fork must carry its context through the portable seed.
+        let native_fork = harness == src.harness
+            && harness_forks_natively(harness)
+            && source_is_terminal
+            && anchor.is_none();
         if opts.seed && !native_fork && harness != "shell" {
             // Full transcript from the start (seq 0) so the original objective
             // — usually stated in the opening message — is carried, not just
-            // the recent tail.
+            // the recent tail. With an anchor, stop there: events past it are
+            // exactly what the fork is branching away from.
             if let Some(tr) = transcript_seq.as_ref() {
-                if let Some(seed) = render_fork_seed(&tr.events, opts.max_seed_bytes) {
+                let events: &[construct_protocol::TimestampedEvent] = match anchor {
+                    Some(a) => {
+                        let end = tr.events.partition_point(|e| e.seq <= a);
+                        &tr.events[..end]
+                    }
+                    None => &tr.events,
+                };
+                if let Some(seed) = render_fork_seed(events, opts.max_seed_bytes) {
                     prompt_parts.push(seed);
                 }
             }
@@ -554,33 +570,47 @@ impl Client {
                 // and merge eligibility all key off `forked_from` being
                 // present, uniformly, whether the fork was the instant
                 // same-harness primary path or the cross-harness picker.
-                forked_from: Some(construct_protocol::ForkedFrom {
-                    session_id: src.id.clone(),
-                    transcript_seq: transcript_seq.as_ref().map(|t| t.total).unwrap_or(0),
-                    at_ms: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64,
-                    // The parent's compute time so far — the busy-time
-                    // counterpart to `transcript_seq`, so lineage windows
-                    // can report summed compute time per window.
-                    parent_busy_ms: src.busy_ms_at(
-                        SystemTime::now()
+                //
+                // The counter stamps (`transcript_seq`, messages, tokens,
+                // busy) describe the BRANCH POINT, not the fork's creation
+                // moment. For an anchored fork those differ: lineage carves
+                // the parent's lane into windows by subtracting neighboring
+                // stamps, so stamping "now" onto a fork that branched three
+                // turns ago would misattribute those turns' work to the
+                // wrong window.
+                forked_from: Some(match anchor {
+                    Some(a) => anchored_forked_from(
+                        &src,
+                        a,
+                        transcript_seq
+                            .as_ref()
+                            .map(|t| t.events.as_slice())
+                            .unwrap_or(&[]),
+                    ),
+                    None => construct_protocol::ForkedFrom {
+                        session_id: src.id.clone(),
+                        transcript_seq: total_seq,
+                        at_ms: SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis() as i64,
-                    ),
-                    // The parent's chat-message tally so far — the
-                    // message-only counterpart to `transcript_seq`, so
-                    // lineage windows can count actual messages.
-                    parent_message_count: src.message_count,
-                    // ...and the token counterpart (spec 0103).
-                    parent_tokens: src.tokens,
-                    // A user-initiated fork through this path, never an
-                    // automatic reset snapshot (spec 0085) — those are
-                    // synthesized entirely daemon-side, never through
-                    // `fork_session`.
-                    is_reset_snapshot: false,
+                        // The parent's compute time so far — the busy-time
+                        // counterpart to `transcript_seq`, so lineage windows
+                        // can report summed compute time per window.
+                        parent_busy_ms: src.busy_ms_at(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as i64,
+                        ),
+                        // The parent's chat-message tally so far — the
+                        // message-only counterpart to `transcript_seq`, so
+                        // lineage windows can count actual messages.
+                        parent_message_count: src.message_count,
+                        // ...and the token counterpart (spec 0103).
+                        parent_tokens: src.tokens,
+                        is_reset_snapshot: false,
+                    },
                 }),
             })
             .await?;
@@ -1329,6 +1359,16 @@ pub struct ForkOptions {
     /// Initial PTY size for forks of terminal sessions. When omitted, the
     /// client uses a standard terminal default.
     pub pty_size: Option<PtySize>,
+    /// Fork anchor: the last transcript `seq` (inclusive) carried into the
+    /// fork. `None` — and any value at or past the source's current tail —
+    /// forks from the present, exactly as before this field existed. An
+    /// earlier anchor branches from that point in the conversation: the seed
+    /// covers only events `<= at_seq`, and the `ForkedFrom` stamp records the
+    /// anchor's own counters so lineage windows stay pure subtraction.
+    /// A mid-point anchor forces the portable transcript seed even for
+    /// same-harness forks — native fork primitives only branch at the
+    /// conversation head.
+    pub at_seq: Option<u64>,
 }
 
 impl Default for ForkOptions {
@@ -1339,6 +1379,7 @@ impl Default for ForkOptions {
             seed: true,
             max_seed_bytes: 0,
             pty_size: None,
+            at_seq: None,
         }
     }
 }
@@ -1362,6 +1403,85 @@ impl Default for ForkOptions {
 /// indexed store a state-copy would desync), so it keeps the seed.
 fn harness_forks_natively(harness: &str) -> bool {
     matches!(harness, "claude" | "codex" | "opencode" | "grok" | "pi")
+}
+
+/// Build the `ForkedFrom` stamp for a fork anchored at `anchor` (an
+/// inclusive transcript seq strictly before the parent's tail). The message
+/// and token counters are recomputed from the event slice up to the anchor —
+/// mirroring the daemon's own accounting (every `Message` event counts;
+/// tokens accumulate from `Cost` events) — so lineage's subtraction-based
+/// window math attributes post-anchor work to the parent's later windows,
+/// not to this fork.
+///
+/// `parent_busy_ms` is an estimate: busy spans are replayed from the
+/// persisted state-transition events (`Status`, `AwaitingInput`, `Done`,
+/// `Error`), which misses spans the daemon opened from PTY-quiescence
+/// heuristics. It is clamped to the parent's true current total so the
+/// estimate can never exceed a later checkpoint.
+fn anchored_forked_from(
+    src: &construct_protocol::SessionSummary,
+    anchor: u64,
+    events: &[construct_protocol::TimestampedEvent],
+) -> construct_protocol::ForkedFrom {
+    use construct_protocol::{SessionEvent, SessionState, TokenTally};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let mut messages: u64 = 0;
+    let mut tokens = TokenTally::default();
+    let mut busy_ms: u64 = 0;
+    let mut running_since: Option<i64> = None;
+    let mut last_at_ms: i64 = 0;
+    for ev in events.iter().take_while(|e| e.seq <= anchor) {
+        let at_ms = ev.at.timestamp_millis();
+        last_at_ms = at_ms;
+        match &ev.event {
+            SessionEvent::Message { .. } => messages += 1,
+            SessionEvent::Cost {
+                tokens_in,
+                tokens_out,
+                tokens_cached,
+                ..
+            } => tokens.add(*tokens_in, *tokens_out, *tokens_cached),
+            SessionEvent::Status { state, .. } => {
+                if *state == SessionState::Running {
+                    running_since.get_or_insert(at_ms);
+                } else if let Some(since) = running_since.take() {
+                    busy_ms = busy_ms.saturating_add(at_ms.saturating_sub(since).max(0) as u64);
+                }
+            }
+            SessionEvent::AwaitingInput { .. }
+            | SessionEvent::Done { .. }
+            | SessionEvent::Error { .. } => {
+                if let Some(since) = running_since.take() {
+                    busy_ms = busy_ms.saturating_add(at_ms.saturating_sub(since).max(0) as u64);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(since) = running_since {
+        busy_ms = busy_ms.saturating_add(last_at_ms.saturating_sub(since).max(0) as u64);
+    }
+    // The busy estimate can only be clamped against a summary that actually
+    // tracks busy time — min() against an untracked 0 would erase it. The
+    // message/token counters need no clamp: they are recomputed from the
+    // exact events the daemon's own accumulators consumed, so they can't
+    // exceed a later checkpoint.
+    let busy_cap = src.busy_ms_at(now_ms);
+    if busy_cap > 0 {
+        busy_ms = busy_ms.min(busy_cap);
+    }
+    construct_protocol::ForkedFrom {
+        session_id: src.id.clone(),
+        transcript_seq: anchor,
+        at_ms: now_ms,
+        parent_busy_ms: busy_ms,
+        parent_message_count: messages,
+        parent_tokens: tokens,
+        is_reset_snapshot: false,
+    }
 }
 
 fn render_fork_seed(
@@ -1951,5 +2071,206 @@ mod fork_lineage_tests {
             "headless forks never native-fork; the seed must stay: {prompt:?}"
         );
         let _ = std::fs::remove_file(&sock);
+    }
+
+    /// Mock daemon for the anchored-fork (fork-at-seq) tests: a claude
+    /// terminal source with an 8-event transcript spanning two turns, plus
+    /// summary counters well past the mid-point anchor.
+    async fn anchored_fork_daemon() -> (
+        std::path::PathBuf,
+        Arc<StdMutex<Vec<serde_json::Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let sock =
+            std::path::PathBuf::from(format!("/tmp/afa{}{}{}.sock", std::process::id(), nanos, n));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon socket");
+        let captured = Arc::new(StdMutex::new(Vec::<serde_json::Value>::new()));
+        let captured_srv = captured.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = split(stream);
+            let mut reader = BufReader::new(r);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    break;
+                }
+                let req: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                let resp = match method {
+                    ipc_method::SESSION_GET => serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": {
+                            "summary": {
+                                "id": "src-1",
+                                "harness": "claude",
+                                "cwd": "/tmp",
+                                "state": "running",
+                                "created_at": "1970-01-01T00:00:00Z",
+                                "has_pty": true,
+                                "busy_ms": 60_000,
+                                "message_count": 4,
+                                "tokens": { "input": 300, "output": 120, "cached": 10 }
+                            },
+                            "events": []
+                        }
+                    }),
+                    ipc_method::SESSION_TRANSCRIPT => serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": { "events": [
+                            {"seq": 1, "at": "1970-01-01T00:00:01Z", "event": {
+                                "type": "message", "role": "user",
+                                "text": "EARLY_MARKER: the objective"
+                            }},
+                            {"seq": 2, "at": "1970-01-01T00:00:02Z", "event": {
+                                "type": "status", "state": "running"
+                            }},
+                            {"seq": 3, "at": "1970-01-01T00:00:05Z", "event": {
+                                "type": "cost", "usd": 0.0,
+                                "tokens_in": 100, "tokens_out": 40, "tokens_cached": 10
+                            }},
+                            {"seq": 4, "at": "1970-01-01T00:00:06Z", "event": {
+                                "type": "message", "role": "assistant",
+                                "text": "MID_MARKER: first answer"
+                            }},
+                            {"seq": 5, "at": "1970-01-01T00:00:07Z", "event": {
+                                "type": "awaiting_input"
+                            }},
+                            {"seq": 6, "at": "1970-01-01T00:00:10Z", "event": {
+                                "type": "message", "role": "user",
+                                "text": "LATE_MARKER: new direction"
+                            }},
+                            {"seq": 7, "at": "1970-01-01T00:00:11Z", "event": {
+                                "type": "cost", "usd": 0.0,
+                                "tokens_in": 200, "tokens_out": 80, "tokens_cached": 0
+                            }},
+                            {"seq": 8, "at": "1970-01-01T00:00:12Z", "event": {
+                                "type": "message", "role": "assistant",
+                                "text": "FINAL_MARKER: done"
+                            }}
+                        ], "total": 8 }
+                    }),
+                    ipc_method::PROGRAM_GET => serde_json::json!({
+                        "jsonrpc": "2.0", "id": id, "result": {
+                            "program": {
+                                "session_id": "src-1",
+                                "markdown": "",
+                                "version": 0,
+                                "updated_at_ms": 0
+                            },
+                            "revisions": []
+                        }
+                    }),
+                    ipc_method::SESSION_CREATE => {
+                        captured_srv
+                            .lock()
+                            .unwrap()
+                            .push(req.get("params").cloned().unwrap_or_default());
+                        serde_json::json!({
+                            "jsonrpc": "2.0", "id": id, "result": { "session_id": "new-1" }
+                        })
+                    }
+                    _ => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null}),
+                };
+                let s = resp.to_string() + "\n";
+                let _ = w.write_all(s.as_bytes()).await;
+            }
+        });
+        (sock, captured, server)
+    }
+
+    /// An anchored fork slices the seed at the anchor and stamps
+    /// `ForkedFrom` with the ANCHOR's counters, not the parent's current
+    /// ones — and it forces the portable seed even for a same-harness
+    /// claude fork, because native fork primitives only branch at the
+    /// conversation head.
+    #[tokio::test]
+    async fn anchored_fork_slices_the_seed_and_stamps_the_anchor() {
+        let (sock, captured, _server) = anchored_fork_daemon().await;
+        let client = Client::connect(&sock).await.expect("connect");
+        let mut opts = ForkOptions::default();
+        opts.at_seq = Some(4);
+        client
+            .fork_session("src-1", "claude", opts)
+            .await
+            .expect("anchored fork");
+        let calls = captured.lock().unwrap().clone();
+        let prompt = calls[0]
+            .get("prompt")
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
+        assert!(
+            prompt.contains("EARLY_MARKER") && prompt.contains("MID_MARKER"),
+            "seed carries the transcript up to the anchor: {prompt:?}"
+        );
+        assert!(
+            !prompt.contains("LATE_MARKER") && !prompt.contains("FINAL_MARKER"),
+            "events past the anchor are exactly what the fork branches away \
+             from: {prompt:?}"
+        );
+        let ff = calls[0].get("forked_from").cloned().expect("forked_from");
+        assert_eq!(ff.get("transcript_seq").and_then(|v| v.as_u64()), Some(4));
+        assert_eq!(
+            ff.get("parent_message_count").and_then(|v| v.as_u64()),
+            Some(2),
+            "two of the four messages precede the anchor"
+        );
+        assert_eq!(
+            ff.get("parent_tokens").cloned(),
+            Some(serde_json::json!({ "input": 100, "output": 40, "cached": 10 })),
+            "only the first Cost event precedes the anchor"
+        );
+        assert_eq!(
+            ff.get("parent_busy_ms").and_then(|v| v.as_u64()),
+            Some(4_000),
+            "Running opened at t=2s and was still open at the anchor's last \
+             event (t=6s)"
+        );
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// An anchor at (or past) the parent's tail is the plain head fork:
+    /// same-harness claude keeps the native path (no seed) and the stamp
+    /// records the full tail.
+    #[tokio::test]
+    async fn anchor_at_or_past_the_tail_is_a_plain_head_fork() {
+        for at_seq in [8, 999] {
+            let (sock, captured, _server) = anchored_fork_daemon().await;
+            let client = Client::connect(&sock).await.expect("connect");
+            let mut opts = ForkOptions::default();
+            opts.at_seq = Some(at_seq);
+            client
+                .fork_session("src-1", "claude", opts)
+                .await
+                .expect("head fork");
+            let calls = captured.lock().unwrap().clone();
+            assert!(
+                calls[0].get("prompt").map(|p| p.is_null()).unwrap_or(true),
+                "at_seq={at_seq}: native path, no seed: {:?}",
+                calls[0].get("prompt")
+            );
+            let ff = calls[0].get("forked_from").cloned().expect("forked_from");
+            assert_eq!(
+                ff.get("transcript_seq").and_then(|v| v.as_u64()),
+                Some(8),
+                "at_seq={at_seq}: stamped at the tail"
+            );
+            assert_eq!(
+                ff.get("parent_message_count").and_then(|v| v.as_u64()),
+                Some(4),
+                "at_seq={at_seq}: head-fork stamps use the summary counters"
+            );
+            let _ = std::fs::remove_file(&sock);
+        }
     }
 }

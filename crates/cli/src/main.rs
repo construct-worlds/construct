@@ -131,6 +131,11 @@ enum Command {
         /// and most-recent activity are kept and the middle is elided.
         #[arg(long, default_value_t = 0)]
         max_seed_bytes: usize,
+        /// Fork anchor: last transcript seq (inclusive) carried into the
+        /// fork. Omit — or pass a value at/past the tail — to fork from the
+        /// present. Seqs are visible via `construct transcript`.
+        #[arg(long)]
+        at_seq: Option<u64>,
     },
     /// SSH to a host and run `construct` there with a clipboard bridge:
     /// remote selection copies land on THIS machine's clipboard, and remote
@@ -605,6 +610,7 @@ async fn main() -> Result<()> {
             prompt,
             no_seed,
             max_seed_bytes,
+            at_seq,
         } => {
             let c = connect(&socket).await?;
             let id = c
@@ -617,6 +623,7 @@ async fn main() -> Result<()> {
                         seed: !no_seed,
                         max_seed_bytes,
                         pty_size: None,
+                        at_seq,
                     },
                 )
                 .await?;

@@ -906,6 +906,29 @@ struct Lane<'a> {
     ended: bool,
 }
 
+/// Arrow-label suffix for a fork that branched from BEHIND the parent's
+/// current checkpoint — an anchored fork (fork-at-seq) created after later
+/// forks or merges already advanced the parent's lane. Says how far back
+/// the anchor reaches, in the units segment labels use: messages when the
+/// stamps carry them, raw transcript events otherwise. `None` for ordinary
+/// head forks, and for a backdated FIRST branch (no checkpoint yet — the
+/// preceding segment row already tells that story). Must be computed
+/// BEFORE the fork's stamps advance the parent's checkpoint.
+fn back_fork_label(lane: &Lane, parent: &Lane) -> Option<String> {
+    let seq = lane.fork_seq?;
+    if seq >= parent.cp_seq {
+        return None;
+    }
+    let msgs = parent.cp_msgs.saturating_sub(lane.fork_msgs);
+    let (n, unit) = if parent.cp_msgs > 0 && msgs > 0 {
+        (msgs, if msgs == 1 { "msg" } else { "msgs" })
+    } else {
+        let d = parent.cp_seq - seq;
+        (d, if d == 1 { "event" } else { "events" })
+    };
+    Some(format!("{n} {unit} back"))
+}
+
 /// Event kinds on the global timeline, in tie-break order: a box appears
 /// (fork-out/subagent spawn/root creation), a fork merges back, a lane
 /// ends. Branches sort before merges at the same instant so e.g. a fork
@@ -1212,6 +1235,7 @@ fn layout_tree(
                 // turn-info line gets a lane-bar row above it (the row is
                 // left blank here; the end-fill draws every live lane's
                 // bar through it).
+                let back = back_fork_label(&lanes[i], &lanes[p]);
                 if let Some(seq) = lanes[i].fork_seq {
                     let d = seq.saturating_sub(lanes[p].cp_seq);
                     if d > 0 {
@@ -1239,8 +1263,16 @@ fn layout_tree(
                         );
                         cur += 1;
                     }
-                    lanes[p].cp_seq = seq;
-                    lanes[p].cp_ms = lanes[i].box_ms;
+                    // Advance-only: an anchored fork (fork-at-seq) can branch
+                    // from a point EARLIER than the last checkpoint — its box
+                    // lands here in creation order, but its stamps point
+                    // backward. Regressing the checkpoint would make the
+                    // parent's next window re-count events already attributed
+                    // to a previous segment.
+                    if seq >= lanes[p].cp_seq {
+                        lanes[p].cp_seq = seq;
+                        lanes[p].cp_ms = lanes[i].box_ms;
+                    }
                     lanes[p].cp_busy = lanes[p].cp_busy.max(lanes[i].fork_busy);
                     lanes[p].cp_msgs = lanes[p].cp_msgs.max(lanes[i].fork_msgs);
                     lanes[p].cp_tokens = lanes[p].cp_tokens.max(&lanes[i].fork_tokens);
@@ -1253,15 +1285,19 @@ fn layout_tree(
                 // separate `LineageEdge` variant — it IS an ordinary fork
                 // edge, just one `ForkedFrom` marks as auto-created.
                 let edge_word = if is_reset_snapshot_edge(&lanes[i]) {
-                    "↺"
+                    "↺".to_string()
                 } else {
-                    match lanes[i].node.edge {
-                        LineageEdge::Fork => "⑂",
-                        LineageEdge::Subagent => "▸",
-                        LineageEdge::Root => "",
+                    match (lanes[i].node.edge, &back) {
+                        // An anchored fork reaching behind the parent's
+                        // checkpoint says so on its arrow — its branch
+                        // point is not the segment it visually hangs from.
+                        (LineageEdge::Fork, Some(b)) => format!("⑂ {b}"),
+                        (LineageEdge::Fork, None) => "⑂".to_string(),
+                        (LineageEdge::Subagent, _) => "▸".to_string(),
+                        (LineageEdge::Root, _) => String::new(),
                     }
                 };
-                let ew = UnicodeWidthStr::width(edge_word);
+                let ew = UnicodeWidthStr::width(edge_word.as_str());
                 // Minimal-x placement: boxes only need THEIR OWN rows
                 // free (every event gets fresh rows, so box rects never
                 // collide), and a lane's bar simply gaps behind anything
@@ -1274,7 +1310,11 @@ fn layout_tree(
                 // keeps the diagram narrow.
                 let (this_lo, this_hi) = (lanes[i].box_ms, lanes[i].close_ms);
                 let bw = box_content_w(&lanes[i]) + 4;
-                let mut x = lanes[p].lane_col + 7;
+                // The arrow's minimum reach: glyph at plane+3 (ew wide),
+                // then at least one dash cell and the `▸` head before the
+                // box — a wide edge label (backdated forks) pushes the box
+                // right instead of colliding with it.
+                let mut x = lanes[p].lane_col + (ew + 6).max(7);
                 // The lane may hang anywhere under the box's interior:
                 // pick the leftmost free column at least SPREAD_APART
                 // columns away from every lifetime-overlapping lane (or
@@ -1353,7 +1393,7 @@ fn layout_tree(
                 c.put(
                     ay,
                     plane + 3,
-                    edge_word,
+                    &edge_word,
                     &LineageSpan::Edge {
                         kind: lanes[i].node.edge,
                         session_id: lanes[i].node.session_id.clone(),
@@ -1482,8 +1522,10 @@ fn layout_tree(
                     c.put_if_empty(cur, dx, '─', &fork_border);
                 }
                 c.put(cur, flane, "┘", &fork_border);
-                lanes[p].cp_seq = mseq;
-                lanes[p].cp_ms = at;
+                if mseq >= lanes[p].cp_seq {
+                    lanes[p].cp_seq = mseq;
+                    lanes[p].cp_ms = at;
+                }
                 lanes[p].cp_busy = lanes[p].cp_busy.max(mbusy);
                 lanes[p].cp_msgs = lanes[p].cp_msgs.max(mmsgs);
                 lanes[p].cp_tokens = lanes[p].cp_tokens.max(&mtokens);
@@ -1797,6 +1839,7 @@ pub fn flatten_rails(
                     continue;
                 }
                 let p = lanes[i].parent.expect("child lane has a parent");
+                let back = back_fork_label(&lanes[i], &lanes[p]);
                 if let Some(seq) = lanes[i].fork_seq {
                     let d = seq.saturating_sub(lanes[p].cp_seq);
                     if d > 0 {
@@ -1824,8 +1867,16 @@ pub fn flatten_rails(
                         last_row[p] = last_row[p].max(cur);
                         cur += 1;
                     }
-                    lanes[p].cp_seq = seq;
-                    lanes[p].cp_ms = lanes[i].box_ms;
+                    // Advance-only: an anchored fork (fork-at-seq) can branch
+                    // from a point EARLIER than the last checkpoint — its box
+                    // lands here in creation order, but its stamps point
+                    // backward. Regressing the checkpoint would make the
+                    // parent's next window re-count events already attributed
+                    // to a previous segment.
+                    if seq >= lanes[p].cp_seq {
+                        lanes[p].cp_seq = seq;
+                        lanes[p].cp_ms = lanes[i].box_ms;
+                    }
                     lanes[p].cp_busy = lanes[p].cp_busy.max(lanes[i].fork_busy);
                     lanes[p].cp_msgs = lanes[p].cp_msgs.max(lanes[i].fork_msgs);
                     lanes[p].cp_tokens = lanes[p].cp_tokens.max(&lanes[i].fork_tokens);
@@ -1851,15 +1902,19 @@ pub fn flatten_rails(
                 c.put(cur, pc, "├", &parent_border);
                 c.put(cur, cc, if cc > pc { "┐" } else { "┌" }, &child_border);
                 let glyph = if is_reset_snapshot_edge(&lanes[i]) {
-                    "↺"
+                    "↺".to_string()
                 } else {
-                    match lanes[i].node.edge {
-                        LineageEdge::Fork => "⑂",
-                        LineageEdge::Subagent => "▸",
-                        LineageEdge::Root => "",
+                    match (lanes[i].node.edge, &back) {
+                        // An anchored fork reaching behind the parent's
+                        // checkpoint says so on its edge glyph — its branch
+                        // point is not the row it visually hangs from.
+                        (LineageEdge::Fork, Some(b)) => format!("⑂ {b}"),
+                        (LineageEdge::Fork, None) => "⑂".to_string(),
+                        (LineageEdge::Subagent, _) => "▸".to_string(),
+                        (LineageEdge::Root, _) => String::new(),
                     }
                 };
-                put_label(&mut c, cur, &lanes[i], Some(glyph));
+                put_label(&mut c, cur, &lanes[i], Some(&glyph));
                 placed[i] = true;
                 first_row[i] = cur + 1;
                 last_row[i] = cur;
@@ -1953,8 +2008,10 @@ pub fn flatten_rails(
                 c.put(cur, pc, "├", &parent_border);
                 c.put(cur, cc, if cc > pc { "┘" } else { "└" }, &fork_border);
                 c.put(cur, text_x, "↩ merge", &fork_border);
-                lanes[p].cp_seq = mseq;
-                lanes[p].cp_ms = at;
+                if mseq >= lanes[p].cp_seq {
+                    lanes[p].cp_seq = mseq;
+                    lanes[p].cp_ms = at;
+                }
                 lanes[p].cp_busy = lanes[p].cp_busy.max(mbusy);
                 lanes[p].cp_msgs = lanes[p].cp_msgs.max(mmsgs);
                 lanes[p].cp_tokens = lanes[p].cp_tokens.max(&mtokens);
@@ -3707,6 +3764,103 @@ mod tests {
                 10, // root, since C forked (seq 20) to now (event_count 30)…
                 2,  // …sharing the final "now" row with C's own whole life
             ]
+        );
+    }
+
+    #[test]
+    fn backdated_fork_does_not_regress_the_parent_checkpoint() {
+        // An anchored fork (fork-at-seq) created AFTER a later fork already
+        // advanced the parent's checkpoint: its stamps point backward. The
+        // checkpoint must not move back — root's remaining events would be
+        // re-counted into the next window — and no segment row is emitted
+        // for the backdated branch itself.
+        let root = with_event_count(with_created_at_ms(base("root"), 0), 30);
+        let a = with_event_count(
+            with_created_at_ms(forked_from_at(base("a"), "root", 20, 1_000), 1_000),
+            3,
+        );
+        // b was created later (t=2000) but anchored at seq 10 — behind a's
+        // seq-20 checkpoint.
+        let b = with_event_count(
+            with_created_at_ms(forked_from_at(base("b"), "root", 10, 2_000), 2_000),
+            2,
+        );
+        let sessions = vec![root, a, b];
+        let tree = build_tree("root", &sessions).unwrap();
+        for rows in [
+            flatten(&tree, &sessions, 9_000),
+            flatten_rails(&tree, &sessions, 9_000).0,
+        ] {
+            assert_eq!(
+                segment_deltas(&rows),
+                vec![
+                    20, // root before a forked: [0, 20)
+                    10, // root since seq 20 to now (event_count 30) — b's
+                    // backdated branch at seq 10 must NOT reset the
+                    // checkpoint and turn this into a 20-event window
+                    3, // a's own life
+                    2, // b's own life
+                ],
+                "backdated anchor must not re-count the parent's events"
+            );
+        }
+    }
+
+    #[test]
+    fn backdated_fork_arrow_says_how_far_back_it_branched() {
+        // A backdated branch emits no segment row of its own (its window
+        // was already carved), so the arrow label is where the timeline
+        // information lives: `⑂ N events back` (msgs when the stamps carry
+        // message counts).
+        let root = with_event_count(with_created_at_ms(base("root"), 0), 30);
+        let a = with_event_count(
+            with_created_at_ms(forked_from_at(base("a"), "root", 20, 1_000), 1_000),
+            3,
+        );
+        let b = with_event_count(
+            with_created_at_ms(forked_from_at(base("b"), "root", 10, 2_000), 2_000),
+            2,
+        );
+        let sessions = vec![root, a, b];
+        let tree = build_tree("root", &sessions).unwrap();
+        for rows in [
+            flatten(&tree, &sessions, 9_000),
+            flatten_rails(&tree, &sessions, 9_000).0,
+        ] {
+            let text = rows
+                .iter()
+                .map(|r| r.text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains("⑂ 10 events back"),
+                "backdated branch is labeled with its reach: {text}"
+            );
+        }
+
+        // With message counts tracked on the stamps, the label counts
+        // messages instead of raw events.
+        let mut a = with_event_count(
+            with_created_at_ms(forked_from_at(base("a"), "root", 20, 1_000), 1_000),
+            3,
+        );
+        a.forked_from.as_mut().unwrap().parent_message_count = 6;
+        let mut b = with_event_count(
+            with_created_at_ms(forked_from_at(base("b"), "root", 10, 2_000), 2_000),
+            2,
+        );
+        b.forked_from.as_mut().unwrap().parent_message_count = 2;
+        let root = with_event_count(with_created_at_ms(base("root"), 0), 30);
+        let sessions = vec![root, a, b];
+        let tree = build_tree("root", &sessions).unwrap();
+        let text = flatten(&tree, &sessions, 9_000)
+            .iter()
+            .map(|r| r.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("⑂ 4 msgs back"),
+            "message-count stamps label in msgs: {text}"
         );
     }
 
