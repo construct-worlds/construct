@@ -654,10 +654,6 @@ mod tests {
         assert!(avail.available);
     }
 
-    /// Serializes tests that mutate the direct-API-key / `HOME` env vars
-    /// `smith_auth_methods` reads, so parallel test execution can't race them.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Regression for the `auto` entry counting subscription/Ollama
     /// availability: a machine with only a Codex subscription credential
     /// (no direct API key) must NOT report `auto` as available, since
@@ -668,7 +664,12 @@ mod tests {
     /// exact mismatch this dialog exists to prevent.
     #[tokio::test]
     async fn auto_unavailable_when_only_a_subscription_credential_exists() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        // `HOME` and `CODEX_HOME` are process-global, and tests in other
+        // modules point them at their own fixtures. A lock private to this
+        // module excluded only its own tests, so a router test setting
+        // `CODEX_HOME` could still interleave with this one's read. Take the
+        // crate-wide guard every env-mutating test uses.
+        let _lock = crate::router::oauth::test_env_guard();
         let key_vars = [
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",

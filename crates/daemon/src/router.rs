@@ -24,7 +24,7 @@ pub mod oauth;
 pub mod proxy;
 pub mod translate;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -425,6 +425,11 @@ pub struct SessionRouting {
     /// pinned route so a request-carried Construct alias can select its own
     /// target.
     catalog_enabled: AtomicBool,
+    /// Native models the harness fills its own internal seats with (spec
+    /// 0166). Captured at attach because the set is a property of the
+    /// harness's catalog, and the proxy cannot afford a disk read per
+    /// request.
+    role_models: HashSet<String>,
     route: RwLock<Option<ArmedRoute>>,
     /// Bumped on every route change. Open pass-through tunnels compare it
     /// against the value they started with to notice they are stale: a
@@ -441,6 +446,12 @@ pub struct SessionRouting {
 impl SessionRouting {
     pub fn armed_route(&self) -> Option<ArmedRoute> {
         self.route.read().unwrap().clone()
+    }
+
+    /// Whether a request's model names an internal seat the harness chose
+    /// for itself rather than the model the session runs on (spec 0166).
+    pub fn is_role_model(&self, model: &str) -> bool {
+        self.role_models.contains(model)
     }
 
     pub fn route_epoch(&self) -> u64 {
@@ -734,6 +745,22 @@ impl Router {
             || (self.publish_models
                 && harness == "claude"
                 && !self.published_models("claude").is_empty());
+        // Failing to read the catalog leaves the set empty, which restores
+        // the pre-0166 behavior of pinning every model. Say so rather than
+        // letting a silent fallback re-hide the substitution.
+        let role_models = match self.native_role_models(harness) {
+            Ok(models) => models,
+            Err(error) => {
+                tracing::warn!(
+                    session = %session_id,
+                    %harness,
+                    error = %format!("{error:#}"),
+                    "could not read the harness catalog; internal-seat models will follow \
+                     this session's pinned route"
+                );
+                HashSet::new()
+            }
+        };
 
         let ctx = Arc::new(SessionRouting {
             session_id: session_id.to_string(),
@@ -742,6 +769,7 @@ impl Router {
             ca,
             upstream_proxy: self.upstream_proxy.clone(),
             catalog_enabled: AtomicBool::new(catalog_enabled),
+            role_models,
             route: RwLock::new(None),
             route_epoch: std::sync::atomic::AtomicU64::new(0),
             observed: AtomicBool::new(false),
@@ -1651,6 +1679,57 @@ mod tests {
         r.attach_session("s1", "claude", None).unwrap();
         let err = r.set_route("s1", "claude", Some("kimi"), None, None, None).unwrap_err();
         assert!(err.to_string().contains("NOT_SET_ANYWHERE"), "{err}");
+    }
+
+    /// A Codex session learns its harness's internal seats at attach, so
+    /// the proxy can tell "the model this session runs on" apart from "the
+    /// model Codex picked for its own reviewer" without a disk read per
+    /// request (spec 0166).
+    #[tokio::test]
+    async fn attach_captures_the_harnesss_hidden_models_as_role_models() {
+        let _env = oauth::test_env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let codex_home = dir.path().join("codex");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(
+            codex_home.join("models_cache.json"),
+            serde_json::json!({
+                "models": [
+                    {"slug": "gpt-5.6-sol", "visibility": "list"},
+                    {"slug": "codex-auto-review", "visibility": "hide"},
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("CODEX_HOME", &codex_home);
+
+        let r = started(&dir, cfg_with(true)).await;
+        r.attach_session("s-codex", "codex", None).unwrap();
+        let ctx = r.sessions.read().unwrap()["s-codex"].clone();
+
+        assert!(
+            ctx.is_role_model("codex-auto-review"),
+            "the approval reviewer is a seat Codex fills for itself"
+        );
+        assert!(
+            !ctx.is_role_model("gpt-5.6-sol"),
+            "a picker-visible model is the session's own work and follows the pin"
+        );
+
+        std::env::remove_var("CODEX_HOME");
+    }
+
+    /// Only Codex publishes a catalog we can read seats from. Every other
+    /// harness keeps today's behavior rather than guessing.
+    #[tokio::test]
+    async fn a_harness_without_a_readable_catalog_has_no_role_models() {
+        let _env = oauth::test_env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let r = started(&dir, cfg_with(true)).await;
+        r.attach_session("s-claude", "claude", None).unwrap();
+        let ctx = r.sessions.read().unwrap()["s-claude"].clone();
+        assert!(!ctx.is_role_model("codex-auto-review"));
     }
 
     #[tokio::test]
