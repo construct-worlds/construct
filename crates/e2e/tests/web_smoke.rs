@@ -1321,6 +1321,7 @@ async fn web_client_loads_and_websocket_connects() {
                   top: { text: 'top pick' },
                   verbs: [{ label: 'refine', cards: [{ text: 'card a' }, { text: 'card b' }] }],
                 });
+                const fanLabels = suggestFanItems().map((item) => item.label);
                 composerEl.hidden = false;
                 inputEl.value = 'typing must continue';
                 inputEl.focus();
@@ -1447,6 +1448,7 @@ async fn web_client_loads_and_websocket_connects() {
                   historyFontSize,
                   historyCardHeight,
                   historyHasClamp: !!clamp,
+                  fanLabels,
                 };
               } finally {
                 delete suggestDeckEl.hidden;
@@ -1573,6 +1575,18 @@ async fn web_client_loads_and_websocket_connects() {
     assert_eq!(
         suggestion_focus["historyHasClamp"], true,
         "history cards clamp via an inner span: {suggestion_focus:?}"
+    );
+    assert!(
+        suggestion_focus["fanLabels"]
+            .as_array()
+            .is_some_and(|labels| labels.iter().any(|label| label == "history ›")),
+        "the fan must always expose History: {suggestion_focus:?}"
+    );
+    assert!(
+        suggestion_focus["fanLabels"]
+            .as_array()
+            .is_some_and(|labels| labels.iter().any(|label| label == "regenerate")),
+        "a dealt hand must expose explicit Regenerate: {suggestion_focus:?}"
     );
     let history_lh = suggestion_focus["historyLineHeight"].as_f64().unwrap_or(0.0);
     let history_fs = suggestion_focus["historyFontSize"].as_f64().unwrap_or(0.0);
