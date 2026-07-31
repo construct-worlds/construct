@@ -13,19 +13,22 @@ expose a generic HTTP webhook only on loopback. A service owns its instruction,
 harness, model, working directory, and routing policy; a channel supplies the
 transport-specific credential and listener configuration.
 
-The TUI lists services in a dedicated sidebar section between lineage and the
-operator panel. Creating or selecting a service opens a first-class service
-view in the active split, rather than a modal. The view presents fields and
-focused-field guidance side by side with a padded interior, stacking the
-guidance below the fields only when the terminal is too narrow for two readable
-columns. The same view exposes routed-session activity and keeps create/edit/
-delete actions in the view's normal focus lifecycle.
+The TUI renders services as top-level rows in the ordinary session list rather
+than in a separate sidebar section. A service row uses the distinct `◈` type
+glyph, participates in the same scrolling, keyboard navigation, and pointer
+selection as a session, and opens a first-class service view in the active
+split rather than a modal. The view presents fields and focused-field guidance
+side by side with a padded interior, stacking the guidance below the fields
+only when the terminal is too narrow for two readable columns. The same view
+exposes routed-session activity and keeps create/edit/delete actions in the
+view's normal focus lifecycle.
 
-The WebTUI mirrors this surface at `/services/<name>`. Its service list is
-below the session list, its wide layout uses the same definition/help columns,
-and narrow layouts stack those columns. A service may occupy a shared split
-pane alongside a session; a pane identity therefore carries either a session
-id or a service name, never an ambiguous URL or display label.
+The WebTUI mirrors this surface at `/services/<name>`. Services appear in the
+same list model as sessions, using the same `◈` glyph and row selection. Its
+wide service view uses the same definition/help columns, and narrow layouts
+stack those columns. A service may occupy a shared split pane alongside a
+session; a pane identity therefore carries either a session id or a service
+name, never an ambiguous URL or display label.
 
 The HTTP channel accepts authenticated JSON deliveries and routes them into
 ordinary headless Construct sessions. `session-key` routing persists the

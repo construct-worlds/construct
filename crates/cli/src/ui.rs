@@ -304,9 +304,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.main_window_dividers.clear();
     app.layout.session_title_name_hits.clear();
     app.layout.session_harness_hits.clear();
-    app.layout.service_area = None;
-    app.layout.service_add_hit = None;
-    app.layout.service_row_hits.clear();
     app.layout.list_visible_rows.clear();
     app.layout.list_mode_toggle_hit = None;
     // Cleared here rather than in `render_sessions`, which the collapsed and
@@ -3012,7 +3009,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     // `pane_border_style`'s focused styling as the highlight rather than
     // inventing new styling.
     // Exactly one sidebar region reads as keyboard-focused at a time:
-    // session rows, services, or lineage.
+    // the unified session/service rows or lineage.
     let focused = app.session_rows_focused() || app.tutorial_wants_list_highlight();
     // Collapsed render path: a thin column with a `»` expand glyph
     // on the top border. Anywhere inside the pane click-expands. Keyed off
@@ -3180,6 +3177,35 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 selected_idx = Some(i);
             }
             match item {
+                AppListItem::Service { summary: service } => {
+                    // Services use a deliberately distinct type glyph rather
+                    // than borrowing session state glyphs. Their harness (or
+                    // paused state) remains right-aligned like a session's
+                    // harness label, so service rows still scan with the
+                    // rest of the fleet.
+                    let suffix = if service.paused {
+                        format!("{} · paused", service.harness)
+                    } else {
+                        service.harness.clone()
+                    };
+                    let suffix_w = suffix.chars().count();
+                    let prefix_w = 3; // `◈ ` plus the name's separating gap
+                    let name_avail = row_w.saturating_sub(prefix_w + 1 + suffix_w);
+                    let name = fit_name(&service.name, name_avail, None);
+                    let name_w = name.chars().count();
+                    let gap = row_w.saturating_sub(prefix_w + name_w + suffix_w);
+                    let name_style = if service.paused {
+                        Style::default().fg(app.theme.dim)
+                    } else {
+                        Style::default().fg(app.theme.text)
+                    };
+                    vec![Line::from(vec![
+                        Span::styled("◈ ", Style::default().fg(app.theme.accent)),
+                        Span::styled(name, name_style),
+                        Span::raw(" ".repeat(gap)),
+                        Span::styled(suffix, session_list_secondary_style(&app.theme)),
+                    ])]
+                }
                 AppListItem::Session {
                     summary: s,
                     indented,
@@ -3371,8 +3397,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     let (list_items_area, matrix_area) =
         split_list_pane(inner, app.matrix_rain_hidden, app.matrix_rain_h);
     // Lineage section (spec 0081): the selected session's fork/subagent
-    // tree. Services are carved from the bottom first, then lineage from the
-    // remaining rows, yielding sessions → lineage → services → operator.
+    // tree. Services are ordinary rows in the list above; they do not claim
+    // a separate sidebar region.
     let lineage = app
         .lineage_section_session()
         .map(|id| (id.clone(), app.lineage_section_rows(&id)));
@@ -3388,10 +3414,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 > list_items_area.width as usize
         })
         .unwrap_or(false);
-    let (list_and_lineage_area, service_rect) =
-        split_service_section(list_items_area, app.services.len());
     let (list_items_area, lineage_rect) = split_lineage_section(
-        list_and_lineage_area,
+        list_items_area,
         lineage.as_ref().map(|(_, rows)| rows.len()).unwrap_or(0),
         app.lineage_collapsed,
         app.lineage_h,
@@ -3560,124 +3584,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     if let (Some(rect), Some((id, mut rows))) = (lineage_rect, lineage) {
         render_lineage_section(f, rect, app, &id, &mut rows);
     }
-    if let Some(rect) = service_rect {
-        render_service_section(f, rect, app);
-    }
     render_matrix_rain(f, matrix_area, app);
-}
-
-/// Carve a compact services section from the bottom of the sidebar content,
-/// immediately above the operator panel. The header is always present when
-/// space permits, so a fleet with no services still exposes the `+` create
-/// affordance. At most four service rows are shown; the section remains
-/// intentionally quieter than the session list and reserves the session
-/// list's minimum height before lineage takes its own bounded share.
-fn split_service_section(list: Rect, service_count: usize) -> (Rect, Option<Rect>) {
-    let available = list
-        .height
-        .saturating_sub(crate::app::SESSION_LIST_H_MIN);
-    if available == 0 {
-        return (list, None);
-    }
-    let desired = (service_count.saturating_add(1)).min(5) as u16;
-    let height = desired.max(1).min(available);
-    let rows = Rect {
-        height: list.height - height,
-        ..list
-    };
-    let section = Rect {
-        x: list.x,
-        y: list.y + list.height - height,
-        width: list.width,
-        height,
-    };
-    (rows, Some(section))
-}
-
-fn render_service_section(f: &mut Frame, rect: Rect, app: &mut App) {
-    app.layout.service_area = Some(rect);
-    let focused = app.focus == PaneFocus::List && app.service_focused;
-    let rule_color = if focused {
-        app.theme.border_focused
-    } else {
-        app.theme.border
-    };
-    let width = rect.width as usize;
-    let mut header = "─ services ".to_string();
-    if header.chars().count() < width.saturating_sub(3) {
-        header.push_str(&"─".repeat(
-            width
-                .saturating_sub(3)
-                .saturating_sub(header.chars().count()),
-        ));
-    }
-    header.push_str(" + ");
-    header = header.chars().take(width).collect();
-    let mut lines = vec![Line::from(Span::styled(
-        format!("{header:<width$}"),
-        Style::default().fg(rule_color),
-    ))];
-    if rect.width >= 3 {
-        app.layout.service_add_hit = Some(Rect {
-            x: rect.x + rect.width - 3,
-            y: rect.y,
-            width: 3,
-            height: 1,
-        });
-    }
-
-    let visible = rect.height.saturating_sub(1) as usize;
-    app.service_selected = app
-        .service_selected
-        .min(app.services.len().saturating_sub(1));
-    let visible_start = if app.service_focused && visible > 0 {
-        app.service_selected.saturating_sub(visible - 1)
-    } else {
-        0
-    };
-    for (index, service) in app
-        .services
-        .iter()
-        .enumerate()
-        .skip(visible_start)
-        .take(visible)
-    {
-        let status = if service.paused { "○" } else { "●" };
-        let model = service
-            .model
-            .as_deref()
-            .map(|model| format!(" · {model}"))
-            .unwrap_or_default();
-        let raw = format!(" {status} {} · {}{model}", service.name, service.harness);
-        let mut text: String = raw.chars().take(width).collect();
-        let text_width = text.chars().count();
-        if text_width < width {
-            text.push_str(&" ".repeat(width - text_width));
-        }
-        let selected = focused && index == app.service_selected;
-        let mut style = Style::default().fg(if service.paused {
-            app.theme.dim
-        } else {
-            app.theme.text
-        });
-        if selected {
-            style = style
-                .fg(app.theme.highlight_fg)
-                .bg(app.theme.highlight_bg);
-        }
-        lines.push(Line::from(Span::styled(text, style)));
-        app.layout.service_row_hits.push(crate::app::ServiceRowHit {
-            index,
-            name: service.name.clone(),
-            area: Rect {
-                x: rect.x,
-                y: rect.y + 1 + (index - visible_start) as u16,
-                width: rect.width,
-                height: 1,
-            },
-        });
-    }
-    f.render_widget(Paragraph::new(lines), rect);
 }
 
 /// Carve the sidebar's lineage section (spec 0081) from the bottom of the

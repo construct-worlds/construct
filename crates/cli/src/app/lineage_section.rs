@@ -96,11 +96,10 @@ impl App {
         true
     }
 
-    /// Whether the session ROWS should read as the keyboard-focused sidebar
-    /// region. Service or lineage focus takes the highlight off the sessions
-    /// title bar.
+    /// Whether the unified session/service rows should read as the
+    /// keyboard-focused sidebar region.
     pub(crate) fn session_rows_focused(&self) -> bool {
-        self.focus == PaneFocus::List && !self.service_focused && !self.lineage_focused
+        self.focus == PaneFocus::List && !self.lineage_focused
     }
 
     /// Test helper for toggling lineage focus; keyboard entry is scoped to
@@ -135,7 +134,6 @@ impl App {
             .position(|&idx| rows[idx].session_id() == Some(id.as_str()))
             .unwrap_or(0);
         self.focus = PaneFocus::List;
-        self.service_focused = false;
         self.lineage_focused = true;
         if !self.restore_lineage_scroll_for_selected_session() {
             self.lineage_follow_selection = true;
@@ -290,9 +288,9 @@ impl App {
     /// the "a closing overlay never eats a live keystroke" rule, so e.g.
     /// `C-x C-c` still quits while the section is focused.
     ///
-    /// Esc hands focus back to the session rows. Bare Tab advances to the
-    /// services section when present, then its handler completes the cycle
-    /// back to session rows.
+    /// Esc hands focus back to the session rows. Bare Tab advances back to
+    /// the unified rows because services no longer have a separate focus
+    /// region.
     pub(super) async fn handle_lineage_focus_key(&mut self, key: KeyEvent) -> bool {
         if self.lineage_section_session().is_none() {
             // The section vanished under the focus (selection moved to a
@@ -332,13 +330,10 @@ impl App {
             // before its second key arrives would prevent global focus and
             // session commands such as `C-x o` from completing.
             KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => false,
-            // Bare Tab advances downward in the sidebar to services, or back
-            // to the session rows when the services section is unavailable.
+            // Bare Tab advances back to the unified session/service rows.
             KeyCode::Tab => {
                 self.lineage_focused = false;
-                if !self.activate_service_focus() {
-                    self.focus = PaneFocus::List;
-                }
+                self.focus = PaneFocus::List;
                 true
             }
             _ => {

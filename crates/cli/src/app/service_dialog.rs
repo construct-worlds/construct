@@ -1,4 +1,4 @@
-//! Service sidebar focus and the inline service-view editor.
+//! Inline service-view editor and service definition lifecycle.
 
 use super::*;
 
@@ -81,9 +81,6 @@ impl App {
             Ok(mut services) => {
                 services.sort_by(|a, b| a.name.cmp(&b.name));
                 self.services = services;
-                self.service_selected = self
-                    .service_selected
-                    .min(self.services.len().saturating_sub(1));
             }
             Err(error) => self.set_status(format!("services refresh failed: {error}")),
         }
@@ -126,71 +123,6 @@ impl App {
             confirm_delete: false,
         });
         true
-    }
-
-    pub(super) fn activate_service_focus(&mut self) -> bool {
-        if self.layout.service_area.is_none() {
-            return false;
-        }
-        self.focus = PaneFocus::List;
-        self.lineage_focused = false;
-        self.service_focused = true;
-        self.service_selected = self
-            .service_selected
-            .min(self.services.len().saturating_sub(1));
-        true
-    }
-
-    pub(super) async fn handle_service_focus_key(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Esc => {
-                self.service_focused = false;
-                true
-            }
-            KeyCode::Tab => {
-                self.service_focused = false;
-                self.focus = PaneFocus::List;
-                true
-            }
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('p') => {
-                if !self.services.is_empty() {
-                    self.service_selected = self
-                        .service_selected
-                        .checked_sub(1)
-                        .unwrap_or(self.services.len() - 1);
-                }
-                true
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if !self.services.is_empty() {
-                    self.service_selected = (self.service_selected + 1) % self.services.len();
-                }
-                true
-            }
-            KeyCode::Char('n') => {
-                self.open_new_service_view("service");
-                true
-            }
-            KeyCode::Enter => {
-                if let Some(name) = self
-                    .services
-                    .get(self.service_selected)
-                    .map(|service| service.name.clone())
-                {
-                    self.open_edit_service_view(&name);
-                } else {
-                    self.open_new_service_view("service");
-                }
-                true
-            }
-            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => false,
-            _ => {
-                if self.chord_state.is_empty() {
-                    self.service_focused = false;
-                }
-                false
-            }
-        }
     }
 
     fn edit_service_dialog_text(&mut self, mut edit: impl FnMut(&mut String)) {
@@ -298,7 +230,6 @@ impl App {
             .await
         {
             Ok(result) => {
-                let name = result.service.name.clone();
                 self.refresh_services().await;
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     dialog.mode = ServiceDialogMode::Edit;
@@ -312,11 +243,6 @@ impl App {
                         "Saved. Restart the daemon to apply changes.".to_string()
                     });
                 }
-                self.service_selected = self
-                    .services
-                    .iter()
-                    .position(|service| service.name == name)
-                    .unwrap_or(0);
             }
             Err(error) => {
                 if let Some(dialog) = self.service_dialog.as_mut() {

@@ -187,10 +187,14 @@ const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
 /// bounds client-side IPC chatter, so it can stay short.
 const HARNESS_USAGE_QUERY_INTERVAL: Duration = Duration::from_secs(2);
 
-/// A row in the rendered list view. Sessions and group headers share the
-/// list; key dispatch and selection are typed.
+/// A row in the rendered list view. Sessions, services, and group headers
+/// share the list; key dispatch and selection are typed.
 #[derive(Debug, Clone)]
 pub enum ListItem {
+    /// A service is a top-level fleet item. It has no PTY or transcript, but
+    /// selecting it opens the service view in exactly the same split-pane
+    /// lifecycle as selecting a session.
+    Service { summary: ServiceSummary },
     Session {
         summary: SessionSummary,
         indented: bool,
@@ -599,6 +603,7 @@ pub(crate) fn list_archive_indent_cells(
 impl ListItem {
     pub fn matches(&self, sel: &Selection) -> bool {
         match (self, sel) {
+            (ListItem::Service { summary }, Selection::Service(name)) => summary.name == *name,
             (ListItem::Session { summary, .. }, Selection::Session(id)) => summary.id == *id,
             (ListItem::GroupHeader { group, .. }, Selection::Group(id)) => group.id == *id,
             (ListItem::ArchivedRow { section, .. }, Selection::ArchivedRow(sel)) => section == sel,
@@ -1567,19 +1572,6 @@ pub struct MatrixWidgetHover {
     pub until: Instant,
 }
 
-#[derive(Debug, Clone)]
-pub struct ServiceRowHit {
-    pub index: usize,
-    pub name: String,
-    pub area: ratatui::layout::Rect,
-}
-
-impl ServiceRowHit {
-    pub fn contains(&self, col: u16, row: u16) -> bool {
-        App::rect_contains(self.area, col, row)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VimMode {
     Normal,
@@ -1603,8 +1595,6 @@ pub struct App {
     pub sessions: Vec<SessionSummary>,
     pub groups: Vec<GroupSummary>,
     pub services: Vec<ServiceSummary>,
-    pub service_selected: usize,
-    pub service_focused: bool,
     pub selection: Selection,
     pub focus: PaneFocus,
     pub main_windows: MainWindowTree,
@@ -3948,12 +3938,6 @@ pub struct LayoutSnapshot {
     /// can show the session's current model (and cached usage-probe data,
     /// spec 0086) on hover.
     pub session_harness_hits: Vec<SessionHarnessHit>,
-    /// Sidebar services section, between lineage and the operator panel.
-    pub service_area: Option<ratatui::layout::Rect>,
-    /// `+` create affordance in the services section header.
-    pub service_add_hit: Option<ratatui::layout::Rect>,
-    /// Visible service rows; clicking one opens its editor.
-    pub service_row_hits: Vec<ServiceRowHit>,
     /// Bounds of the sidebar's lineage section from the last frame (header
     /// row included). `None` when the selected session has no lineage to
     /// show (or the sidebar is collapsed/hidden).
@@ -4295,9 +4279,6 @@ impl LayoutSnapshot {
             modal_area,
             session_title_name_hits,
             session_harness_hits,
-            service_area,
-            service_add_hit,
-            service_row_hits,
             lineage_area,
             lineage_header_hit,
             lineage_collapse_hit,
@@ -4390,8 +4371,6 @@ impl LayoutSnapshot {
         shift.opt_rect(view_area);
         shift.opt_rect(pin_strip_area);
         shift.opt_rect(matrix_rain_area);
-        shift.opt_rect(service_area);
-        shift.opt_rect(service_add_hit);
         shift.opt_rect(lineage_area);
         shift.opt_rect(lineage_header_hit);
         shift.opt_rect(lineage_collapse_hit);
@@ -4403,8 +4382,6 @@ impl LayoutSnapshot {
         shift.opt_rect(dynamic_ui_dropdown_area);
         shift.opt_rect(playbook_resize_hit);
         shift.opt_rect(playbook_pinned_card_rect);
-        shift.retain_rects(service_row_hits, |hit| &mut hit.area);
-
         // The list's row map is indexed by offset from the items area's top
         // row, so rows clipped off the top have to leave the map too.
         if let Some(items) = list_items_area.as_mut() {
@@ -5114,8 +5091,6 @@ async fn run_with_socket_initial_selection(
         sessions,
         groups,
         services,
-        service_selected: 0,
-        service_focused: false,
         selection: initial_window_sel,
         // Default focus is the view — the selected session is usually
         // what the user wants to interact with first. List navigation
@@ -7092,7 +7067,6 @@ impl App {
         }
         self.selection = Selection::Service(name);
         self.focus = PaneFocus::View;
-        self.service_focused = false;
         self.lineage_focused = false;
         self.transcript.clear();
         self.transcript_session = None;
@@ -7749,6 +7723,17 @@ impl App {
     /// is collapsed.
     pub fn list_items(&self) -> Vec<ListItem> {
         let mut out: Vec<ListItem> = Vec::new();
+
+        // Services are ordinary top-level list rows rather than a separate
+        // sidebar section. Keep their order stable even if a notification
+        // arrives with an unsorted service vector.
+        let mut services = self.services.clone();
+        services.sort_by(|a, b| a.name.cmp(&b.name));
+        out.extend(
+            services
+                .into_iter()
+                .map(|summary| ListItem::Service { summary }),
+        );
 
         let orch_id = self.orchestrator_id.as_deref();
         let mut subagents_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
@@ -8966,6 +8951,7 @@ impl App {
             }
         }
         match &items[next] {
+            ListItem::Service { summary } => self.select_service(summary.name.clone()),
             ListItem::Session { summary, .. } => self.select_session(summary.id.clone()),
             ListItem::GroupHeader { group, .. } => self.select_group(group.id.clone()),
             ListItem::ArchivedRow { section, .. } => self.select_archive_row(section.clone()),
@@ -8985,10 +8971,12 @@ impl App {
     }
 
     fn is_primary_list_target(item: &ListItem) -> bool {
-        matches!(
-            item,
-            ListItem::Session { summary, .. } if !summary.archived
-        ) || matches!(item, ListItem::GroupHeader { .. })
+        match item {
+            ListItem::Service { .. } => true,
+            ListItem::Session { summary, .. } => !summary.archived,
+            ListItem::GroupHeader { .. } => true,
+            ListItem::ArchivedRow { .. } => false,
+        }
     }
 
     /// After any list mutation, make sure `self.selection` still refers to
@@ -9081,6 +9069,7 @@ impl App {
         self.selection = items
             .iter()
             .find_map(|it| match it {
+                ListItem::Service { summary } => Some(Selection::Service(summary.name.clone())),
                 ListItem::Session { summary, .. } => Some(Selection::Session(summary.id.clone())),
                 ListItem::GroupHeader { group, .. } => Some(Selection::Group(group.id.clone())),
                 ListItem::ArchivedRow { .. } => None,
@@ -10725,19 +10714,12 @@ impl App {
                 }
                 // Lineage section header: like the operator panel's title
                 // bar, dragging it adjusts the section height (the section
-                // is bottom-anchored above services, so dragging the header
-                // up grows it). The header's own buttons (collapse,
+                // is bottom-anchored above the operator panel, so dragging
+                // the header up grows it). The header's own buttons (collapse,
                 // mode toggle) are excluded so their clicks stay clicks.
                 if self.is_on_lineage_header_bar(ev.column, ev.row) {
                     let cur_h = self.layout.lineage_area.map(|a| a.height).unwrap_or(1);
                     self.resizing_lineage = Some((ev.row, cur_h));
-                    return;
-                }
-                if self
-                    .layout
-                    .service_area
-                    .is_some_and(|area| Self::rect_contains(area, ev.column, ev.row))
-                {
                     return;
                 }
                 if self.is_over_lineage_section(ev.column, ev.row) {
@@ -11528,6 +11510,7 @@ impl App {
     /// disclosure rows, every compact-mode row) takes one.
     pub(crate) fn list_item_display_height(&self, item: &ListItem) -> usize {
         match item {
+            ListItem::Service { .. } => 1,
             ListItem::Session { .. } if self.list_mode == SessionListViewMode::Full => 2,
             _ => 1,
         }
@@ -11920,12 +11903,6 @@ impl App {
         if self.configure_popup.is_some() && self.handle_configure_key(key).await {
             return;
         }
-        if self.focus == PaneFocus::List
-            && self.service_focused
-            && self.handle_service_focus_key(key).await
-        {
-            return;
-        }
         // The sidebar's lineage section, keyboard-focused (bare `Tab` from
         // the list pane — spec 0081): owns
         // navigation/merge/discard/jump keys while focused; anything else
@@ -12050,14 +12027,14 @@ impl App {
                 }
             }
             // Bare `Tab`, with the list pane focused, moves keyboard focus
-            // through the sidebar's sections: sessions → lineage → services
-            // → sessions. View-focused panes never reach here with a bare
+            // through the sidebar's sections: rows → lineage → rows.
+            // View-focused panes never reach here with a bare
             // Tab (PTY capture forwards it), keeping terminal completion.
             if key.modifiers.is_empty()
                 && matches!(key.code, KeyCode::Tab)
                 && self.focus == PaneFocus::List
             {
-                if self.activate_lineage_focus() || self.activate_service_focus() {
+                if self.activate_lineage_focus() {
                     self.chord_label.clear();
                     return;
                 }
@@ -13029,14 +13006,12 @@ impl App {
         let focused_on_session =
             self.focus == PaneFocus::View && session_window == Some(self.active_window_id);
         let focused_on_list_session = self.focus == PaneFocus::List
-            && !self.service_focused
             && !self.lineage_focused
             && self.selected_id().as_deref() == Some(session_id.as_str());
 
         if focused_on_session {
             self.select_session(session_id);
             self.focus = PaneFocus::List;
-            self.service_focused = false;
             self.lineage_focused = false;
             self.set_status(format!("OP-XY session {session_label} → list"));
         } else if focused_on_list_session && self.activate_lineage_focus() {
@@ -13048,7 +13023,6 @@ impl App {
         } else {
             self.select_session(session_id);
             self.focus = PaneFocus::List;
-            self.service_focused = false;
             self.lineage_focused = false;
             self.set_status(format!("OP-XY session {session_label} → list"));
         }
@@ -15869,9 +15843,6 @@ mod tests {
             remote_control_hits: Vec::new(),
             session_title_name_hits: Vec::new(),
             session_harness_hits: Vec::new(),
-            service_area: None,
-            service_add_hit: None,
-            service_row_hits: Vec::new(),
             lineage_area: None,
             lineage_header_hit: None,
             lineage_collapse_hit: None,
@@ -16026,8 +15997,6 @@ mod tests {
             sessions,
             groups: Vec::new(),
             services: Vec::new(),
-            service_selected: 0,
-            service_focused: false,
             selection: Selection::Session("s1".into()),
             focus: PaneFocus::View,
             main_windows: MainWindowTree::single(1, Selection::Session("s1".into())),
@@ -40116,7 +40085,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn services_render_between_lineage_and_operator() {
+    async fn services_render_as_distinct_rows_in_the_session_list() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
         app.services.push(service_summary_for_test("assistant"));
@@ -40124,27 +40093,18 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
 
-        let rows = app.layout.list_items_area.expect("session rows");
-        let services = app.layout.service_area.expect("services section");
-        let lineage = app.layout.lineage_area.expect("lineage section");
-        assert_eq!(rows.bottom(), lineage.y);
-        assert_eq!(lineage.bottom(), services.y);
-        if let Some(operator) = app.layout.matrix_rain_area {
-            if operator.height > 0 {
-                assert_eq!(services.bottom(), operator.y);
-            }
-        }
-        assert_eq!(app.layout.service_row_hits.len(), 1);
+        assert!(matches!(
+            app.list_items().first(),
+            Some(ListItem::Service { summary }) if summary.name == "assistant"
+        ));
         let rendered = term
             .backend()
             .buffer()
             .content()
             .chunks(term.backend().buffer().area.width as usize)
-            .skip(services.y as usize)
-            .take(services.height as usize)
             .flat_map(|row| row.iter().map(|cell| cell.symbol()))
             .collect::<String>();
-        assert!(rendered.contains("services"));
+        assert!(rendered.contains("◈"));
         assert!(rendered.contains("assistant"));
         server.abort();
     }
@@ -40162,48 +40122,39 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
         assert!(app.lineage_focused);
-        assert!(!app.service_focused);
 
         app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
         assert!(!app.lineage_focused);
-        assert!(app.service_focused);
-
-        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .await;
-        assert!(!app.lineage_focused);
-        assert!(!app.service_focused);
         assert_eq!(app.focus, PaneFocus::List);
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_sidebar_create_and_edit_affordances_open_service_view() {
+    async fn service_list_row_opens_service_view_and_serve_starts_creation() {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
 
-        let row = app.layout.service_row_hits[0].area;
-        app.handle_left_click(row.x + 1, row.y).await;
+        let row = app.layout.list_items_area.expect("session list");
+        app.click_list(app.layout.list_area.expect("list"), row.x + 1, row.y).await;
+        assert!(app.service_dialog.is_none());
+        assert_eq!(
+            app.selection,
+            Selection::Service("assistant".into())
+        );
+        assert_eq!(app.focus, PaneFocus::View);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+            .await;
         assert!(matches!(
             app.service_dialog.as_ref().map(|dialog| dialog.mode),
             Some(ServiceDialogMode::Edit)
         ));
-        assert_eq!(
-            app.service_dialog
-                .as_ref()
-                .map(|dialog| dialog.service.name.as_str()),
-            Some("assistant")
-        );
-        assert_eq!(app.selection, Selection::Service("assistant".into()));
-        assert_eq!(app.focus, PaneFocus::View);
-
         app.service_dialog = None;
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let add = app.layout.service_add_hit.expect("create affordance");
-        app.handle_left_click(add.x + 1, add.y).await;
+        app.open_new_service_view("service");
         assert!(matches!(
             app.service_dialog.as_ref().map(|dialog| dialog.mode),
             Some(ServiceDialogMode::Create)
