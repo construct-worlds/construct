@@ -15,7 +15,10 @@ transport-specific credential and listener configuration.
 
 The TUI lists services in a dedicated sidebar section between lineage and the
 operator panel. Creating or selecting a service opens one editor for the full
-definition; edits continue to preserve the one-file-per-service boundary.
+definition; edits continue to preserve the one-file-per-service boundary. The
+editor presents fields and focused-field guidance side by side with a padded
+interior, stacking the guidance below the fields only when the terminal is too
+narrow for two readable columns.
 
 The HTTP channel accepts authenticated JSON deliveries and routes them into
 ordinary headless Construct sessions. `session-key` routing persists the

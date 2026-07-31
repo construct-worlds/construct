@@ -40077,6 +40077,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_dialog_is_padded_and_describes_the_focused_field() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.open_new_service_dialog("assistant");
+        app.service_dialog.as_mut().unwrap().selected_field = 6;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let popup = app.layout.modal_area.expect("service dialog");
+        let field_y = popup.y + 2;
+        let buffer = term.backend().buffer();
+        for x in popup.x + 1..popup.x + 4 {
+            assert_eq!(
+                buffer.cell((x, field_y)).map(|cell| cell.symbol()),
+                Some(" "),
+                "service fields keep the remote-dialog-sized left inset"
+            );
+        }
+        assert_eq!(
+            buffer
+                .cell((popup.x + 4, field_y))
+                .map(|cell| cell.symbol()),
+            Some(" "),
+            "the first field's unselected marker starts after the inset"
+        );
+        assert!(
+            (popup.x + 4..popup.right().saturating_sub(4)).any(|x| {
+                buffer
+                    .cell((x, field_y))
+                    .is_some_and(|cell| cell.symbol() == "│")
+            }),
+            "a divider separates fields from contextual help"
+        );
+        let popup_text = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .skip(popup.y as usize)
+            .take(popup.height as usize)
+            .flat_map(|row| row.iter().map(|cell| cell.symbol()))
+            .collect::<String>();
+        assert!(popup_text.contains("Loopback port"));
+        assert!(popup_text.contains("unique among services"));
+
+        app.service_dialog.as_mut().unwrap().selected_field = 5;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let buffer = term.backend().buffer();
+        let popup_text = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .skip(popup.y as usize)
+            .take(popup.height as usize)
+            .flat_map(|row| row.iter().map(|cell| cell.symbol()))
+            .collect::<String>();
+        assert!(popup_text.contains("Reuses one session"));
+        assert!(!popup_text.contains("Loopback port"));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn lineage_section_renders_below_the_session_rows() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());

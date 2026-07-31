@@ -539,8 +539,11 @@ fn render_service_dialog(f: &mut Frame, app: &mut App) {
         return;
     };
     let area = f.area();
-    let width = 88u16.min(area.width.saturating_sub(4)).max(30);
-    let height = 18u16.min(area.height.saturating_sub(2)).max(12);
+    let width = 112u16.min(area.width.saturating_sub(4));
+    let height = 22u16.min(area.height.saturating_sub(2));
+    if width < 36 || height < 14 {
+        return;
+    }
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -551,6 +554,7 @@ fn render_service_dialog(f: &mut Frame, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border_focused))
+        .padding(ratatui::widgets::Padding::new(3, 3, 1, 1))
         .title(dialog.title());
     let inner = block.inner(popup);
     f.render_widget(block, popup);
@@ -566,7 +570,7 @@ fn render_service_dialog(f: &mut Frame, app: &mut App) {
         "HTTP port",
         "State",
     ];
-    let mut lines = Vec::with_capacity(14);
+    let mut field_lines = Vec::with_capacity(labels.len());
     for (index, label) in labels.iter().enumerate() {
         let selected = index == dialog.selected_field;
         let locked = index == 0 && dialog.mode == crate::app::ServiceDialogMode::Edit;
@@ -585,21 +589,101 @@ fn render_service_dialog(f: &mut Frame, app: &mut App) {
             app.theme.text
         });
         if selected {
-            style = style
-                .fg(app.theme.highlight_fg)
-                .bg(app.theme.highlight_bg);
+            style = style.fg(app.theme.highlight_fg).bg(app.theme.highlight_bg);
         }
-        lines.push(Line::from(Span::styled(text, style)));
+        field_lines.push(Line::from(Span::styled(text, style)));
     }
-    lines.push(Line::from(""));
+
+    let (help_title, help_body, help_hint) = service_dialog_field_help(&dialog);
+    let help_lines = vec![
+        Line::from(Span::styled(
+            help_title,
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(help_body, Style::default().fg(app.theme.text))),
+        Line::from(""),
+        Line::from(Span::styled(help_hint, Style::default().fg(app.theme.dim))),
+    ];
+
+    let wide = inner.width >= 72;
+    let body_chunks = if wide {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(8),
+                Constraint::Length(1),
+                Constraint::Min(3),
+            ])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(8),
+                Constraint::Length(5),
+                Constraint::Min(1),
+            ])
+            .split(inner)
+    };
+
+    if wide {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(56),
+                Constraint::Length(3),
+                Constraint::Min(24),
+            ])
+            .split(body_chunks[0]);
+        f.render_widget(Paragraph::new(field_lines), columns[0]);
+        let divider_x = columns[1].x.saturating_add(columns[1].width / 2);
+        for y in columns[1].top()..columns[1].bottom() {
+            f.buffer_mut()
+                .set_string(divider_x, y, "│", Style::default().fg(app.theme.border));
+        }
+        f.render_widget(
+            Paragraph::new(help_lines).wrap(Wrap { trim: false }),
+            columns[2],
+        );
+    } else {
+        f.render_widget(Paragraph::new(field_lines), body_chunks[0]);
+        f.render_widget(
+            Paragraph::new(help_lines).wrap(Wrap { trim: false }),
+            body_chunks[1],
+        );
+    }
+
+    let lower = body_chunks[2];
+    let footer = if dialog.mode == crate::app::ServiceDialogMode::Create {
+        "Tab/↑/↓ field · Enter/C-s create · Esc cancel"
+    } else {
+        "Tab/↑/↓ field · Enter/C-s save · C-r rotate token · C-d delete · Esc close"
+    };
+    let footer_h = if footer.chars().count() > lower.width as usize {
+        2
+    } else {
+        1
+    }
+    .min(lower.height);
+    let lower_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(footer_h)])
+        .split(lower);
+    let mut status_lines = Vec::with_capacity(3);
     if let Some(token) = &dialog.new_token {
-        lines.push(Line::from(vec![
-            Span::styled("Token (shown once)  ", Style::default().fg(app.theme.warning)),
+        status_lines.push(Line::from(vec![
+            Span::styled(
+                "Token (shown once)  ",
+                Style::default().fg(app.theme.warning),
+            ),
             Span::styled(token.clone(), Style::default().fg(app.theme.text)),
         ]));
     }
     if let Some(note) = &dialog.note {
-        lines.push(Line::from(Span::styled(
+        status_lines.push(Line::from(Span::styled(
             note.clone(),
             Style::default().fg(if dialog.confirm_delete {
                 app.theme.danger
@@ -608,20 +692,83 @@ fn render_service_dialog(f: &mut Frame, app: &mut App) {
             }),
         )));
     }
-    let footer = if dialog.mode == crate::app::ServiceDialogMode::Create {
-        "Tab/↑/↓ field · Enter/C-s create · Esc cancel"
-    } else {
-        "Tab/↑/↓ field · Enter/C-s save · C-r rotate token · C-d delete · Esc close"
-    };
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        footer,
-        Style::default().fg(app.theme.dim),
-    )));
     f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        inner,
+        Paragraph::new(status_lines).wrap(Wrap { trim: false }),
+        lower_chunks[0],
     );
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            footer,
+            Style::default().fg(app.theme.dim),
+        )))
+        .wrap(Wrap { trim: false }),
+        lower_chunks[1],
+    );
+}
+
+fn service_dialog_field_help(
+    dialog: &crate::app::ServiceDialog,
+) -> (&'static str, &'static str, &'static str) {
+    match dialog.selected_field {
+        0 => (
+            "Service name",
+            "Stable identifier used in the webhook URL and TOML filename. Use 1–32 lowercase letters, digits, or interior hyphens.",
+            if dialog.mode == crate::app::ServiceDialogMode::Edit {
+                "Locked after creation."
+            } else {
+                "Type to edit."
+            },
+        ),
+        1 => (
+            "Instruction",
+            "Prepended to every incoming message. Define the service's role, boundaries, and response behavior here.",
+            "Type to edit · applies after restart.",
+        ),
+        2 => (
+            "Harness",
+            "Agent harness used for new service sessions, such as smith, claude, or codex.",
+            "Type to edit · applies after restart.",
+        ),
+        3 => (
+            "Model",
+            "Optional model override passed to the harness. Leave it blank to use that harness's default model.",
+            "Type to edit · applies after restart.",
+        ),
+        4 => (
+            "Working directory",
+            "Directory where service sessions start and from which relative paths are resolved.",
+            "Type to edit · applies after restart.",
+        ),
+        5 => {
+            let explanation = match dialog.service.routing.as_str() {
+                "per-event" => {
+                    "Creates a fresh session for every accepted request. Requests never share conversation history."
+                }
+                "single" => {
+                    "Routes every request into one shared session so all callers contribute to the same conversation."
+                }
+                _ => {
+                    "Reuses one session for each caller-supplied session_key. Equal keys continue the same conversation."
+                }
+            };
+            (
+                "Routing",
+                explanation,
+                "←/→ or Space cycles · applies after restart.",
+            )
+        }
+        6 => (
+            "HTTP port",
+            "Loopback port for this service's HTTP webhook. It must be between 1 and 65535 and unique among services.",
+            "Type a port · applies after restart.",
+        ),
+        7 => (
+            "State",
+            "Serving starts the listener. Paused keeps the definition but does not start its listener after restart.",
+            "Space or ←/→ toggles · applies after restart.",
+        ),
+        _ => ("Service field", "", ""),
+    }
 }
 
 fn paint_default_backgrounds(f: &mut Frame, background: Option<Color>) {
