@@ -4,7 +4,8 @@ use crate::app::{
     feature_guidance, harness_guidance, harness_picker_entries, smith_method_guidance, App,
     ConfigureTab, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
     MinibufferChoiceAction, MinibufferChoiceHit, MinibufferIntent, PaneFocus, RemoteControlHit,
-    RemoteControlHitAction, ScreenPoint, Selection, SessionTitleMenuAction, TextSelectionRange,
+    RemoteControlHitAction, ScreenPoint, Selection, ServiceTitleMenuAction,
+    SessionTitleMenuAction, TextSelectionRange,
     TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit, WindowSplitDirection, ZoomMode,
     CONFIGURE_TABS, PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS, PLAYBOOK_CLIP_HOVER_PREVIEW_COLS,
     PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS, PLAYBOOK_COLLAB_CURSOR_TTL_MS, PLAYBOOK_CONTENT_PADDING_X,
@@ -490,6 +491,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.layout.modal_area = Some(help_popup);
     }
     render_session_title_menu(f, app);
+    render_service_title_menu(f, app);
     render_route_menu(f, app);
     render_fleet_tally_panel(f, app);
     render_tutorial_card(f, app);
@@ -1429,14 +1431,18 @@ fn render_view_close_tooltip(f: &mut Frame, app: &App) {
     let Some(view_area) = app.layout.view_area else {
         return;
     };
-    if app.session_title_menu.is_some() {
+    if app.session_title_menu.is_some() || app.service_title_menu.is_some() {
         return;
     }
     if !hovered_view_close_button(app, view_area) {
         return;
     }
     let (cx, _, cy) = view_close_button_range(view_area);
-    let label = " Session actions ";
+    let label = if app.selection.service_name().is_some() {
+        " Service actions "
+    } else {
+        " Session actions "
+    };
     let total = f.area();
     let inner_w = UnicodeWidthStr::width(label) as u16;
     let w = inner_w + 2;
@@ -7595,6 +7601,79 @@ fn render_session_title_menu(f: &mut Frame, app: &App) {
     }
 }
 
+fn render_service_title_menu(f: &mut Frame, app: &App) {
+    let Some(menu) = &app.service_title_menu else {
+        return;
+    };
+    let paused = app
+        .services
+        .iter()
+        .find(|service| service.name == menu.name)
+        .is_some_and(|service| service.paused);
+
+    let area = menu.area;
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border))
+        .title(Span::styled(
+            " service ",
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Clear, area);
+    f.render_widget(block, area);
+    for (idx, action) in ServiceTitleMenuAction::ALL.iter().copied().enumerate() {
+        let row = area.y.saturating_add(1).saturating_add(idx as u16);
+        if row >= area.y.saturating_add(area.height).saturating_sub(1) {
+            break;
+        }
+        let hovered = app.mouse_pos.is_some_and(|(mx, my)| {
+            my == row && mx > area.x && mx < area.x.saturating_add(area.width).saturating_sub(1)
+        });
+        let style = if hovered {
+            Style::default()
+                .fg(app.theme.text)
+                .bg(app.theme.inactive_highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else if matches!(action, ServiceTitleMenuAction::Delete) {
+            Style::default().fg(app.theme.danger)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        render_session_title_menu_row(
+            f,
+            area,
+            row,
+            action.label(paused),
+            service_title_menu_action_binding(app, action),
+            style,
+        );
+    }
+}
+
+fn service_title_menu_action_binding(
+    app: &App,
+    action: ServiceTitleMenuAction,
+) -> Option<&'static str> {
+    match (action, app.profile) {
+        (ServiceTitleMenuAction::Edit, Profile::Emacs)
+        | (ServiceTitleMenuAction::Edit, Profile::Vim) => Some("e"),
+        (ServiceTitleMenuAction::SplitHorizontal, Profile::Emacs) => Some("C-x 3"),
+        (ServiceTitleMenuAction::SplitHorizontal, Profile::Vim) => Some("C-w v"),
+        (ServiceTitleMenuAction::SplitVertical, Profile::Emacs) => Some("C-x 2"),
+        (ServiceTitleMenuAction::SplitVertical, Profile::Vim) => Some("C-w s"),
+        (ServiceTitleMenuAction::CloseSplit, Profile::Emacs) => Some("C-x 0"),
+        (ServiceTitleMenuAction::CloseSplit, Profile::Vim) => Some("C-w c"),
+        (ServiceTitleMenuAction::Delete, _) => Some("C-d"),
+        (ServiceTitleMenuAction::RotateToken, _)
+        | (ServiceTitleMenuAction::PauseResume, _) => None,
+    }
+}
+
 fn render_session_title_menu_row(
     f: &mut Frame,
     area: Rect,
@@ -7873,12 +7952,25 @@ fn render_service_view(
         .service_dialog
         .as_ref()
         .filter(|dialog| dialog.service.name == name)
-        .unwrap_or(&fallback);
+        .cloned()
+        .unwrap_or(fallback);
+    let border_style = pane_border_style(&app.theme, focused);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(pane_border_style(&app.theme, focused))
+        .border_style(border_style)
         .padding(ratatui::widgets::Padding::new(2, 2, 1, 1))
         .title(format!(" service: {} ", summary.name));
+    let block = apply_pane_title_right_cluster(
+        app,
+        area,
+        None,
+        border_style,
+        true,
+        true,
+        focused,
+        app.theme.matrix_close,
+        block,
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.width < 36 || inner.height < 8 {
@@ -7923,7 +8015,7 @@ fn render_service_view(
         )));
     }
 
-    let (help_title, help_body, help_hint) = service_dialog_field_help(dialog);
+    let (help_title, help_body, help_hint) = service_dialog_field_help(&dialog);
     let help_lines = vec![
         Line::from(Span::styled(
             help_title,

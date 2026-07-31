@@ -23,6 +23,13 @@ only when the terminal is too narrow for two readable columns. The same view
 exposes routed-session activity and keeps create/edit/delete actions in the
 view's normal focus lifecycle.
 
+The service view uses the same top-right title-actions affordance as a session
+view. Its menu is service-specific: edit the definition, rotate the HTTP
+credential, pause or resume ingress, split or close the pane, and delete the
+service. Global `C-x` chords remain available while the service view is
+focused; session-only commands such as `C-x .` explain their scope instead of
+being silently swallowed.
+
 The WebTUI mirrors this surface at `/services/<name>`. Services appear in the
 same list model as sessions, using the same `◈` glyph and row selection. Its
 wide service view uses the same definition/help columns, and narrow layouts

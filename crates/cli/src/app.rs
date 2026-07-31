@@ -39,6 +39,7 @@ mod mouse;
 mod playbook_popup;
 pub mod route_menu;
 mod service_dialog;
+mod service_title_menu;
 mod session_picker;
 mod session_title_menu;
 mod session_title_rename;
@@ -1463,6 +1464,42 @@ pub enum SessionTitleMenuAction {
     Delete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceTitleMenuAction {
+    Edit,
+    RotateToken,
+    PauseResume,
+    SplitHorizontal,
+    SplitVertical,
+    CloseSplit,
+    Delete,
+}
+
+impl ServiceTitleMenuAction {
+    pub const ALL: [Self; 7] = [
+        Self::Edit,
+        Self::RotateToken,
+        Self::PauseResume,
+        Self::SplitHorizontal,
+        Self::SplitVertical,
+        Self::CloseSplit,
+        Self::Delete,
+    ];
+
+    pub fn label(self, paused: bool) -> &'static str {
+        match self {
+            Self::Edit => "edit service",
+            Self::RotateToken => "rotate HTTP token",
+            Self::PauseResume if paused => "resume service",
+            Self::PauseResume => "pause service",
+            Self::SplitHorizontal => "split horizontal",
+            Self::SplitVertical => "split vertical",
+            Self::CloseSplit => "close split",
+            Self::Delete => "delete service",
+        }
+    }
+}
+
 impl SessionTitleMenuAction {
     pub const ALL: [Self; 9] = [
         Self::Rename,
@@ -1499,6 +1536,43 @@ pub struct SessionTitleMenu {
     /// visible on parents so the menu teaches the workflow without allowing a
     /// dead-end click.
     pub merge_enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceTitleMenu {
+    pub name: String,
+    pub area: ratatui::layout::Rect,
+}
+
+impl ServiceTitleMenu {
+    pub fn item_at(&self, col: u16, row: u16) -> Option<ServiceTitleMenuAction> {
+        if col <= self.area.x
+            || col
+                >= self
+                    .area
+                    .x
+                    .saturating_add(self.area.width)
+                    .saturating_sub(1)
+            || row <= self.area.y
+            || row
+                >= self
+                    .area
+                    .y
+                    .saturating_add(self.area.height)
+                    .saturating_sub(1)
+        {
+            return None;
+        }
+        let idx = row.saturating_sub(self.area.y).saturating_sub(1) as usize;
+        ServiceTitleMenuAction::ALL.get(idx).copied()
+    }
+
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        col >= self.area.x
+            && col < self.area.x.saturating_add(self.area.width)
+            && row >= self.area.y
+            && row < self.area.y.saturating_add(self.area.height)
+    }
 }
 
 /// In-progress inline rename of a session's title, edited directly in its
@@ -1915,6 +1989,8 @@ pub struct App {
     pub layout: LayoutSnapshot,
     /// Session-view title hamburger dropdown.
     pub session_title_menu: Option<SessionTitleMenu>,
+    /// Service-view title actions dropdown.
+    pub service_title_menu: Option<ServiceTitleMenu>,
     /// Open fleet-tally panel listing the rows one tally counted (spec 0169).
     pub fleet_panel: Option<FleetTallyPanel>,
     /// A session or group the list should scroll into view on the next
@@ -5218,6 +5294,7 @@ async fn run_with_socket_initial_selection(
         start_instant: now,
         layout: LayoutSnapshot::default(),
         session_title_menu: None,
+        service_title_menu: None,
         fleet_panel: None,
         list_scroll_target: None,
         route_menu: None,
@@ -10957,6 +11034,16 @@ impl App {
         fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
             c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
         }
+        if let Some(menu) = self.service_title_menu.clone() {
+            if let Some(action) = menu.item_at(col, row) {
+                self.run_service_title_menu_action(menu.name, action).await;
+                return;
+            }
+            if menu.contains(col, row) {
+                return;
+            }
+            self.service_title_menu = None;
+        }
         // The fleet-tally panel is sized to its content and overhangs the
         // sidebar into the view pane, so it has to claim its own cells
         // before any pane branch below sees them.
@@ -11271,6 +11358,12 @@ impl App {
                         self.open_session_title_menu(session_id, view);
                     }
                     return;
+                }
+                if row == close_y && col >= close_x_start && col < close_x_end {
+                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                        self.open_service_title_menu(name, view);
+                        return;
+                    }
                 }
                 if self.handle_dynamic_ui_overlay_click(col, row).await {
                     return;
@@ -11867,7 +11960,11 @@ impl App {
             }
             let is_ctrl_x = matches!(key.code, KeyCode::Char('x'))
                 && key.modifiers.contains(KeyModifiers::CONTROL);
-            if !is_ctrl_x {
+            // Once C-x has started a chord, let its continuation reach the
+            // global keymap. Without this guard the service-view fast path
+            // returns on the second key, so bindings such as C-x . appear to
+            // do nothing while a service is focused.
+            if !is_ctrl_x && self.chord_state.is_empty() {
                 return;
             }
         }
@@ -12486,7 +12583,16 @@ impl App {
             TogglePlaybookTerminalFocus => {
                 self.toggle_playbook_terminal_focus();
             }
-            OpenSuggestions => self.toggle_suggest_deck().await,
+            OpenSuggestions => {
+                if self.selection.service_name().is_some() {
+                    self.set_status(
+                        "prompt suggestions are available in session views, not service views"
+                            .to_string(),
+                    );
+                } else {
+                    self.toggle_suggest_deck().await;
+                }
+            }
             OpenDiff => {
                 if let Some(id) = self.selected_id() {
                     match self.client.diff(&id).await {
@@ -16095,6 +16201,7 @@ mod tests {
             start_instant: now,
             layout: LayoutSnapshot::default(),
             session_title_menu: None,
+            service_title_menu: None,
             fleet_panel: None,
             list_scroll_target: None,
             route_menu: None,
@@ -40181,10 +40288,82 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("service: assistant"));
+        assert!(text.contains("☰"), "service view should expose title actions");
         assert!(text.contains("Instruction"));
         assert!(text.contains("Service name"));
         assert!(text.contains("Activity"));
         assert!(app.layout.modal_area.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_title_menu_opens_and_edits_service() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let view = app.layout.view_area.expect("service view");
+        let (button_x, _, button_y) = crate::ui::view_close_button_range(view);
+        let click = |kind| MouseEvent {
+            kind,
+            column: button_x + 1,
+            row: button_y,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.on_mouse(click(MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(click(MouseEventKind::Up(MouseButton::Left)))
+            .await;
+        let menu = app
+            .service_title_menu
+            .clone()
+            .expect("service actions menu should open");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw menu");
+        let menu_text = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(menu_text.contains("rotate HTTP token"));
+        assert!(menu_text.contains("pause service"));
+        let edit_index = ServiceTitleMenuAction::ALL
+            .iter()
+            .position(|action| *action == ServiceTitleMenuAction::Edit)
+            .expect("edit action");
+        app.handle_left_click(menu.area.x + 2, menu.area.y + 1 + edit_index as u16)
+            .await;
+        assert!(matches!(
+            app.service_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(ServiceDialogMode::Edit)
+        ));
+        assert!(app.service_title_menu.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_cx_dot_explains_suggestions_are_session_only() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".to_string());
+
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+            .await;
+
+        assert_eq!(
+            app.status.as_ref().map(|(text, _)| text.as_str()),
+            Some("prompt suggestions are available in session views, not service views")
+        );
         server.abort();
     }
 
