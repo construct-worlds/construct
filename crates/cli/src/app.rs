@@ -1951,6 +1951,11 @@ pub struct App {
     /// from the adapter (currently smith interactive). Drives the
     /// fixed bottom input pane.
     pub editor_states: HashMap<String, EditorState>,
+    /// Client-side mirror of a prompt draft typed into a captured PTY. It
+    /// closes the short gap before an adapter's next `EditorState` event, and
+    /// lets the suggestion deck offer draft keywords for harnesses that do
+    /// not expose an editor state.
+    pub prompt_drafts: HashMap<String, String>,
     /// Per-session live agent status, fed by `SessionEvent::AgentStatus`
     /// and rendered above queued input while a turn is active.
     pub agent_statuses: HashMap<String, construct_protocol::AgentStatus>,
@@ -4788,6 +4793,7 @@ async fn run_with_socket_initial_selection(
         pinned_card_drag: None,
         list_collapsed: persisted.list_collapsed,
         editor_states: HashMap::new(),
+        prompt_drafts: HashMap::new(),
         agent_statuses: HashMap::new(),
         pending_tool_approvals: HashMap::new(),
         browser_previews: HashMap::new(),
@@ -6262,12 +6268,61 @@ impl App {
                 let active_window = Some(self.active_window_id);
                 self.set_scrollback_for_window(active_window, 0);
                 if let Some(id) = self.selected_id() {
+                    self.append_prompt_draft(&id, &text);
                     let bytes = self.encode_paste_for_pty(&id, text);
                     self.queue_pty_input(id, bytes, "pty_input");
                 }
             }
             None => {}
         }
+    }
+
+    /// Mirror ordinary prompt typing before the asynchronous PTY round trip
+    /// reports it back. This makes a following `C-x .` see the text the user
+    /// has just entered instead of waiting for the adapter event loop.
+    fn record_prompt_draft_key(&mut self, key: KeyEvent) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        if !self
+            .sessions
+            .iter()
+            .any(|session| {
+                session.id == id
+                    && session.state == construct_protocol::SessionState::AwaitingInput
+            })
+        {
+            return;
+        }
+        match key.code {
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.append_prompt_draft(&id, &c.to_string());
+            }
+            KeyCode::Backspace => {
+                if let Some(draft) = self.prompt_drafts.get_mut(&id) {
+                    draft.pop();
+                }
+            }
+            KeyCode::Enter => {
+                self.prompt_drafts.remove(&id);
+            }
+            _ => {}
+        }
+    }
+
+    fn append_prompt_draft(&mut self, session_id: &str, text: &str) {
+        let initial = self
+            .editor_states
+            .get(session_id)
+            .map(|state| state.buf.clone())
+            .unwrap_or_default();
+        let draft = self
+            .prompt_drafts
+            .entry(session_id.to_string())
+            .or_insert(initial);
+        draft.push_str(text);
     }
 
     /// Encode pasted text for forwarding to a child PTY. If the child has
@@ -8752,6 +8807,8 @@ impl App {
                             completions,
                         } = &payload.event
                         {
+                            self.prompt_drafts
+                                .insert(payload.session_id.clone(), buf.clone());
                             self.editor_states.insert(
                                 payload.session_id.clone(),
                                 EditorState {
@@ -11224,6 +11281,7 @@ impl App {
                 return;
             }
             if self.chord_state.is_empty() && !is_ctrl_x {
+                self.record_prompt_draft_key(key);
                 self.forward_key_to_selected_pty(key);
                 return;
             }
@@ -15092,6 +15150,7 @@ mod tests {
             remote_control_popup: None,
             remote_control_task: None,
             editor_states: HashMap::new(),
+            prompt_drafts: HashMap::new(),
             agent_statuses: HashMap::new(),
             pending_tool_approvals: HashMap::new(),
             browser_previews: HashMap::new(),
@@ -32850,6 +32909,43 @@ mod tests {
             "printable keys move focus into the keyword surface"
         );
         assert_eq!(deck.regenerate_query.as_deref(), Some("docs"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn suggestion_keywords_prefer_the_local_unacknowledged_draft() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.editor_states.insert(
+            "s1".into(),
+            EditorState {
+                buf: "older draft".into(),
+                ..Default::default()
+            },
+        );
+        app.prompt_drafts.insert("s1".into(), "just typed".into());
+
+        assert_eq!(
+            app.suggestion_draft_keywords("s1").as_deref(),
+            Some("just typed")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn typed_prompt_is_available_to_suggestions_before_adapter_echoes_it() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.sessions[0].state = construct_protocol::SessionState::AwaitingInput;
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+        ] {
+            app.record_prompt_draft_key(key);
+        }
+
+        assert_eq!(app.suggestion_draft_keywords("s1").as_deref(), Some("test"));
         server.abort();
     }
 

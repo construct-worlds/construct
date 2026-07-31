@@ -377,11 +377,20 @@ impl App {
     pub(super) async fn toggle_suggest_deck(&mut self) {
         let draft_keywords = self
             .selected_id()
-            .and_then(|id| self.editor_states.get(&id))
-            .map(|editor| editor.buf.trim().to_string())
+            .and_then(|id| self.suggestion_draft_keywords(&id))
             .filter(|keywords| !keywords.is_empty());
         self.toggle_suggest_deck_for_with_keywords(None, draft_keywords)
             .await;
+    }
+
+    pub(super) fn suggestion_draft_keywords(&self, session_id: &str) -> Option<String> {
+        self.prompt_drafts
+            .get(session_id)
+            .map(String::as_str)
+            .or_else(|| self.editor_states.get(session_id).map(|editor| editor.buf.as_str()))
+            .map(str::trim)
+            .filter(|keywords| !keywords.is_empty())
+            .map(str::to_string)
     }
 
     pub(super) async fn toggle_suggest_deck_for(&mut self, session_id: Option<String>) {
@@ -1013,7 +1022,6 @@ mod tests {
             })
             .collect()
     }
-
     #[test]
     fn fan_orders_top_verbs_history() {
         let h = hand();
@@ -1090,6 +1098,7 @@ mod tests {
         assert_eq!(deck.focus, DeckFocus::Categories);
         assert!(deck.regenerate_query.is_none());
     }
+
 
     #[test]
     fn max_right_rows_uses_tallest_category() {
