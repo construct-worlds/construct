@@ -6373,6 +6373,8 @@ fn session_title_menu_action_label(
         (SessionTitleMenuAction::Rename, Profile::Vim) => Some("r"),
         (SessionTitleMenuAction::Fork, Profile::Emacs) => Some("C-x f"),
         (SessionTitleMenuAction::Fork, Profile::Vim) => Some("f"),
+        (SessionTitleMenuAction::ForkTurn, Profile::Emacs) => Some("C-x F"),
+        (SessionTitleMenuAction::ForkTurn, Profile::Vim) => Some("F"),
         (SessionTitleMenuAction::ProgramTerminalMode, _) => Some("C-x Space"),
         (SessionTitleMenuAction::SplitHorizontal, Profile::Emacs) => Some("C-x 3"),
         (SessionTitleMenuAction::SplitHorizontal, Profile::Vim) => Some("C-w v"),
@@ -7151,6 +7153,10 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
         id.clone(),
         translate_block_hits(out.blocks, paint_row_offset, paint_area.height),
     );
+    app.turn_mark_hits.insert(
+        id.clone(),
+        translate_turn_marks(&out.turn_marks, paint_row_offset, paint_area),
+    );
     let terminal_scrollbar = render_terminal_scrollbar(
         f,
         chat_area,
@@ -7161,6 +7167,7 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
     );
     app.set_scrollback_for_window(window_id, clamped_scrollback);
     app.layout.terminal_scrollbar = terminal_scrollbar;
+    render_turn_mark_affordances(f, app, &id);
     // If this session has an open Program view, the Program renderer owns the
     // sticky-widget body at the top layer. Rendering it here too paints the
     // same widget underneath the Program over the terminal, so skip the
@@ -12332,6 +12339,83 @@ pub fn pin_tile_layout(area: Rect, n: usize) -> Vec<Rect> {
 /// entirely above the visible slice are dropped; partially-visible ones
 /// are clipped. Header/button hit zones only survive if the header row
 /// itself is visible. A `row_offset` of 0 is the identity transform.
+/// Map replay-relative turn-boundary rows (spec 0163) to absolute
+/// screen-space hit zones within the painted pane area. The `⑂` glyph
+/// zone hugs the pane's right edge on the boundary row.
+fn translate_turn_marks(
+    marks: &[crate::pty_render::TurnMark],
+    row_offset: u16,
+    paint_area: Rect,
+) -> Vec<crate::app::TurnMarkHit> {
+    marks
+        .iter()
+        .filter_map(|m| {
+            if m.row < row_offset {
+                return None;
+            }
+            let rel = m.row - row_offset;
+            if rel >= paint_area.height || paint_area.width < 8 {
+                return None;
+            }
+            let y = paint_area.y + rel;
+            let x_end = paint_area.right();
+            Some(crate::app::TurnMarkHit {
+                anchor_seq: m.anchor_seq,
+                turn: m.turn,
+                y,
+                x_start: x_end.saturating_sub(3),
+                x_end,
+                row_x_start: paint_area.x,
+                row_x_end: x_end,
+            })
+        })
+        .collect()
+}
+
+/// Hover affordance for the pane's turn boundaries: pointing at a turn's
+/// row reveals a `⑂` at the right edge; pointing at the glyph itself
+/// highlights it and shows the fork tooltip. Click dispatch lives in
+/// `App::try_fork_turn_mark_at`.
+fn render_turn_mark_affordances(f: &mut Frame, app: &mut App, session_id: &str) {
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    let Some(hits) = app.turn_mark_hits.get(session_id) else {
+        return;
+    };
+    let mut tooltip: Option<(u16, u16, usize)> = None;
+    for hit in hits {
+        if my != hit.y || mx < hit.row_x_start || mx >= hit.row_x_end {
+            continue;
+        }
+        let on_glyph = mx >= hit.x_start && mx < hit.x_end;
+        let style = if on_glyph {
+            Style::default()
+                .fg(app.theme.highlight_fg)
+                .bg(app.theme.highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.dim)
+        };
+        f.render_widget(
+            Paragraph::new(" ⑂ ").style(style),
+            Rect::new(hit.x_start, hit.y, hit.x_end - hit.x_start, 1),
+        );
+        if on_glyph {
+            tooltip = Some((hit.x_start, hit.y, hit.turn));
+        }
+    }
+    if let Some((x, y, turn)) = tooltip {
+        render_button_tooltip(
+            f,
+            &app.theme,
+            &format!(" fork from turn #{turn} "),
+            x,
+            y.saturating_sub(2),
+        );
+    }
+}
+
 fn translate_block_hits(
     blocks: Vec<crate::pty_render::BlockHitRect>,
     row_offset: u16,

@@ -42,6 +42,10 @@ impl App {
             SessionTitleMenuAction::Fork => {
                 self.run_action(crate::keymap::KeyAction::OpenFork).await
             }
+            SessionTitleMenuAction::ForkTurn => {
+                self.run_action(crate::keymap::KeyAction::OpenForkTurn)
+                    .await
+            }
             SessionTitleMenuAction::ProgramTerminalMode => {
                 self.run_action(crate::keymap::KeyAction::OpenProgram).await;
             }
