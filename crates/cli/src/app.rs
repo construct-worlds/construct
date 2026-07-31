@@ -11296,11 +11296,15 @@ impl App {
                     self.activate_route_menu().await;
                     return;
                 }
-                // Right moves into the model column, Left back out of it;
-                // both mirror the chevron between them. From the targets,
-                // Left closes, as Esc does anywhere.
+                // Right moves targets → models → efforts; Left walks back.
+                // From the targets, Left closes, as Esc does anywhere.
                 KeyCode::Right => {
-                    self.route_menu_focus_models();
+                    match self.route_menu.as_ref().map(|m| m.focus) {
+                        Some(crate::app::route_menu::RouteFocus::Models) => {
+                            self.route_menu_focus_efforts();
+                        }
+                        _ => self.route_menu_focus_models(),
+                    }
                     return;
                 }
                 KeyCode::Left => {
@@ -17140,6 +17144,7 @@ mod tests {
         summary.route = Some(construct_protocol::SessionRoute {
             name: "kimi".into(),
             model: "kimi-k2.5".into(),
+            effort: None,
             origin_model: Some("claude-opus-5".into()),
             observed: true,
         });

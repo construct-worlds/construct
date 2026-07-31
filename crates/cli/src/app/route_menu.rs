@@ -18,6 +18,15 @@ impl App {
             }
         };
         let active = listed.active.clone();
+        // Live pin model/effort come from the session record, not the
+        // route option defaults (list_routes does not rewrite those).
+        let (active_model, active_effort) = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.route.as_ref())
+            .map(|r| (Some(r.model.clone()), r.effort.clone()))
+            .unwrap_or((None, None));
         let native = self.session_native_selection(&session_id);
         // Open on the armed target so the current state is where the eye
         // already is; with no pin, a live native pick is the current state.
@@ -37,18 +46,24 @@ impl App {
             routes: listed.routes,
             unavailable_reason: listed.unavailable_reason,
             active,
+            active_model,
+            active_effort,
             native,
             focus: RouteFocus::Targets,
             selected,
             model_selected: 0,
+            effort_selected: 0,
             target_scroll: 0,
             model_scroll: 0,
+            effort_scroll: 0,
             anchor: (col, row),
             target_col_w: 0,
+            model_col_w: 0,
             desc_lines: 0,
             visible_body_rows: 0,
         };
         menu.model_selected = menu.active_model_index();
+        menu.effort_selected = menu.active_effort_index();
         self.route_menu = Some(menu.anchored(self.frame_area()));
     }
 
@@ -63,12 +78,13 @@ impl App {
         self.route_menu = Some(menu.anchored(frame));
     }
 
-    /// A click: in the target column it selects and previews; in the model
-    /// column it commits. One click to look, one to choose.
+    /// A click: target column selects and previews; model column selects
+    /// (and commits when there is no effort scale); effort column commits.
     pub(super) async fn hit_route_menu(&mut self, hit: RouteHit) {
         match hit {
             RouteHit::Target(index) => self.select_route_target(index).await,
-            RouteHit::Model(index) => self.arm_route_model(index).await,
+            RouteHit::Model(index) => self.select_or_arm_route_model(index).await,
+            RouteHit::Effort(index) => self.arm_route_effort(index).await,
         }
     }
 
@@ -80,22 +96,26 @@ impl App {
         // selecting it arms straight away.
         if index == 0 {
             self.route_menu = None;
-            self.apply_route(menu.session_id, None, None).await;
+            self.apply_route(menu.session_id, None, None, None).await;
             return;
         }
         menu.selected = index;
         menu.model_selected = menu.active_model_index();
+        menu.effort_selected = menu.active_effort_index();
         menu.model_scroll = 0;
+        menu.effort_scroll = 0;
         menu.focus = RouteFocus::Targets;
         menu.ensure_target_visible();
         self.replace_route_menu(menu);
     }
 
-    async fn arm_route_model(&mut self, index: usize) {
-        let Some(menu) = self.route_menu.clone() else {
+    /// Model column: when the model has a real effort scale, preview it and
+    /// move focus to the effort column; otherwise arm immediately.
+    async fn select_or_arm_route_model(&mut self, index: usize) {
+        let Some(mut menu) = self.route_menu.clone() else {
             return;
         };
-        let Some(route) = menu.focused_target() else {
+        let Some(route) = menu.focused_target().cloned() else {
             return;
         };
         if let Some(reason) = route.unavailable_reason.as_deref() {
@@ -113,13 +133,45 @@ impl App {
         let Some(model) = menu.models().get(index).cloned() else {
             return;
         };
-        let (session, name) = (menu.session_id.clone(), route.name.clone());
+        menu.model_selected = index;
+        menu.effort_selected = menu.active_effort_index();
+        menu.effort_scroll = 0;
+        if menu.model_descends() {
+            menu.focus = RouteFocus::Efforts;
+            menu.ensure_effort_visible();
+            self.replace_route_menu(menu);
+            return;
+        }
+        let session = menu.session_id.clone();
         self.route_menu = None;
-        self.apply_route(session, Some(name), Some(model)).await;
+        self.apply_route(session, Some(route.name), Some(model), None)
+            .await;
     }
 
-    /// Enter: from the target column, step into the models; from the model
-    /// column, arm the highlighted one.
+    async fn arm_route_effort(&mut self, index: usize) {
+        let Some(menu) = self.route_menu.clone() else {
+            return;
+        };
+        let Some(route) = menu.focused_target() else {
+            return;
+        };
+        if route.unavailable_reason.is_some() {
+            return;
+        }
+        let Some(model) = menu.models().get(menu.model_selected).cloned() else {
+            return;
+        };
+        let efforts = menu.efforts_for_selected_model();
+        let Some(effort) = efforts.get(index).cloned() else {
+            return;
+        };
+        let (session, name) = (menu.session_id.clone(), route.name.clone());
+        self.route_menu = None;
+        self.apply_route(session, Some(name), Some(model), Some(effort))
+            .await;
+    }
+
+    /// Enter: targets → models → efforts (when present) → arm.
     pub(super) async fn activate_route_menu(&mut self) {
         let Some(menu) = self.route_menu.clone() else {
             return;
@@ -141,7 +193,10 @@ impl App {
                     self.route_menu_focus_models();
                 }
             }
-            RouteFocus::Models => self.arm_route_model(menu.model_selected).await,
+            RouteFocus::Models => {
+                self.select_or_arm_route_model(menu.model_selected).await;
+            }
+            RouteFocus::Efforts => self.arm_route_effort(menu.effort_selected).await,
         }
     }
 
@@ -155,13 +210,25 @@ impl App {
         }
     }
 
-    /// Left: hand focus back to the targets, or close if it is already
-    /// there.
+    /// Right from models steps into efforts when the model has a scale.
+    pub(super) fn route_menu_focus_efforts(&mut self) {
+        let Some(menu) = self.route_menu.as_mut() else {
+            return;
+        };
+        if menu.focus == RouteFocus::Models && menu.model_descends() {
+            menu.focus = RouteFocus::Efforts;
+            menu.effort_selected = menu.active_effort_index();
+            menu.ensure_effort_visible();
+        }
+    }
+
+    /// Left: efforts → models → targets → close.
     pub(super) fn route_menu_back(&mut self) {
         let Some(menu) = self.route_menu.as_mut() else {
             return;
         };
         match menu.focus {
+            RouteFocus::Efforts => menu.focus = RouteFocus::Models,
             RouteFocus::Models => menu.focus = RouteFocus::Targets,
             RouteFocus::Targets => self.route_menu = None,
         }
@@ -182,7 +249,9 @@ impl App {
                 // highlight follows it rather than pointing at a row that
                 // now belongs to a different target.
                 menu.model_selected = menu.active_model_index();
+                menu.effort_selected = menu.active_effort_index();
                 menu.model_scroll = 0;
+                menu.effort_scroll = 0;
                 menu.ensure_target_visible();
             }
             RouteFocus::Models => {
@@ -192,7 +261,18 @@ impl App {
                 }
                 menu.model_selected =
                     (menu.model_selected as isize + delta).rem_euclid(len as isize) as usize;
+                menu.effort_selected = menu.active_effort_index();
+                menu.effort_scroll = 0;
                 menu.ensure_model_visible();
+            }
+            RouteFocus::Efforts => {
+                let len = menu.efforts_for_selected_model().len();
+                if len == 0 {
+                    return;
+                }
+                menu.effort_selected =
+                    (menu.effort_selected as isize + delta).rem_euclid(len as isize) as usize;
+                menu.ensure_effort_visible();
             }
         }
         self.replace_route_menu(menu);
@@ -254,13 +334,15 @@ impl App {
         session_id: String,
         route: Option<String>,
         model: Option<String>,
+        effort: Option<String>,
     ) {
         // Status labels lead with the model, matching how a decoded native
         // pick reads everywhere else (`model · route`, spec 0158).
-        let label = match (&route, &model) {
-            (Some(r), Some(m)) => format!("{m} · {r}"),
-            (Some(r), None) => r.clone(),
-            (None, _) => String::new(),
+        let label = match (&route, &model, &effort) {
+            (Some(r), Some(m), Some(e)) => format!("{m} ({e}) · {r}"),
+            (Some(r), Some(m), None) => format!("{m} · {r}"),
+            (Some(r), None, _) => r.clone(),
+            (None, _, _) => String::new(),
         };
         let clearing = label.is_empty();
         // A redirect only applies to requests carrying a native model id.
@@ -272,7 +354,11 @@ impl App {
             .is_some()
             .then(|| self.session_native_selection(&session_id))
             .flatten();
-        match self.client.set_route(&session_id, route, model).await {
+        match self
+            .client
+            .set_route(&session_id, route, model, effort)
+            .await
+        {
             Ok(()) => match inert {
                 Some((native_route, native_model)) => self.set_status(format!(
                     "redirect armed: {label} — idle while the harness addresses {native_model} · {native_route} directly"
@@ -314,12 +400,13 @@ pub fn login_blocker_prefix(reason: &str) -> &'static str {
 pub const ROUTE_DESCRIPTION: &str =
     "Redirect model requests to another provider — transparent to the harness.";
 
-/// Which column the keyboard is driving. Both are always visible; focus
-/// only decides what moves.
+/// Which column the keyboard is driving. Columns are always visible when
+/// they have content; focus only decides what moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteFocus {
     Targets,
     Models,
+    Efforts,
 }
 
 /// Where a click landed.
@@ -327,6 +414,7 @@ pub enum RouteFocus {
 pub enum RouteHit {
     Target(usize),
     Model(usize),
+    Effort(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -339,6 +427,11 @@ pub struct RouteMenu {
     /// the user with no explanation (spec 0115).
     pub unavailable_reason: Option<String>,
     pub active: Option<String>,
+    /// Model currently armed on the pin, when a pin is active. Used to
+    /// preselect the model column; `RouteOption::model` is only the default.
+    pub active_model: Option<String>,
+    /// Effort currently armed on the pin, when a pin chose one.
+    pub active_effort: Option<String>,
     /// The `(route, model)` the harness itself is on right now via a
     /// Construct-published native catalog entry (spec 0157), decoded from
     /// the model it reports. Requests carrying that id select their own
@@ -349,15 +442,21 @@ pub struct RouteMenu {
     pub selected: usize,
     /// Highlighted model row within the highlighted target.
     pub model_selected: usize,
+    /// Highlighted effort row for the highlighted model.
+    pub effort_selected: usize,
     /// First visible body row of the target list (Default is above the body
     /// and never scrolls).
     pub target_scroll: usize,
     /// First visible body row of the model list for the focused target.
     pub model_scroll: usize,
+    /// First visible body row of the effort list for the focused model.
+    pub effort_scroll: usize,
     anchor: (u16, u16),
     /// Width of the target column, including its padding. Set when the
     /// menu is placed so render and hit-testing agree on one number.
     pub target_col_w: u16,
+    /// Width of the model column (between the two dividers).
+    pub model_col_w: u16,
     /// Rows the description wraps to. Set when the menu is placed, for the
     /// same reason.
     pub desc_lines: u16,
@@ -393,6 +492,45 @@ impl RouteMenu {
         route.models.clone()
     }
 
+    /// Model string under the model highlight (empty when Default / no models).
+    pub fn selected_model(&self) -> Option<String> {
+        self.models().get(self.model_selected).cloned()
+    }
+
+    /// Effort levels for the currently highlighted model. Empty when the
+    /// target has no real scale — the third column is omitted then.
+    pub fn efforts_for_selected_model(&self) -> Vec<String> {
+        let Some(model) = self.selected_model() else {
+            return Vec::new();
+        };
+        self.efforts_for_model(&model)
+    }
+
+    pub fn efforts_for_model(&self, model: &str) -> Vec<String> {
+        let Some(route) = self.focused_target() else {
+            return Vec::new();
+        };
+        route.efforts.get(model).cloned().unwrap_or_default()
+    }
+
+    /// Whether any model on any target offers a multi-level effort scale —
+    /// used so the menu reserves a third column width without jumping.
+    pub fn any_effort_column(&self) -> bool {
+        self.routes
+            .iter()
+            .any(|r| r.efforts.values().any(|levels| levels.len() > 1))
+    }
+
+    /// Tallest effort list any model on the focused target (or any target
+    /// when sizing height) can show.
+    pub fn max_efforts_len(&self) -> usize {
+        self.routes
+            .iter()
+            .flat_map(|r| r.efforts.values().map(|v| v.len()))
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Rows above the two columns: "No redirect", a rule, and the
     /// description. It sits apart because it is the absence of a route,
     /// not one of the targets listed under it.
@@ -419,10 +557,10 @@ impl RouteMenu {
             .unwrap_or(0)
     }
 
-    /// Rows in the two-column body — tall enough for every target, for
-    /// the largest model list any target offers, and for a login-blocker
-    /// action line, so switching the left column does not resize the
-    /// popup.
+    /// Rows in the multi-column body — tall enough for every target, for
+    /// the largest model list any target offers, the tallest effort list,
+    /// and for a login-blocker action line, so switching columns does not
+    /// resize the popup.
     pub fn body_rows(&self) -> usize {
         let blocker_rows = if self
             .routes
@@ -437,6 +575,7 @@ impl RouteMenu {
         self.routes
             .len()
             .max(self.max_models_len())
+            .max(self.max_efforts_len())
             .max(blocker_rows)
     }
 
@@ -532,21 +671,65 @@ impl RouteMenu {
         index > 0 && self.target_enabled(index)
     }
 
+    /// Whether the highlighted model has an effort column to move into.
+    pub fn model_descends(&self) -> bool {
+        self.efforts_for_selected_model().len() > 1
+    }
+
     pub fn model_is_active(&self, index: usize) -> bool {
-        let Some(route) = self.focused_target() else {
+        if !self.target_is_active(self.selected) {
             return false;
+        }
+        let Some(active) = self.active_model.as_deref() else {
+            // Fall back to the route option default when the pin model is
+            // unknown (e.g. unit tests that only set `active`).
+            let Some(route) = self.focused_target() else {
+                return false;
+            };
+            return self.models().get(index).is_some_and(|m| *m == route.model);
         };
-        self.target_is_active(self.selected)
-            && self.models().get(index).is_some_and(|m| *m == route.model)
+        self.models().get(index).is_some_and(|m| m == active)
     }
 
     /// Row of the model this target is currently armed on, so moving the
     /// highlight lands on the live choice rather than the top of the list.
     pub fn active_model_index(&self) -> usize {
         let models = self.models();
+        if self.target_is_active(self.selected) {
+            if let Some(active) = self.active_model.as_deref() {
+                if let Some(i) = models.iter().position(|m| m == active) {
+                    return i;
+                }
+            }
+        }
         self.focused_target()
             .and_then(|r| models.iter().position(|m| *m == r.model))
             .unwrap_or(0)
+    }
+
+    pub fn effort_is_active(&self, index: usize) -> bool {
+        if !self.model_is_active(self.model_selected) {
+            return false;
+        }
+        let Some(active) = self.active_effort.as_deref() else {
+            return false;
+        };
+        self.efforts_for_selected_model()
+            .get(index)
+            .is_some_and(|e| e == active)
+    }
+
+    /// Row of the effort currently armed on the pin for the selected model.
+    pub fn active_effort_index(&self) -> usize {
+        let efforts = self.efforts_for_selected_model();
+        if self.model_is_active(self.model_selected) {
+            if let Some(active) = self.active_effort.as_deref() {
+                if let Some(i) = efforts.iter().position(|e| e == active) {
+                    return i;
+                }
+            }
+        }
+        0
     }
 
     /// Reason the highlighted target cannot be used, shown in the model
@@ -599,10 +782,24 @@ impl RouteMenu {
             .unwrap_or(0)
             .max(blocker_w)
             .saturating_add(4) as u16;
+        // Effort column only when some target advertises a real scale.
+        let efforts_w = if self.any_effort_column() {
+            self.routes
+                .iter()
+                .flat_map(|r| r.efforts.values().flatten().map(|e| e.chars().count()))
+                .max()
+                .unwrap_or(0)
+                .max(6) // "medium"
+                .saturating_add(4) as u16
+        } else {
+            0
+        };
+        let dividers = if efforts_w > 0 { 2u16 } else { 1 };
 
         let max_w = size.width.saturating_sub(2).max(12);
         let mut target_col_w = targets_w;
-        // The session-level reason spans both columns, so it gets a say in
+        let mut model_col_w = models_w;
+        // The session-level reason spans all columns, so it gets a say in
         // the width — otherwise the one message explaining why nothing can
         // be routed is the thing that gets truncated.
         let reason_w = self
@@ -610,28 +807,40 @@ impl RouteMenu {
             .as_deref()
             .map(|r| r.chars().count() + 3)
             .unwrap_or(0) as u16;
-        // The native-pick note spans both columns too, but a long decoded
-        // id must not balloon the popup: it argues up to a cap and then
+        // The native-pick note spans columns too, but a long decoded id
+        // must not balloon the popup: it argues up to a cap and then
         // truncates like any other row.
         let native_w = self
             .native_note()
             .map(|n| n.chars().count().min(56) + 3)
             .unwrap_or(0) as u16;
-        // The description spans both columns, so it argues for width too —
+        // The description spans columns, so it argues for width too —
         // two cramped lines read worse than one clear one.
         let mut width = targets_w
             .saturating_add(models_w)
-            .saturating_add(3)
+            .saturating_add(efforts_w)
+            .saturating_add(dividers)
+            .saturating_add(2)
             .max(reason_w)
             .max(native_w)
-            .max(46);
+            .max(if efforts_w > 0 { 56 } else { 46 });
         if width > max_w {
-            // Give the target column its share first: the model column can
+            // Give the target column its share first: model/effort can
             // truncate a long id more gracefully than a target name.
             width = max_w;
-            target_col_w = targets_w.min(width.saturating_sub(8));
+            let min_rest = 8u16.saturating_add(if efforts_w > 0 { 8 } else { 0 });
+            target_col_w = targets_w.min(width.saturating_sub(min_rest));
+            let rest = width
+                .saturating_sub(target_col_w)
+                .saturating_sub(dividers);
+            if efforts_w > 0 {
+                model_col_w = models_w.min(rest.saturating_mul(2) / 3).max(8);
+            } else {
+                model_col_w = rest;
+            }
         }
         self.target_col_w = target_col_w;
+        self.model_col_w = model_col_w;
 
         self.desc_lines = self.description(width.saturating_sub(2)).len() as u16;
         let reason_rows = if self.unavailable_reason.is_some() {
@@ -671,9 +880,11 @@ impl RouteMenu {
         // the viewport past the end of either list.
         let targets = self.routes.len();
         let models = self.models().len();
+        let efforts = self.efforts_for_selected_model().len();
         let vis = self.visible_body_rows;
         self.target_scroll = self.target_scroll.min(targets.saturating_sub(vis));
         self.model_scroll = self.model_scroll.min(models.saturating_sub(vis));
+        self.effort_scroll = self.effort_scroll.min(efforts.saturating_sub(vis));
         self
     }
 
@@ -705,6 +916,17 @@ impl RouteMenu {
         self.model_scroll = self.model_scroll.min(len.saturating_sub(vis));
     }
 
+    pub fn ensure_effort_visible(&mut self) {
+        let len = self.efforts_for_selected_model().len();
+        let vis = self.visible_body_rows.max(1);
+        if self.effort_selected < self.effort_scroll {
+            self.effort_scroll = self.effort_selected;
+        } else if self.effort_selected >= self.effort_scroll + vis {
+            self.effort_scroll = self.effort_selected + 1 - vis;
+        }
+        self.effort_scroll = self.effort_scroll.min(len.saturating_sub(vis));
+    }
+
     /// Scroll the focused column by `delta` rows. Returns true when the
     /// event was consumed (menu open and the wheel is for it).
     pub fn scroll_focused(&mut self, delta: isize) -> bool {
@@ -731,8 +953,29 @@ impl RouteMenu {
                 let next = (self.model_scroll as isize + delta).clamp(0, max as isize) as usize;
                 self.model_scroll = next;
             }
+            RouteFocus::Efforts => {
+                let len = self.efforts_for_selected_model().len();
+                let max = len.saturating_sub(vis);
+                if max == 0 {
+                    return true;
+                }
+                let next = (self.effort_scroll as isize + delta).clamp(0, max as isize) as usize;
+                self.effort_scroll = next;
+            }
         }
         true
+    }
+
+    /// Column boundaries for hit-testing / scrolling. Returns
+    /// `(target_end, model_end)` absolute x coordinates (inclusive of the
+    /// cell just left of the next divider).
+    pub fn column_bounds(&self) -> (u16, u16) {
+        let inner_x = self.area.x.saturating_add(1);
+        let target_end = inner_x.saturating_add(self.target_col_w);
+        let model_end = target_end
+            .saturating_add(1)
+            .saturating_add(self.model_col_w);
+        (target_end, model_end)
     }
 
     /// Scroll the column under `(col, row)`. Falls back to the focused
@@ -749,21 +992,15 @@ impl RouteMenu {
             .saturating_add(self.area.height)
             .saturating_sub(1);
         if row >= body_start && row < last {
-            let divider = self
-                .area
-                .x
-                .saturating_add(1)
-                .saturating_add(self.target_col_w);
-            if col <= divider {
-                // Temporarily treat as targets for this wheel.
-                let prev = self.focus;
-                self.focus = RouteFocus::Targets;
-                self.scroll_focused(delta);
-                self.focus = prev;
-                return true;
-            }
+            let (target_end, model_end) = self.column_bounds();
             let prev = self.focus;
-            self.focus = RouteFocus::Models;
+            if col <= target_end {
+                self.focus = RouteFocus::Targets;
+            } else if self.any_effort_column() && col > model_end {
+                self.focus = RouteFocus::Efforts;
+            } else {
+                self.focus = RouteFocus::Models;
+            }
             self.scroll_focused(delta);
             self.focus = prev;
             return true;
@@ -778,8 +1015,7 @@ impl RouteMenu {
             && row < self.area.y.saturating_add(self.area.height)
     }
 
-    /// Which column and row a click landed on. A click in the target
-    /// column selects a target; one in the model column commits it.
+    /// Which column and row a click landed on.
     pub fn hit_at(&self, col: u16, row: u16) -> Option<RouteHit> {
         if !self.contains(col, row) {
             return None;
@@ -795,14 +1031,20 @@ impl RouteMenu {
         if self.visible_body_rows > 0 && visible >= self.visible_body_rows {
             return None;
         }
-        let divider = self
-            .area
-            .x
-            .saturating_add(1)
-            .saturating_add(self.target_col_w);
-        if col <= divider {
+        let (target_end, model_end) = self.column_bounds();
+        if col <= target_end {
             let index = visible + self.target_scroll;
             (index < self.routes.len()).then_some(RouteHit::Target(index + 1))
+        } else if self.any_effort_column() && col > model_end {
+            if self.focused_blocker().is_some() {
+                return None;
+            }
+            let efforts = self.efforts_for_selected_model();
+            if efforts.len() <= 1 {
+                return None;
+            }
+            let index = visible + self.effort_scroll;
+            (index < efforts.len()).then_some(RouteHit::Effort(index))
         } else {
             // A blocked focused target fills the model column with its
             // reason and action line instead of model rows: any click
@@ -831,10 +1073,26 @@ mod tests {
             dialect: "anthropic".to_string(),
             model: models.first().copied().unwrap_or_default().to_string(),
             models: models.iter().map(|m| m.to_string()).collect(),
+            efforts: Default::default(),
             base_url: "https://example.invalid".to_string(),
             unavailable_reason: reason.map(str::to_string),
             login_command: None,
         }
+    }
+
+    fn option_with_efforts(
+        name: &str,
+        models: &[&str],
+        efforts: &[(&str, &[&str])],
+    ) -> construct_protocol::RouteOption {
+        let mut route = option(name, models, None);
+        for (model, levels) in efforts {
+            route.efforts.insert(
+                (*model).to_string(),
+                levels.iter().map(|s| (*s).to_string()).collect(),
+            );
+        }
+        route
     }
 
     fn menu(routes: Vec<construct_protocol::RouteOption>, active: Option<&str>) -> RouteMenu {
@@ -844,19 +1102,60 @@ mod tests {
             routes,
             unavailable_reason: None,
             active: active.map(str::to_string),
+            active_model: None,
+            active_effort: None,
             native: None,
             focus: RouteFocus::Targets,
             selected: 0,
             model_selected: 0,
+            effort_selected: 0,
             target_scroll: 0,
             model_scroll: 0,
+            effort_scroll: 0,
             anchor: (40, 23),
             target_col_w: 0,
+            model_col_w: 0,
             desc_lines: 0,
             visible_body_rows: 0,
         };
         m = m.anchored(ratatui::layout::Rect::new(0, 0, 120, 30));
         m
+    }
+
+    #[test]
+    fn effort_column_appears_when_a_model_advertises_levels() {
+        let mut m = menu(
+            vec![option_with_efforts(
+                "codex-oauth",
+                &["gpt-5.6-sol", "gpt-5.5"],
+                &[
+                    ("gpt-5.6-sol", &["low", "medium", "high"]),
+                    ("gpt-5.5", &["low", "medium", "high"]),
+                ],
+            )],
+            None,
+        );
+        m.selected = 1;
+        assert!(m.any_effort_column());
+        assert_eq!(m.efforts_for_selected_model(), vec!["low", "medium", "high"]);
+        assert!(m.model_descends());
+        let m = m.anchored(ratatui::layout::Rect::new(0, 0, 120, 30));
+        let first = m.area.y + 1;
+        let body = first + m.header_rows();
+        let (target_end, model_end) = m.column_bounds();
+        assert_eq!(m.hit_at(target_end.saturating_sub(1), body), Some(RouteHit::Target(1)));
+        assert_eq!(m.hit_at(target_end + 2, body), Some(RouteHit::Model(0)));
+        assert_eq!(m.hit_at(model_end + 2, body), Some(RouteHit::Effort(0)));
+        assert_eq!(m.hit_at(model_end + 2, body + 2), Some(RouteHit::Effort(2)));
+    }
+
+    #[test]
+    fn no_effort_column_when_levels_are_absent() {
+        let mut m = menu(vec![option("kimi", &["kimi-k2.5"], None)], None);
+        m.selected = 1;
+        assert!(!m.any_effort_column());
+        assert!(m.efforts_for_selected_model().is_empty());
+        assert!(!m.model_descends());
     }
 
     #[test]

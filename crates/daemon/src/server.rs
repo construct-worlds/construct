@@ -1433,7 +1433,7 @@ async fn dispatch(
     });
     dispatch_entry!(ipc_method::SESSION_SET_ROUTE, {
         let p = params!(req, SessionSetRouteParams);
-        match manager.set_route(&p.session_id, p.route, p.model).await {
+        match manager.set_route(&p.session_id, p.route, p.model, p.effort).await {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }

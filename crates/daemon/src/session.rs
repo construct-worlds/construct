@@ -5723,6 +5723,7 @@ impl SessionManager {
             // not the target's current default (spec 0114).
             Some(route.model.as_str()),
             route.origin_model.clone(),
+            route.effort.clone(),
         ) {
             // The route no longer resolves (renamed in config, key gone).
             // Surface it rather than silently pinning a stale endpoint or
@@ -5761,12 +5762,13 @@ impl SessionManager {
             }));
     }
 
-    /// Arm, change, or clear a session's route (spec 0114).
+    /// Arm, change, or clear a session's route (spec 0114 / 0165).
     pub async fn set_route(
         &self,
         session_id: &str,
         route: Option<String>,
         model: Option<String>,
+        effort: Option<String>,
     ) -> Result<()> {
         let entry = self
             .get_entry(session_id)
@@ -5793,6 +5795,7 @@ impl SessionManager {
             route.as_deref(),
             model.as_deref(),
             origin_model,
+            effort,
         )?;
         if armed == existing {
             return Ok(());

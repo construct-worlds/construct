@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
-use super::{oauth, oauth::OauthProvider, profile_effort_support, ArmedRoute, EffortSupport, Router};
+use super::{
+    effort_level_set, oauth, oauth::OauthProvider, profile_effort_support, ArmedRoute,
+    EffortSupport, Router,
+};
 
 // The id codec is a wire contract shared with clients (they decode ids for
 // display, spec 0158), so it lives in the protocol crate. Re-exported here
@@ -309,33 +312,39 @@ pub fn build_codex_catalog(
                 .copied()
                 .unwrap_or(100 + ranks.len() + index)
         });
-        let (default_level, levels) = match model.effort {
-            EffortSupport::Verbatim => ("medium", json!([
+        let (default_level, level_names) = effort_level_set(model.effort);
+        let levels = match model.effort {
+            EffortSupport::Verbatim => json!([
                 {"effort": "low", "description": "Fastest, minimal reasoning"},
                 {"effort": "medium", "description": "Balanced reasoning"},
                 {"effort": "high", "description": "Deepest reasoning, slower"}
-            ])),
-            EffortSupport::Thinking => ("minimal", json!([
+            ]),
+            EffortSupport::Thinking => json!([
                 {"effort": "minimal", "description": "No extended thinking"},
                 {"effort": "low", "description": "Extended thinking, 4k token budget"},
                 {"effort": "medium", "description": "Extended thinking, 12k token budget"},
                 {"effort": "high", "description": "Extended thinking, 24k token budget"}
-            ])),
-            EffortSupport::Grok => ("high", json!([
+            ]),
+            EffortSupport::Grok => json!([
                 {"effort": "low", "description": "Quick, fast implementation"},
                 {"effort": "medium", "description": "Balanced implementation and testing"},
                 {"effort": "high", "description": "Highest quality with extensive reasoning"}
-            ])),
-            EffortSupport::Kimi => ("high", json!([
+            ]),
+            EffortSupport::Kimi => json!([
                 {"effort": "low", "description": "Lower Kimi thinking effort"},
                 {"effort": "high", "description": "High Kimi thinking effort"},
                 {"effort": "xhigh", "description": "Maximum Kimi thinking effort"}
-            ])),
-            EffortSupport::Unsupported => ("medium", json!([{
+            ]),
+            EffortSupport::Unsupported => json!([{
                 "effort": "medium",
                 "description": "Provider-default reasoning through Construct"
-            }])),
+            }]),
         };
+        debug_assert_eq!(
+            level_names.len(),
+            levels.as_array().map(|a| a.len()).unwrap_or(0),
+            "catalog descriptions must track effort_level_set"
+        );
         entry["default_reasoning_level"] = Value::String(default_level.to_string());
         entry["supported_reasoning_levels"] = levels;
         // Route profiles currently carry no capability metadata. Advertise a

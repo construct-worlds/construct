@@ -122,6 +122,47 @@ pub fn profile_effort_support(provider: &str) -> EffortSupport {
     }
 }
 
+/// Default and selectable levels for a target's effort support (spec 0160).
+///
+/// A single-element list is a provider-default stub — the native catalog
+/// still advertises it so Codex has a level, but Construct's pin picker
+/// treats it as "no choice" and omits the third column (spec 0165).
+pub fn effort_level_set(support: EffortSupport) -> (&'static str, &'static [&'static str]) {
+    match support {
+        EffortSupport::Verbatim => ("medium", &["low", "medium", "high"]),
+        EffortSupport::Thinking => ("minimal", &["minimal", "low", "medium", "high"]),
+        EffortSupport::Grok => ("high", &["low", "medium", "high"]),
+        EffortSupport::Kimi => ("high", &["low", "high", "xhigh"]),
+        EffortSupport::Unsupported => ("medium", &["medium"]),
+    }
+}
+
+/// Levels a pin-router third column may offer. Empty when the target has
+/// no real selectable scale.
+pub fn effort_levels_for_picker(support: EffortSupport) -> Vec<String> {
+    let (_, levels) = effort_level_set(support);
+    if levels.len() <= 1 {
+        Vec::new()
+    } else {
+        levels.iter().map(|s| (*s).to_string()).collect()
+    }
+}
+
+/// Per-model effort map for a route option's picker column.
+fn efforts_for_models(
+    models: impl IntoIterator<Item = String>,
+    support_for: impl Fn(&str) -> EffortSupport,
+) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    for model in models {
+        let levels = effort_levels_for_picker(support_for(&model));
+        if !levels.is_empty() {
+            out.insert(model, levels);
+        }
+    }
+    out
+}
+
 /// How a harness can be routed.
 ///
 /// Per spec 0115 each entry is an empirical claim about a specific
@@ -334,6 +375,10 @@ pub struct ArmedRoute {
     pub client_dialect: Dialect,
     /// Whether and how the target honors a requested reasoning effort.
     pub effort: EffortSupport,
+    /// Pin-chosen effort applied when this arm is the session's durable
+    /// pin (spec 0165). Catalog-resolved request-scoped arms leave this
+    /// `None` so the harness request body remains authoritative.
+    pub pin_effort: Option<String>,
     pub client: reqwest::Client,
 }
 
@@ -925,6 +970,7 @@ impl Router {
             target_dialect: provider.dialect(),
             client_dialect: routing.dialect,
             effort: oauth::effort_support(provider, &model),
+            pin_effort: None,
             client: reqwest::Client::new(),
         })
     }
@@ -1051,6 +1097,7 @@ impl Router {
             target_dialect,
             client_dialect: routing.dialect,
             effort: profile_effort_support(&profile.provider),
+            pin_effort: None,
             client: reqwest::Client::new(),
         })
     }
@@ -1065,6 +1112,7 @@ impl Router {
         name: Option<&str>,
         model: Option<&str>,
         origin_model: Option<String>,
+        effort: Option<String>,
     ) -> Result<Option<SessionRoute>> {
         let ctx = self
             .sessions
@@ -1085,10 +1133,27 @@ impl Router {
             ctx.bump_route_epoch();
             return Ok(None);
         };
-        let armed = self.resolve(name, harness, model)?;
+        let mut armed = self.resolve(name, harness, model)?;
+        if let Some(chosen) = effort {
+            let levels = effort_levels_for_picker(armed.effort);
+            if levels.is_empty() {
+                // Target has no real scale: drop the pin effort rather than
+                // advertise a choice the proxy cannot honor.
+                armed.pin_effort = None;
+            } else if levels.iter().any(|l| l == &chosen) {
+                armed.pin_effort = Some(chosen);
+            } else {
+                return Err(anyhow!(
+                    "route \"{name}\": effort \"{chosen}\" is not supported \
+                     (supported: {})",
+                    levels.join(", ")
+                ));
+            }
+        }
         let summary = SessionRoute {
             name: armed.name.clone(),
             model: armed.model.clone(),
+            effort: armed.pin_effort.clone(),
             origin_model,
             observed: ctx.observed(),
         };
@@ -1132,11 +1197,16 @@ impl Router {
                     Some(b) => (Some(b.reason), b.login_command),
                     None => (None, None),
                 };
+                let models = self.oauth_model_list(*p);
+                let efforts = efforts_for_models(models.iter().cloned(), |m| {
+                    oauth::effort_support(*p, m)
+                });
                 RouteOption {
                     name: p.name().to_string(),
                     dialect: p.dialect().label().to_string(),
                     model: self.oauth_model(*p),
-                    models: self.oauth_model_list(*p),
+                    models,
+                    efforts,
                     base_url: p.endpoint().to_string(),
                     unavailable_reason,
                     login_command,
@@ -1146,19 +1216,25 @@ impl Router {
         routes.extend(self
             .profiles
             .iter()
-            .map(|(name, profile)| RouteOption {
-                name: name.clone(),
-                dialect: provider_dialect(&profile.provider)
-                    .map(|d| d.label().to_string())
-                    .unwrap_or_else(|| profile.provider.clone()),
-                model: profile.model.clone().unwrap_or_default(),
-                models: self.profile_model_list(profile),
-                base_url: profile.resolved_base_url().unwrap_or_default(),
-                unavailable_reason: routing
-                    .and_then(|_| self.profile_blocker(profile, harness)),
-                // A profile's blocker is a missing key or dialect, never a
-                // login someone can click through.
-                login_command: None,
+            .map(|(name, profile)| {
+                let models = self.profile_model_list(profile);
+                let support = profile_effort_support(&profile.provider);
+                let efforts = efforts_for_models(models.iter().cloned(), |_| support);
+                RouteOption {
+                    name: name.clone(),
+                    dialect: provider_dialect(&profile.provider)
+                        .map(|d| d.label().to_string())
+                        .unwrap_or_else(|| profile.provider.clone()),
+                    model: profile.model.clone().unwrap_or_default(),
+                    models,
+                    efforts,
+                    base_url: profile.resolved_base_url().unwrap_or_default(),
+                    unavailable_reason: routing
+                        .and_then(|_| self.profile_blocker(profile, harness)),
+                    // A profile's blocker is a missing key or dialect, never a
+                    // login someone can click through.
+                    login_command: None,
+                }
             }));
 
         RouterListRoutesResult {
@@ -1573,7 +1649,7 @@ mod tests {
         )
         .await;
         r.attach_session("s1", "claude", None).unwrap();
-        let err = r.set_route("s1", "claude", Some("kimi"), None, None).unwrap_err();
+        let err = r.set_route("s1", "claude", Some("kimi"), None, None, None).unwrap_err();
         assert!(err.to_string().contains("NOT_SET_ANYWHERE"), "{err}");
     }
 
@@ -1593,7 +1669,7 @@ mod tests {
         r.attach_session("s1", "claude", None).unwrap();
 
         let armed = r
-            .set_route("s1", "claude", Some("kimi"), None, Some("claude-opus-5".into()))
+            .set_route("s1", "claude", Some("kimi"), None, Some("claude-opus-5".into()), None)
             .unwrap()
             .unwrap();
         assert_eq!(armed.name, "kimi");
@@ -1602,7 +1678,104 @@ mod tests {
         assert!(!armed.observed, "nothing has been proxied yet");
 
         // Clearing always succeeds (spec 0114).
-        assert!(r.set_route("s1", "claude", None, None, None).unwrap().is_none());
+        assert!(r.set_route("s1", "claude", None, None, None, None).unwrap().is_none());
+    }
+
+    /// A pin may record a reasoning-effort level when the target advertises
+    /// a real scale (spec 0165). Unsupported scales drop the value; invalid
+    /// levels are rejected.
+    #[tokio::test]
+    async fn pin_effort_is_recorded_when_the_target_supports_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CONSTRUCT_TEST_ROUTE_KEY", "sk-test");
+        let r = started_with(
+            &dir,
+            cfg_with(true),
+            profiles(vec![
+                (
+                    "gpt",
+                    ModelProfile {
+                        provider: "openai".to_string(),
+                        base_url: Some("https://api.openai.com/v1".to_string()),
+                        api_key_env: Some("CONSTRUCT_TEST_ROUTE_KEY".to_string()),
+                        api_key: None,
+                        model: Some("gpt-5".to_string()),
+                    },
+                ),
+                (
+                    "gemini-pro",
+                    ModelProfile {
+                        provider: "gemini".to_string(),
+                        base_url: Some("https://generativelanguage.googleapis.com".to_string()),
+                        api_key_env: Some("CONSTRUCT_TEST_ROUTE_KEY".to_string()),
+                        api_key: None,
+                        model: Some("gemini-2.5-pro".to_string()),
+                    },
+                ),
+            ]),
+        )
+        .await;
+        r.attach_session("s1", "claude", None).unwrap();
+
+        let listed = r.list_routes("claude", true, None, false);
+        let gpt = route_named(&listed, "gpt");
+        assert!(
+            gpt.efforts
+                .get("gpt-5")
+                .is_some_and(|levels| levels == &["low", "medium", "high"]),
+            "openai profiles expose a selectable scale: {:?}",
+            gpt.efforts
+        );
+        let gemini = route_named(&listed, "gemini-pro");
+        assert!(
+            gemini.efforts.is_empty(),
+            "unsupported targets omit the third column: {:?}",
+            gemini.efforts
+        );
+
+        let armed = r
+            .set_route(
+                "s1",
+                "claude",
+                Some("gpt"),
+                Some("gpt-5"),
+                None,
+                Some("high".into()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(armed.effort.as_deref(), Some("high"));
+        let ctx = r.sessions.read().unwrap()["s1"].clone();
+        assert_eq!(
+            ctx.armed_route().unwrap().pin_effort.as_deref(),
+            Some("high")
+        );
+
+        let err = r
+            .set_route(
+                "s1",
+                "claude",
+                Some("gpt"),
+                None,
+                None,
+                Some("ludicrous".into()),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("ludicrous"), "{err}");
+
+        // Gemini has no selectable scale: effort is dropped, not rejected.
+        let armed = r
+            .set_route(
+                "s1",
+                "claude",
+                Some("gemini-pro"),
+                None,
+                None,
+                Some("high".into()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(armed.effort, None);
     }
 
     /// A provider with no translator is offered but not selectable, with
@@ -1624,7 +1797,7 @@ mod tests {
             .as_deref()
             .unwrap();
         assert!(reason.contains("no translator"), "{reason}");
-        assert!(r.set_route("s1", "claude", Some("meta-model"), None, None).is_err());
+        assert!(r.set_route("s1", "claude", Some("meta-model"), None, None, None).is_err());
     }
 
     #[tokio::test]
@@ -1656,7 +1829,7 @@ mod tests {
             "https://generativelanguage.googleapis.com/v1beta"
         );
 
-        r.set_route("s1", "claude", Some("gemini-pro"), None, None)
+        r.set_route("s1", "claude", Some("gemini-pro"), None, None, None)
             .unwrap();
         let armed = r.sessions.read().unwrap()["s1"].armed_route().unwrap();
         assert_eq!(armed.auth, TargetAuth::GoogleApiKey);
@@ -1685,7 +1858,7 @@ mod tests {
         )
         .await;
         r.attach_session("s1", "claude", None).unwrap();
-        r.set_route("s1", "claude", Some("azure"), None, None)
+        r.set_route("s1", "claude", Some("azure"), None, None, None)
             .unwrap();
         let armed = r.sessions.read().unwrap()["s1"].armed_route().unwrap();
         assert_eq!(armed.target_dialect, Dialect::OpenAiResponses);
@@ -1728,7 +1901,7 @@ mod tests {
         assert_eq!(gpt.base_url, "https://api.openai.com/v1");
 
         let armed = r
-            .set_route("s1", "claude", Some("gpt"), None, None)
+            .set_route("s1", "claude", Some("gpt"), None, None, None)
             .unwrap()
             .unwrap();
         assert_eq!(armed.model, "gpt-5.5");
@@ -1781,7 +1954,7 @@ mod tests {
         )
         .await;
         let err = r
-            .set_route("never-attached", "claude", Some("kimi"), None, None)
+            .set_route("never-attached", "claude", Some("kimi"), None, None, None)
             .unwrap_err();
         assert!(err.to_string().contains("no routing transport"), "{err}");
     }
@@ -1978,7 +2151,7 @@ mod tests {
         .await;
         let env = r.attach_session("s1", "claude", None).unwrap();
         let token = Router::token_from_env(&env).unwrap();
-        r.set_route("s1", "claude", Some("kimi"), None, Some("claude-opus-5".into()))
+        r.set_route("s1", "claude", Some("kimi"), None, Some("claude-opus-5".into()), None)
             .unwrap();
 
         // Client: CONNECT through the router, then TLS with the router CA
@@ -2111,7 +2284,7 @@ mod tests {
         .await;
         let env = r.attach_session("s1", "claude", None).unwrap();
         let token = Router::token_from_env(&env).unwrap();
-        r.set_route("s1", "claude", Some("gpt"), None, Some("claude-opus-5".into()))
+        r.set_route("s1", "claude", Some("gpt"), None, Some("claude-opus-5".into()), None)
             .unwrap();
 
         let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", r.port()))
@@ -2260,6 +2433,7 @@ mod tests {
             Some("gemini"),
             None,
             Some("claude-opus-5".into()),
+            None,
         )
         .unwrap();
 
@@ -2595,7 +2769,7 @@ mod tests {
         let env = r.attach_session("s1", "pi", None).unwrap();
         let token = Router::token_from_env(&env).unwrap();
         let armed = r
-            .set_route("s1", "pi", Some("claude-oauth"), None, Some("gpt-5.6-sol".into()))
+            .set_route("s1", "pi", Some("claude-oauth"), None, Some("gpt-5.6-sol".into()), None)
             .unwrap()
             .unwrap();
         assert_eq!(armed.name, "claude-oauth");
@@ -2740,7 +2914,7 @@ mod tests {
 
         let r = started(&dir, cfg_with(true)).await;
         r.attach_session("s1", "claude", None).unwrap();
-        r.set_route("s1", "claude", Some("codex-oauth"), None, None)
+        r.set_route("s1", "claude", Some("codex-oauth"), None, None, None)
             .unwrap();
         let ctx = r.sessions.read().unwrap()["s1"].clone();
         let route = ctx.armed_route().unwrap();
