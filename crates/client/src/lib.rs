@@ -454,6 +454,23 @@ impl Client {
         self.request(ipc_method::SESSION_LIST, &serde_json::Value::Null)
             .await
     }
+    pub async fn list_services(&self) -> Result<Vec<construct_protocol::ServiceSummary>> {
+        self.request(ipc_method::SERVICE_LIST, &serde_json::Value::Null)
+            .await
+    }
+    pub async fn put_service(
+        &self,
+        params: construct_protocol::ServicePutParams,
+    ) -> Result<construct_protocol::ServicePutResult> {
+        self.request(ipc_method::SERVICE_PUT, &params).await
+    }
+    pub async fn delete_service(&self, name: String) -> Result<()> {
+        self.request(
+            ipc_method::SERVICE_DELETE,
+            &construct_protocol::ServiceNameParams { name },
+        )
+        .await
+    }
     pub async fn get(&self, id: &str) -> Result<SessionDetail> {
         self.request(
             ipc_method::SESSION_GET,

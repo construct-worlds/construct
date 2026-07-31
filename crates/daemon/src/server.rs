@@ -1228,6 +1228,32 @@ async fn dispatch(
     dispatch_entry!(ipc_method::SESSION_LIST, {
         ok!(req, &manager.list().await)
     });
+    dispatch_entry!(ipc_method::SERVICE_LIST, {
+        match crate::service::list_summaries(&construct_protocol::paths::Paths::discover().services_dir()) {
+            Ok(services) => ok!(req, &services),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::SERVICE_PUT, {
+        let p = params!(req, construct_protocol::ServicePutParams);
+        match crate::service::put_definition(
+            &construct_protocol::paths::Paths::discover().services_dir(),
+            p,
+        ) {
+            Ok(result) => ok!(req, &result),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::SERVICE_DELETE, {
+        let p = params!(req, construct_protocol::ServiceNameParams);
+        match crate::service::delete_definition(
+            &construct_protocol::paths::Paths::discover().services_dir(),
+            &p.name,
+        ) {
+            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
+        }
+    });
     dispatch_entry!(ipc_method::SESSION_CREATE, {
         let p = params!(req, CreateSessionParams);
         match manager.create(p).await {

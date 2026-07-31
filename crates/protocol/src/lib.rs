@@ -1224,6 +1224,9 @@ pub mod ipc_method {
     /// result back into the document once the subagent completes.
     pub const PLAYBOOK_VERB_EXECUTE: &str = "playbook.verb_execute";
     pub const SESSION_LIST: &str = "session.list";
+    pub const SERVICE_LIST: &str = "service.list";
+    pub const SERVICE_PUT: &str = "service.put";
+    pub const SERVICE_DELETE: &str = "service.delete";
     pub const SESSION_CREATE: &str = "session.create";
     pub const SESSION_GET: &str = "session.get";
     pub const SESSION_INPUT: &str = "session.input";
@@ -3204,6 +3207,46 @@ pub struct CreateSessionParams {
     /// Optional fork ancestry, persisted on the new top-level session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<ForkedFrom>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceSummary {
+    pub name: String,
+    pub instruction: String,
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub cwd: String,
+    pub routing: String,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_port: Option<u16>,
+    #[serde(default)]
+    pub has_http_token: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServicePutParams {
+    pub service: ServiceSummary,
+    /// Generate and replace the HTTP bearer token. The new token is returned
+    /// once and is never included by `service.list`.
+    #[serde(default)]
+    pub rotate_token: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServicePutResult {
+    pub service: ServiceSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_token: Option<String>,
+    /// V1 persists atomically; the current daemon adopts changes on restart.
+    pub restart_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceNameParams {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

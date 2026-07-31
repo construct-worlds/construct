@@ -32,6 +32,8 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub routing: ServiceRouting,
     #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
     pub channels: BTreeMap<String, ServiceChannelConfig>,
 }
 
@@ -84,6 +86,101 @@ pub fn load_definitions(dir: &std::path::Path) -> Result<BTreeMap<String, Servic
     Ok(services)
 }
 
+pub fn list_summaries(dir: &std::path::Path) -> Result<Vec<construct_protocol::ServiceSummary>> {
+    Ok(load_definitions(dir)?
+        .into_iter()
+        .map(|(name, config)| summary(name, &config))
+        .collect())
+}
+
+pub fn put_definition(
+    dir: &std::path::Path,
+    params: construct_protocol::ServicePutParams,
+) -> Result<construct_protocol::ServicePutResult> {
+    validate_service_name(&params.service.name)?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(format!("{}.toml", params.service.name));
+    let existing = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| toml::from_str::<ServiceConfig>(&raw).ok());
+    let mut new_token = None;
+    let token = if params.rotate_token || existing.is_none() {
+        let token = format!("cst_{}", uuid::Uuid::new_v4().simple());
+        new_token = Some(token.clone());
+        Some(token)
+    } else {
+        existing
+            .as_ref()
+            .and_then(|config| config.channels.get("http"))
+            .and_then(|channel| channel.token.clone())
+    };
+    let mut channels = BTreeMap::new();
+    if let Some(port) = params.service.http_port {
+        channels.insert(
+            "http".to_string(),
+            ServiceChannelConfig {
+                kind: None,
+                port: Some(port),
+                token,
+            },
+        );
+    }
+    let routing = match params.service.routing.as_str() {
+        "per-event" => ServiceRouting::PerEvent,
+        "session-key" => ServiceRouting::SessionKey,
+        "single" => ServiceRouting::Single,
+        other => return Err(anyhow!("invalid routing mode `{other}`")),
+    };
+    let config = ServiceConfig {
+        instruction: params.service.instruction,
+        harness: params.service.harness,
+        model: params.service.model,
+        cwd: params.service.cwd,
+        routing,
+        paused: params.service.paused,
+        channels,
+    };
+    let encoded = toml::to_string_pretty(&config)?;
+    let temporary = dir.join(format!(".{}.toml.tmp", params.service.name));
+    std::fs::write(&temporary, encoded)
+        .with_context(|| format!("write {}", temporary.display()))?;
+    std::fs::rename(&temporary, &path).with_context(|| format!("replace {}", path.display()))?;
+    Ok(construct_protocol::ServicePutResult {
+        service: summary(params.service.name, &config),
+        new_token,
+        restart_required: true,
+    })
+}
+
+pub fn delete_definition(dir: &std::path::Path, name: &str) -> Result<()> {
+    validate_service_name(name)?;
+    let path = dir.join(format!("{name}.toml"));
+    if path.exists() {
+        std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn summary(name: String, config: &ServiceConfig) -> construct_protocol::ServiceSummary {
+    let http = config.channels.get("http");
+    construct_protocol::ServiceSummary {
+        name,
+        instruction: config.instruction.clone(),
+        harness: config.harness.clone(),
+        model: config.model.clone(),
+        cwd: config.cwd.clone(),
+        routing: match config.routing {
+            ServiceRouting::PerEvent => "per-event",
+            ServiceRouting::SessionKey => "session-key",
+            ServiceRouting::Single => "single",
+        }
+        .to_string(),
+        paused: config.paused,
+        http_port: http.and_then(|channel| channel.port),
+        has_http_token: http.and_then(|channel| channel.token.as_ref()).is_some(),
+    }
+}
+
 fn validate_service_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 32
@@ -105,6 +202,9 @@ pub fn spawn_all(
     data_dir: PathBuf,
 ) {
     for (name, service) in services {
+        if service.paused {
+            continue;
+        }
         let Some(channel) = service.channels.get("http").cloned() else {
             continue;
         };
@@ -415,5 +515,53 @@ mod tests {
         let services = load_definitions(dir.path()).unwrap();
         assert_eq!(services.len(), 1);
         assert_eq!(services["alerts"].channels["http"].port, Some(8787));
+    }
+
+    #[test]
+    fn put_preserves_token_until_explicit_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = construct_protocol::ServiceSummary {
+            name: "alerts".into(),
+            instruction: "triage".into(),
+            harness: "smith".into(),
+            model: None,
+            cwd: ".".into(),
+            routing: "session-key".into(),
+            paused: false,
+            http_port: Some(8787),
+            has_http_token: false,
+        };
+        let first = put_definition(
+            dir.path(),
+            construct_protocol::ServicePutParams {
+                service: service.clone(),
+                rotate_token: false,
+            },
+        )
+        .unwrap();
+        let original = first.new_token.unwrap();
+        let second = put_definition(
+            dir.path(),
+            construct_protocol::ServicePutParams {
+                service: service.clone(),
+                rotate_token: false,
+            },
+        )
+        .unwrap();
+        assert!(second.new_token.is_none());
+        let stored = load_definitions(dir.path()).unwrap();
+        assert_eq!(
+            stored["alerts"].channels["http"].token.as_deref(),
+            Some(original.as_str())
+        );
+        let rotated = put_definition(
+            dir.path(),
+            construct_protocol::ServicePutParams {
+                service,
+                rotate_token: true,
+            },
+        )
+        .unwrap();
+        assert_ne!(rotated.new_token.as_deref(), Some(original.as_str()));
     }
 }
