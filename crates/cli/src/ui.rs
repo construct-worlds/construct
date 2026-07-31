@@ -1737,6 +1737,11 @@ fn harness_hover_tooltip_rect(anchor_x: u16, anchor_y: u16, w: u16, h: u16, tota
 
 const HARNESS_PICKER_MAX_ROWS: usize = 8;
 
+/// The fork flow's turn picker gets a taller window than the harness
+/// picker: turns accumulate over a session's life (harness count doesn't),
+/// so more visible rows means less scrolling to reach older turns.
+const TURN_PICKER_MAX_ROWS: usize = 10;
+
 /// Render the anchored fork's turn picker (spec 0163) as a completion menu
 /// above its prompt row — same shape as the harness picker: one row per
 /// past user turn, keyboard highlight, hover, click-to-pick.
@@ -1808,7 +1813,11 @@ fn render_turn_picker(f: &mut Frame, area: Rect, app: &mut App) {
     // Prompt row under the menu, mirroring the harness picker's input row.
     if area.height > 0 {
         let y = area.y + area.height - 1;
-        let hint = "Fork: pick the turn to retry — or now (Enter picks, Esc cancels)";
+        let hint = if app.turn_picker_loading {
+            "Fork: loading past turns… (Enter forks from now, Esc cancels)"
+        } else {
+            "Fork: pick the turn to retry — or now (Enter picks, Esc cancels)"
+        };
         f.render_widget(
             Paragraph::new(hint).style(Style::default().fg(app.theme.dim)),
             Rect::new(area.x, y, area.width, 1),
@@ -10812,10 +10821,7 @@ pub fn compute_minibuffer_height(app: &App, total_h: u16) -> u16 {
         app.minibuffer.as_ref().map(|m| &m.intent),
         Some(MinibufferIntent::ForkTurnPick { .. })
     ) {
-        let row_count = app
-            .turn_picker_entries
-            .len()
-            .clamp(1, HARNESS_PICKER_MAX_ROWS) as u16;
+        let row_count = app.turn_picker_entries.len().clamp(1, TURN_PICKER_MAX_ROWS) as u16;
         return (row_count + 1).min(total_h.saturating_sub(2).max(1));
     }
     let is_orch = matches!(

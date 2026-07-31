@@ -242,6 +242,7 @@ impl App {
                     if let Some(entry) = picked {
                         self.minibuffer = None;
                         self.turn_picker_entries = Vec::new();
+                        self.turn_picker_loading = false;
                         self.open_fork_harness_picker(source_session_id, entry.anchor_seq)
                             .await;
                     }
@@ -249,10 +250,12 @@ impl App {
                 KeyCode::Esc => {
                     self.minibuffer = None;
                     self.turn_picker_entries = Vec::new();
+                    self.turn_picker_loading = false;
                 }
                 KeyCode::Char('g') if ctrl => {
                     self.minibuffer = None;
                     self.turn_picker_entries = Vec::new();
+                    self.turn_picker_loading = false;
                 }
                 _ => {}
             }
