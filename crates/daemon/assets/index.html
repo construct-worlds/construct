@@ -11726,21 +11726,26 @@ function renderSuggestFan() {
     }
     suggestFanEl.innerHTML = "";
     const total = items.length;
-    // Chips sweep a quarter arc around the orb center: the top pick sits
-    // at the smallest angle (just above the orb), verbs fan out toward
-    // horizontal-left. Right edges anchor to the arc; the pop-in stagger
-    // reveals outward from the orb.
+    // The idle History + Generate menu is a compact vertical pair above the
+    // orb. Generated hands use the wider quarter arc: the top pick sits at
+    // the smallest angle (just above the orb), and verbs fan leftward.
+    // Right edges anchor to the arc; the pop-in stagger reveals outward.
     const radius = Math.min(185, Math.max(120, window.innerWidth * 0.32));
     // Arc positions first, then a de-conflict pass: chips near the top of
     // the arc compress vertically, so walk outward from the orb keeping a
     // minimum vertical gap between neighbors.
-    const pos = items.map((_, k) => {
-      const th = ((8 + (total === 1 ? 40 : k * (84 / (total - 1)))) * Math.PI) / 180;
-      return {
-        right: Math.round(radius * Math.sin(th)) - 20,
-        bottom: Math.round(radius * Math.cos(th) * 0.72),
-      };
-    });
+    const pos = total <= 2
+      ? items.map((_, k) => ({
+          right: 18,
+          bottom: 58 + (total - 1 - k) * 42,
+        }))
+      : items.map((_, k) => {
+          const th = ((8 + k * (84 / (total - 1))) * Math.PI) / 180;
+          return {
+            right: Math.round(radius * Math.sin(th)) - 20,
+            bottom: Math.round(radius * Math.cos(th) * 0.72),
+          };
+        });
     for (let k = pos.length - 2; k >= 0; k--) {
       if (pos[k].bottom - pos[k + 1].bottom < 40) pos[k].bottom = pos[k + 1].bottom + 40;
     }

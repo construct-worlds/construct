@@ -1317,6 +1317,13 @@ async fn web_client_loads_and_websocket_connects() {
                   { text: 'first long prompt that should clamp over multiple lines of preview text without collapsing the row height' },
                   { text: 'second history entry for overlap regression' },
                 ];
+                // Before a hand exists, the two utility actions must stay
+                // together above the orb rather than spreading over the
+                // generated-hand quarter arc.
+                renderSuggestFan();
+                const compactMenuPositions = [...suggestFanEl.querySelectorAll('.suggest-chip')]
+                  .map((chip) => ({ right: parseInt(chip.style.right, 10), bottom: parseInt(chip.style.bottom, 10) }));
+                closeSuggestDeck();
                 state.suggestionsById.set('s-suggestion-focus', {
                   top: { text: 'top pick' },
                   verbs: [{ label: 'refine', cards: [{ text: 'card a' }, { text: 'card b' }] }],
@@ -1449,6 +1456,7 @@ async fn web_client_loads_and_websocket_connects() {
                   historyCardHeight,
                   historyHasClamp: !!clamp,
                   fanLabels,
+                  compactMenuPositions,
                 };
               } finally {
                 delete suggestDeckEl.hidden;
@@ -1587,6 +1595,21 @@ async fn web_client_loads_and_websocket_connects() {
             .as_array()
             .is_some_and(|labels| labels.iter().any(|label| label == "regenerate")),
         "a dealt hand must expose explicit Regenerate: {suggestion_focus:?}"
+    );
+    let compact_positions = suggestion_focus["compactMenuPositions"]
+        .as_array()
+        .expect("idle suggestion menu positions");
+    assert_eq!(compact_positions.len(), 2, "idle menu should have two actions");
+    assert_eq!(
+        compact_positions[0]["right"], compact_positions[1]["right"],
+        "History and Generate must share a compact vertical column: {suggestion_focus:?}"
+    );
+    let compact_gap = (compact_positions[0]["bottom"].as_i64().unwrap_or_default()
+        - compact_positions[1]["bottom"].as_i64().unwrap_or_default())
+    .abs();
+    assert!(
+        compact_gap <= 42,
+        "History and Generate should be neighbors, not a wide fan: {suggestion_focus:?}"
     );
     let history_lh = suggestion_focus["historyLineHeight"].as_f64().unwrap_or(0.0);
     let history_fs = suggestion_focus["historyFontSize"].as_f64().unwrap_or(0.0);
