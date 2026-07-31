@@ -794,6 +794,81 @@ impl App {
                 let cmd = input.trim();
                 self.run_palette_command(cmd).await;
             }
+            MinibufferIntent::ServiceName { mut service } => {
+                service.name = input.trim().to_string();
+                let value = service.instruction.clone();
+                self.minibuffer = Some(Minibuffer {
+                    prompt: "Instruction: ".to_string(),
+                    cursor: value.chars().count(),
+                    input: value,
+                    intent: MinibufferIntent::ServiceInstruction { service },
+                    error: None,
+                });
+            }
+            MinibufferIntent::ServiceInstruction { mut service } => {
+                service.instruction = input;
+                let value = service.routing.clone();
+                self.minibuffer = Some(Minibuffer {
+                    prompt: "Routing (session-key|per-event|single): ".to_string(),
+                    cursor: value.chars().count(),
+                    input: value,
+                    intent: MinibufferIntent::ServiceRouting { service },
+                    error: None,
+                });
+            }
+            MinibufferIntent::ServiceRouting { mut service } => {
+                service.routing = input.trim().to_string();
+                let value = service.http_port.unwrap_or(8787).to_string();
+                self.minibuffer = Some(Minibuffer {
+                    prompt: "HTTP port: ".to_string(),
+                    cursor: value.chars().count(),
+                    input: value,
+                    intent: MinibufferIntent::ServicePort { service },
+                    error: None,
+                });
+            }
+            MinibufferIntent::ServicePort { mut service } => {
+                let port = match input.trim().parse::<u16>() {
+                    Ok(port) if port > 0 => port,
+                    _ => {
+                        self.set_status("service create failed: invalid HTTP port".to_string());
+                        return;
+                    }
+                };
+                service.http_port = Some(port);
+                match self
+                    .client
+                    .put_service(construct_protocol::ServicePutParams {
+                        service,
+                        rotate_token: false,
+                    })
+                    .await
+                {
+                    Ok(result) => {
+                        let token = result
+                            .new_token
+                            .map(|value| format!(" · token {value} (shown once)"))
+                            .unwrap_or_default();
+                        self.set_status(format!(
+                            "{} saved{} · restart daemon to serve",
+                            result.service.name, token
+                        ));
+                    }
+                    Err(error) => self.set_status(format!("service save failed: {error}")),
+                }
+            }
+            MinibufferIntent::ServiceDeleteConfirm { name } => {
+                if !matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    self.set_status("service delete cancelled".to_string());
+                    return;
+                }
+                match self.client.delete_service(name.clone()).await {
+                    Ok(()) => self.set_status(format!(
+                        "{name} deleted; restart daemon to withdraw endpoint"
+                    )),
+                    Err(error) => self.set_status(format!("service delete failed: {error}")),
+                }
+            }
             MinibufferIntent::Orchestrator => {
                 // Unreachable in PTY-orchestrator mode — the
                 // orchestrator panel's keys are handled in

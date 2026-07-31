@@ -1144,6 +1144,21 @@ pub enum MinibufferIntent {
         group_id: String,
     },
     CommandPalette,
+    ServiceName {
+        service: construct_protocol::ServiceSummary,
+    },
+    ServiceInstruction {
+        service: construct_protocol::ServiceSummary,
+    },
+    ServiceRouting {
+        service: construct_protocol::ServiceSummary,
+    },
+    ServicePort {
+        service: construct_protocol::ServiceSummary,
+    },
+    ServiceDeleteConfirm {
+        name: String,
+    },
     /// Persistent orchestrator session input. Unlike other intents
     /// this one stays open across Enter — the panel re-opens with an
     /// empty input after each submission. Slash-prefixed input is
@@ -13283,6 +13298,122 @@ impl App {
             }
             "tasks" => {
                 self.open_tasks_popup().await;
+            }
+            "serve" => {
+                let selected = self.selected_session().cloned();
+                let suggested = arg
+                    .split_whitespace()
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("service")
+                    .to_string();
+                let service = construct_protocol::ServiceSummary {
+                    name: suggested.clone(),
+                    instruction: String::new(),
+                    harness: selected
+                        .as_ref()
+                        .map(|session| session.harness.clone())
+                        .unwrap_or_else(|| "smith".to_string()),
+                    model: selected.as_ref().and_then(|session| session.model.clone()),
+                    cwd: selected
+                        .as_ref()
+                        .map(|session| session.cwd.clone())
+                        .unwrap_or_else(|| ".".to_string()),
+                    routing: "session-key".to_string(),
+                    paused: false,
+                    http_port: Some(8787),
+                    has_http_token: false,
+                };
+                self.minibuffer = Some(Minibuffer {
+                    prompt: "Service name: ".to_string(),
+                    cursor: suggested.chars().count(),
+                    input: suggested,
+                    intent: MinibufferIntent::ServiceName { service },
+                    error: None,
+                });
+            }
+            "services" => match self.client.list_services().await {
+                Ok(services) if services.is_empty() => {
+                    self.set_status("services: none — run /serve to create one".to_string())
+                }
+                Ok(services) => self.set_status(format!(
+                    "services: {}",
+                    services
+                        .iter()
+                        .map(|service| format!(
+                            "{}{}",
+                            service.name,
+                            if service.paused { " (paused)" } else { "" }
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+                Err(error) => self.set_status(format!("services failed: {error}")),
+            },
+            "service" => {
+                let mut words = arg.split_whitespace();
+                let action = words.next().unwrap_or("");
+                let name = words.next().unwrap_or("");
+                let services = self.client.list_services().await.unwrap_or_default();
+                let found = services.into_iter().find(|service| service.name == name);
+                match (action, found) {
+                    ("edit", Some(service)) => {
+                        let input = service.name.clone();
+                        self.minibuffer = Some(Minibuffer {
+                            prompt: "Service name: ".to_string(),
+                            cursor: input.chars().count(),
+                            input,
+                            intent: MinibufferIntent::ServiceName { service },
+                            error: None,
+                        });
+                    }
+                    ("pause" | "resume", Some(mut service)) => {
+                        service.paused = action == "pause";
+                        match self
+                            .client
+                            .put_service(construct_protocol::ServicePutParams {
+                                service,
+                                rotate_token: false,
+                            })
+                            .await
+                        {
+                            Ok(result) => self.set_status(format!(
+                                "{} saved; restart daemon to apply",
+                                result.service.name
+                            )),
+                            Err(error) => self.set_status(format!("service update failed: {error}")),
+                        }
+                    }
+                    ("rotate-token", Some(service)) => match self
+                        .client
+                        .put_service(construct_protocol::ServicePutParams {
+                            service,
+                            rotate_token: true,
+                        })
+                        .await
+                    {
+                        Ok(result) => self.set_status(format!(
+                            "new token for {}: {} (shown once; restart to apply)",
+                            result.service.name,
+                            result.new_token.unwrap_or_default()
+                        )),
+                        Err(error) => self.set_status(format!("token rotation failed: {error}")),
+                    },
+                    ("delete", Some(service)) => {
+                        self.minibuffer = Some(Minibuffer {
+                            prompt: format!("Delete service {}? [y/N] ", service.name),
+                            input: String::new(),
+                            cursor: 0,
+                            intent: MinibufferIntent::ServiceDeleteConfirm {
+                                name: service.name,
+                            },
+                            error: None,
+                        });
+                    }
+                    _ => self.set_status(
+                        "service: use edit|pause|resume|rotate-token|delete <name>".to_string(),
+                    ),
+                }
             }
             "remote-control" | "remote-connect" | "remote" => {
                 // Subcommand dispatch. `stop`, `debug`, and provider names
