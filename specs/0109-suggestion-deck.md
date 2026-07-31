@@ -104,6 +104,12 @@ from burning tokens.
   keyword field, and a highlighted `[ generate ]` / `[ regenerate ]`
   action chip. Left arrow leaves the keyword field back to the category
   list; both Escape and `C-g` close the deck. Web may differ.
+  When the keyboard chord (`C-x .`) opens the TUI deck while the
+  session's visible prompt contains a non-blank draft, the deck opens
+  directly on Generate with that draft prefilled as keyword guidance.
+  This is only a copy: opening, cancelling, or regenerating never
+  consumes or changes the harness prompt, and clicking the pane
+  affordance retains the ordinary unprefilled deck.
 - Hidden generation sessions must be torn down after use and must never
   appear in user-facing session lists.
 - A generation result must be discarded if a newer turn started while
