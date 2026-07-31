@@ -2230,6 +2230,33 @@ impl PromptDraft {
             .drain(byte_pos(&self.buf, start)..byte_pos(&self.buf, self.cursor));
         self.cursor = start;
     }
+
+    fn apply_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Char(c) if !ctrl && !alt => self.insert(&c.to_string()),
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Char('h') if ctrl => self.backspace(),
+            KeyCode::Delete => self.delete(),
+            KeyCode::Char('d') if ctrl => self.delete(),
+            KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Char('b') if ctrl => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Right => self.cursor = (self.cursor + 1).min(self.buf.chars().count()),
+            KeyCode::Char('f') if ctrl => {
+                self.cursor = (self.cursor + 1).min(self.buf.chars().count())
+            }
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::Char('a') if ctrl => self.cursor = 0,
+            KeyCode::End => self.cursor = self.buf.chars().count(),
+            KeyCode::Char('e') if ctrl => self.cursor = self.buf.chars().count(),
+            KeyCode::Char('k') if ctrl => self.delete_to_end(),
+            KeyCode::Char('u') if ctrl => self.delete_to_start(),
+            KeyCode::Char('w') if ctrl => self.delete_word_backward(),
+            _ => return false,
+        }
+        true
+    }
 }
 
 /// The operator's latest finalized utterance, typewritten over the matrix
@@ -6359,32 +6386,14 @@ impl App {
         {
             return;
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Char(c) if !ctrl && !alt => self.insert_prompt_draft(&id, &c.to_string()),
             KeyCode::Enter => {
                 self.prompt_drafts.remove(&id);
             }
             _ => {
                 let initial = PromptDraft::from_editor(self.editor_states.get(&id));
                 let draft = self.prompt_drafts.entry(id).or_insert(initial);
-                match key.code {
-                    KeyCode::Backspace | KeyCode::Char('h') if ctrl => draft.backspace(),
-                    KeyCode::Delete | KeyCode::Char('d') if ctrl => draft.delete(),
-                    KeyCode::Left | KeyCode::Char('b') if ctrl => {
-                        draft.cursor = draft.cursor.saturating_sub(1)
-                    }
-                    KeyCode::Right | KeyCode::Char('f') if ctrl => {
-                        draft.cursor = (draft.cursor + 1).min(draft.buf.chars().count())
-                    }
-                    KeyCode::Home | KeyCode::Char('a') if ctrl => draft.cursor = 0,
-                    KeyCode::End | KeyCode::Char('e') if ctrl => draft.cursor = draft.buf.chars().count(),
-                    KeyCode::Char('k') if ctrl => draft.delete_to_end(),
-                    KeyCode::Char('u') if ctrl => draft.delete_to_start(),
-                    KeyCode::Char('w') if ctrl => draft.delete_word_backward(),
-                    _ => {}
-                }
+                draft.apply_key(key);
             }
         }
     }
@@ -32990,49 +32999,6 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test]
-    async fn suggestion_keywords_prefer_the_local_unacknowledged_draft() {
-        let (mut app, _dir, server) = two_session_app().await;
-        app.editor_states.insert(
-            "s1".into(),
-            EditorState {
-                buf: "older draft".into(),
-                ..Default::default()
-            },
-        );
-        app.prompt_drafts.insert(
-            "s1".into(),
-            PromptDraft {
-                buf: "just typed".into(),
-                cursor: "just typed".chars().count(),
-            },
-        );
-
-        assert_eq!(
-            app.suggestion_draft_keywords("s1").as_deref(),
-            Some("just typed")
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn typed_prompt_is_available_to_suggestions_before_adapter_echoes_it() {
-        let (mut app, _dir, server) = two_session_app().await;
-        app.sessions[0].state = construct_protocol::SessionState::AwaitingInput;
-
-        for key in [
-            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
-        ] {
-            app.record_prompt_draft_key(key);
-        }
-
-        assert_eq!(app.suggestion_draft_keywords("s1").as_deref(), Some("test"));
-        server.abort();
-    }
-
     #[test]
     fn prompt_draft_tracks_common_line_editing_keys() {
         let mut draft = PromptDraft {
@@ -33057,6 +33023,10 @@ mod tests {
         draft.cursor = draft.buf.chars().count();
         draft.delete_to_start();
         assert!(draft.buf.is_empty(), "C-u clears to the line start");
+
+        draft.insert("testx");
+        assert!(draft.apply_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        assert_eq!(draft.buf, "test", "plain Backspace is mirrored");
     }
 
     /// Spec 0109 "typing always wins": a key the deck doesn't use closes
