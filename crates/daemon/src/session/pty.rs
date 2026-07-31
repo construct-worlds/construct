@@ -356,6 +356,7 @@ impl SessionManager {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub async fn pty_replay(&self, id: &str) -> Result<PtyReplayResult> {
         self.pty_replay_range(id, None, None).await
     }

@@ -495,12 +495,6 @@ impl Theme {
         }
     }
 
-    /// Back-compat: dark palette + theme.toml color overrides, no detection.
-    pub fn load_or_default() -> (Self, Option<String>) {
-        let cfg = ThemeConfig::load();
-        (cfg.resolve(Some(false)), cfg.warning)
-    }
-
     pub fn accent_style(&self) -> Style {
         Style::default().fg(self.accent)
     }

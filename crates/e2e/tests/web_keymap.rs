@@ -588,20 +588,6 @@ async fn wait_for_text(page: &Page, sel: &str, needle: &str) -> bool {
     }
 }
 
-async fn wait_for_changed_number(page: &Page, js: &str, from: f64) -> Option<f64> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let v = eval_number(page, js).await;
-        if v != from && !v.is_nan() {
-            return Some(v);
-        }
-        if Instant::now() > deadline {
-            return None;
-        }
-        tokio::time::sleep(Duration::from_millis(120)).await;
-    }
-}
-
 async fn save_screenshot(page: &Page, name: &str) {
     use chromiumoxide::cdp::browser_protocol::page::{
         CaptureScreenshotFormat, CaptureScreenshotParams,

@@ -24,11 +24,11 @@
 //! [`BackgroundCompletion`] channel so the agent can synthesize an
 //! `OBSERVATION:` for the LLM at the next turn boundary.
 
-use crate::tools::{ToolCtx, ToolOutcome};
+use crate::tools::ToolOutcome;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, Mutex};
 
 /// Placeholder output written to the LLM's conversation when a tool
 /// auto-backgrounds. The real result lands later as an
@@ -39,12 +39,6 @@ pub const BG_PLACEHOLDER_OUTPUT: &str = "(running in background; will report whe
 /// Default auto-background threshold. Overridable via
 /// `CONSTRUCT_TOOL_BG_AFTER_MS`.
 pub const DEFAULT_BG_AFTER_MS: u64 = 60_000;
-/// Default time before the `[bg]` / `[kill]` buttons appear on a
-/// running tool block. Overridable via `CONSTRUCT_TOOL_BUTTONS_AFTER_MS`.
-/// Read by the TUI's `synth_block` — the adapter doesn't act on
-/// this directly, it's exported here for a single source of truth.
-pub const DEFAULT_BUTTONS_AFTER_MS: u64 = 15_000;
-
 /// One-shot control signal a supervisor accepts from outside.
 #[derive(Debug, Clone, Copy)]
 pub enum ToolControl {
@@ -54,9 +48,6 @@ pub enum ToolControl {
 
 /// Live entry for a tool currently being supervised.
 pub struct RunningEntry {
-    pub name: String,
-    pub args_summary: String,
-    pub started_at: Instant,
     /// Sender side of the supervisor's control channel. The
     /// adapter's inbox dispatcher uses this to forward
     /// `ToolAction` events from the daemon.
@@ -70,7 +61,6 @@ pub struct RunningEntry {
 /// describe what's running.
 pub struct BackgroundEntry {
     pub name: String,
-    pub args_summary: String,
     pub started_at: Instant,
     pub call_id: String,
 }
@@ -115,14 +105,11 @@ pub enum SupervisorOutcome {
 pub struct BackgroundCompletion {
     pub call_id: String,
     pub tool_name: String,
-    pub args_summary: String,
     pub duration: Duration,
     pub outcome: Result<ToolOutcome, String>,
 }
 
 pub type BgCompletionTx = mpsc::UnboundedSender<BackgroundCompletion>;
-pub type BgCompletionRx = mpsc::UnboundedReceiver<BackgroundCompletion>;
-
 /// Read the auto-bg threshold from env or fall back to the default.
 pub fn bg_after_duration() -> Duration {
     let ms = std::env::var("CONSTRUCT_TOOL_BG_AFTER_MS")
@@ -147,7 +134,7 @@ pub fn bg_after_duration() -> Duration {
 pub async fn supervise<F>(
     call_id: String,
     name: String,
-    args_summary: String,
+    _args_summary: String,
     tasks: Arc<Tasks>,
     completion_tx: BgCompletionTx,
     bg_after: Duration,
@@ -163,9 +150,6 @@ where
         g.insert(
             call_id.clone(),
             RunningEntry {
-                name: name.clone(),
-                args_summary: args_summary.clone(),
-                started_at,
                 control_tx,
             },
         );
@@ -199,7 +183,6 @@ where
                     Some(ToolControl::Background) => {
                         let entry = BackgroundEntry {
                             name: name.clone(),
-                            args_summary: args_summary.clone(),
                             started_at,
                             call_id: call_id.clone(),
                         };
@@ -216,7 +199,6 @@ where
             _ = sleep_fut => {
                 let entry = BackgroundEntry {
                     name: name.clone(),
-                    args_summary: args_summary.clone(),
                     started_at,
                     call_id: call_id.clone(),
                 };
@@ -249,7 +231,6 @@ fn spawn_background_watcher(
 ) {
     let call_id = entry.call_id.clone();
     let tool_name = entry.name.clone();
-    let args_summary = entry.args_summary.clone();
     let started_at = entry.started_at;
     // Move metadata into the backgrounded map immediately so
     // `agentd_get_tasks` and `/tasks` can see it before completion.
@@ -271,7 +252,6 @@ fn spawn_background_watcher(
         let _ = completion_tx.send(BackgroundCompletion {
             call_id,
             tool_name,
-            args_summary,
             duration,
             outcome,
         });

@@ -231,10 +231,6 @@ impl RemoteState {
         self.persist().await;
     }
 
-    pub fn port(&self) -> u16 {
-        self.port.load(Ordering::SeqCst)
-    }
-
     /// Install a snapshot path on an existing state. The state
     /// writes through to this path on every mutator call. Called
     /// once by the supervisor when a `RemoteState` is installed

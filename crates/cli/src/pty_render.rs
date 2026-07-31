@@ -439,10 +439,6 @@ impl ItemHistory {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty() && self.pending_chunk.is_empty()
-    }
-
     /// Remove all accumulated items while preserving the current PTY
     /// geometry. Used by bootstrap when the transcript contains PTY
     /// ordering markers: rebuilding from the transcript preserves the
@@ -4440,22 +4436,6 @@ mod tests {
     // surface the underlying main-screen scrollback when the user
     // scrolls.
     // ============================================================
-
-    /// Helper: count rows in a screen that have ANY non-blank
-    /// content. Used as a "does this look like a populated
-    /// viewport" check.
-    fn screen_populated_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> usize {
-        (0..rows)
-            .filter(|&r| {
-                (0..cols).any(|c| {
-                    screen
-                        .cell(r, c)
-                        .map(|cell| !cell.contents().is_empty() && cell.contents() != " ")
-                        .unwrap_or(false)
-                })
-            })
-            .count()
-    }
 
     /// Concat every populated row's content for comparison. Two
     /// scrollback positions should produce different concat'd

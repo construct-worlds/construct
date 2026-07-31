@@ -54,7 +54,7 @@ fn messages_to_ollama(system: &str, messages: &[Message]) -> Vec<Value> {
     }
     for m in messages {
         match &m.content {
-            Content::Text { text: text } => {
+            Content::Text { text } => {
                 out.push(json!({ "role": role_str(m.role), "content": text }));
             }
             Content::AssistantToolCalls { text, calls } => {
@@ -168,7 +168,6 @@ impl LlmProvider for Ollama {
         let mut buf: Vec<u8> = Vec::new();
 
         let mut assistant_text = String::new();
-        let mut emitted_so_far = 0usize;
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
         let mut usage = Usage::default();
@@ -196,7 +195,6 @@ impl LlmProvider for Ollama {
                         if !t.is_empty() {
                             sink.delta(t);
                             assistant_text.push_str(t);
-                            emitted_so_far = assistant_text.len();
                         }
                     }
                     if let Some(calls) = msg.get("tool_calls").and_then(|a| a.as_array()) {

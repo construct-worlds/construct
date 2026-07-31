@@ -1605,10 +1605,8 @@ impl Storage {
         Ok(())
     }
 
-    /// Read the last `max_bytes` of the session's `pty.log`. Returns an
-    /// empty buffer if the file doesn't exist. Used by `pty_replay` to feed
-    /// a TUI's vt100 parser on attach so scrollback covers the on-disk log,
-    /// not just a small in-memory window.
+    /// Read the last `max_bytes` of the session's `pty.log`.
+    #[cfg(test)]
     pub fn read_pty_tail(&self, id: &str, max_bytes: usize) -> Result<Vec<u8>> {
         let (bytes, _, _, _) = self.read_pty_range_before(id, max_bytes, None)?;
         Ok(bytes)

@@ -119,6 +119,7 @@ pub fn has_lineage(session_id: &str, sessions: &[SessionSummary]) -> bool {
 /// topmost ancestor, then materialize the tree back down from there. `None`
 /// when `focus_id` isn't among `sessions` (e.g. it was deleted while the
 /// popup was open).
+#[cfg(test)]
 pub fn build_tree(focus_id: &str, sessions: &[SessionSummary]) -> Option<LineageNode> {
     build_tree_with_expansions(focus_id, sessions, None)
 }
@@ -408,14 +409,6 @@ impl LineageViewMode {
         }
     }
 
-    /// Short label for the top-border toggle button.
-    pub fn label(self) -> &'static str {
-        match self {
-            LineageViewMode::Boxes => "lineage",
-            LineageViewMode::Rails => "lineage (compact)",
-        }
-    }
-
     /// A one-word name for this mode — used where the surrounding UI
     /// already says "lineage" (the sidebar section header), so the full
     /// [`Self::label`] would be redundant.
@@ -649,6 +642,7 @@ pub fn selectable_indices(rows: &[LineageRow]) -> Vec<usize> {
 /// A childless node still gets exactly one window — its whole life — so
 /// every node's activity is visible somewhere. A window with zero messages
 /// is skipped (no "0 msgs" line), leaving just the lane bar.
+#[cfg(test)]
 pub fn flatten(root: &LineageNode, sessions: &[SessionSummary], now_ms: i64) -> Vec<LineageRow> {
     flatten_with_boxes(root, sessions, now_ms).0
 }
@@ -1543,7 +1537,6 @@ fn layout_tree(
                         let (_, label_end, outcome) = lanes[j].end.expect("end event has end data");
                         if row_end_x > 0 && lanes[j].lane_col < row_end_x + 2 {
                             cur += 1;
-                            row_end_x = 0;
                         }
                         let owner = lanes[j].node.session_id.clone();
                         let busy = (lanes[j].busy_total > 0)

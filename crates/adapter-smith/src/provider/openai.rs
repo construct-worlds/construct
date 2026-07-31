@@ -62,7 +62,7 @@ fn messages_to_openai(system: &str, messages: &[Message]) -> Vec<Value> {
     }
     for m in messages {
         match &m.content {
-            Content::Text { text: text } => {
+            Content::Text { text } => {
                 out.push(json!({ "role": role_str(m.role), "content": text }));
             }
             Content::AssistantToolCalls { text, calls } => {
@@ -180,7 +180,6 @@ impl LlmProvider for OpenAi {
         let mut stream = resp.bytes_stream().eventsource();
 
         let mut assistant_text = String::new();
-        let mut emitted_so_far = 0usize;
         // tool-call accumulators keyed by `index`
         let mut tool_calls: Vec<ToolCallAcc> = Vec::new();
         let mut stop_reason = StopReason::EndTurn;
@@ -233,7 +232,6 @@ impl LlmProvider for OpenAi {
                 if !text.is_empty() {
                     sink.delta(text);
                     assistant_text.push_str(text);
-                    emitted_so_far = assistant_text.len();
                 }
             }
             if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
