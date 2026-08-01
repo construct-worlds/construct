@@ -177,9 +177,9 @@ pub fn desired_listeners(
 
 /// The socket work to get from `current` to `desired`.
 ///
-/// Every stop precedes every start. Two services swapping ports would
-/// otherwise deadlock on `EADDRINUSE`, and the executor relies on this
-/// ordering being baked into the plan rather than remembered at the call site.
+/// Stops are listed before starts so the plan reads in the order it happens.
+/// The executor does not depend on that: it releases every port before binding
+/// any, which is what makes a port handover safe.
 pub fn plan(
     current: &BTreeMap<ListenerKey, u16>,
     desired: &BTreeMap<ListenerKey, u16>,
@@ -313,9 +313,10 @@ async fn reload(
         report.failures.push((key, port, error));
     }
 
-    // Stops first (the plan guarantees the ordering), awaiting each task so
-    // the port is actually released — it frees when the listener drops inside
-    // the task, not when the token is cancelled.
+    // Two passes, so every release happens before any bind no matter how the
+    // plan is ordered — that is what lets one channel hand a port to another
+    // in a single reload. Each task is awaited because the port frees when the
+    // listener drops inside it, not when the token is cancelled.
     for action in &actions {
         let key = match action {
             ListenerAction::Stop(key) | ListenerAction::Rebind(key, _) => key,
@@ -559,6 +560,237 @@ mod tests {
         );
     }
 
+    /// A supervisor fixture backed by real files and a real session manager,
+    /// so the tests below exercise the reload path the daemon runs, not a
+    /// re-implementation of it.
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        paths: Paths,
+        manager: Arc<SessionManager>,
+        handle: ServiceHandle,
+        registry: Registry,
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let paths = Paths {
+                config_dir: tmp.path().join("config"),
+                state_dir: tmp.path().join("state"),
+                data_dir: tmp.path().join("data"),
+                runtime_dir: tmp.path().join("run"),
+            };
+            std::fs::create_dir_all(paths.services_dir()).expect("services dir");
+            let storage = Arc::new(
+                crate::storage::Storage::new(paths.data_dir.clone()).expect("storage"),
+            );
+            let config = Arc::new(crate::config::Config::default());
+            let (manager, _remote_rx, _restart_rx) = SessionManager::new(
+                storage,
+                config,
+                paths.runtime_dir.clone(),
+            )
+            .await
+            .expect("session manager");
+            let (handle, _rx) = channel();
+            Self {
+                _tmp: tmp,
+                paths,
+                manager: Arc::new(manager),
+                handle,
+                registry: Registry::default(),
+            }
+        }
+
+        fn write(&self, name: &str, body: &str) {
+            std::fs::write(
+                self.paths.services_dir().join(format!("{name}.toml")),
+                body,
+            )
+            .expect("write definition");
+        }
+
+        fn remove(&self, name: &str) {
+            std::fs::remove_file(self.paths.services_dir().join(format!("{name}.toml")))
+                .expect("remove definition");
+        }
+
+        async fn reload(&mut self) -> Result<ReloadReport> {
+            super::reload(
+                &self.manager,
+                &self.paths,
+                &self.handle,
+                &mut self.registry,
+                ReloadReason::Boot,
+            )
+            .await
+        }
+    }
+
+    /// A definition with no channels, so these tests never touch a port.
+    fn definition(routing: &str, paused: bool) -> String {
+        format!(
+            "instruction = \"x\"\nharness = \"smith\"\ncwd = \".\"\nrouting = \"{routing}\"\npaused = {paused}\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn a_reload_reuses_the_state_of_a_service_it_already_knows() {
+        // The invariant that matters most: rebuilding a service's shared state
+        // would drop its routed-session map and reset its dedup ring, so a
+        // retried delivery would open a second conversation.
+        let mut fx = Fixture::new().await;
+        fx.write("svc", &definition("session-key", false));
+        fx.reload().await.expect("first reload");
+        let first = fx.registry.shared.get("svc").cloned().expect("registered");
+
+        fx.write("svc", &definition("per-event", false));
+        fx.reload().await.expect("second reload");
+        let second = fx.registry.shared.get("svc").cloned().expect("still registered");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the same service must keep its identity across a reload"
+        );
+        assert_eq!(
+            second.config().routing,
+            crate::service::ServiceRouting::PerEvent,
+            "the edited definition is what readers now see"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broken_definition_changes_nothing() {
+        let mut fx = Fixture::new().await;
+        fx.write("svc", &definition("session-key", false));
+        fx.reload().await.expect("first reload");
+
+        fx.write("svc", "this is not valid toml [[[");
+        let outcome = fx.reload().await;
+        assert!(outcome.is_err(), "a parse failure must fail the reload");
+
+        // Still registered, still running the definition it had before.
+        let shared = fx.registry.shared.get("svc").expect("service survives");
+        assert_eq!(
+            shared.config().routing,
+            crate::service::ServiceRouting::SessionKey,
+            "a file that does not parse must not disturb what is running"
+        );
+    }
+
+    #[tokio::test]
+    async fn services_appear_and_disappear_with_their_definitions() {
+        let mut fx = Fixture::new().await;
+        fx.write("first", &definition("session-key", false));
+        fx.reload().await.expect("reload");
+        assert!(fx.registry.shared.contains_key("first"));
+        assert!(!fx.registry.shared.contains_key("second"));
+
+        fx.write("second", &definition("single", false));
+        fx.reload().await.expect("reload");
+        assert!(fx.registry.shared.contains_key("second"));
+
+        fx.remove("first");
+        fx.reload().await.expect("reload");
+        assert!(
+            !fx.registry.shared.contains_key("first"),
+            "a deleted definition stops being served"
+        );
+        assert!(fx.registry.shared.contains_key("second"));
+    }
+
+    #[tokio::test]
+    async fn a_channel_binds_moves_and_releases_across_reloads() {
+        // Exercises the wiring the pure `plan` tests cannot: that a reload
+        // actually binds, rebinds, and releases real sockets.
+        let _serialized = port_lock().lock().await;
+        let mut fx = Fixture::new().await;
+        let first_port = free_port().await;
+        let second_port = free_port().await;
+
+        let with_channel = |port: u16, paused: bool| {
+            format!(
+                "instruction = \"x\"\nharness = \"smith\"\ncwd = \".\"\nrouting = \"per-event\"\npaused = {paused}\n\n[channels.http1]\nkind = \"http\"\nenabled = true\nport = {port}\ntoken = \"secret\"\n"
+            )
+        };
+
+        fx.write("svc", &with_channel(first_port, false));
+        let report = fx.reload().await.expect("reload");
+        assert_eq!(report.started.len(), 1, "the channel was bound");
+        assert!(port_in_use(first_port).await, "port answers once bound");
+
+        fx.write("svc", &with_channel(second_port, false));
+        let report = fx.reload().await.expect("reload");
+        assert_eq!(report.rebound.len(), 1, "a port change rebinds");
+        assert!(!port_in_use(first_port).await, "the old port is released");
+        assert!(port_in_use(second_port).await, "the new port answers");
+
+        // Pausing releases the port; this is the behavior that silently did
+        // nothing before definitions were applied live.
+        fx.write("svc", &with_channel(second_port, true));
+        let report = fx.reload().await.expect("reload");
+        assert_eq!(report.stopped.len(), 1, "pausing stops the listener");
+        assert!(!port_in_use(second_port).await, "a paused service frees its port");
+    }
+
+    #[tokio::test]
+    async fn one_service_can_hand_a_port_to_another_in_one_reload() {
+        // The case the two-pass executor exists for: if the bind ran before
+        // the release, this would fail with EADDRINUSE and the port would end
+        // up serving nobody.
+        let _serialized = port_lock().lock().await;
+        let mut fx = Fixture::new().await;
+        let port = free_port().await;
+        let with_port = |port: u16| {
+            format!(
+                "instruction = \"x\"\nharness = \"smith\"\ncwd = \".\"\nrouting = \"per-event\"\n\n[channels.http1]\nkind = \"http\"\nenabled = true\nport = {port}\ntoken = \"secret\"\n"
+            )
+        };
+
+        fx.write("giver", &with_port(port));
+        fx.reload().await.expect("reload");
+        assert!(port_in_use(port).await, "giver holds the port");
+
+        // Swap ownership in a single reload.
+        fx.remove("giver");
+        fx.write("taker", &with_port(port));
+        let report = fx.reload().await.expect("reload");
+
+        assert!(
+            report.failures.is_empty(),
+            "the handover must not fail to bind: {:?}",
+            report.failures
+        );
+        assert_eq!(report.stopped, vec![("giver".into(), "http1".into())]);
+        assert_eq!(report.started, vec![("taker".into(), "http1".into())]);
+        assert!(port_in_use(port).await, "the taker is now serving the port");
+    }
+
+    /// Serializes the tests that claim a real port.
+    ///
+    /// `free_port` reports a port that was free a moment ago, so two tests
+    /// running concurrently can be handed the same one and whichever binds
+    /// second fails. Taking this lock makes the port-using tests deterministic
+    /// with respect to each other.
+    fn port_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(Default::default)
+    }
+
+    /// A port nothing is listening on right now.
+    async fn free_port() -> u16 {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind ephemeral");
+        listener.local_addr().expect("addr").port()
+    }
+
+    async fn port_in_use(port: u16) -> bool {
+        TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_err()
+    }
+
     #[test]
     fn every_editable_field_declares_when_it_applies() {
         use construct_protocol::{PropagationClass, ServiceField};
@@ -586,6 +818,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_released_port_can_be_bound_again() {
+        let _serialized = port_lock().lock().await;
         // The port frees when the listener drops inside its task, not when the
         // token is cancelled — so a rebind must await the handle. This is the
         // real failure behind two services swapping ports.
@@ -618,22 +851,21 @@ mod tests {
     }
 
     #[test]
-    fn every_stop_precedes_every_start() {
-        // Two services swapping ports: starting before stopping would fail
-        // with EADDRINUSE, so the ordering is part of the plan itself.
-        let current = BTreeMap::from([(key("a", "http"), 9000u16), (key("b", "http"), 9001u16)]);
-        let desired = BTreeMap::from([(key("a", "http"), 9001u16), (key("b", "http"), 9000u16)]);
+    fn a_port_handover_releases_before_it_binds() {
+        // One service gives up a port and another takes it in the same reload.
+        // A swap of two ports would not test this: both sides are rebinds, so
+        // there is no Start to order against and the assertion would hold
+        // vacuously.
+        let current = BTreeMap::from([(key("a", "http"), 9000u16)]);
+        let desired = BTreeMap::from([(key("b", "http"), 9000u16)]);
         let actions = plan(&current, &desired);
-        let last_stop = actions
-            .iter()
-            .rposition(|action| !matches!(action, ListenerAction::Start(..)))
-            .expect("a rebind is a stop");
-        let first_start = actions
-            .iter()
-            .position(|action| matches!(action, ListenerAction::Start(..)));
-        assert!(
-            first_start.is_none_or(|start| last_stop < start),
-            "stops must come first: {actions:?}"
+        assert_eq!(
+            actions,
+            vec![
+                ListenerAction::Stop(key("a", "http")),
+                ListenerAction::Start(key("b", "http"), 9000),
+            ],
+            "the release is planned before the bind that needs the port"
         );
     }
 }

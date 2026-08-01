@@ -1262,6 +1262,124 @@ async fn json_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A live service plus one channel runtime, so the tests below read
+    /// configuration the way a request does rather than inspecting the struct.
+    async fn live_service(config: ServiceConfig) -> (Arc<ServiceShared>, Arc<ServiceRuntime>) {
+        let tmp = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let (manager, _remote_rx, _restart_rx) = crate::session::SessionManager::new(
+            storage,
+            Arc::new(crate::config::Config::default()),
+            tmp.path().join("run"),
+        )
+        .await
+        .expect("session manager");
+        let shared = ServiceShared::load(
+            "svc".to_string(),
+            config,
+            Arc::new(manager),
+            tmp.path().join("data"),
+        );
+        let runtime = channel_runtime(shared.clone(), "http1".to_string());
+        (shared, runtime)
+    }
+
+    fn config_with_channel(token: &str, enabled: bool, paused: bool) -> ServiceConfig {
+        ServiceConfig {
+            instruction: String::new(),
+            harness: "smith".into(),
+            model: None,
+            cwd: ".".into(),
+            routing: ServiceRouting::SessionKey,
+            paused,
+            approval_timeout_secs: 0,
+            sandbox: ServiceSandboxConfig::default(),
+            channels: BTreeMap::from([(
+                "http1".to_string(),
+                ServiceChannelConfig {
+                    kind: Some("http".into()),
+                    enabled,
+                    port: Some(9000),
+                    token: Some(token.to_string()),
+                },
+            )]),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rotated_credential_takes_effect_without_rebinding() {
+        // The listener never moves for a rotation, so the credential has to be
+        // read per request. Before this, the old secret kept working until the
+        // daemon restarted.
+        let (shared, runtime) = live_service(config_with_channel("first", true, false)).await;
+        assert_eq!(runtime.token().as_deref(), Some("first"));
+
+        shared.set_config(config_with_channel("second", true, false));
+        assert_eq!(
+            runtime.token().as_deref(),
+            Some("second"),
+            "the next request authenticates against the rotated secret"
+        );
+
+        // A channel detached out from under a live listener can authenticate
+        // nobody, rather than falling back to its previous secret.
+        let mut detached = config_with_channel("second", true, false);
+        detached.channels.clear();
+        shared.set_config(detached);
+        assert_eq!(runtime.token(), None);
+    }
+
+    #[tokio::test]
+    async fn pausing_or_disabling_stops_a_channel_serving() {
+        let (shared, runtime) = live_service(config_with_channel("t", true, false)).await;
+        assert!(runtime.serving());
+
+        shared.set_config(config_with_channel("t", true, true));
+        assert!(!runtime.serving(), "a paused service refuses requests");
+
+        shared.set_config(config_with_channel("t", false, false));
+        assert!(!runtime.serving(), "a disabled channel refuses requests");
+
+        shared.set_config(config_with_channel("t", true, false));
+        assert!(runtime.serving(), "resuming serves again");
+    }
+
+    #[tokio::test]
+    async fn a_definition_change_keeps_routed_sessions_and_delivery_history() {
+        // Editing a definition must not lose which session serves a key, nor
+        // which deliveries were already handled — the first would strand live
+        // conversations, the second would let a retry open a duplicate.
+        let (shared, _runtime) = live_service(config_with_channel("t", true, false)).await;
+        shared
+            .state
+            .lock()
+            .await
+            .sessions
+            .insert("http1:customer".into(), "s-existing".into());
+        {
+            let mut seen = shared.seen_requests.lock().await;
+            seen.0.push_back("http1:req-1".into());
+            seen.1.insert("http1:req-1".into());
+        }
+
+        let mut edited = config_with_channel("t", true, false);
+        edited.routing = ServiceRouting::PerEvent;
+        shared.set_config(edited);
+
+        assert_eq!(
+            shared.state.lock().await.sessions.get("http1:customer"),
+            Some(&"s-existing".to_string()),
+            "the routed session survives the edit"
+        );
+        assert!(
+            shared.seen_requests.lock().await.1.contains("http1:req-1"),
+            "an already-handled delivery is still recognized after the edit"
+        );
+        assert_eq!(shared.config().routing, ServiceRouting::PerEvent);
+    }
+
     fn msg(role: MessageRole, text: &str) -> SessionEvent {
         SessionEvent::Message {
             role,
