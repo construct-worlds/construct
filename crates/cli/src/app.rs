@@ -195,7 +195,13 @@ pub enum ListItem {
     /// A service is a top-level fleet item. It has no PTY or transcript, but
     /// selecting it opens the service view in exactly the same split-pane
     /// lifecycle as selecting a session.
-    Service { summary: ServiceSummary },
+    Service {
+        summary: ServiceSummary,
+        /// Number of active routed sessions shown beneath this service when
+        /// its disclosure is expanded.
+        session_count: usize,
+        sessions_expanded: bool,
+    },
     Session {
         summary: SessionSummary,
         indented: bool,
@@ -298,6 +304,18 @@ pub(crate) fn is_matrix_rain_session_active(
 
 fn is_subagent_session(s: &SessionSummary) -> bool {
     matches!(s.kind, construct_protocol::SessionKind::Subagent)
+}
+
+fn service_session_matches(s: &SessionSummary, service_name: &str) -> bool {
+    let Some(title) = s.title.as_deref() else {
+        return false;
+    };
+    let prefix = format!("service:{service_name}");
+    title == prefix || title.starts_with(&format!("{prefix}:"))
+}
+
+fn service_children_key(service_name: &str) -> String {
+    format!("service:{service_name}")
 }
 
 fn selection_is_valid_for_sessions(
@@ -604,7 +622,9 @@ pub(crate) fn list_archive_indent_cells(
 impl ListItem {
     pub fn matches(&self, sel: &Selection) -> bool {
         match (self, sel) {
-            (ListItem::Service { summary }, Selection::Service(name)) => summary.name == *name,
+            (ListItem::Service { summary, .. }, Selection::Service(name)) => {
+                summary.name == *name
+            }
             (ListItem::Session { summary, .. }, Selection::Session(id)) => summary.id == *id,
             (ListItem::GroupHeader { group, .. }, Selection::Group(id)) => group.id == *id,
             (ListItem::ArchivedRow { section, .. }, Selection::ArchivedRow(sel)) => section == sel,
@@ -7514,6 +7534,19 @@ impl App {
             .then(|| id.to_string())
     }
 
+    fn selected_service_children_key(&self) -> Option<String> {
+        let name = self.selection.service_name()?;
+        self.sessions
+            .iter()
+            .any(|session| {
+                is_user_list_session(session)
+                    && !session.archived
+                    && session.forked_from.is_none()
+                    && service_session_matches(session, name)
+            })
+            .then(|| service_children_key(name))
+    }
+
     pub fn selected_id(&self) -> Option<String> {
         self.selected_session().map(|s| s.id.clone())
     }
@@ -7803,14 +7836,10 @@ impl App {
 
         // Services are ordinary top-level list rows rather than a separate
         // sidebar section. Keep their order stable even if a notification
-        // arrives with an unsorted service vector.
+        // arrives with an unsorted service vector. Their routed sessions are
+        // inserted below each row after the session-tree indexes exist.
         let mut services = self.services.clone();
         services.sort_by(|a, b| a.name.cmp(&b.name));
-        out.extend(
-            services
-                .into_iter()
-                .map(|summary| ListItem::Service { summary }),
-        );
 
         let orch_id = self.orchestrator_id.as_deref();
         let mut subagents_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
@@ -8025,6 +8054,39 @@ impl App {
             );
         };
 
+        for service in &services {
+            let mut routed: Vec<&SessionSummary> = self
+                .sessions
+                .iter()
+                .filter(|session| {
+                    is_user_list_session(session)
+                        && !session.archived
+                        && session.forked_from.is_none()
+                        && service_session_matches(session, &service.name)
+                })
+                .collect();
+            routed.sort_by(|a, b| {
+                a.position
+                    .cmp(&b.position)
+                    .then_with(|| b.created_at.cmp(&a.created_at))
+            });
+            let session_count = routed.len();
+            let sessions_expanded = session_count > 0
+                && !self
+                    .children_collapsed
+                    .contains(&service_children_key(&service.name));
+            out.push(ListItem::Service {
+                summary: service.clone(),
+                session_count,
+                sessions_expanded,
+            });
+            if sessions_expanded {
+                for session in routed {
+                    push_session(&mut out, session, true);
+                }
+            }
+        }
+
         let mut ungrouped: Vec<&SessionSummary> = self
             .sessions
             .iter()
@@ -8035,6 +8097,7 @@ impl App {
             .filter(|s| Some(s.id.as_str()) != orch_id)
             .filter(|s| is_user_list_session(s))
             .filter(|s| s.forked_from.is_none())
+            .filter(|s| !services.iter().any(|service| service_session_matches(s, &service.name)))
             .collect();
         ungrouped.sort_by(|a, b| {
             a.position
@@ -8072,6 +8135,7 @@ impl App {
                 .filter(|s| s.group_id.as_deref() == Some(g.id.as_str()))
                 .filter(|s| is_user_list_session(s))
                 .filter(|s| s.forked_from.is_none())
+                .filter(|s| !services.iter().any(|service| service_session_matches(s, &service.name)))
                 .collect();
             members.sort_by_key(|s| s.position);
             let (active, archived): (Vec<&SessionSummary>, Vec<&SessionSummary>) =
@@ -9028,7 +9092,7 @@ impl App {
             }
         }
         match &items[next] {
-            ListItem::Service { summary } => self.select_service(summary.name.clone()),
+            ListItem::Service { summary, .. } => self.select_service(summary.name.clone()),
             ListItem::Session { summary, .. } => self.select_session(summary.id.clone()),
             ListItem::GroupHeader { group, .. } => self.select_group(group.id.clone()),
             ListItem::ArchivedRow { section, .. } => self.select_archive_row(section.clone()),
@@ -9146,7 +9210,7 @@ impl App {
         self.selection = items
             .iter()
             .find_map(|it| match it {
-                ListItem::Service { summary } => Some(Selection::Service(summary.name.clone())),
+                ListItem::Service { summary, .. } => Some(Selection::Service(summary.name.clone())),
                 ListItem::Session { summary, .. } => Some(Selection::Session(summary.id.clone())),
                 ListItem::GroupHeader { group, .. } => Some(Selection::Group(group.id.clone())),
                 ListItem::ArchivedRow { .. } => None,
@@ -11365,6 +11429,12 @@ impl App {
                         return;
                     }
                 }
+                if self.service_dialog.is_none() {
+                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                        self.open_edit_service_view(&name);
+                        return;
+                    }
+                }
                 if self.handle_dynamic_ui_overlay_click(col, row).await {
                     return;
                 }
@@ -12809,6 +12879,8 @@ impl App {
                     if let Err(e) = self.client.set_project_collapsed(&id, false).await {
                         self.set_status(format!("expand failed: {e}"));
                     }
+                } else if let Some(key) = self.selected_service_children_key() {
+                    self.children_collapsed.remove(&key);
                 } else if self.focus == PaneFocus::List {
                     if let Some(id) = self.selected_session_has_children() {
                         self.children_collapsed.remove(&id);
@@ -12823,6 +12895,8 @@ impl App {
                     if let Err(e) = self.client.set_project_collapsed(&id, true).await {
                         self.set_status(format!("collapse failed: {e}"));
                     }
+                } else if let Some(key) = self.selected_service_children_key() {
+                    self.children_collapsed.insert(key);
                 } else if self.focus == PaneFocus::List {
                     if let Some(id) = self.selected_session_has_children() {
                         self.children_collapsed.insert(id);
@@ -40202,7 +40276,7 @@ mod tests {
 
         assert!(matches!(
             app.list_items().first(),
-            Some(ListItem::Service { summary }) if summary.name == "assistant"
+            Some(ListItem::Service { summary, .. }) if summary.name == "assistant"
         ));
         let rendered = term
             .backend()
@@ -40343,6 +40417,113 @@ mod tests {
             Some(ServiceDialogMode::Edit)
         ));
         assert!(app.service_title_menu.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn clicking_service_view_starts_editing() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let view = app.layout.view_area.expect("service view");
+        let click = |kind| MouseEvent {
+            kind,
+            column: view.x + 8,
+            row: view.y + 4,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.on_mouse(click(MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(click(MouseEventKind::Up(MouseButton::Left)))
+            .await;
+
+        assert!(matches!(
+            app.service_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(ServiceDialogMode::Edit)
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_rows_group_and_toggle_routed_sessions() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        let mut routed = summary_with_kind(construct_protocol::SessionKind::User);
+        routed.id = "service-session".into();
+        routed.title = Some("service:assistant:demo".into());
+        routed.position = 0;
+        app.sessions.push(routed);
+        app.services.push(service_summary_for_test("assistant"));
+
+        let items = app.list_items();
+        assert!(matches!(
+            &items[0],
+            ListItem::Service {
+                summary,
+                session_count: 1,
+                sessions_expanded: true,
+            } if summary.name == "assistant"
+        ));
+        assert!(matches!(
+            &items[1],
+            ListItem::Session { summary, indented: true, .. }
+                if summary.id == "service-session"
+        ));
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    ListItem::Session { summary, .. } if summary.id == "service-session"
+                ))
+                .count(),
+            1,
+            "service sessions must not also appear in the ungrouped list"
+        );
+
+        app.selection = Selection::Service("assistant".into());
+        app.focus = PaneFocus::List;
+        app.run_action(KeyAction::CollapseGroup).await;
+        assert!(matches!(
+            &app.list_items()[0],
+            ListItem::Service {
+                session_count: 1,
+                sessions_expanded: false,
+                ..
+            }
+        ));
+        assert!(!app
+            .list_items()
+            .iter()
+            .any(|item| matches!(item, ListItem::Session { summary, .. } if summary.id == "service-session")));
+
+        app.run_action(KeyAction::ExpandGroup).await;
+        assert!(matches!(
+            &app.list_items()[0],
+            ListItem::Service {
+                session_count: 1,
+                sessions_expanded: true,
+                ..
+            }
+        ));
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let list = app.layout.list_area.expect("session list");
+        let rows = app.layout.list_items_area.expect("list rows");
+        app.click_list(list, list.x + 1, rows.y).await;
+        assert!(matches!(
+            &app.list_items()[0],
+            ListItem::Service {
+                sessions_expanded: false,
+                ..
+            }
+        ));
         server.abort();
     }
 

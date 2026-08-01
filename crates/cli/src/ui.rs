@@ -3183,19 +3183,28 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 selected_idx = Some(i);
             }
             match item {
-                AppListItem::Service { summary: service } => {
+                AppListItem::Service {
+                    summary: service,
+                    session_count,
+                    sessions_expanded,
+                } => {
                     // Services use a deliberately distinct type glyph rather
                     // than borrowing session state glyphs. Their harness (or
                     // paused state) remains right-aligned like a session's
                     // harness label, so service rows still scan with the
                     // rest of the fleet.
+                    let disclosure = if *session_count > 0 {
+                        if *sessions_expanded { "▼ " } else { "▶ " }
+                    } else {
+                        "  "
+                    };
                     let suffix = if service.paused {
                         format!("{} · paused", service.harness)
                     } else {
                         service.harness.clone()
                     };
                     let suffix_w = suffix.chars().count();
-                    let prefix_w = 3; // `◈ ` plus the name's separating gap
+                    let prefix_w = 5; // disclosure + `◈ ` plus the name's gap
                     let name_avail = row_w.saturating_sub(prefix_w + 1 + suffix_w);
                     let name = fit_name(&service.name, name_avail, None);
                     let name_w = name.chars().count();
@@ -3206,6 +3215,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         Style::default().fg(app.theme.text)
                     };
                     vec![Line::from(vec![
+                        Span::styled(disclosure, Style::default().fg(app.theme.group)),
                         Span::styled("◈ ", Style::default().fg(app.theme.accent)),
                         Span::styled(name, name_style),
                         Span::raw(" ".repeat(gap)),
@@ -7774,7 +7784,11 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         return;
     }
     if let Some(name) = app.selection.service_name().map(str::to_owned) {
-        render_service_view(f, area, app, &name, last_focused);
+        // A service is a real split pane, so its frame follows pane focus just
+        // like a session frame. `last_focused` is intentionally retained for
+        // title affordances, but must not keep an inactive service border
+        // highlighted while focus is in the list or another split.
+        render_service_view(f, area, app, &name, focused);
         return;
     }
     let summary = app.selected_session().cloned();
