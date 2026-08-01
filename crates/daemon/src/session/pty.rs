@@ -36,7 +36,7 @@ impl SessionManager {
 
     /// Like [`Self::pty_input`] (transcript capture included) but waits
     /// for the adapter to ACK delivery. For daemon-internal prompt
-    /// submission (program runs) whose follow-up bookkeeping should only
+    /// submission (playbook runs) whose follow-up bookkeeping should only
     /// happen once the input has actually reached the harness.
     pub(crate) async fn pty_input_delivered(&self, id: &str, bytes: Vec<u8>) -> Result<()> {
         self.pty_input_inner(id, bytes, true, true).await
@@ -109,7 +109,7 @@ impl SessionManager {
 
     /// Accept `job` into `entry`'s ordered delivery queue, lazily spawning
     /// the per-session writer task on first use. All input producers —
-    /// interactive typing, program submission, OSC 11 responses — funnel
+    /// interactive typing, playbook submission, OSC 11 responses — funnel
     /// through this one queue, so per-session byte order is preserved no
     /// matter which mix of paths is active. Sync (never awaits): callers
     /// hold no locks and the dispatch loop is never delayed here.
@@ -395,7 +395,7 @@ impl SessionManager {
 
     /// Deliver a prompt as a bracketed paste (`ESC[200~` … `ESC[201~`) when
     /// submitting to external PTY-backed agents.
-    pub(super) async fn program_submit_typed_prompt(&self, id: &str, prompt: &str) -> Result<()> {
+    pub(super) async fn playbook_submit_typed_prompt(&self, id: &str, prompt: &str) -> Result<()> {
         // Deliver the prompt as a bracketed paste (`ESC[200~` … `ESC[201~`)
         // rather than raw keystrokes. External agent TUIs (claude/codex/
         // antigravity) enable DEC mode 2004 and only run their multiline
@@ -405,14 +405,14 @@ impl SessionManager {
         // the harness exactly where the paste stops, so the Enter we send
         // afterward is read as a submit keypress — without it the prompt
         // landed in the input box but never submitted.
-        self.pty_input_without_capture(id, program_bracketed_paste_bytes(prompt))
+        self.pty_input_without_capture(id, playbook_bracketed_paste_bytes(prompt))
             .await?;
-        tokio::time::sleep(PROGRAM_EXTERNAL_PTY_SUBMIT_DELAY).await;
+        tokio::time::sleep(PLAYBOOK_EXTERNAL_PTY_SUBMIT_DELAY).await;
         self.pty_input_without_capture(id, vec![b'\r']).await?;
         Ok(())
     }
 
-    /// Cold-start-tolerant variant of [`Self::program_submit_typed_prompt`]
+    /// Cold-start-tolerant variant of [`Self::playbook_submit_typed_prompt`]
     /// for prompts delivered to a just-created execution fork: the submit
     /// Enter is gated on the PTY producing output after the paste, not just
     /// a fixed delay. A cold-started harness still busy with its own
@@ -425,7 +425,7 @@ impl SessionManager {
     /// for usage probes). Output growth after the paste is evidence the
     /// harness consumed it, so the Enter written afterwards arrives in a
     /// later read and parses as a real keypress. Unlike the usage probe's
-    /// token-echo gate this cannot look for the prompt text itself: program
+    /// token-echo gate this cannot look for the prompt text itself: playbook
     /// prompts are long, and external TUIs collapse long pastes into a
     /// `[Pasted text #N]` placeholder that never echoes the body. On gate
     /// timeout the Enter is sent anyway — a missing echo most likely means
@@ -439,44 +439,44 @@ impl SessionManager {
     /// harness which has not attached its input handler yet gets a silent
     /// pass here. Readiness is established *before* this is called — see
     /// `wait_for_fork_ready`.
-    pub(super) async fn program_submit_typed_prompt_cold_start(
+    pub(super) async fn playbook_submit_typed_prompt_cold_start(
         &self,
         id: &str,
         prompt: &str,
     ) -> Result<()> {
         let before_offset = self.pty_log_len(id);
-        self.pty_input_without_capture(id, program_bracketed_paste_bytes(prompt))
+        self.pty_input_without_capture(id, playbook_bracketed_paste_bytes(prompt))
             .await?;
         let started = tokio::time::Instant::now();
         loop {
             if self.pty_log_len(id) > before_offset {
                 break;
             }
-            if started.elapsed() >= PROGRAM_PASTE_OUTPUT_GATE_TIMEOUT {
+            if started.elapsed() >= PLAYBOOK_PASTE_OUTPUT_GATE_TIMEOUT {
                 tracing::warn!(
                     session = %id,
-                    "program fork prompt: no PTY output after paste within the gate window; sending Enter anyway",
+                    "playbook fork prompt: no PTY output after paste within the gate window; sending Enter anyway",
                 );
                 break;
             }
-            tokio::time::sleep(PROGRAM_PASTE_OUTPUT_GATE_POLL).await;
+            tokio::time::sleep(PLAYBOOK_PASTE_OUTPUT_GATE_POLL).await;
         }
         // Keep the short settle between the observed echo and the Enter:
         // the echo proves the paste was consumed, the settle lets the
         // harness finish the render/state update it triggered.
-        tokio::time::sleep(PROGRAM_EXTERNAL_PTY_SUBMIT_DELAY).await;
+        tokio::time::sleep(PLAYBOOK_EXTERNAL_PTY_SUBMIT_DELAY).await;
         self.pty_input_without_capture(id, vec![b'\r']).await?;
         Ok(())
     }
 }
 
 /// Poll interval / hard cap for the paste-output gate in
-/// [`SessionManager::program_submit_typed_prompt_cold_start`]. The timeout
+/// [`SessionManager::playbook_submit_typed_prompt_cold_start`]. The timeout
 /// is generous relative to how fast a responsive harness echoes (tens of
 /// ms) precisely because the case the gate exists for is a harness slow to
 /// drain stdin while busy with its own startup work.
-const PROGRAM_PASTE_OUTPUT_GATE_POLL: Duration = Duration::from_millis(50);
-const PROGRAM_PASTE_OUTPUT_GATE_TIMEOUT: Duration = Duration::from_secs(5);
+const PLAYBOOK_PASTE_OUTPUT_GATE_POLL: Duration = Duration::from_millis(50);
+const PLAYBOOK_PASTE_OUTPUT_GATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Per-session writer task (spec 0087): drains the ordered input queue and
 /// performs the adapter `session.pty_input` round-trips that used to run

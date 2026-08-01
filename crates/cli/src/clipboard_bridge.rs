@@ -647,7 +647,7 @@ pub(crate) async fn run_ssh(
 
     let ssh_cmd = resolve_override(ssh_cmd, ENV_SSH_CMD);
     let remote_cmd = resolve_override(remote_cmd, ENV_REMOTE_CMD);
-    let (program, prefix_args) = split_ssh_cmd(ssh_cmd.as_deref());
+    let (playbook, prefix_args) = split_ssh_cmd(ssh_cmd.as_deref());
     let argv = build_ssh_argv(
         &prefix_args,
         &ssh_args,
@@ -655,22 +655,22 @@ pub(crate) async fn run_ssh(
         &remote_sock,
         remote_cmd.as_deref(),
     );
-    let status = tokio::process::Command::new(&program)
+    let status = tokio::process::Command::new(&playbook)
         .args(&argv)
         .status()
         .await
-        .with_context(|| format!("spawn {program} (transport command not found?)"))?;
+        .with_context(|| format!("spawn {playbook} (transport command not found?)"))?;
     Ok(status.code().unwrap_or(1))
 }
 
-/// Split the transport command into program + leading args. Whitespace
+/// Split the transport command into playbook + leading args. Whitespace
 /// split only — enough for `tsh ssh` / `gcloud compute ssh`; arguments that
 /// themselves contain spaces aren't supported here (pass them via `ssh_args`
 /// instead).
 fn split_ssh_cmd(cmd: Option<&str>) -> (String, Vec<OsString>) {
     let mut parts = cmd.unwrap_or("ssh").split_whitespace();
-    let program = parts.next().unwrap_or("ssh").to_string();
-    (program, parts.map(Into::into).collect())
+    let playbook = parts.next().unwrap_or("ssh").to_string();
+    (playbook, parts.map(Into::into).collect())
 }
 
 /// Unique-enough suffix for the remote socket path so concurrent bridges to
@@ -764,17 +764,17 @@ mod tests {
     }
 
     #[test]
-    fn ssh_cmd_splits_into_program_and_prefix_args() {
-        let (program, prefix) = split_ssh_cmd(None);
-        assert_eq!(program, "ssh");
+    fn ssh_cmd_splits_into_playbook_and_prefix_args() {
+        let (playbook, prefix) = split_ssh_cmd(None);
+        assert_eq!(playbook, "ssh");
         assert!(prefix.is_empty());
 
-        let (program, prefix) = split_ssh_cmd(Some("tsh ssh"));
-        assert_eq!(program, "tsh");
+        let (playbook, prefix) = split_ssh_cmd(Some("tsh ssh"));
+        assert_eq!(playbook, "tsh");
         assert_eq!(prefix, vec![OsString::from("ssh")]);
 
-        let (program, prefix) = split_ssh_cmd(Some("gcloud compute ssh"));
-        assert_eq!(program, "gcloud");
+        let (playbook, prefix) = split_ssh_cmd(Some("gcloud compute ssh"));
+        assert_eq!(playbook, "gcloud");
         assert_eq!(
             prefix,
             vec![OsString::from("compute"), OsString::from("ssh")]

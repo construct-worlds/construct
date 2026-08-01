@@ -75,7 +75,7 @@ responsiveness must not depend on the health of any adapter process.
   CPU spike: the client's input requests ACK immediately; the typed
   bytes render when the harness catches up. Typing into session B in
   the meantime is unaffected.
-- A program run submits a bracketed paste and then an Enter keypress
+- A playbook run submits a bracketed paste and then an Enter keypress
   with a settle delay between them: the paste job's delivery is awaited
   before the delay starts, so the Enter cannot outrun the paste even
   though interactive typing is being queued concurrently — and all of

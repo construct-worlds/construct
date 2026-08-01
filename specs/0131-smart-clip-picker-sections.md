@@ -3,11 +3,11 @@
 Status: accepted
 Date: 2026-06-29
 Area: ux
-Scope: How the `@` smart-clip picker in the program view organizes its candidates into a relevance section and expandable category submenus, identically in the TUI and web UI.
+Scope: How the `@` smart-clip picker in the playbook view organizes its candidates into a relevance section and expandable category submenus, identically in the TUI and web UI.
 
 ## Decision
 
-Typing `@` in the program view opens a two-level picker, not a flat list.
+Typing `@` in the playbook view opens a two-level picker, not a flat list.
 
 Root view, top to bottom:
 
@@ -40,7 +40,7 @@ A flat, truncated list forced a single ordering to serve two jobs at once — "s
 
 ## Non-Goals
 
-- Not a general command palette. The picker only inserts clips into the program buffer.
+- Not a general command palette. The picker only inserts clips into the playbook buffer.
 - No fuzzy ranking beyond the simple label-subsequence fallback; this is deliberately conservative to keep dimming meaningful.
 - Archived-session rollups and other list-view affordances are not reproduced inside the submenu; only grouping and ordering are mirrored.
 

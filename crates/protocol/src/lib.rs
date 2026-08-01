@@ -1210,19 +1210,19 @@ pub mod ipc_method {
     /// connect a silently-missing convenience back to its cause instead
     /// of leaving the user guessing.
     pub const FEATURES_STATUS: &str = "features.status";
-    pub const PROGRAM_GET: &str = "program.get";
-    pub const PROGRAM_UPDATE: &str = "program.update";
-    pub const PROGRAM_EDIT: &str = "program.edit";
-    pub const PROGRAM_CURSOR: &str = "program.cursor";
-    pub const PROGRAM_EXECUTE: &str = "program.execute";
-    pub const PROGRAM_LIST_TEMPLATES: &str = "program.list_templates";
-    /// List available Program selection verbs (spec 0089): built-in plus any
+    pub const PLAYBOOK_GET: &str = "playbook.get";
+    pub const PLAYBOOK_UPDATE: &str = "playbook.update";
+    pub const PLAYBOOK_EDIT: &str = "playbook.edit";
+    pub const PLAYBOOK_CURSOR: &str = "playbook.cursor";
+    pub const PLAYBOOK_EXECUTE: &str = "playbook.execute";
+    pub const PLAYBOOK_LIST_TEMPLATES: &str = "playbook.list_templates";
+    /// List available Playbook selection verbs (spec 0089): built-in plus any
     /// user-defined `verbs/*.md` overrides/additions.
-    pub const PROGRAM_LIST_VERBS: &str = "program.list_verbs";
-    /// Run a Program selection verb (spec 0089): spawns a result-returning
+    pub const PLAYBOOK_LIST_VERBS: &str = "playbook.list_verbs";
+    /// Run a Playbook selection verb (spec 0089): spawns a result-returning
     /// subagent scoped to the selection; the daemon merges its structured
     /// result back into the document once the subagent completes.
-    pub const PROGRAM_VERB_EXECUTE: &str = "program.verb_execute";
+    pub const PLAYBOOK_VERB_EXECUTE: &str = "playbook.verb_execute";
     pub const SESSION_LIST: &str = "session.list";
     pub const SESSION_CREATE: &str = "session.create";
     pub const SESSION_GET: &str = "session.get";
@@ -1302,7 +1302,7 @@ pub mod ipc_method {
     /// sent to any user-kind session, newest first (spec 0155). See
     /// [`crate::PromptHistoryListParams`] / [`crate::PromptHistoryListResult`].
     pub const PROMPT_HISTORY_LIST: &str = "prompt_history.list";
-    /// Substring search across session name/metadata, stored program
+    /// Substring search across session name/metadata, stored playbook
     /// contents, and transcript history — see [`crate::SearchParams`] /
     /// [`crate::SearchResult`].
     pub const SESSION_SEARCH: &str = "session.search";
@@ -1387,8 +1387,8 @@ pub mod ipc_method {
 pub mod ipc_notif {
     pub const EVENT: &str = "session/event";
     pub const STATE: &str = "session/state";
-    pub const PROGRAM_STATE: &str = "program/state";
-    pub const PROGRAM_CURSOR: &str = "program/cursor";
+    pub const PLAYBOOK_STATE: &str = "playbook/state";
+    pub const PLAYBOOK_CURSOR: &str = "playbook/cursor";
     pub const DELETED: &str = "session/deleted";
     pub const PROJECT_STATE: &str = "project/state";
     pub const PROJECT_DELETED: &str = "project/deleted";
@@ -1411,19 +1411,19 @@ pub mod ipc_notif {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ProgramUpdateActor {
+pub enum PlaybookUpdateActor {
     Human,
     Agent,
 }
 
-impl Default for ProgramUpdateActor {
+impl Default for PlaybookUpdateActor {
     fn default() -> Self {
         Self::Human
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramDocument {
+pub struct PlaybookDocument {
     pub session_id: String,
     pub markdown: String,
     pub version: u64,
@@ -1432,14 +1432,14 @@ pub struct ProgramDocument {
     pub template_id: Option<String>,
 }
 
-/// A program "block": the unit of program-run shimmer (see specs 0042 and
+/// A playbook "block": the unit of playbook-run shimmer (see specs 0042 and
 /// 0053). A run of non-blank Markdown lines is split at heading and list-item
 /// boundaries, so each heading, each list item, and each plain paragraph is its
 /// own block — letting an individual task card shimmer or settle independently
 /// of its siblings even when written without blank lines between them. Wrapped
 /// continuation lines stay with the item or paragraph they belong to.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProgramBlockSpan {
+pub struct PlaybookBlockSpan {
     /// Source-line range `[start_line, end_line)` into `markdown.lines()`.
     pub start_line: usize,
     pub end_line: usize,
@@ -1453,11 +1453,11 @@ pub struct ProgramBlockSpan {
     pub text: String,
 }
 
-/// One block of a program with its current shimmer state — the per-block
-/// projection returned by program get/edit/update so an agent reads and
+/// One block of a playbook with its current shimmer state — the per-block
+/// projection returned by playbook get/edit/update so an agent reads and
 /// declares shimmer by stable block ref (spec 0053).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProgramBlockView {
+pub struct PlaybookBlockView {
     /// Stable daemon-owned block-instance reference for shimmer declarations.
     /// Prefer this (or `id`, which mirrors it for compatibility with existing
     /// agent instructions) over content-derived ids.
@@ -1487,14 +1487,14 @@ pub struct ProgramBlockView {
     pub tooltip: Option<String>,
 }
 
-/// A declaration that a program block (addressed by its stable ref/id) is pending
+/// A declaration that a playbook block (addressed by its stable ref/id) is pending
 /// (`shimmer: true`) or settled (`shimmer: false`) — the unit of the per-block
-/// shimmer declaration carried by program edits (spec 0053). When declaring a
+/// shimmer declaration carried by playbook edits (spec 0053). When declaring a
 /// block pending, a concise `tooltip` describing its run status is required of
 /// agent callers (spec 0057) and stored alongside the shimmer state; it is
 /// ignored when settling a block.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProgramShimmerDecl {
+pub struct PlaybookShimmerDecl {
     pub id: String,
     pub shimmer: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1504,41 +1504,41 @@ pub struct ProgramShimmerDecl {
 /// Hardcoded fallback tooltip for a block that is shimmering without a stored
 /// tooltip — optimistic client-side shimmer before an agent supplies one,
 /// legacy run state, or a block kept pending across an edit (spec 0057).
-pub const PROGRAM_SHIMMER_FALLBACK_TOOLTIP: &str = "Working…";
+pub const PLAYBOOK_SHIMMER_FALLBACK_TOOLTIP: &str = "Working…";
 
-pub const PROGRAM_SHIMMER_STATUS_QUEUED: &str = "Queued behind current turn";
-pub const PROGRAM_SHIMMER_STATUS_DELIVERED: &str = "Delivered, waiting for agent";
-pub const PROGRAM_SHIMMER_STATUS_AGENT_WORKING: &str = "Agent working, no status yet";
+pub const PLAYBOOK_SHIMMER_STATUS_QUEUED: &str = "Queued behind current turn";
+pub const PLAYBOOK_SHIMMER_STATUS_DELIVERED: &str = "Delivered, waiting for agent";
+pub const PLAYBOOK_SHIMMER_STATUS_AGENT_WORKING: &str = "Agent working, no status yet";
 
-/// Maximum word count for a program-shimmer tooltip (spec 0057). Longer
+/// Maximum word count for a playbook-shimmer tooltip (spec 0057). Longer
 /// tooltips are gracefully truncated rather than rejected.
-pub const PROGRAM_SHIMMER_TOOLTIP_MAX_WORDS: usize = 10;
+pub const PLAYBOOK_SHIMMER_TOOLTIP_MAX_WORDS: usize = 10;
 
-/// Normalize a program-shimmer tooltip to its stored form (spec 0057): trim,
+/// Normalize a playbook-shimmer tooltip to its stored form (spec 0057): trim,
 /// collapse internal whitespace to single spaces, and truncate to at most
-/// [`PROGRAM_SHIMMER_TOOLTIP_MAX_WORDS`] words (appending `…` when truncated).
+/// [`PLAYBOOK_SHIMMER_TOOLTIP_MAX_WORDS`] words (appending `…` when truncated).
 /// Returns `None` for an empty/whitespace-only string so an absent tooltip is
 /// never stored as an empty label.
-pub fn normalize_program_tooltip(raw: &str) -> Option<String> {
+pub fn normalize_playbook_tooltip(raw: &str) -> Option<String> {
     let words: Vec<&str> = raw.split_whitespace().collect();
     if words.is_empty() {
         return None;
     }
-    if words.len() <= PROGRAM_SHIMMER_TOOLTIP_MAX_WORDS {
+    if words.len() <= PLAYBOOK_SHIMMER_TOOLTIP_MAX_WORDS {
         Some(words.join(" "))
     } else {
         Some(format!(
             "{}…",
-            words[..PROGRAM_SHIMMER_TOOLTIP_MAX_WORDS].join(" ")
+            words[..PLAYBOOK_SHIMMER_TOOLTIP_MAX_WORDS].join(" ")
         ))
     }
 }
 
-/// Legacy content-derived id for a program block (spec 0053). Derived from the
+/// Legacy content-derived id for a playbook block (spec 0053). Derived from the
 /// block's identity signature with a dependency-free FNV-1a hash so the daemon
 /// and every client compute the same fallback id for the same content. Stable
-/// block refs from `ProgramBlockView::id` are authoritative when available.
-pub fn program_block_id(signature: &str) -> String {
+/// block refs from `PlaybookBlockView::id` are authoritative when available.
+pub fn playbook_block_id(signature: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in signature.as_bytes() {
         hash ^= *byte as u64;
@@ -1551,7 +1551,7 @@ pub fn program_block_id(signature: &str) -> String {
 /// instance ids (`clip_id=...`) because those are client-assigned references to
 /// a specific rendered clip, not task content. Adding or repairing clip ids must
 /// not settle a block whose work is still pending.
-fn program_block_identity_signature(signature: &str) -> String {
+fn playbook_block_identity_signature(signature: &str) -> String {
     let mut out = String::with_capacity(signature.len());
     let mut rest = signature;
     loop {
@@ -1567,14 +1567,14 @@ fn program_block_identity_signature(signature: &str) -> String {
         };
         let body = &after_start[..end];
         out.push_str("@{");
-        out.push_str(&program_smart_clip_body_without_instance_id(body));
+        out.push_str(&playbook_smart_clip_body_without_instance_id(body));
         out.push('}');
         rest = &after_start[end + 1..];
     }
     out
 }
 
-fn program_smart_clip_body_without_instance_id(raw_clip: &str) -> String {
+fn playbook_smart_clip_body_without_instance_id(raw_clip: &str) -> String {
     raw_clip
         .split_whitespace()
         .filter(|part| !part.starts_with("clip_id="))
@@ -1583,10 +1583,10 @@ fn program_smart_clip_body_without_instance_id(raw_clip: &str) -> String {
 }
 
 /// One inline `@{type:target ...}` smart-clip occurrence found while scanning
-/// program text, with the byte span (`start` is the index of `@`, `end` is
+/// playbook text, with the byte span (`start` is the index of `@`, `end` is
 /// one past the closing `}`) so a caller can remove or replace it in place.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProgramSmartClipOccurrence {
+pub struct PlaybookSmartClipOccurrence {
     pub type_name: String,
     pub target: String,
     pub start: usize,
@@ -1599,7 +1599,7 @@ pub struct ProgramSmartClipOccurrence {
 /// `:::clip ... :::` blocks. Used by the daemon's instant-dispatch fast path
 /// (spec 0066) to find and strip a list item's harness clip without a full
 /// Markdown parser.
-pub fn program_scan_smart_clips(text: &str) -> Vec<ProgramSmartClipOccurrence> {
+pub fn playbook_scan_smart_clips(text: &str) -> Vec<PlaybookSmartClipOccurrence> {
     let mut out = Vec::new();
     let mut idx = 0usize;
     while let Some(rel_start) = text[idx..].find("@{") {
@@ -1612,7 +1612,7 @@ pub fn program_scan_smart_clips(text: &str) -> Vec<ProgramSmartClipOccurrence> {
         let body = &text[after..after + rel_end];
         let first = body.split_whitespace().next().unwrap_or(body);
         let (type_name, target) = first.split_once(':').unwrap_or(("clip", first));
-        out.push(ProgramSmartClipOccurrence {
+        out.push(PlaybookSmartClipOccurrence {
             type_name: type_name.to_string(),
             target: target.to_string(),
             start,
@@ -1624,7 +1624,7 @@ pub fn program_scan_smart_clips(text: &str) -> Vec<ProgramSmartClipOccurrence> {
 }
 
 /// True if a trimmed line is a Markdown ATX heading (`#`..`######` then a space).
-fn program_is_heading(trimmed: &str) -> bool {
+fn playbook_is_heading(trimmed: &str) -> bool {
     let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
     (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ')
 }
@@ -1633,7 +1633,7 @@ fn program_is_heading(trimmed: &str) -> bool {
 /// or ordered prefix plus its single separating space (e.g. 2 for `"- "`, 4
 /// for `"12. "`). `None` for a bare/empty bullet (`"-"` alone) or a line that
 /// is not a list item.
-fn program_list_item_marker_len(trimmed: &str) -> Option<usize> {
+fn playbook_list_item_marker_len(trimmed: &str) -> Option<usize> {
     if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
         return Some(2);
     }
@@ -1649,11 +1649,11 @@ fn program_list_item_marker_len(trimmed: &str) -> Option<usize> {
 
 /// True if a trimmed line begins a Markdown list item: a `-`/`*`/`+` bullet
 /// (with content or as a bare empty bullet) or an ordered `N.`/`N)` marker.
-pub fn program_is_list_item(trimmed: &str) -> bool {
+pub fn playbook_is_list_item(trimmed: &str) -> bool {
     if trimmed == "-" || trimmed == "*" || trimmed == "+" {
         return true;
     }
-    if program_list_item_marker_len(trimmed).is_some() {
+    if playbook_list_item_marker_len(trimmed).is_some() {
         return true;
     }
     let digits = trimmed.bytes().take_while(|b| b.is_ascii_digit()).count();
@@ -1663,9 +1663,9 @@ pub fn program_is_list_item(trimmed: &str) -> bool {
 /// The text following a list item's marker — e.g. `"task"` for both `"- task"`
 /// and `"12. task"` — or `None` if `trimmed` is not a list item with content
 /// (including a bare empty bullet). Used by the daemon's instant-dispatch
-/// fast path (spec 0066) to derive a subagent prompt from a program list item.
-pub fn program_list_item_text(trimmed: &str) -> Option<&str> {
-    program_list_item_marker_len(trimmed).map(|len| &trimmed[len..])
+/// fast path (spec 0066) to derive a subagent prompt from a playbook list item.
+pub fn playbook_list_item_text(trimmed: &str) -> Option<&str> {
+    playbook_list_item_marker_len(trimmed).map(|len| &trimmed[len..])
 }
 
 /// Split Markdown into ordered blocks, finer than paragraphs: a run of non-blank
@@ -1675,16 +1675,16 @@ pub fn program_list_item_text(trimmed: &str) -> Option<&str> {
 /// The daemon uses this to compute the shimmer pending set and the per-block
 /// projection; clients use it to map shimmer back onto source lines. Keeping a
 /// single shared parser guarantees daemon and clients agree on block identity.
-pub fn program_block_spans(markdown: &str) -> Vec<ProgramBlockSpan> {
+pub fn playbook_block_spans(markdown: &str) -> Vec<PlaybookBlockSpan> {
     let raw_lines: Vec<&str> = markdown.lines().collect();
     let mut blocks = Vec::new();
     let mut start: Option<usize> = None;
     let mut norm: Vec<String> = Vec::new();
-    let push = |start: usize, end: usize, norm: &[String], blocks: &mut Vec<ProgramBlockSpan>| {
+    let push = |start: usize, end: usize, norm: &[String], blocks: &mut Vec<PlaybookBlockSpan>| {
         let signature = norm.join("\n");
-        let id = program_block_id(&program_block_identity_signature(&signature));
+        let id = playbook_block_id(&playbook_block_identity_signature(&signature));
         let text = raw_lines[start..end].join("\n");
-        blocks.push(ProgramBlockSpan {
+        blocks.push(PlaybookBlockSpan {
             start_line: start,
             end_line: end,
             signature,
@@ -1702,7 +1702,7 @@ pub fn program_block_spans(markdown: &str) -> Vec<ProgramBlockSpan> {
             }
             continue;
         }
-        if program_is_heading(trimmed) {
+        if playbook_is_heading(trimmed) {
             // A heading ends the current block and is a single-line block.
             if let Some(s) = start.take() {
                 push(s, i, &norm, &mut blocks);
@@ -1711,7 +1711,7 @@ pub fn program_block_spans(markdown: &str) -> Vec<ProgramBlockSpan> {
             push(i, i + 1, &[trimmed.to_string()], &mut blocks);
             continue;
         }
-        if program_is_list_item(trimmed) {
+        if playbook_is_list_item(trimmed) {
             // A list item ends the current block and begins a new one.
             if let Some(s) = start.take() {
                 push(s, i, &norm, &mut blocks);
@@ -1735,7 +1735,7 @@ pub fn program_block_spans(markdown: &str) -> Vec<ProgramBlockSpan> {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ProgramRunStage {
+pub enum PlaybookRunStage {
     /// Client-local optimistic stage immediately after Run is pressed, before
     /// the execute call returns. Daemon snapshots normally advance to Delivered
     /// because shared run state is published after delivery succeeds.
@@ -1746,14 +1746,14 @@ pub enum ProgramRunStage {
     Settling,
 }
 
-impl Default for ProgramRunStage {
+impl Default for PlaybookRunStage {
     fn default() -> Self {
         Self::Pressed
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramRunProgress {
+pub struct PlaybookRunProgress {
     pub run_id: String,
     pub started_at_ms: i64,
     pub expires_at_ms: i64,
@@ -1787,22 +1787,22 @@ pub struct ProgramRunProgress {
     /// the projected status string is the client-facing contract.
     #[serde(default, skip_serializing)]
     pub queued_behind_current_turn: bool,
-    /// True once an in-run program declaration/edit has narrowed this run —
+    /// True once an in-run playbook declaration/edit has narrowed this run —
     /// i.e. the run is actively managed via per-block declarations rather than
-    /// riding the untouched optimistic full-program shimmer. A managed run is
+    /// riding the untouched optimistic full-playbook shimmer. A managed run is
     /// cleared by its pending set emptying, a terminal owning-session state, or
     /// the inactivity backstop — NOT by the owning session merely returning to
     /// awaiting-input (a self-scheduling agent goes idle while delegated or
     /// background work is still in flight). An unmanaged run that no
     /// declaration has narrowed still clears when the owning session goes idle
-    /// after being seen running. See `specs/0042-program-run-progress-affordance.md`.
+    /// after being seen running. See `specs/0042-playbook-run-progress-affordance.md`.
     #[serde(default)]
     pub agent_managed: bool,
     /// Derived compact stage for clients to render next to the Run control.
     /// It is computed from the run lifecycle facts above; clients should not
     /// use it as a stop signal.
     #[serde(default)]
-    pub stage: ProgramRunStage,
+    pub stage: PlaybookRunStage,
     /// Number of blocks from this run's initial pending set that have settled.
     #[serde(default)]
     pub settled_block_count: usize,
@@ -1811,7 +1811,7 @@ pub struct ProgramRunProgress {
     pub total_block_count: usize,
 }
 
-impl ProgramRunProgress {
+impl PlaybookRunProgress {
     pub fn pending_block_count(&self) -> usize {
         if !self.pending_block_refs.is_empty() {
             self.pending_block_refs.len()
@@ -1829,14 +1829,14 @@ impl ProgramRunProgress {
         self.settled_block_count = self.total_block_count.saturating_sub(pending);
         self.stage = if self.agent_managed {
             if self.settled_block_count > 0 {
-                ProgramRunStage::Settling
+                PlaybookRunStage::Settling
             } else {
-                ProgramRunStage::PlanningPassDone
+                PlaybookRunStage::PlanningPassDone
             }
         } else if self.first_output_seen {
-            ProgramRunStage::FirstOutput
+            PlaybookRunStage::FirstOutput
         } else {
-            ProgramRunStage::Delivered
+            PlaybookRunStage::Delivered
         };
     }
 
@@ -1847,9 +1847,9 @@ impl ProgramRunProgress {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramRevision {
+pub struct PlaybookRevision {
     pub version: u64,
-    pub actor: ProgramUpdateActor,
+    pub actor: PlaybookUpdateActor,
     pub at_ms: i64,
     pub markdown: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1857,7 +1857,7 @@ pub struct ProgramRevision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramTemplate {
+pub struct PlaybookTemplate {
     pub id: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1871,35 +1871,35 @@ pub struct ProgramTemplate {
 // dialect registry (spec 0074): see `dialect::CONSTRUCT_MARKDOWN_EXTENSIONS`.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramGetParams {
+pub struct PlaybookGetParams {
     pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramGetResult {
-    pub program: ProgramDocument,
+pub struct PlaybookGetResult {
+    pub playbook: PlaybookDocument,
     #[serde(default)]
-    pub revisions: Vec<ProgramRevision>,
+    pub revisions: Vec<PlaybookRevision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_run: Option<ProgramRunProgress>,
+    pub active_run: Option<PlaybookRunProgress>,
     /// Ordered per-block projection with each block's stable ref/id and current
     /// shimmer state (spec 0053). Derived from the live markdown; not persisted.
     #[serde(default)]
-    pub blocks: Vec<ProgramBlockView>,
-    /// Ephemeral remote cursor/presence entries currently editing this Program
+    pub blocks: Vec<PlaybookBlockView>,
+    /// Ephemeral remote cursor/presence entries currently editing this Playbook
     /// (spec 0065). Not persisted; clients render them as advisory UI only.
     #[serde(default)]
-    pub collaborators: Vec<ProgramCursor>,
+    pub collaborators: Vec<PlaybookCursor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramUpdateParams {
+pub struct PlaybookUpdateParams {
     pub session_id: String,
     pub markdown: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_version: Option<u64>,
     #[serde(default)]
-    pub actor: ProgramUpdateActor,
+    pub actor: PlaybookUpdateActor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1921,29 +1921,29 @@ pub struct ProgramUpdateParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramUpdateResult {
-    pub program: ProgramDocument,
+pub struct PlaybookUpdateResult {
+    pub playbook: PlaybookDocument,
     /// Fresh per-block projection after the write, so the caller rides the echo
     /// instead of re-reading (spec 0053).
     #[serde(default)]
-    pub blocks: Vec<ProgramBlockView>,
+    pub blocks: Vec<PlaybookBlockView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_run: Option<ProgramRunProgress>,
+    pub active_run: Option<PlaybookRunProgress>,
 }
 
-/// One anchored edit: replace `old_string` with `new_string` in the program
+/// One anchored edit: replace `old_string` with `new_string` in the playbook
 /// Markdown. An empty `old_string` appends `new_string` to the end of the
 /// document. Anchored edits apply to the *latest* document content, so
 /// concurrent edits to other regions merge without a version conflict; the
 /// only failures are a vanished anchor (`old_string` not found) or an
 /// ambiguous one (multiple matches without `replace_all`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramEdit {
+pub struct PlaybookEdit {
     pub old_string: String,
     pub new_string: String,
     #[serde(default)]
     pub replace_all: bool,
-    /// Keep the block this edit produces in the program-run shimmer set, in the
+    /// Keep the block this edit produces in the playbook-run shimmer set, in the
     /// same call (spec 0053). Editing a block changes its text and therefore its
     /// id, so its prior shimmer does not carry over; setting this re-adds the
     /// resulting block's new id atomically — so a move/annotate of a still-
@@ -1954,12 +1954,12 @@ pub struct ProgramEdit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramEditParams {
+pub struct PlaybookEditParams {
     pub session_id: String,
     #[serde(default)]
-    pub edits: Vec<ProgramEdit>,
+    pub edits: Vec<PlaybookEdit>,
     #[serde(default)]
-    pub actor: ProgramUpdateActor,
+    pub actor: PlaybookUpdateActor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// Partial shimmer declaration applied after the edits (spec 0053): each
@@ -1967,11 +1967,11 @@ pub struct ProgramEditParams {
     /// may target any block, not only blocks this edit changed. Ids that match
     /// no post-edit block are dropped (the block changed underneath the caller).
     #[serde(default)]
-    pub shimmer: Vec<ProgramShimmerDecl>,
+    pub shimmer: Vec<PlaybookShimmerDecl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProgramCursor {
+pub struct PlaybookCursor {
     pub session_id: String,
     /// Daemon-scoped connection identity, stable until disconnect.
     pub client_id: String,
@@ -1980,8 +1980,8 @@ pub struct ProgramCursor {
     /// Client surface/kind, e.g. "tui" or "web", or "agent" for the owning
     /// agent's own presence cursor (spec 0065 agent presence).
     pub kind: String,
-    /// Caret offset in Unicode scalar values within the current Program
-    /// markdown. This matches the TUI's existing Program cursor units.
+    /// Caret offset in Unicode scalar values within the current Playbook
+    /// markdown. This matches the TUI's existing Playbook cursor units.
     pub cursor: usize,
     /// For a human cursor (`kind` "tui"/"web"), the bounds of that client's
     /// real text selection. For the agent's own presence cursor
@@ -2000,16 +2000,16 @@ pub struct ProgramCursor {
     pub updated_at_ms: i64,
     /// `false` is a best-effort tombstone sent when a client leaves or
     /// disconnects; it should clear any rendered cursor for `client_id`.
-    #[serde(default = "program_cursor_default_active")]
+    #[serde(default = "playbook_cursor_default_active")]
     pub active: bool,
 }
 
-fn program_cursor_default_active() -> bool {
+fn playbook_cursor_default_active() -> bool {
     true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramCursorParams {
+pub struct PlaybookCursorParams {
     pub session_id: String,
     pub cursor: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2020,30 +2020,30 @@ pub struct ProgramCursorParams {
     pub version: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// When true, clears this connection's cursor for the Program.
+    /// When true, clears this connection's cursor for the Playbook.
     #[serde(default)]
     pub clear: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramCursorResult {
-    pub cursor: ProgramCursor,
+pub struct PlaybookCursorResult {
+    pub cursor: PlaybookCursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramCursorNotificationPayload {
-    pub cursor: ProgramCursor,
+pub struct PlaybookCursorNotificationPayload {
+    pub cursor: PlaybookCursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramExecuteParams {
+pub struct PlaybookExecuteParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_version: Option<u64>,
     /// Optional one-line instruction supplied with a Run gesture. The daemon
-    /// appends it to the generated program-run prompt; the program body and
+    /// appends it to the generated playbook-run prompt; the playbook body and
     /// shimmer scope remain unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
@@ -2054,7 +2054,7 @@ pub struct ProgramExecuteParams {
     pub shimmer: Option<Vec<bool>>,
     /// For a selection Run, the stable block ref/id of every real document
     /// block the client's selection overlaps — computed via the same
-    /// containment logic as the TUI's `selected_program_block_ids` (overlap
+    /// containment logic as the TUI's `selected_playbook_block_ids` (overlap
     /// of the selection's character range with each block's line range), not
     /// by re-hashing the selected substring's own text. Lets the daemon trust
     /// the client's block identity instead of re-parsing the raw selected
@@ -2065,7 +2065,7 @@ pub struct ProgramExecuteParams {
     /// for older clients and callers (e.g. the MCP tool) that don't send it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_block_ids: Option<Vec<String>>,
-    /// Execute in a new interactive fork of the Program-owning session
+    /// Execute in a new interactive fork of the Playbook-owning session
     /// instead of the owner itself. This is the explicit Shift-modified
     /// override in the clients (spec 0137); omitting it runs on the owner.
     #[serde(default)]
@@ -2073,14 +2073,14 @@ pub struct ProgramExecuteParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramExecuteResult {
-    pub program: ProgramDocument,
+pub struct PlaybookExecuteResult {
+    pub playbook: PlaybookDocument,
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_run: Option<ProgramRunProgress>,
-    /// Per-block projection of the program after the run was seeded (spec 0053).
+    pub active_run: Option<PlaybookRunProgress>,
+    /// Per-block projection of the playbook after the run was seeded (spec 0053).
     #[serde(default)]
-    pub blocks: Vec<ProgramBlockView>,
+    pub blocks: Vec<PlaybookBlockView>,
     /// The session that received the Run prompt. Present for both forked and
     /// owner-session execution so clients can identify the worker uniformly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2088,43 +2088,43 @@ pub struct ProgramExecuteResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramListTemplatesResult {
-    pub templates: Vec<ProgramTemplate>,
+pub struct PlaybookListTemplatesResult {
+    pub templates: Vec<PlaybookTemplate>,
 }
 
-/// What a Program selection verb does with its subagent's structured result
+/// What a Playbook selection verb does with its subagent's structured result
 /// (spec 0089): `Annotate` inserts new content adjacent to the selection and
 /// leaves the selected text untouched; `Rewrite` replaces the selected
 /// markdown with the returned content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ProgramVerbEffect {
+pub enum PlaybookVerbEffect {
     Annotate,
     Rewrite,
 }
 
-/// Whether a Program selection verb's subagent runs to completion unattended
+/// Whether a Playbook selection verb's subagent runs to completion unattended
 /// (`SingleShot`) or may hold a dialogue with the user inside its own session
 /// before producing a result (`Interactive`) (spec 0089).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ProgramVerbInteraction {
+pub enum PlaybookVerbInteraction {
     SingleShot,
     Interactive,
 }
 
-/// A typed refinement action offered on a Program selection alongside Run
+/// A typed refinement action offered on a Playbook selection alongside Run
 /// (spec 0089). Loaded from a markdown definition file: built-in verbs ship
 /// embedded; user files under a `verbs/` config directory add to or, by
 /// matching `name`, override them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramVerb {
+pub struct PlaybookVerb {
     pub name: String,
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub effect: ProgramVerbEffect,
-    pub interaction: ProgramVerbInteraction,
+    pub effect: PlaybookVerbEffect,
+    pub interaction: PlaybookVerbInteraction,
     #[serde(default)]
     pub order: i64,
     #[serde(default)]
@@ -2134,28 +2134,28 @@ pub struct ProgramVerb {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramListVerbsResult {
-    pub verbs: Vec<ProgramVerb>,
+pub struct PlaybookListVerbsResult {
+    pub verbs: Vec<PlaybookVerb>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramVerbExecuteParams {
+pub struct PlaybookVerbExecuteParams {
     pub session_id: String,
-    /// A verb's `name` from `program.list_verbs`.
+    /// A verb's `name` from `playbook.list_verbs`.
     pub verb: String,
     /// The selected markdown the verb operates on — a verb's entire
-    /// jurisdiction. Unlike `program.execute`, there is no whole-document
+    /// jurisdiction. Unlike `playbook.execute`, there is no whole-document
     /// fallback: a verb always targets an explicit selection.
     pub selection: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_version: Option<u64>,
     /// Optional one-line instruction composed onto the verb's purpose prompt,
-    /// same convention as `program.execute`'s `comment` (spec 0137).
+    /// same convention as `playbook.execute`'s `comment` (spec 0137).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_block_ids: Option<Vec<String>>,
-    /// Deliver the verb prompt to the Program owner instead of creating a
+    /// Deliver the verb prompt to the Playbook owner instead of creating a
     /// fork. Owner delivery always implies a direct edit — there is no fork
     /// to merge a structured result back from — so the daemon treats this as
     /// `direct_edit` regardless of the flag below. Interactive clients set it
@@ -2163,7 +2163,7 @@ pub struct ProgramVerbExecuteParams {
     /// (spec 0137); it stays default-off so API callers keep forking.
     #[serde(default)]
     pub run_on_owner: bool,
-    /// Let the executing fork edit the owner's Program directly instead
+    /// Let the executing fork edit the owner's Playbook directly instead
     /// of returning a structured result for daemon-side merge. Ignored when
     /// `run_on_owner` is set.
     #[serde(default)]
@@ -2171,25 +2171,25 @@ pub struct ProgramVerbExecuteParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramVerbExecuteResult {
-    pub program: ProgramDocument,
+pub struct PlaybookVerbExecuteResult {
+    pub playbook: PlaybookDocument,
     /// The subagent spawned to run the verb; its session clip is what the
     /// provisional edit annotates onto the selection.
     pub subagent_session_id: String,
     pub verb: String,
     #[serde(default)]
-    pub blocks: Vec<ProgramBlockView>,
+    pub blocks: Vec<PlaybookBlockView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramStateNotificationPayload {
-    pub program: ProgramDocument,
+pub struct PlaybookStateNotificationPayload {
+    pub playbook: PlaybookDocument,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_run: Option<ProgramRunProgress>,
+    pub active_run: Option<PlaybookRunProgress>,
     /// Ordered per-block projection, included so clients can map stable
     /// block refs to the rendered Markdown without re-deriving identity.
     #[serde(default)]
-    pub blocks: Vec<ProgramBlockView>,
+    pub blocks: Vec<PlaybookBlockView>,
 }
 
 /// One user-invocable action contributed by an installed plugin (spec 0152
@@ -3250,13 +3250,13 @@ pub struct TranscriptResult {
 
 /// Which corner of a session's stored data `session.search` looks in.
 /// `Name` is the same instant, in-memory match the TUI's `C-x b` picker
-/// already does (title/id/short-id/harness); `Program` and `Transcript`
+/// already does (title/id/short-id/harness); `Playbook` and `Transcript`
 /// scan on-disk files and are what the daemon-side search engine adds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchScope {
     Name,
-    Program,
+    Playbook,
     Transcript,
 }
 
@@ -4003,32 +4003,32 @@ mod project_compat_tests {
 }
 
 #[cfg(test)]
-mod program_block_tests {
+mod playbook_block_tests {
     use super::*;
 
     #[test]
     fn block_id_is_stable_against_position_and_changes_with_content() {
-        let a = program_block_id("- item");
+        let a = playbook_block_id("- item");
         // Same content, different surrounding document position → same id.
-        let doc1 = program_block_spans("- item\n\n- other\n");
-        let doc2 = program_block_spans("- other\n\n- different\n\n- item\n");
+        let doc1 = playbook_block_spans("- item\n\n- other\n");
+        let doc2 = playbook_block_spans("- other\n\n- different\n\n- item\n");
         let id1 = &doc1.iter().find(|b| b.signature == "- item").unwrap().id;
         let id2 = &doc2.iter().find(|b| b.signature == "- item").unwrap().id;
         assert_eq!(&a, id1);
         assert_eq!(id1, id2, "id is position-independent");
         // Editing the block's text changes its id.
-        assert_ne!(a, program_block_id("- item done"));
+        assert_ne!(a, playbook_block_id("- item done"));
     }
 
     #[test]
     fn block_id_ignores_smart_clip_instance_ids() {
-        let without_clip_id = program_block_spans("* task — @{session:s1}\n")
+        let without_clip_id = playbook_block_spans("* task — @{session:s1}\n")
             .pop()
             .unwrap();
-        let with_clip_id = program_block_spans("* task — @{session:s1 clip_id=clip_4}\n")
+        let with_clip_id = playbook_block_spans("* task — @{session:s1 clip_id=clip_4}\n")
             .pop()
             .unwrap();
-        let changed_clip_id = program_block_spans("* task — @{session:s1 clip_id=clip_9}\n")
+        let changed_clip_id = playbook_block_spans("* task — @{session:s1 clip_id=clip_9}\n")
             .pop()
             .unwrap();
         assert_eq!(without_clip_id.signature, "* task — @{session:s1}");
@@ -4039,7 +4039,7 @@ mod program_block_tests {
         assert_eq!(without_clip_id.id, with_clip_id.id);
         assert_eq!(with_clip_id.id, changed_clip_id.id);
 
-        let changed_target = program_block_spans("* task — @{session:s2 clip_id=clip_4}\n")
+        let changed_target = playbook_block_spans("* task — @{session:s2 clip_id=clip_4}\n")
             .pop()
             .unwrap();
         assert_ne!(
@@ -4050,7 +4050,7 @@ mod program_block_tests {
 
     #[test]
     fn identical_blocks_share_one_id() {
-        let spans = program_block_spans("- dup\n\n- dup\n");
+        let spans = playbook_block_spans("- dup\n\n- dup\n");
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].id, spans[1].id, "equal content → equal id");
     }
@@ -4059,7 +4059,7 @@ mod program_block_tests {
     fn spans_split_heading_and_items_into_separate_blocks() {
         // A heading glued to two items (no blank lines) splits into the heading
         // plus one block per item — so each card shimmers independently.
-        let spans = program_block_spans("## In progress\n  * one\n* two\n\n## Done\n");
+        let spans = playbook_block_spans("## In progress\n  * one\n* two\n\n## Done\n");
         assert_eq!(spans.len(), 4);
         assert_eq!((spans[0].start_line, spans[0].end_line), (0, 1));
         assert_eq!(spans[0].signature, "## In progress");
@@ -4074,14 +4074,14 @@ mod program_block_tests {
         // Distinct items have distinct ids.
         assert_ne!(spans[1].id, spans[2].id);
         // Empty / whitespace-only input has no blocks.
-        assert!(program_block_spans("  \n\n").is_empty());
+        assert!(playbook_block_spans("  \n\n").is_empty());
     }
 
     #[test]
     fn spans_keep_wrapped_continuation_with_its_item_and_paragraph() {
         // A wrapped continuation line stays with the item above it; a multi-line
         // paragraph stays whole; an ordered marker also starts an item.
-        let spans = program_block_spans(
+        let spans = playbook_block_spans(
             "intro paragraph\nsecond line\n\n1. first step\n   wrapped detail\n2. second step\n",
         );
         assert_eq!(spans.len(), 3);
@@ -4093,7 +4093,7 @@ mod program_block_tests {
     #[test]
     fn scan_smart_clips_finds_type_target_and_span() {
         let text = "- do X @{harness:codex} and @{session:s1 clip_id=clip_2}";
-        let clips = program_scan_smart_clips(text);
+        let clips = playbook_scan_smart_clips(text);
         assert_eq!(clips.len(), 2);
         assert_eq!(clips[0].type_name, "harness");
         assert_eq!(clips[0].target, "codex");
@@ -4108,44 +4108,44 @@ mod program_block_tests {
 
     #[test]
     fn scan_smart_clips_empty_for_no_clips() {
-        assert!(program_scan_smart_clips("- plain item, no clips here").is_empty());
+        assert!(playbook_scan_smart_clips("- plain item, no clips here").is_empty());
     }
 
     #[test]
     fn list_item_text_strips_bullet_and_ordered_markers() {
-        assert_eq!(program_list_item_text("- task"), Some("task"));
-        assert_eq!(program_list_item_text("* task"), Some("task"));
-        assert_eq!(program_list_item_text("+ task"), Some("task"));
-        assert_eq!(program_list_item_text("12. task"), Some("task"));
-        assert_eq!(program_list_item_text("3) task"), Some("task"));
+        assert_eq!(playbook_list_item_text("- task"), Some("task"));
+        assert_eq!(playbook_list_item_text("* task"), Some("task"));
+        assert_eq!(playbook_list_item_text("+ task"), Some("task"));
+        assert_eq!(playbook_list_item_text("12. task"), Some("task"));
+        assert_eq!(playbook_list_item_text("3) task"), Some("task"));
         // Bare/empty bullets and non-list-item lines have no item text.
-        assert_eq!(program_list_item_text("-"), None);
-        assert_eq!(program_list_item_text("plain paragraph"), None);
+        assert_eq!(playbook_list_item_text("-"), None);
+        assert_eq!(playbook_list_item_text("plain paragraph"), None);
     }
 
     #[test]
     fn normalize_tooltip_trims_collapses_and_truncates() {
         // Empty / whitespace-only → None (never stored as an empty label).
-        assert_eq!(normalize_program_tooltip("   "), None);
-        assert_eq!(normalize_program_tooltip(""), None);
+        assert_eq!(normalize_playbook_tooltip("   "), None);
+        assert_eq!(normalize_playbook_tooltip(""), None);
         // Trims and collapses internal whitespace.
         assert_eq!(
-            normalize_program_tooltip("  Building   the   PR \n"),
+            normalize_playbook_tooltip("  Building   the   PR \n"),
             Some("Building the PR".to_string())
         );
         // Exactly the max word count is kept verbatim.
         let ten = "one two three four five six seven eight nine ten";
-        assert_eq!(normalize_program_tooltip(ten), Some(ten.to_string()));
+        assert_eq!(normalize_playbook_tooltip(ten), Some(ten.to_string()));
         // Over the max is truncated to the first N words with an ellipsis.
         let eleven = "one two three four five six seven eight nine ten eleven";
         assert_eq!(
-            normalize_program_tooltip(eleven),
+            normalize_playbook_tooltip(eleven),
             Some("one two three four five six seven eight nine ten…".to_string())
         );
     }
 
-    fn run_progress_with_pending(pending: &[&str]) -> ProgramRunProgress {
-        ProgramRunProgress {
+    fn run_progress_with_pending(pending: &[&str]) -> PlaybookRunProgress {
+        PlaybookRunProgress {
             run_id: "r1".into(),
             started_at_ms: 10,
             expires_at_ms: 20,
@@ -4157,43 +4157,43 @@ mod program_block_tests {
             first_output_seen: false,
             queued_behind_current_turn: false,
             agent_managed: false,
-            stage: ProgramRunStage::Pressed,
+            stage: PlaybookRunStage::Pressed,
             settled_block_count: 0,
             total_block_count: pending.len(),
         }
     }
 
     #[test]
-    fn program_run_stage_derives_pipeline_progress() {
+    fn playbook_run_stage_derives_pipeline_progress() {
         let mut run = run_progress_with_pending(&["a", "b", "c"]);
         run.refresh_stage();
-        assert_eq!(run.stage, ProgramRunStage::Delivered);
+        assert_eq!(run.stage, PlaybookRunStage::Delivered);
         assert_eq!(run.settled_block_count, 0);
         assert_eq!(run.total_block_count, 3);
 
         run.first_output_seen = true;
         run.refresh_stage();
-        assert_eq!(run.stage, ProgramRunStage::FirstOutput);
+        assert_eq!(run.stage, PlaybookRunStage::FirstOutput);
 
         run.agent_managed = true;
         run.refresh_stage();
-        assert_eq!(run.stage, ProgramRunStage::PlanningPassDone);
+        assert_eq!(run.stage, PlaybookRunStage::PlanningPassDone);
 
         run.pending_block_refs = vec!["b".into(), "c".into()];
         run.refresh_stage();
-        assert_eq!(run.stage, ProgramRunStage::Settling);
+        assert_eq!(run.stage, PlaybookRunStage::Settling);
         assert_eq!(run.settled_block_count, 1);
         assert_eq!(run.total_block_count, 3);
     }
 
     #[test]
-    fn program_run_stage_defaults_total_for_legacy_payloads() {
+    fn playbook_run_stage_defaults_total_for_legacy_payloads() {
         let mut run = run_progress_with_pending(&["a", "b"]);
         run.total_block_count = 0;
         run.refresh_stage();
         assert_eq!(run.total_block_count, 2);
         assert_eq!(run.settled_block_count, 0);
-        assert_eq!(run.stage, ProgramRunStage::Delivered);
+        assert_eq!(run.stage, PlaybookRunStage::Delivered);
     }
 }
 

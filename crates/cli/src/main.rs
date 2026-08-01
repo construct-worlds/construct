@@ -5,8 +5,10 @@ use std::io::Read;
 use std::path::PathBuf;
 
 mod acp;
+mod ansi;
 mod app;
 mod clipboard_bridge;
+mod doctor;
 mod color;
 mod keymap;
 mod lineage;
@@ -56,6 +58,19 @@ enum Command {
     },
     /// Print resolved paths.
     Paths,
+    /// Check this machine's construct install and report what is wrong.
+    ///
+    /// Read-only: it never starts a daemon, creates directories, or edits
+    /// config. Works with the daemon down. Exits non-zero only when
+    /// construct genuinely cannot run here (spec 0168).
+    Doctor {
+        /// Emit the full report as JSON instead of text. Never colored.
+        #[arg(long)]
+        json: bool,
+        /// When to color the text report.
+        #[arg(long, value_name = "WHEN", default_value = "auto")]
+        color: ansi::ColorChoice,
+    },
     /// Ping the daemon.
     Ping,
     /// List registered harnesses.
@@ -67,7 +82,7 @@ enum Command {
         #[command(subcommand)]
         command: Option<midi::MidiCommand>,
     },
-    /// Search session names, program contents, and transcript history.
+    /// Search session names, playbook contents, and transcript history.
     Search {
         query: String,
         /// Global cap on returned hits (default 50).
@@ -76,7 +91,7 @@ enum Command {
         /// Restrict to one session. Repeatable.
         #[arg(long = "session")]
         session_ids: Vec<String>,
-        /// Restrict to these scopes (name, program, transcript). Repeatable;
+        /// Restrict to these scopes (name, playbook, transcript). Repeatable;
         /// default searches all three.
         #[arg(long = "scope", value_enum)]
         scopes: Vec<SearchScopeArg>,
@@ -180,13 +195,13 @@ enum Command {
     },
     /// Send input to a session.
     Send { session_id: String, text: String },
-    /// Manage a session's orchestration program.
-    Program {
+    /// Manage a session's orchestration playbook.
+    Playbook {
         #[command(subcommand)]
-        command: ProgramCommand,
+        command: PlaybookCommand,
     },
     /// Manage installed plugins (install, link, list, enable, disable,
-    /// uninstall). Plugins contribute adapters, program verbs, program
+    /// uninstall). Plugins contribute adapters, playbook verbs, playbook
     /// templates, and MCP tool servers via a construct-plugin.toml manifest.
     Plugin {
         #[command(subcommand)]
@@ -294,10 +309,10 @@ enum DaemonCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum ProgramCommand {
-    /// Print the program Markdown and metadata.
+enum PlaybookCommand {
+    /// Print the playbook Markdown and metadata.
     Get { session_id: String },
-    /// Replace the program from a file, stdin, or template.
+    /// Replace the playbook from a file, stdin, or template.
     Set {
         session_id: String,
         /// Read Markdown from this file.
@@ -313,9 +328,9 @@ enum ProgramCommand {
         #[arg(long)]
         base_version: Option<u64>,
     },
-    /// Edit the program in $EDITOR and save it back.
+    /// Edit the playbook in $EDITOR and save it back.
     Edit { session_id: String },
-    /// Ask the owning session to execute the full program or selected Markdown.
+    /// Ask the owning session to execute the full playbook or selected Markdown.
     Execute {
         session_id: String,
         #[arg(long)]
@@ -323,7 +338,7 @@ enum ProgramCommand {
         #[arg(long)]
         base_version: Option<u64>,
     },
-    /// List available program templates.
+    /// List available playbook templates.
     Templates,
 }
 
@@ -332,7 +347,7 @@ enum ProgramCommand {
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum SearchScopeArg {
     Name,
-    Program,
+    Playbook,
     Transcript,
 }
 
@@ -340,7 +355,7 @@ impl From<SearchScopeArg> for construct_protocol::SearchScope {
     fn from(v: SearchScopeArg) -> Self {
         match v {
             SearchScopeArg::Name => construct_protocol::SearchScope::Name,
-            SearchScopeArg::Program => construct_protocol::SearchScope::Program,
+            SearchScopeArg::Playbook => construct_protocol::SearchScope::Playbook,
             SearchScopeArg::Transcript => construct_protocol::SearchScope::Transcript,
         }
     }
@@ -423,6 +438,9 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    // Read before `cli.socket` is consumed: doctor reports which socket it
+    // looked at, and whether that was the user's choice or the default.
+    let socket_overridden = cli.socket.is_some();
     let socket = cli.socket.unwrap_or_else(|| Paths::discover().socket());
 
     if command_allows_upgrade_prompt(&command) {
@@ -438,6 +456,9 @@ async fn main() -> Result<()> {
         Command::Paths => {
             construct_daemon::print_paths();
             Ok(())
+        }
+        Command::Doctor { json, color } => {
+            doctor::run(&socket, socket_overridden, json, color).await
         }
         Command::Ping => {
             let c = connect(&socket).await?;
@@ -536,7 +557,7 @@ async fn main() -> Result<()> {
             for hit in &result.hits {
                 let scope = match hit.scope {
                     construct_protocol::SearchScope::Name => "name",
-                    construct_protocol::SearchScope::Program => "program",
+                    construct_protocol::SearchScope::Playbook => "playbook",
                     construct_protocol::SearchScope::Transcript => "transcript",
                 };
                 let seq = hit.seq.map(|s| format!(" seq={s}")).unwrap_or_default();
@@ -636,9 +657,9 @@ async fn main() -> Result<()> {
             c.send_input(&session_id, text).await?;
             Ok(())
         }
-        Command::Program { command } => {
+        Command::Playbook { command } => {
             let c = connect(&socket).await?;
-            run_program_command(&c, command).await
+            run_playbook_command(&c, command).await
         }
         Command::Plugin { command } => plugin_cmd::run(command),
         Command::AskGate => {
@@ -837,29 +858,30 @@ fn command_allows_upgrade_prompt(command: &Command) -> bool {
             | Command::Upgrade { .. }
             | Command::Ssh { .. }
             | Command::Acp { .. }
-            | Command::Program { .. }
+            | Command::Playbook { .. }
             | Command::Plugin { .. }
             | Command::AskGate
             | Command::Mcp
             | Command::Adapter { .. }
+            | Command::Doctor { .. }
     )
 }
 
-async fn run_program_command(client: &Client, command: ProgramCommand) -> Result<()> {
+async fn run_playbook_command(client: &Client, command: PlaybookCommand) -> Result<()> {
     match command {
-        ProgramCommand::Get { session_id } => {
-            let result = client.program_get(&session_id).await?;
+        PlaybookCommand::Get { session_id } => {
+            let result = client.playbook_get(&session_id).await?;
             eprintln!(
                 "session={} version={} updated_at_ms={} template={}",
-                result.program.session_id,
-                result.program.version,
-                result.program.updated_at_ms,
-                result.program.template_id.as_deref().unwrap_or("(none)")
+                result.playbook.session_id,
+                result.playbook.version,
+                result.playbook.updated_at_ms,
+                result.playbook.template_id.as_deref().unwrap_or("(none)")
             );
-            print!("{}", result.program.markdown);
+            print!("{}", result.playbook.markdown);
             Ok(())
         }
-        ProgramCommand::Set {
+        PlaybookCommand::Set {
             session_id,
             file,
             stdin,
@@ -881,31 +903,31 @@ async fn run_program_command(client: &Client, command: ProgramCommand) -> Result
                 (markdown, None)
             } else {
                 let template_id = template.expect("template source counted above");
-                let templates = client.program_templates().await?.templates;
+                let templates = client.playbook_templates().await?.templates;
                 let Some(found) = templates.into_iter().find(|t| t.id == template_id) else {
-                    anyhow::bail!("unknown program template: {template_id}");
+                    anyhow::bail!("unknown playbook template: {template_id}");
                 };
                 (found.markdown, Some(found.id))
             };
             let result = client
-                .program_update(construct_protocol::ProgramUpdateParams {
+                .playbook_update(construct_protocol::PlaybookUpdateParams {
                     session_id,
                     markdown,
                     base_version,
-                    actor: construct_protocol::ProgramUpdateActor::Human,
+                    actor: construct_protocol::PlaybookUpdateActor::Human,
                     template_id,
                     note: None,
                     shimmer: None,
                     shimmer_tooltips: None,
                 })
                 .await?;
-            println!("updated program version {}", result.program.version);
+            println!("updated playbook version {}", result.playbook.version);
             Ok(())
         }
-        ProgramCommand::Edit { session_id } => {
-            let current = client.program_get(&session_id).await?.program;
+        PlaybookCommand::Edit { session_id } => {
+            let current = client.playbook_get(&session_id).await?.playbook;
             let dir = tempfile::tempdir()?;
-            let path = dir.path().join("program.md");
+            let path = dir.path().join("playbook.md");
             std::fs::write(&path, &current.markdown)?;
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
             let status = std::process::Command::new(editor).arg(&path).status()?;
@@ -914,31 +936,31 @@ async fn run_program_command(client: &Client, command: ProgramCommand) -> Result
             }
             let markdown = std::fs::read_to_string(&path)?;
             if markdown == current.markdown {
-                println!("program unchanged at version {}", current.version);
+                println!("playbook unchanged at version {}", current.version);
                 return Ok(());
             }
             let result = client
-                .program_update(construct_protocol::ProgramUpdateParams {
+                .playbook_update(construct_protocol::PlaybookUpdateParams {
                     session_id,
                     markdown,
                     base_version: Some(current.version),
-                    actor: construct_protocol::ProgramUpdateActor::Human,
+                    actor: construct_protocol::PlaybookUpdateActor::Human,
                     template_id: current.template_id,
                     note: None,
                     shimmer: None,
                     shimmer_tooltips: None,
                 })
                 .await?;
-            println!("updated program version {}", result.program.version);
+            println!("updated playbook version {}", result.playbook.version);
             Ok(())
         }
-        ProgramCommand::Execute {
+        PlaybookCommand::Execute {
             session_id,
             selection,
             base_version,
         } => {
             let result = client
-                .program_execute(construct_protocol::ProgramExecuteParams {
+                .playbook_execute(construct_protocol::PlaybookExecuteParams {
                     session_id,
                     selection,
                     base_version,
@@ -949,13 +971,13 @@ async fn run_program_command(client: &Client, command: ProgramCommand) -> Result
                 })
                 .await?;
             println!(
-                "execution prompt sent from program version {}",
-                result.program.version
+                "execution prompt sent from playbook version {}",
+                result.playbook.version
             );
             Ok(())
         }
-        ProgramCommand::Templates => {
-            for template in client.program_templates().await?.templates {
+        PlaybookCommand::Templates => {
+            for template in client.playbook_templates().await?.templates {
                 let source = if template.built_in {
                     "built-in"
                 } else {
@@ -1043,7 +1065,7 @@ async fn ensure_daemon_running(socket: &std::path::Path) {
 
 /// Cheap readiness probe: can we open the IPC socket? A stale socket file
 /// (the daemon is gone) fails to connect, so this correctly reports "not live".
-fn socket_is_live(socket: &std::path::Path) -> bool {
+pub(crate) fn socket_is_live(socket: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 

@@ -310,7 +310,7 @@ impl App {
     }
 
     /// Deliver a UI action to `session_id` as user intent
-    /// (`OBSERVATION: ui.action …`). `pub(super)` because the program editor's
+    /// (`OBSERVATION: ui.action …`). `pub(super)` because the playbook editor's
     /// action-link click handler (spec 0074: action links are dialect-wide)
     /// dispatches through this same path, with `panel_id: None`.
     pub(super) async fn dispatch_dynamic_ui_action(
@@ -354,7 +354,7 @@ impl App {
     }
 
     /// Toggle a widget's pinned/selected state from a title-bar indicator
-    /// click. Shared by the session pane title bar and the program title bar.
+    /// click. Shared by the session pane title bar and the playbook title bar.
     pub fn toggle_dynamic_ui_widget_pin(&mut self, session_id: String, panel_id: String) {
         let key = (session_id, panel_id);
         if self.dynamic_ui_selected.contains(&key) {

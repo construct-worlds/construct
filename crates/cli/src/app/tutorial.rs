@@ -49,7 +49,7 @@ pub enum TutorialTarget {
     None,
     List,
     View,
-    Program,
+    Playbook,
 }
 
 /// One line of tour-card text: a run of segments, each either plain prose
@@ -82,8 +82,8 @@ fn chord_label(action: KeyAction, profile: Profile) -> &'static str {
         (OpenNewSession, Emacs) => "C-x C-f",
         (OpenNewSession, Vim) => "o",
         (SwitchFocus, _) => "C-x o",
-        (OpenProgram, _) => "C-x SPC",
-        (RunProgram, _) => "C-x C-r",
+        (OpenPlaybook, _) => "C-x SPC",
+        (RunPlaybook, _) => "C-x C-r",
         (SplitWindowBelow, Emacs) => "C-x 2",
         (SplitWindowBelow, Vim) => "C-w s",
         (SplitWindowRight, Emacs) => "C-x 3",
@@ -118,7 +118,7 @@ pub struct TutorialCardCtx {
     /// waiting-line → select-instruction swap.
     pub subagent_listed: bool,
     /// Keyboard focus is on the session list. Step 7's bare-`?` instruction
-    /// only works from there; with focus in the view pane / program editor
+    /// only works from there; with focus in the view pane / playbook editor
     /// the card shows an explicit "focus first" hint instead.
     pub list_focused: bool,
 }
@@ -151,7 +151,7 @@ pub struct TutorialState {
     pub focus_switched: bool,
     pub selection_moved: bool,
     // Step 5 sub-checks.
-    pub program_opened: bool,
+    pub playbook_opened: bool,
     pub template_applied: bool,
     pub task_line_present: bool,
     pub run_started: bool,
@@ -199,7 +199,7 @@ impl TutorialState {
             step1_phase: Step1Phase::AwaitCtrlX,
             focus_switched: false,
             selection_moved: false,
-            program_opened: false,
+            playbook_opened: false,
             template_applied: false,
             task_line_present: false,
             run_started: false,
@@ -217,7 +217,7 @@ impl TutorialState {
             2 | 3 => TutorialTarget::View,
             4 => TutorialTarget::View,
             5 => TutorialTarget::List,
-            6 | 7 => TutorialTarget::Program,
+            6 | 7 => TutorialTarget::Playbook,
             _ => TutorialTarget::None,
         }
     }
@@ -254,7 +254,7 @@ impl TutorialState {
             5 if self.focus_switched && self.selection_moved => self.advance(6),
             6 => {
                 let ready = if self.degraded {
-                    self.program_opened && self.template_applied && self.task_line_present
+                    self.playbook_opened && self.template_applied && self.task_line_present
                 } else {
                     self.run_started
                 };
@@ -285,7 +285,7 @@ impl TutorialState {
     /// re-arms the target step's transient progress flags (checklist
     /// booleans, the step-1 phase, feedback) so the step can be
     /// demonstrated again. Never undoes real-world effects — sessions,
-    /// program contents, and remembered facts (the practice session, an
+    /// playbook contents, and remembered facts (the practice session, an
     /// already-spawned subagent) stay as they are, so a re-entered step
     /// whose real-world condition already holds simply completes again on
     /// the next observation, or can be stepped past with `[next step]`.
@@ -300,7 +300,7 @@ impl TutorialState {
                 self.selection_moved = false;
             }
             6 => {
-                self.program_opened = false;
+                self.playbook_opened = false;
                 self.template_applied = false;
                 self.task_line_present = false;
                 self.run_started = false;
@@ -344,7 +344,7 @@ impl TutorialState {
         if self.completed {
             return vec![
                 vec![t("Tour complete! Nice work covering the core")],
-                vec![t("keybindings and the program board.")],
+                vec![t("keybindings and the playbook board.")],
                 vec![],
                 vec![t("Replay anytime: palette -> tutorial.")],
             ];
@@ -375,7 +375,7 @@ impl TutorialState {
             ],
             6 => {
                 let mut items = vec![
-                    ("open the program".to_string(), self.program_opened),
+                    ("open the playbook".to_string(), self.playbook_opened),
                     (
                         "apply the Tasks template".to_string(),
                         self.template_applied,
@@ -549,10 +549,10 @@ fn step6_lines(profile: Profile, degraded: bool) -> Vec<TutorialLine> {
     let mut lines = vec![
         vec![
             k(
-                chord_label(KeyAction::OpenProgram, profile),
-                KeyAction::OpenProgram,
+                chord_label(KeyAction::OpenPlaybook, profile),
+                KeyAction::OpenPlaybook,
             ),
-            t(" opens the program board."),
+            t(" opens the playbook board."),
         ],
         vec![t("Pick the built-in \"Tasks\" template, then")],
         vec![t("type \"- Test task\" under ## Todo.")],
@@ -563,8 +563,8 @@ fn step6_lines(profile: Profile, degraded: bool) -> Vec<TutorialLine> {
     } else {
         lines.push(vec![
             k(
-                chord_label(KeyAction::RunProgram, profile),
-                KeyAction::RunProgram,
+                chord_label(KeyAction::RunPlaybook, profile),
+                KeyAction::RunPlaybook,
             ),
             t(" runs it, moves task to In Progress,"),
         ]);
@@ -663,7 +663,7 @@ fn step7_lines(state: &TutorialState, ctx: TutorialCardCtx) -> Vec<TutorialLine>
 
 // Ordered like step 4, and for the same reason: a bare `?` only resolves
 // to `ToggleHelp` from list focus — with focus in the session terminal or
-// the program editor it is (correctly) just typed into that surface. The
+// the playbook editor it is (correctly) just typed into that surface. The
 // tour never steals the key; the card teaches the order and, while focus
 // is elsewhere, says so explicitly. Clicking the `?` label works from any
 // focus (it dispatches the action directly).
@@ -715,7 +715,7 @@ fn step9_lines(profile: Profile) -> Vec<TutorialLine> {
     ]
 }
 
-/// Non-empty lines under a `## <heading>` section of a program's Markdown.
+/// Non-empty lines under a `## <heading>` section of a playbook's Markdown.
 /// Deliberately simple (no nested-list awareness) — the Tasks template's
 /// three top-level sections never nest.
 fn section_lines<'a>(markdown: &'a str, heading: &str) -> Vec<&'a str> {
@@ -893,11 +893,11 @@ impl App {
                 _ => {}
             },
             6 => match action {
-                KeyAction::OpenProgram => {
-                    t.program_opened = true;
+                KeyAction::OpenPlaybook => {
+                    t.playbook_opened = true;
                     t.touch_progress();
                 }
-                KeyAction::RunProgram => {
+                KeyAction::RunPlaybook => {
                     t.run_started = true;
                     t.touch_progress();
                 }
@@ -1002,8 +1002,8 @@ impl App {
     /// same payload shapes `on_notification` parses further down (cheap at
     /// UI event rates) so this stays the one call site, with all step logic
     /// living in this module. Covers "session created" (STATE, including a
-    /// subagent's own STATE push), "program document updated"
-    /// (PROGRAM_STATE), and the practice session's own deletion (DELETED).
+    /// subagent's own STATE push), "playbook document updated"
+    /// (PLAYBOOK_STATE), and the practice session's own deletion (DELETED).
     pub fn tutorial_observe_notification(&mut self, n: &Notification) {
         if self.tutorial.is_none() {
             return;
@@ -1018,12 +1018,12 @@ impl App {
                     self.tutorial_on_session_created(&payload.session);
                 }
             }
-        } else if n.method == construct_protocol::ipc_notif::PROGRAM_STATE {
+        } else if n.method == construct_protocol::ipc_notif::PLAYBOOK_STATE {
             if let Ok(payload) = serde_json::from_value::<
-                construct_protocol::ProgramStateNotificationPayload,
+                construct_protocol::PlaybookStateNotificationPayload,
             >(params)
             {
-                self.tutorial_on_program_state(&payload.program);
+                self.tutorial_on_playbook_state(&payload.playbook);
             }
         } else if n.method == construct_protocol::ipc_notif::DELETED {
             if let Ok(payload) =
@@ -1091,14 +1091,14 @@ impl App {
         }
     }
 
-    fn tutorial_on_program_state(&mut self, program: &construct_protocol::ProgramDocument) {
-        // Computed before borrowing the tour state mutably: is this program
+    fn tutorial_on_playbook_state(&mut self, playbook: &construct_protocol::PlaybookDocument) {
+        // Computed before borrowing the tour state mutably: is this playbook
         // the one the user is actually looking at / working with?
         let displayed = self
-            .program_popup
+            .playbook_popup
             .as_ref()
-            .is_some_and(|p| p.program.session_id == program.session_id)
-            || self.selected_id().as_deref() == Some(program.session_id.as_str());
+            .is_some_and(|p| p.playbook.session_id == playbook.session_id)
+            || self.selected_id().as_deref() == Some(playbook.session_id.as_str());
         let Some(t) = self.tutorial.as_mut() else {
             return;
         };
@@ -1107,7 +1107,7 @@ impl App {
         }
         // Scope to the practice session when known. When it isn't (tour
         // resumed / steps skipped — `practice_session_id` is not
-        // persisted), fall back to the program being displayed or the
+        // persisted), fall back to the playbook being displayed or the
         // selected session, and ADOPT it as the practice session so the
         // remaining scoped observers work again. Without this fallback the
         // agent's ## Done edit — which arrives ONLY through this daemon
@@ -1116,7 +1116,7 @@ impl App {
         // step 6 could never detect completion (user report).
         match t.practice_session_id.as_deref() {
             Some(practice) => {
-                if practice != program.session_id.as_str() {
+                if practice != playbook.session_id.as_str() {
                     return;
                 }
             }
@@ -1124,16 +1124,16 @@ impl App {
                 if !displayed {
                     return;
                 }
-                t.practice_session_id = Some(program.session_id.clone());
+                t.practice_session_id = Some(playbook.session_id.clone());
             }
         }
-        if program.template_id.as_deref() == Some("tasks") {
+        if playbook.template_id.as_deref() == Some("tasks") {
             t.template_applied = true;
         }
-        if todo_section_has_task(&program.markdown) {
+        if todo_section_has_task(&playbook.markdown) {
             t.task_line_present = true;
         }
-        if done_section_has_task(&program.markdown) {
+        if done_section_has_task(&playbook.markdown) {
             t.task_done = true;
         }
         t.touch_progress();
@@ -1193,27 +1193,27 @@ impl App {
         }
     }
 
-    /// Client-side counterpart of [`Self::tutorial_on_program_state`] for
+    /// Client-side counterpart of [`Self::tutorial_on_playbook_state`] for
     /// step 5's two content-driven sub-checks. Applying the Tasks template
-    /// and typing the task line are LOCAL edits to the program popup's
+    /// and typing the task line are LOCAL edits to the playbook popup's
     /// buffer — the daemon only learns about them on save (`C-x C-s`) or
-    /// run (`C-x C-r`), so waiting for its PROGRAM_STATE event left the
+    /// run (`C-x C-r`), so waiting for its PLAYBOOK_STATE event left the
     /// checklist unticked while the user was actually doing the step
     /// (user report). Evaluated from the render tick — a cheap string scan
     /// gated to step 5 with unticked boxes — so the checkmarks appear as
     /// the user acts, before any save. The daemon event path stays as a
-    /// second source (a program synced from another client): whichever
+    /// second source (a playbook synced from another client): whichever
     /// source sees it first ticks, and ticks are sticky — later buffer
     /// edits never untick them.
-    pub fn tutorial_observe_program_buffer(&mut self) {
+    pub fn tutorial_observe_playbook_buffer(&mut self) {
         let Some(t) = self.tutorial.as_ref() else {
             return;
         };
         let unticked = match t.step {
             6 => !(t.template_applied && t.task_line_present),
             // Step 6's ## Done gate combines two sources with OR: the
-            // daemon's program/state event (the agent's edits — the primary
-            // source, see `tutorial_on_program_state`) and this buffer scan
+            // daemon's playbook/state event (the agent's edits — the primary
+            // source, see `tutorial_on_playbook_state`) and this buffer scan
             // (a popup whose view semantics DO refresh, or a user moving
             // the line by hand). Sticky either way.
             7 => !t.task_done,
@@ -1222,19 +1222,19 @@ impl App {
         if t.completed || !unticked {
             return;
         }
-        let Some(popup) = self.program_popup.as_ref() else {
+        let Some(popup) = self.playbook_popup.as_ref() else {
             return;
         };
-        // Scope to the practice session's program when we know it; a tour
+        // Scope to the practice session's playbook when we know it; a tour
         // resumed after a TUI restart loses `practice_session_id` (it is
-        // not persisted), so fall back to whatever program the user is
+        // not persisted), so fall back to whatever playbook the user is
         // actually editing rather than leaving the step un-completable.
         if let Some(practice) = t.practice_session_id.as_deref() {
-            if practice != popup.program.session_id.as_str() {
+            if practice != popup.playbook.session_id.as_str() {
                 return;
             }
         }
-        let template = popup.program.template_id.as_deref() == Some("tasks")
+        let template = popup.playbook.template_id.as_deref() == Some("tasks")
             || has_tasks_board_sections(&popup.buffer);
         let task = todo_section_has_task(&popup.buffer);
         let done = done_section_has_task(&popup.buffer);
@@ -1265,11 +1265,11 @@ impl App {
         }
     }
 
-    /// Drives the step 5/6 stall hint and the client-side program-buffer
+    /// Drives the step 5/6 stall hint and the client-side playbook-buffer
     /// observation from the existing render tick — no dedicated timer
     /// thread.
     pub fn tutorial_tick(&mut self, now: Instant) {
-        self.tutorial_observe_program_buffer();
+        self.tutorial_observe_playbook_buffer();
         if let Some(t) = self.tutorial.as_mut() {
             t.tick(now);
         }
@@ -1287,10 +1287,10 @@ impl App {
             .is_some_and(|t| t.wants(TutorialTarget::View))
     }
 
-    pub fn tutorial_wants_program_highlight(&self) -> bool {
+    pub fn tutorial_wants_playbook_highlight(&self) -> bool {
         self.tutorial
             .as_ref()
-            .is_some_and(|t| t.wants(TutorialTarget::Program))
+            .is_some_and(|t| t.wants(TutorialTarget::Playbook))
     }
 }
 
@@ -1343,7 +1343,7 @@ mod tests {
     fn step5_completion_differs_by_degraded_mode() {
         let mut degraded = TutorialState::start(true, Profile::Emacs);
         degraded.step = 6;
-        degraded.program_opened = true;
+        degraded.playbook_opened = true;
         degraded.template_applied = true;
         degraded.task_line_present = true;
         degraded.recompute_completion();
@@ -1351,7 +1351,7 @@ mod tests {
 
         let mut normal = TutorialState::start(false, Profile::Emacs);
         normal.step = 6;
-        normal.program_opened = true;
+        normal.playbook_opened = true;
         normal.template_applied = true;
         normal.task_line_present = true;
         normal.recompute_completion();

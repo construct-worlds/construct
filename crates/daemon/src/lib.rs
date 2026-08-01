@@ -19,9 +19,10 @@ mod adapter;
 mod availability;
 mod config;
 mod cost_history;
+pub mod doctor;
 mod loops;
 pub mod plugins;
-mod program_verbs;
+mod playbook_verbs;
 mod remote;
 mod remote_supervisor;
 mod router;
@@ -151,14 +152,14 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
         "loaded config"
     );
 
-    let program_templates_dir = config.program_templates_dir_override();
-    if let Some(dir) = program_templates_dir.as_ref() {
-        tracing::info!(dir = %dir.display(), "program templates dir override");
+    let playbook_templates_dir = config.playbook_templates_dir_override();
+    if let Some(dir) = playbook_templates_dir.as_ref() {
+        tracing::info!(dir = %dir.display(), "playbook templates dir override");
     }
     let storage = Arc::new(
         storage::Storage::new(paths.data_dir.clone())?
-            .with_program_templates_dir(program_templates_dir)
-            .with_program_verbs_dir(paths.config_dir.join("verbs"))
+            .with_playbook_templates_dir(playbook_templates_dir)
+            .with_playbook_verbs_dir(paths.config_dir.join("verbs"))
             .with_plugin_verb_dirs(plugin_set.verb_dirs())
             .with_plugin_template_dirs(plugin_set.template_dirs()),
     );
@@ -608,15 +609,15 @@ fn warn_legacy_paths(current: &Paths) {
     }
 }
 
-fn shell_quote(path: &std::path::Path) -> String {
+pub(crate) fn shell_quote(path: &std::path::Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
-fn legacy_migration_notice(current: &Paths) -> Option<String> {
+pub(crate) fn legacy_migration_notice(current: &Paths) -> Option<String> {
     legacy_migration_notice_with_paths(current, &Paths::discover_legacy())
 }
 
-fn legacy_migration_notice_with_paths(current: &Paths, legacy: &Paths) -> Option<String> {
+pub(crate) fn legacy_migration_notice_with_paths(current: &Paths, legacy: &Paths) -> Option<String> {
     let mut found = Vec::<(&str, &std::path::Path)>::new();
     let legacy_items = [
         ("config directory", legacy.config_dir.as_path()),

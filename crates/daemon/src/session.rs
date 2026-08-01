@@ -11,11 +11,11 @@ use construct_protocol::dialect;
 use construct_protocol::{
     agent_context, ahp_method, ClientView, CreateSessionParams, DeletedNotificationPayload,
     EventNotificationPayload, GroupSummary, HarnessInfo, LayoutDocument,
-    LayoutStateNotificationPayload, MessageRole, MoveDirection, NativeSubagentRef, ProgramDocument,
-    ProgramEditParams, ProgramExecuteParams, ProgramExecuteResult, ProgramGetResult,
-    ProgramListTemplatesResult, ProgramListVerbsResult, ProgramRunProgress,
-    ProgramStateNotificationPayload, ProgramUpdateParams, ProgramUpdateResult,
-    ProgramVerbExecuteParams, ProgramVerbExecuteResult, ProjectDeletedNotificationPayload,
+    LayoutStateNotificationPayload, MessageRole, MoveDirection, NativeSubagentRef, PlaybookDocument,
+    PlaybookEditParams, PlaybookExecuteParams, PlaybookExecuteResult, PlaybookGetResult,
+    PlaybookListTemplatesResult, PlaybookListVerbsResult, PlaybookRunProgress,
+    PlaybookStateNotificationPayload, PlaybookUpdateParams, PlaybookUpdateResult,
+    PlaybookVerbExecuteParams, PlaybookVerbExecuteResult, ProjectDeletedNotificationPayload,
     ProjectStateNotificationPayload, PtyReplayResult, PtySize, SearchParams, SearchResult,
     SessionAttachClipboardParams, SessionAttachClipboardResult, SessionDetail,
     SessionEmitEventParams, SessionEvent, SessionStartParams, SessionState, SessionSummary,
@@ -32,7 +32,7 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 mod events;
 mod groups;
 mod lifecycle;
-mod program_run;
+mod playbook_run;
 mod pty;
 mod usage_probe;
 mod widgets;
@@ -67,17 +67,17 @@ const PTY_REPLAY_CAP: usize = 8 * 1024 * 1024;
 const RESPAWN_REDRAW_POLL: Duration = Duration::from_millis(100);
 const RESPAWN_REDRAW_SETTLE: Duration = Duration::from_millis(400);
 const RESPAWN_REDRAW_MAX_WAIT: Duration = Duration::from_secs(6);
-/// After delivering a program prompt as a bracketed paste to an external
+/// After delivering a playbook prompt as a bracketed paste to an external
 /// agent TUI, wait this long before sending the submit Enter. The paste is
 /// explicitly delimited by its `ESC[201~` end marker, so the harness has
 /// already finalized the multi-line body into its input box; this short
 /// settle lets its render/state update land so the trailing `\r` is read as
 /// a clean submit keypress rather than being coalesced into the paste.
-const PROGRAM_EXTERNAL_PTY_SUBMIT_DELAY: Duration = Duration::from_millis(120);
-/// Poll interval while waiting for a freshly created program-execution fork
+const PLAYBOOK_EXTERNAL_PTY_SUBMIT_DELAY: Duration = Duration::from_millis(120);
+/// Poll interval while waiting for a freshly created playbook-execution fork
 /// to become ready for its run/verb prompt.
-const PROGRAM_FORK_READY_POLL: Duration = Duration::from_millis(100);
-/// Fallback readiness signal for a program-execution fork: how long its PTY
+const PLAYBOOK_FORK_READY_POLL: Duration = Duration::from_millis(100);
+/// Fallback readiness signal for a playbook-execution fork: how long its PTY
 /// must stay quiet before the daemon treats the harness as ready even though
 /// it never reported `AwaitingInput`. Deliberately at least `PTY_QUIESCENCE`,
 /// the daemon's own definition of "this TUI is idle" — a shorter window
@@ -86,14 +86,14 @@ const PROGRAM_FORK_READY_POLL: Duration = Duration::from_millis(100);
 /// 500ms window fired mid-boot and the prompt was pasted into a harness that
 /// had not attached its input handler yet; the bytes were flushed with the
 /// rest of the pre-mount input and the Run silently never happened.
-const PROGRAM_FORK_READY_SETTLE: Duration = PTY_QUIESCENCE;
+const PLAYBOOK_FORK_READY_SETTLE: Duration = PTY_QUIESCENCE;
 /// Hard cap on waiting for a fork to become ready. On timeout the prompt is
 /// delivered anyway: a slow-booting harness eventually drains stdin, and
 /// delivering late can never be worse than the old deliver-immediately
 /// behavior.
-const PROGRAM_FORK_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
-const PROGRAM_CURSOR_TTL_MS: i64 = 60 * 1000;
-const PROGRAM_AGENT_CURSOR_TTL_MS: i64 = 2 * 1000;
+const PLAYBOOK_FORK_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const PLAYBOOK_CURSOR_TTL_MS: i64 = 60 * 1000;
+const PLAYBOOK_AGENT_CURSOR_TTL_MS: i64 = 2 * 1000;
 /// How long an interactive full-screen TUI harness's PTY may be silent before
 /// the daemon treats it as awaiting input. Line-oriented shells use
 /// foreground-process-group detection in the adapter and are exempt.
@@ -119,7 +119,7 @@ const PTY_BLIP_WINDOW: Duration = Duration::from_secs(2);
 /// genuinely working; its eventual stop deserves the marker).
 const RESUME_SETTLE_MIN: Duration = Duration::from_secs(10);
 const RESUME_SETTLE_MAX: Duration = Duration::from_secs(30);
-const PROGRAM_RUN_MAX_MS: i64 = 10 * 60 * 1000;
+const PLAYBOOK_RUN_MAX_MS: i64 = 10 * 60 * 1000;
 
 const MAX_CLIPBOARD_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const ENV_GLOBAL_MEMORY_FILE: &str = "CONSTRUCT_GLOBAL_MEMORY_FILE";
@@ -305,9 +305,9 @@ pub enum BroadcastMsg {
     /// IPC surface only emits `project/*`.
     GroupState(ProjectStateNotificationPayload),
     GroupDeleted(ProjectDeletedNotificationPayload),
-    ProgramState(ProgramStateNotificationPayload),
-    ProgramCursor {
-        payload: construct_protocol::ProgramCursorNotificationPayload,
+    PlaybookState(PlaybookStateNotificationPayload),
+    PlaybookCursor {
+        payload: construct_protocol::PlaybookCursorNotificationPayload,
         /// The connection whose own plain cursor publish produced this
         /// broadcast, if any. The per-connection forwarder skips delivering
         /// it back to that connection: a plain publish is an echo of state
@@ -315,7 +315,7 @@ pub enum BroadcastMsg {
         /// race a later local move — the receiver has no way to tell a
         /// stale echo from a genuine daemon-side rebase, so it must never
         /// see the echo at all. `None` for disconnect tombstones and
-        /// rebase-driven updates (`rebase_program_cursors_after_edit`),
+        /// rebase-driven updates (`rebase_playbook_cursors_after_edit`),
         /// which every connection — including the cursor's own owner —
         /// needs to receive.
         skip_conn_id: Option<u64>,
@@ -612,24 +612,24 @@ fn should_record_pty_user_message(harness: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProgramExecutionDelivery {
+enum PlaybookExecutionDelivery {
     AdapterInput,
     ExternalPtyTypedSubmit,
     PtySubmit,
 }
 
-fn program_execution_delivery(
+fn playbook_execution_delivery(
     summary: &construct_protocol::SessionSummary,
-) -> ProgramExecutionDelivery {
+) -> PlaybookExecutionDelivery {
     if !summary.has_pty {
-        ProgramExecutionDelivery::AdapterInput
+        PlaybookExecutionDelivery::AdapterInput
     } else if matches!(
         summary.harness.as_str(),
         "claude" | "codex" | "antigravity" | "agy" | "grok" | "hermes"
     ) {
-        ProgramExecutionDelivery::ExternalPtyTypedSubmit
+        PlaybookExecutionDelivery::ExternalPtyTypedSubmit
     } else {
-        ProgramExecutionDelivery::PtySubmit
+        PlaybookExecutionDelivery::PtySubmit
     }
 }
 
@@ -672,12 +672,12 @@ fn fork_ready_outcome(
     None
 }
 
-/// Frame a program prompt as a bracketed paste for delivery to an external
+/// Frame a playbook prompt as a bracketed paste for delivery to an external
 /// agent TUI. The body is wrapped in the `ESC[200~` / `ESC[201~` markers a
 /// real terminal sends around a paste; any embedded `ESC[201~` is stripped
 /// first so it can't terminate the paste early (the same paste-injection
 /// guard real terminals apply).
-fn program_bracketed_paste_bytes(prompt: &str) -> Vec<u8> {
+fn playbook_bracketed_paste_bytes(prompt: &str) -> Vec<u8> {
     const START: &[u8] = b"\x1b[200~";
     const END: &[u8] = b"\x1b[201~";
     let sanitized = prompt.replace("\x1b[201~", "");
@@ -688,44 +688,44 @@ fn program_bracketed_paste_bytes(prompt: &str) -> Vec<u8> {
     bytes
 }
 
-/// Frame a program prompt for delivery to a PTY-backed session that runs its
+/// Frame a playbook prompt for delivery to a PTY-backed session that runs its
 /// own line editor (smith, shell). The prompt is terminated with CR (`\r`) —
 /// the byte a real terminal's Enter key sends — not LF (`\n`): smith's line
 /// editor submits on CR and treats LF as "insert a newline into the buffer",
 /// so an LF terminator would leave the whole prompt sitting unsubmitted in the
 /// editor. Shell PTYs map CR→LF via the line discipline (ICRNL), so submission
 /// works there too.
-fn program_pty_submit_bytes(prompt: &str) -> Vec<u8> {
+fn playbook_pty_submit_bytes(prompt: &str) -> Vec<u8> {
     let mut bytes = prompt.as_bytes().to_vec();
     bytes.push(b'\r');
     bytes
 }
 
-fn program_run_instructions() -> Vec<String> {
+fn playbook_run_instructions() -> Vec<String> {
     vec![
-        "Execute this construct program as an autonomous run.".to_string(),
-        "Shimmer semantics: a shimmering block means 'work on this block is still pending in this run — queued, in progress, or not yet done; outcome unknown'. No shimmer means 'settled — done, skipped, or no work needed'. Pending is about the state of the work, not how it runs. A Run starts every executed block shimmering. Declare status with construct_program_edit: `pending` maps each stable block ref to a concise (≤10-word) hover status, while `settled` is an array of refs to clear. Editing semantic text advances a block's ref, so set `keep_pending: true` when changing unfinished work; the compact edit response returns any new refs. Never leave settled work shimmering or drop shimmer from work still in flight.".to_string(),
-        "Planning pass — this MUST be your first program action, before doing or delegating work: read the program to obtain block ids, then make one status-only construct_program_edit with a `pending` map for every still-pending block and `settle_others: true`. No text edit is needed. This makes skipped/no-work blocks settle immediately and keeps planned work shimmering.".to_string(),
-        "Treat program_run.markdown as free-form instructions and state for this turn, not as a request for a one-shot status report or as a fixed task-management schema.".to_string(),
+        "Execute this construct playbook as an autonomous run.".to_string(),
+        "Shimmer semantics: a shimmering block means 'work on this block is still pending in this run — queued, in progress, or not yet done; outcome unknown'. No shimmer means 'settled — done, skipped, or no work needed'. Pending is about the state of the work, not how it runs. A Run starts every executed block shimmering. Declare status with construct_playbook_edit: `pending` maps each stable block ref to a concise (≤10-word) hover status, while `settled` is an array of refs to clear. Editing semantic text advances a block's ref, so set `keep_pending: true` when changing unfinished work; the compact edit response returns any new refs. Never leave settled work shimmering or drop shimmer from work still in flight.".to_string(),
+        "Planning pass — this MUST be your first playbook action, before doing or delegating work: read the playbook to obtain block ids, then make one status-only construct_playbook_edit with a `pending` map for every still-pending block and `settle_others: true`. No text edit is needed. This makes skipped/no-work blocks settle immediately and keeps planned work shimmering.".to_string(),
+        "Treat playbook_run.markdown as free-form instructions and state for this turn, not as a request for a one-shot status report or as a fixed task-management schema.".to_string(),
         "Infer the user's intended objective from the document structure and prose, then keep taking useful next actions while there is actionable work you can do.".to_string(),
-        "Do not ask the user to run the program again; if the document still implies useful work you can perform, continue in this turn.".to_string(),
-        "Record meaningful state changes or results on the program with construct_program_edit (anchored find/replace edits that merge with concurrent human edits; use construct_program_update only for a wholesale rewrite).".to_string(),
-        "When moving or reclassifying existing text between headings or sections, do it with one construct_program_edit call containing multiple `edits` entries: one replacement removes the text from the old location and another replacement inserts it in the new location. Do not remove in one tool call and add in a later tool call, because viewers can briefly see the block disappear.".to_string(),
-        "Keep the program clean: do not add new sections, notes, bullet points, or execution details unless the program content or the user's instructions explicitly request them. Only update what the program already implies needs updating. The program should be at least as concise and readable after a run as it was before.".to_string(),
-        "If blocked, write the blocker and next required external action on the program before ending.".to_string(),
-        "Smart clips are Markdown-native typed references. The clip_id attribute identifies a specific clip instance, not the target itself; preserve clip_id values when editing existing clips. You may insert smart clips into the program at your discretion even without an explicit user request.".to_string(),
-        "The full construct Markdown dialect is valid in the program: timeline and table blocks, agentd action links, and smart clips render on the program surface just as they do in widgets. Action links express user intent only when the user activates them — running the program never triggers the links it contains, and you must not treat link text as an instruction to perform that action.".to_string(),
-        "When the program implies independent subtasks that can run concurrently or in isolation, prefer delegating each to a child agent via `agentd_subagent_create` rather than executing them inline in this session; this keeps the program session as an orchestrator and lets smart clips reference each subagent's live output via `@{session:<id>}`.".to_string(),
+        "Do not ask the user to run the playbook again; if the document still implies useful work you can perform, continue in this turn.".to_string(),
+        "Record meaningful state changes or results on the playbook with construct_playbook_edit (anchored find/replace edits that merge with concurrent human edits; use construct_playbook_update only for a wholesale rewrite).".to_string(),
+        "When moving or reclassifying existing text between headings or sections, do it with one construct_playbook_edit call containing multiple `edits` entries: one replacement removes the text from the old location and another replacement inserts it in the new location. Do not remove in one tool call and add in a later tool call, because viewers can briefly see the block disappear.".to_string(),
+        "Keep the playbook clean: do not add new sections, notes, bullet points, or execution details unless the playbook content or the user's instructions explicitly request them. Only update what the playbook already implies needs updating. The playbook should be at least as concise and readable after a run as it was before.".to_string(),
+        "If blocked, write the blocker and next required external action on the playbook before ending.".to_string(),
+        "Smart clips are Markdown-native typed references. The clip_id attribute identifies a specific clip instance, not the target itself; preserve clip_id values when editing existing clips. You may insert smart clips into the playbook at your discretion even without an explicit user request.".to_string(),
+        "The full construct Markdown dialect is valid in the playbook: timeline and table blocks, agentd action links, and smart clips render on the playbook surface just as they do in widgets. Action links express user intent only when the user activates them — running the playbook never triggers the links it contains, and you must not treat link text as an instruction to perform that action.".to_string(),
+        "When the playbook implies independent subtasks that can run concurrently or in isolation, prefer delegating each to a child agent via `agentd_subagent_create` rather than executing them inline in this session; this keeps the playbook session as an orchestrator and lets smart clips reference each subagent's live output via `@{session:<id>}`.".to_string(),
     ]
 }
 
-fn program_execution_prompt() -> String {
-    "Run the current construct program autonomously. Before doing work, call agentd_context (or construct_context if you are using MCP) and read the program_run field for the latest program content, smart clip reference, and run instructions. If program_run is unavailable, read the current program with the program get tool before acting. Then, before starting or delegating any task, your first program action must be one status-only construct_program_edit whose pending map assigns every still-pending block's stable id a concise status and whose settle_others flag is true, so omitted blocks settle immediately."
+fn playbook_execution_prompt() -> String {
+    "Run the current construct playbook autonomously. Before doing work, call agentd_context (or construct_context if you are using MCP) and read the playbook_run field for the latest playbook content, smart clip reference, and run instructions. If playbook_run is unavailable, read the current playbook with the playbook get tool before acting. Then, before starting or delegating any task, your first playbook action must be one status-only construct_playbook_edit whose pending map assigns every still-pending block's stable id a concise status and whose settle_others flag is true, so omitted blocks settle immediately."
         .to_string()
 }
 
-fn program_execution_prompt_with_comment(comment: Option<&str>) -> String {
-    let mut prompt = program_execution_prompt();
+fn playbook_execution_prompt_with_comment(comment: Option<&str>) -> String {
+    let mut prompt = playbook_execution_prompt();
     if let Some(comment) = comment {
         let one_line = comment.split_whitespace().collect::<Vec<_>>().join(" ");
         if !one_line.is_empty() {
@@ -736,26 +736,26 @@ fn program_execution_prompt_with_comment(comment: Option<&str>) -> String {
     prompt
 }
 
-fn forked_program_execution_prompt(
+fn forked_playbook_execution_prompt(
     owner_session_id: &str,
     fork_session_id: &str,
     comment: Option<&str>,
 ) -> String {
-    let mut prompt = program_execution_prompt_with_comment(comment);
+    let mut prompt = playbook_execution_prompt_with_comment(comment);
     prompt.push_str(&format!(
-        "\n\nYou are running in an interactive fork (session `{fork_session_id}`). The Program \
+        "\n\nYou are running in an interactive fork (session `{fork_session_id}`). The Playbook \
          you must read and update belongs to session `{owner_session_id}`. Always pass \
-         `session_id: \"{owner_session_id}\"` to construct_program_get and every \
-         construct_program_edit/update call; do not edit a Program belonging to this fork. Apply \
+         `session_id: \"{owner_session_id}\"` to construct_playbook_get and every \
+         construct_playbook_edit/update call; do not edit a Playbook belonging to this fork. Apply \
          progress and results directly to that owner document as you work. Do not return a \
          result for the owner to merge.\
          \n\nWhen the dispatched work is fully complete, close this fork with a two-step \
-         finish: first make a final construct_program_edit that settles every block you were \
-         dispatched for on the owner Program (none of your blocks may be left shimmering), \
+         finish: first make a final construct_playbook_edit that settles every block you were \
+         dispatched for on the owner Playbook (none of your blocks may be left shimmering), \
          then — as your last action — call the archive-session tool \
          (construct_archive_session, or agentd_archive_session if you have the agentd-prefixed \
          toolset) with `session_id: \"{fork_session_id}\"`. Never archive before the settle \
-         edit has succeeded. Archiving is a soft close: the transcript and the owner Program's \
+         edit has succeeded. Archiving is a soft close: the transcript and the owner Playbook's \
          session clip stay valid. If work remains pending, you are blocked, or the user has \
          joined the conversation in this fork, leave the session open instead of archiving."
     ));
@@ -767,10 +767,10 @@ fn forked_program_execution_prompt(
 /// fork settles the shimmer of the blocks it was dispatched for — the
 /// deterministic backstop behind the prompt's own settle-then-archive
 /// contract, so a fork that archives without settling can never leave the
-/// owner Program shimmering forever.
+/// owner Playbook shimmering forever.
 #[derive(Clone)]
 struct RunForkDispatch {
-    /// The session whose Program document this fork was dispatched from.
+    /// The session whose Playbook document this fork was dispatched from.
     owner_session_id: String,
     /// The dispatched text as annotated at dispatch time (selection plus
     /// the fork's `@{session:<id>}` clip when annotation succeeded). Its
@@ -780,15 +780,15 @@ struct RunForkDispatch {
     anchor: String,
 }
 
-/// A Program-verb session awaiting a structured result to merge back into
-/// its owning Program (spec 0089), tracked from the moment its provisional
+/// A Playbook-verb session awaiting a structured result to merge back into
+/// its owning Playbook (spec 0089), tracked from the moment its provisional
 /// clip-annotation edit lands until either a mechanical merge or an
 /// escalation resolves it.
 #[derive(Clone)]
 struct PendingVerbMerge {
-    /// The session whose Program document this verb is refining.
-    program_session_id: String,
-    verb: construct_protocol::ProgramVerb,
+    /// The session whose Playbook document this verb is refining.
+    playbook_session_id: String,
+    verb: construct_protocol::PlaybookVerb,
     /// The text currently anchoring this verb's selection in the document —
     /// the original selection with the verb session's `@{session:<id>}` clip
     /// appended by the provisional edit. Authoritative for drift detection:
@@ -799,12 +799,12 @@ struct PendingVerbMerge {
     /// Where the verb session is instructed to write its result JSON — its
     /// own session-widgets directory, already auto-approved for that
     /// session's harness (spec 0089 "enforced by construction": the verb
-    /// session has no Program-editing tool at all, native or MCP, so this
+    /// session has no Playbook-editing tool at all, native or MCP, so this
     /// file drop is the only channel it has back to the document).
     result_file: PathBuf,
 }
 
-/// The JSON contract a Program-verb session writes to its result file (spec
+/// The JSON contract a Playbook-verb session writes to its result file (spec
 /// 0087). `effect` is accepted but not trusted — the daemon always applies
 /// the verb definition's own declared effect, so a verb session cannot
 /// change how its result is merged just by mis-stating this field.
@@ -816,54 +816,54 @@ struct VerbResultPayload {
     content: String,
 }
 
-/// Cap on how much of the full Program document is inlined directly into a
+/// Cap on how much of the full Playbook document is inlined directly into a
 /// verb session's prompt (spec 0089). Above this the document is truncated
-/// with a pointer to the live `agentd_program_get`/`construct_program_get`
+/// with a pointer to the live `agentd_playbook_get`/`construct_playbook_get`
 /// tool instead of growing the prompt unboundedly — a fresh read is also the
 /// only way an interactive verb sees a document that changed after spawn.
-const PROGRAM_VERB_INLINE_DOC_MAX_CHARS: usize = 100_000;
+const PLAYBOOK_VERB_INLINE_DOC_MAX_CHARS: usize = 100_000;
 
-/// Build the initial prompt for a Program-verb session (spec 0089): the
-/// verb's own purpose prompt, the full Program document as background
+/// Build the initial prompt for a Playbook-verb session (spec 0089): the
+/// verb's own purpose prompt, the full Playbook document as background
 /// context, the selection framed as the session's entire jurisdiction, the
 /// optional free-text instruction (same composition rule as selection Run's
 /// comment, spec 0137), and the structured-return contract — including that
-/// the session has no Program-editing tool and must not attempt to act like
+/// the session has no Playbook-editing tool and must not attempt to act like
 /// it does.
 ///
-/// The verb body may place any of these itself with `{{ program.content }}`,
-/// `{{ program.selected_text }}`, and `{{ program.additional_instruction }}`
+/// The verb body may place any of these itself with `{{ playbook.content }}`,
+/// `{{ playbook.selected_text }}`, and `{{ playbook.additional_instruction }}`
 /// template placeholders (spec 0089): a referenced variable is substituted
 /// in place and its default framing section below is suppressed, so an
 /// author who positions a value never gets it twice. The structured-return
 /// contract is not templatable — it always applies.
-fn program_verb_prompt(
-    verb: &construct_protocol::ProgramVerb,
+fn playbook_verb_prompt(
+    verb: &construct_protocol::PlaybookVerb,
     owner_session_id: &str,
     full_document: &str,
     selection: &str,
     comment: Option<&str>,
     direct_target: Option<(&str, &str)>,
 ) -> String {
-    use crate::program_verbs::{
+    use crate::playbook_verbs::{
         prompt_references_var, render_verb_prompt, TEMPLATE_VAR_ADDITIONAL_INSTRUCTION,
         TEMPLATE_VAR_CONTENT, TEMPLATE_VAR_SELECTED_TEXT,
     };
-    use construct_protocol::{ProgramVerbEffect, ProgramVerbInteraction};
+    use construct_protocol::{PlaybookVerbEffect, PlaybookVerbInteraction};
 
     let doc_char_count = full_document.chars().count();
-    let doc_truncated = doc_char_count > PROGRAM_VERB_INLINE_DOC_MAX_CHARS;
+    let doc_truncated = doc_char_count > PLAYBOOK_VERB_INLINE_DOC_MAX_CHARS;
     let doc_excerpt: String = full_document
         .chars()
-        .take(PROGRAM_VERB_INLINE_DOC_MAX_CHARS)
+        .take(PLAYBOOK_VERB_INLINE_DOC_MAX_CHARS)
         .collect();
     // The template substitution carries its own truncation pointer, since a
     // template author controls the surrounding text and gets no framing
     // header to explain the cut.
     let doc_for_template = if doc_truncated {
         format!(
-            "{doc_excerpt}\n\n[... truncated to the first {PROGRAM_VERB_INLINE_DOC_MAX_CHARS} \
-             characters — call agentd_program_get, or construct_program_get if you are using \
+            "{doc_excerpt}\n\n[... truncated to the first {PLAYBOOK_VERB_INLINE_DOC_MAX_CHARS} \
+             characters — call agentd_playbook_get, or construct_playbook_get if you are using \
              MCP, with session_id \"{owner_session_id}\" for the rest, or for a fresh read if \
              the document may have changed since]"
         )
@@ -886,11 +886,11 @@ fn program_verb_prompt(
         ],
     );
     if !prompt_references_var(&verb.prompt, TEMPLATE_VAR_CONTENT) {
-        prompt.push_str("\n\n---\n\nFor context, here is the full Program (orchestration) document this selection is part of");
+        prompt.push_str("\n\n---\n\nFor context, here is the full Playbook (orchestration) document this selection is part of");
         if doc_truncated {
             prompt.push_str(&format!(
-                " (truncated to its first {PROGRAM_VERB_INLINE_DOC_MAX_CHARS} characters — call \
-                 agentd_program_get, or construct_program_get if you are using MCP, with \
+                " (truncated to its first {PLAYBOOK_VERB_INLINE_DOC_MAX_CHARS} characters — call \
+                 agentd_playbook_get, or construct_playbook_get if you are using MCP, with \
                  session_id \"{owner_session_id}\" for the rest, or for a fresh read if the \
                  document may have changed since)"
             ));
@@ -919,35 +919,35 @@ fn program_verb_prompt(
         prompt.push_str("\n\n");
     }
     match verb.interaction {
-        ProgramVerbInteraction::Interactive => prompt.push_str(
+        PlaybookVerbInteraction::Interactive => prompt.push_str(
             "This is an interactive verb: do not make the final document edit yet. Hold a focused dialogue \
              with the user in this session first, following the questioning approach above, \
              until you have enough to finish. Only once you decide to stop should \
              you perform the completion action described below.\n\n",
         ),
-        ProgramVerbInteraction::SingleShot => {
+        PlaybookVerbInteraction::SingleShot => {
             prompt.push_str("Produce your result now without asking the user anything.\n\n")
         }
     }
     let content_meaning = match verb.effect {
-        ProgramVerbEffect::Annotate => {
+        PlaybookVerbEffect::Annotate => {
             "only the new Markdown to add after the selection — do not restate the selection itself"
         }
-        ProgramVerbEffect::Rewrite => "the complete replacement Markdown for the selection",
+        PlaybookVerbEffect::Rewrite => "the complete replacement Markdown for the selection",
     };
     if let Some((target_session_id, live_anchor)) = direct_target {
         let edit_requirement = match verb.effect {
-            ProgramVerbEffect::Annotate => {
+            PlaybookVerbEffect::Annotate => {
                 "the live anchor unchanged, followed by only the new annotation Markdown"
             }
-            ProgramVerbEffect::Rewrite => {
+            PlaybookVerbEffect::Rewrite => {
                 "the complete replacement Markdown for the selection, retaining the provenance session clip from the live anchor"
             }
         };
         prompt.push_str(&format!(
-            "Update the Program directly when ready; do not return a result for another session \
+            "Update the Playbook directly when ready; do not return a result for another session \
              to merge. Read the latest document with session_id `{target_session_id}`, then call \
-             construct_program_edit (or agentd_program_edit) with that same explicit session_id. \
+             construct_playbook_edit (or agentd_playbook_edit) with that same explicit session_id. \
              Your anchored old_string is initially the exact Markdown below (re-read and choose \
              sufficient surrounding context if concurrent edits changed it):\n\n{live_anchor}\n\nFor this \
              `{effect}` verb, the edit's new_string must contain {edit_requirement}. Settle the \
@@ -955,15 +955,15 @@ fn program_verb_prompt(
              @{{harness:...}} smart clips unless removing one is this verb's explicit purpose. \
              Keep the edit focused; do not pad it.",
             effect = match verb.effect {
-                ProgramVerbEffect::Annotate => "annotate",
-                ProgramVerbEffect::Rewrite => "rewrite",
+                PlaybookVerbEffect::Annotate => "annotate",
+                PlaybookVerbEffect::Rewrite => "rewrite",
             }
         ));
     } else {
         prompt.push_str(&format!(
-            "You may read this Program document (agentd_program_get / construct_program_get) but \
+            "You may read this Playbook document (agentd_playbook_get / construct_playbook_get) but \
              have no tool, native or MCP, that can edit it — do not attempt to use \
-             construct_program_edit, agentd_program_edit, or any similar tool; the platform applies \
+             construct_playbook_edit, agentd_playbook_edit, or any similar tool; the platform applies \
              your result on your behalf once you deliver it. When you are ready, \
              call agentd_context (or construct_context if you are using MCP) and read \
              `session_widgets.dir` from the response, then write a single JSON object to \
@@ -976,20 +976,20 @@ fn program_verb_prompt(
     prompt
 }
 
-fn program_run_context(
-    program: &ProgramDocument,
+fn playbook_run_context(
+    playbook: &PlaybookDocument,
     scope: &str,
     markdown: &str,
-) -> agent_context::ProgramRunContext {
-    agent_context::ProgramRunContext {
-        session_id: program.session_id.clone(),
-        program_version: program.version,
-        program_updated_at_ms: program.updated_at_ms,
+) -> agent_context::PlaybookRunContext {
+    agent_context::PlaybookRunContext {
+        session_id: playbook.session_id.clone(),
+        playbook_version: playbook.version,
+        playbook_updated_at_ms: playbook.updated_at_ms,
         scope: scope.to_string(),
-        instructions: program_run_instructions(),
-        smart_clips: dialect::extensions_for_surface(dialect::SURFACE_PROGRAM)
+        instructions: playbook_run_instructions(),
+        smart_clips: dialect::extensions_for_surface(dialect::SURFACE_PLAYBOOK)
             .filter(|ext| ext.kind == dialect::KIND_REFERENCE)
-            .map(|ext| agent_context::ProgramSmartClipReference {
+            .map(|ext| agent_context::PlaybookSmartClipReference {
                 type_name: ext.name.to_string(),
                 syntax: ext.syntax.to_string(),
                 description: ext.description.to_string(),
@@ -999,10 +999,10 @@ fn program_run_context(
     }
 }
 
-/// One selected program block matching the instant-dispatch fast-path shape
+/// One selected playbook block matching the instant-dispatch fast-path shape
 /// (spec 0066): a list item whose text contains exactly one smart clip, and
 /// that clip is `@{harness:<name>}`.
-struct ProgramDispatchItem {
+struct PlaybookDispatchItem {
     /// The block's raw source text (list marker included), pre-edit — the
     /// anchor for the append edit that adds the `@{session:<id>}` clip.
     text: String,
@@ -1015,24 +1015,24 @@ struct ProgramDispatchItem {
 
 /// If every block in `blocks` is a list item containing exactly one smart
 /// clip and that clip is `@{harness:<name>}`, returns one
-/// [`ProgramDispatchItem`] per block in document order. Otherwise — a
+/// [`PlaybookDispatchItem`] per block in document order. Otherwise — a
 /// heading/paragraph block, a missing/non-harness/ambiguous clip, or a
 /// harness name that resolves to nothing — returns `None` so the caller falls
 /// the *whole* selection through to the normal execute path rather than
 /// fast-pathing part of a mixed selection (spec 0066).
-fn program_dispatch_plan(
-    blocks: &[construct_protocol::ProgramBlockSpan],
-) -> Option<Vec<ProgramDispatchItem>> {
+fn playbook_dispatch_plan(
+    blocks: &[construct_protocol::PlaybookBlockSpan],
+) -> Option<Vec<PlaybookDispatchItem>> {
     if blocks.is_empty() {
         return None;
     }
     let mut items = Vec::with_capacity(blocks.len());
     for block in blocks {
         let first_line = block.text.lines().next().unwrap_or("").trim();
-        if !construct_protocol::program_is_list_item(first_line) {
+        if !construct_protocol::playbook_is_list_item(first_line) {
             return None;
         }
-        let clips = construct_protocol::program_scan_smart_clips(&block.text);
+        let clips = construct_protocol::playbook_scan_smart_clips(&block.text);
         if clips.len() != 1 {
             return None;
         }
@@ -1045,12 +1045,12 @@ fn program_dispatch_plan(
         without_clip.push_str(&block.text[..clip.start]);
         without_clip.push_str(&block.text[clip.end..]);
         let trimmed = without_clip.trim();
-        let body = construct_protocol::program_list_item_text(trimmed).unwrap_or(trimmed);
+        let body = construct_protocol::playbook_list_item_text(trimmed).unwrap_or(trimmed);
         let prompt = body.split_whitespace().collect::<Vec<_>>().join(" ");
         if prompt.is_empty() {
             return None;
         }
-        items.push(ProgramDispatchItem {
+        items.push(PlaybookDispatchItem {
             text: block.text.clone(),
             harness: harness.to_string(),
             prompt,
@@ -1065,22 +1065,22 @@ fn program_dispatch_plan(
 /// isolation has the same content id as in the post-edit document — and `new_string`
 /// may span several blocks (e.g. a heading plus a moved item), so ALL of them
 /// are returned, not just the first. The caller drops ids that already existed
-/// pre-edit (so a re-stated heading is not re-lit) and `narrow_program_run`
+/// pre-edit (so a re-stated heading is not re-lit) and `narrow_playbook_run`
 /// ignores any id absent from the post-edit document, so the net effect is to
 /// re-add exactly the new/changed blocks in the same narrowing call that drops
 /// the old ones — the pending set never transiently empties.
-fn program_edit_keep_ids(
-    edits: &[construct_protocol::ProgramEdit],
+fn playbook_edit_keep_ids(
+    edits: &[construct_protocol::PlaybookEdit],
 ) -> std::collections::HashSet<String> {
     edits
         .iter()
         .filter(|e| e.keep_pending)
-        .flat_map(|e| construct_protocol::program_block_spans(&e.new_string))
+        .flat_map(|e| construct_protocol::playbook_block_spans(&e.new_string))
         .map(|span| span.id)
         .collect()
 }
 
-fn program_default_cursor_label(kind: &str) -> String {
+fn playbook_default_cursor_label(kind: &str) -> String {
     match kind {
         "web" => "Web".to_string(),
         "tui" => "TUI".to_string(),
@@ -1088,13 +1088,13 @@ fn program_default_cursor_label(kind: &str) -> String {
     }
 }
 
-fn program_unique_cursor_label(
-    cursors: &HashMap<u64, construct_protocol::ProgramCursor>,
+fn playbook_unique_cursor_label(
+    cursors: &HashMap<u64, construct_protocol::PlaybookCursor>,
     conn_id: u64,
     requested: &str,
     kind: &str,
 ) -> String {
-    let fallback = program_default_cursor_label(kind);
+    let fallback = playbook_default_cursor_label(kind);
     let base = requested.trim();
     let base = if base.is_empty() {
         fallback.as_str()
@@ -1120,23 +1120,23 @@ fn program_unique_cursor_label(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProgramCursorReplacement {
+struct PlaybookCursorReplacement {
     start: usize,
     old_len: usize,
     new_len: usize,
 }
 
-fn program_cursor_replacements(
+fn playbook_cursor_replacements(
     base: &str,
-    edits: &[construct_protocol::ProgramEdit],
-) -> Result<Vec<ProgramCursorReplacement>> {
+    edits: &[construct_protocol::PlaybookEdit],
+) -> Result<Vec<PlaybookCursorReplacement>> {
     let mut working = base.to_string();
     let mut replacements = Vec::new();
     for (i, edit) in edits.iter().enumerate() {
         if edit.old_string.is_empty() {
             let prefix_len = usize::from(!working.is_empty() && !working.ends_with('\n'));
             let inserted = prefix_len + edit.new_string.chars().count();
-            replacements.push(ProgramCursorReplacement {
+            replacements.push(PlaybookCursorReplacement {
                 start: working.chars().count(),
                 old_len: 0,
                 new_len: inserted,
@@ -1158,12 +1158,12 @@ fn program_cursor_replacements(
             .collect();
         match match_byte_offsets.len() {
             0 => anyhow::bail!(
-                "program edit {}: old_string not found in the current program:\n{}",
+                "playbook edit {}: old_string not found in the current playbook:\n{}",
                 i + 1,
                 edit.old_string
             ),
             n if n > 1 && !edit.replace_all => anyhow::bail!(
-                "program edit {}: old_string is not unique ({} matches); add surrounding context or set replace_all",
+                "playbook edit {}: old_string is not unique ({} matches); add surrounding context or set replace_all",
                 i + 1,
                 n
             ),
@@ -1201,7 +1201,7 @@ fn program_cursor_replacements(
                 .chars()
                 .count()
                 .saturating_add_signed(cumulative_delta);
-            replacements.push(ProgramCursorReplacement {
+            replacements.push(PlaybookCursorReplacement {
                 start: anchor_start + prefix,
                 old_len,
                 new_len,
@@ -1217,7 +1217,7 @@ fn program_cursor_replacements(
     Ok(replacements)
 }
 
-fn program_rebase_offset(offset: usize, replacements: &[ProgramCursorReplacement]) -> usize {
+fn playbook_rebase_offset(offset: usize, replacements: &[PlaybookCursorReplacement]) -> usize {
     let mut pos = offset;
     for replacement in replacements {
         let start = replacement.start;
@@ -1247,7 +1247,7 @@ fn program_rebase_offset(offset: usize, replacements: &[ProgramCursorReplacement
 
 /// The minimal char-offset span (in `after`'s coordinates) where `before`
 /// and `after` actually differ, via the same common-prefix/suffix trim
-/// `program_cursor_replacements` uses for one edit — applied here to the
+/// `playbook_cursor_replacements` uses for one edit — applied here to the
 /// whole before/after document instead. Used for the agent-presence
 /// cursor's span (spec 0065 agent presence): unlike picking the last
 /// individual edit's own replacement, this is correct even when a batch's
@@ -1255,7 +1255,7 @@ fn program_rebase_offset(offset: usize, replacements: &[ProgramCursorReplacement
 /// one that reverts it) — it reports where the document actually ended up
 /// different, not where an individual edit nominally touched. Returns
 /// `None` when the two are identical.
-fn program_edit_overall_span(before: &str, after: &str) -> Option<(usize, usize)> {
+fn playbook_edit_overall_span(before: &str, after: &str) -> Option<(usize, usize)> {
     if before == after {
         return None;
     }
@@ -1400,9 +1400,9 @@ pub struct SessionManager {
     /// UI in a worktree against a running daemon without rebuilding.
     dev_assets: std::sync::Mutex<Option<PathBuf>>,
     widget_snapshots: tokio::sync::Mutex<HashMap<String, WidgetSnapshot>>,
-    program_runs: std::sync::Mutex<HashMap<String, ProgramRunProgress>>,
-    /// Program-verb sessions awaiting a structured result to merge back
-    /// into their owning Program (spec 0089), keyed by the *verb session's*
+    playbook_runs: std::sync::Mutex<HashMap<String, PlaybookRunProgress>>,
+    /// Playbook-verb sessions awaiting a structured result to merge back
+    /// into their owning Playbook (spec 0089), keyed by the *verb session's*
     /// own id. In-memory only: a daemon restart mid-verb drops the pending
     /// merge (the verb session, if still running, finishes with nowhere to
     /// deliver its result — a known v1 limitation, not a data-loss risk
@@ -1414,14 +1414,14 @@ pub struct SessionManager {
     /// restart drops the backstop for forks already in flight, and the
     /// run's inactivity expiry then remains the last-resort clear.
     run_fork_dispatches: std::sync::Mutex<HashMap<String, RunForkDispatch>>,
-    program_cursors: std::sync::Mutex<HashMap<u64, construct_protocol::ProgramCursor>>,
+    playbook_cursors: std::sync::Mutex<HashMap<u64, construct_protocol::PlaybookCursor>>,
     /// Reserved pseudo-connection id for each session's agent-authored
-    /// Program cursor (spec 0065 agent presence), keyed by session id and
+    /// Playbook cursor (spec 0065 agent presence), keyed by session id and
     /// lazily allocated from the same `next_conn_id` counter as real client
     /// connections so it can never collide with one. Not cleared on session
-    /// delete, matching `program_runs`/`program_cursors` which likewise
+    /// delete, matching `playbook_runs`/`playbook_cursors` which likewise
     /// outlive it — the cursor itself still ages out via the one-minute TTL.
-    agent_program_cursor_conn_ids: std::sync::Mutex<HashMap<String, u64>>,
+    agent_playbook_cursor_conn_ids: std::sync::Mutex<HashMap<String, u64>>,
     /// Monotonic id handed to each client connection so its current
     /// view can be tracked and cleared on disconnect.
     next_conn_id: AtomicU64,
@@ -1888,11 +1888,11 @@ impl SessionManager {
                 restart_tx,
                 dev_assets: std::sync::Mutex::new(dev_assets),
                 widget_snapshots: tokio::sync::Mutex::new(widget_snapshots),
-                program_runs: std::sync::Mutex::new(HashMap::new()),
+                playbook_runs: std::sync::Mutex::new(HashMap::new()),
                 pending_verb_merges: std::sync::Mutex::new(HashMap::new()),
                 run_fork_dispatches: std::sync::Mutex::new(HashMap::new()),
-                program_cursors: std::sync::Mutex::new(HashMap::new()),
-                agent_program_cursor_conn_ids: std::sync::Mutex::new(HashMap::new()),
+                playbook_cursors: std::sync::Mutex::new(HashMap::new()),
+                agent_playbook_cursor_conn_ids: std::sync::Mutex::new(HashMap::new()),
                 next_conn_id: AtomicU64::new(1),
                 conn_views: std::sync::Mutex::new(HashMap::new()),
                 terminal_backgrounds: std::sync::Mutex::new(HashMap::new()),
@@ -1995,48 +1995,48 @@ impl SessionManager {
         if let Ok(mut m) = self.terminal_backgrounds.lock() {
             m.remove(&conn_id);
         }
-        if let Ok(mut cursors) = self.program_cursors.lock() {
+        if let Ok(mut cursors) = self.playbook_cursors.lock() {
             if let Some(mut cursor) = cursors.remove(&conn_id) {
                 cursor.active = false;
                 cursor.updated_at_ms = chrono::Utc::now().timestamp_millis();
-                let _ = self.broadcast.send(BroadcastMsg::ProgramCursor {
-                    payload: construct_protocol::ProgramCursorNotificationPayload { cursor },
+                let _ = self.broadcast.send(BroadcastMsg::PlaybookCursor {
+                    payload: construct_protocol::PlaybookCursorNotificationPayload { cursor },
                     skip_conn_id: None,
                 });
             }
         }
     }
 
-    pub fn program_collaborators(
+    pub fn playbook_collaborators(
         &self,
         session_id: &str,
-    ) -> Vec<construct_protocol::ProgramCursor> {
+    ) -> Vec<construct_protocol::PlaybookCursor> {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        self.program_cursors
+        self.playbook_cursors
             .lock()
             .map(|cursors| {
                 cursors
                     .values()
-                    .filter(|cursor| program_cursor_is_visible(cursor, session_id, now_ms))
+                    .filter(|cursor| playbook_cursor_is_visible(cursor, session_id, now_ms))
                     .cloned()
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    pub async fn program_cursor(
+    pub async fn playbook_cursor(
         &self,
         conn_id: u64,
         kind: &str,
-        params: construct_protocol::ProgramCursorParams,
-    ) -> Result<construct_protocol::ProgramCursorResult> {
+        params: construct_protocol::PlaybookCursorParams,
+    ) -> Result<construct_protocol::PlaybookCursorResult> {
         self.get_entry(&params.session_id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
         let requested_label = params
             .label
-            .unwrap_or_else(|| program_default_cursor_label(kind));
-        let mut cursor = construct_protocol::ProgramCursor {
+            .unwrap_or_else(|| playbook_default_cursor_label(kind));
+        let mut cursor = construct_protocol::PlaybookCursor {
             session_id: params.session_id,
             client_id: format!("c{conn_id}"),
             label: requested_label.clone(),
@@ -2049,13 +2049,13 @@ impl SessionManager {
             updated_at_ms: chrono::Utc::now().timestamp_millis(),
             active: !params.clear,
         };
-        if let Ok(mut cursors) = self.program_cursors.lock() {
+        if let Ok(mut cursors) = self.playbook_cursors.lock() {
             if cursor.active {
                 cursor.label = cursors
                     .get(&conn_id)
                     .map(|existing| existing.label.clone())
                     .unwrap_or_else(|| {
-                        program_unique_cursor_label(&cursors, conn_id, &requested_label, kind)
+                        playbook_unique_cursor_label(&cursors, conn_id, &requested_label, kind)
                     });
                 cursors.insert(conn_id, cursor.clone());
             } else if let Some(existing) = cursors.remove(&conn_id) {
@@ -2070,13 +2070,13 @@ impl SessionManager {
         // where a later local move races the echo and gets clobbered by it
         // (the receiver can't tell "stale echo" from "real daemon rebase").
         // Every other connection still needs it to render this cursor.
-        let _ = self.broadcast.send(BroadcastMsg::ProgramCursor {
-            payload: construct_protocol::ProgramCursorNotificationPayload {
+        let _ = self.broadcast.send(BroadcastMsg::PlaybookCursor {
+            payload: construct_protocol::PlaybookCursorNotificationPayload {
                 cursor: cursor.clone(),
             },
             skip_conn_id: Some(conn_id),
         });
-        Ok(construct_protocol::ProgramCursorResult { cursor })
+        Ok(construct_protocol::PlaybookCursorResult { cursor })
     }
 
     /// Whether any live connection is currently watching `session_id` in the
@@ -2642,56 +2642,23 @@ impl SessionManager {
         let _ = self.broadcast.send(BroadcastMsg::FeaturesState(status));
     }
 
-    /// Probe real availability for one configured harness (spec 0068). The
-    /// built-in adapters get kind-specific probes; anything else (a
-    /// community adapter registered via `[adapters.<name>]`) falls back to
-    /// the original "does its `binary` resolve" check, since there's no
-    /// protocol-level way to ask an arbitrary AHP adapter what it wraps.
+    /// Probe real availability for one configured harness (spec 0068).
+    ///
+    /// The ladder itself lives in `availability` so `construct doctor` runs
+    /// the identical probe with no daemon in the picture (spec 0168).
     async fn probe_harness_availability(
         &self,
         name: &str,
         binary_spec: &str,
         resolved_binary: Option<&std::path::Path>,
     ) -> crate::availability::Availability {
-        use crate::availability::{probe_generic_adapter, probe_smith, probe_wrapper_cli};
-        match name {
-            "shell" => crate::availability::Availability::ready("ready"),
-            "claude" => probe_wrapper_cli("CONSTRUCT_CLAUDE_CMD", "CONSTRUCT_CLAUDE_BIN", "claude"),
-            "codex" => probe_wrapper_cli("CONSTRUCT_CODEX_CMD", "CONSTRUCT_CODEX_BIN", "codex"),
-            "opencode" => probe_wrapper_cli(
-                "CONSTRUCT_OPENCODE_CMD",
-                "CONSTRUCT_OPENCODE_BIN",
-                &construct_protocol::adapter::default_cli_bin_with_home_fallback(
-                    "opencode",
-                    std::path::Path::new(".opencode/bin/opencode"),
-                ),
-            ),
-            "antigravity" | "agy" => probe_wrapper_cli(
-                "CONSTRUCT_ANTIGRAVITY_CMD",
-                "CONSTRUCT_ANTIGRAVITY_BIN",
-                "agy",
-            ),
-            "grok" => probe_wrapper_cli("CONSTRUCT_GROK_CMD", "CONSTRUCT_GROK_BIN", "grok"),
-            "kimi" => probe_wrapper_cli(
-                "CONSTRUCT_KIMI_CMD",
-                "CONSTRUCT_KIMI_BIN",
-                &construct_protocol::adapter::default_cli_bin_with_home_fallback(
-                    "kimi",
-                    std::path::Path::new(".kimi-code/bin/kimi"),
-                ),
-            ),
-            "hermes" => probe_wrapper_cli(
-                "CONSTRUCT_HERMES_CMD",
-                "CONSTRUCT_HERMES_BIN",
-                &construct_protocol::adapter::default_cli_bin_with_home_fallback(
-                    "hermes",
-                    std::path::Path::new(".local/bin/hermes"),
-                ),
-            ),
-            "pi" => probe_wrapper_cli("CONSTRUCT_PI_CMD", "CONSTRUCT_PI_BIN", "pi"),
-            "smith" => probe_smith(&self.availability_cache).await,
-            _ => probe_generic_adapter(binary_spec, resolved_binary),
-        }
+        crate::availability::probe_harness(
+            &self.availability_cache,
+            name,
+            binary_spec,
+            resolved_binary,
+        )
+        .await
     }
 
     pub async fn list(&self) -> Vec<SessionSummary> {
@@ -2761,7 +2728,7 @@ impl SessionManager {
         self.storage.read_transcript(id, from, limit)
     }
 
-    /// Substring search across session name/metadata, stored program
+    /// Substring search across session name/metadata, stored playbook
     /// contents, and transcript history (spec 0076). The scan is
     /// synchronous file I/O over up to the global byte budget, so unlike
     /// this type's small point reads (`transcript`, `diff`, …) it runs on
@@ -2795,17 +2762,17 @@ impl SessionManager {
         Ok(String::new())
     }
 
-    pub async fn program_get(&self, session_id: &str) -> Result<ProgramGetResult> {
+    pub async fn playbook_get(&self, session_id: &str) -> Result<PlaybookGetResult> {
         self.get_entry(session_id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", session_id))?;
-        let (program, _) = self.storage.read_program_with_blocks(session_id)?;
-        let revisions = self.storage.read_program_revisions(session_id)?;
-        let active_run = self.program_run_snapshot(session_id);
-        let blocks = self.program_blocks_projection(session_id, &program.markdown);
-        let collaborators = self.program_collaborators(session_id);
-        Ok(ProgramGetResult {
-            program,
+        let (playbook, _) = self.storage.read_playbook_with_blocks(session_id)?;
+        let revisions = self.storage.read_playbook_revisions(session_id)?;
+        let active_run = self.playbook_run_snapshot(session_id);
+        let blocks = self.playbook_blocks_projection(session_id, &playbook.markdown);
+        let collaborators = self.playbook_collaborators(session_id);
+        Ok(PlaybookGetResult {
+            playbook,
             revisions,
             active_run,
             blocks,
@@ -2813,7 +2780,7 @@ impl SessionManager {
         })
     }
 
-    pub async fn program_update(&self, params: ProgramUpdateParams) -> Result<ProgramUpdateResult> {
+    pub async fn playbook_update(&self, params: PlaybookUpdateParams) -> Result<PlaybookUpdateResult> {
         self.get_entry(&params.session_id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
@@ -2821,10 +2788,10 @@ impl SessionManager {
         // document, in order (spec 0053). Validate before writing so a miscount
         // fails the call rather than persisting a doc with a stale shimmer set.
         if let Some(decl) = &params.shimmer {
-            let block_count = construct_protocol::program_block_spans(&params.markdown).len();
+            let block_count = construct_protocol::playbook_block_spans(&params.markdown).len();
             if decl.len() != block_count {
                 anyhow::bail!(
-                    "shimmer declaration has {} entries but the program has {} blocks",
+                    "shimmer declaration has {} entries but the playbook has {} blocks",
                     decl.len(),
                     block_count
                 );
@@ -2844,7 +2811,7 @@ impl SessionManager {
         let shimmer = params.shimmer;
         let shimmer_tooltips = params.shimmer_tooltips;
         let session_id = params.session_id;
-        let program = self.storage.update_program(
+        let playbook = self.storage.update_playbook(
             &session_id,
             params.markdown,
             params.actor,
@@ -2858,7 +2825,7 @@ impl SessionManager {
                 // tooltip array is parallel to the shimmer array in document
                 // order, so index i carries block i's tooltip.
                 let pending: std::collections::HashMap<String, Option<String>> = self
-                    .program_blocks_projection(&session_id, &program.markdown)
+                    .playbook_blocks_projection(&session_id, &playbook.markdown)
                     .into_iter()
                     .zip(decl)
                     .enumerate()
@@ -2871,54 +2838,54 @@ impl SessionManager {
                         (block.id, tip)
                     })
                     .collect();
-                self.set_program_run_pending(&session_id, &program.markdown, pending);
+                self.set_playbook_run_pending(&session_id, &playbook.markdown, pending);
             }
             None => {
                 // Co-editing human-save path: narrow by content change only.
-                self.narrow_program_run(&session_id, &program.markdown, &[]);
+                self.narrow_playbook_run(&session_id, &playbook.markdown, &[]);
             }
         }
-        let blocks = self.program_blocks_projection(&session_id, &program.markdown);
-        let active_run = self.program_run_snapshot(&session_id);
-        self.broadcast_program_state(program.clone());
-        Ok(ProgramUpdateResult {
-            program,
+        let blocks = self.playbook_blocks_projection(&session_id, &playbook.markdown);
+        let active_run = self.playbook_run_snapshot(&session_id);
+        self.broadcast_playbook_state(playbook.clone());
+        Ok(PlaybookUpdateResult {
+            playbook,
             blocks,
             active_run,
         })
     }
 
     #[allow(dead_code)]
-    pub async fn program_edit(&self, params: ProgramEditParams) -> Result<ProgramUpdateResult> {
-        self.program_edit_from_conn(params, None).await
+    pub async fn playbook_edit(&self, params: PlaybookEditParams) -> Result<PlaybookUpdateResult> {
+        self.playbook_edit_from_conn(params, None).await
     }
 
-    pub async fn program_edit_from_conn(
+    pub async fn playbook_edit_from_conn(
         &self,
-        params: ProgramEditParams,
+        params: PlaybookEditParams,
         source_conn_id: Option<u64>,
-    ) -> Result<ProgramUpdateResult> {
+    ) -> Result<PlaybookUpdateResult> {
         let entry = self
             .get_entry(&params.session_id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
         // Block ids of the pre-edit document, to tell which keep_pending blocks
         // are genuinely new (so a re-stated, unchanged heading is not re-lit).
-        let (before_program, before_blocks) = self
+        let (before_playbook, before_blocks) = self
             .storage
-            .read_program_with_blocks(&params.session_id)
-            .map(|(program, blocks)| (Some(program), blocks))
+            .read_playbook_with_blocks(&params.session_id)
+            .map(|(playbook, blocks)| (Some(playbook), blocks))
             .unwrap_or_default();
         let before_refs: std::collections::HashSet<String> =
             before_blocks.iter().map(|block| block.id.clone()).collect();
-        let program = self.storage.edit_program(
+        let playbook = self.storage.edit_playbook(
             &params.session_id,
             &params.edits,
             params.actor,
             params.note,
         )?;
         // A source-less edit is agent-authored (server.rs only omits
-        // `source_conn_id` when `actor == ProgramUpdateActor::Agent`).
+        // `source_conn_id` when `actor == PlaybookUpdateActor::Agent`).
         // Reserve/find that agent's own pseudo-cursor slot *before* rebasing
         // so it can be excluded from the rebase-and-broadcast pass below: its
         // position is about to be superseded by the fresh one this edit just
@@ -2926,15 +2893,15 @@ impl SessionManager {
         // one message before the correct publish immediately follows it.
         let agent_conn_id = source_conn_id
             .is_none()
-            .then(|| self.agent_program_cursor_conn_id(&params.session_id));
-        let cursor_updates = before_program
+            .then(|| self.agent_playbook_cursor_conn_id(&params.session_id));
+        let cursor_updates = before_playbook
             .as_ref()
             .map(|before| {
-                self.rebase_program_cursors_after_edit(
+                self.rebase_playbook_cursors_after_edit(
                     &params.session_id,
                     &before.markdown,
                     &params.edits,
-                    program.version,
+                    playbook.version,
                     source_conn_id,
                     agent_conn_id,
                 )
@@ -2948,9 +2915,9 @@ impl SessionManager {
         // document diff reliably reports where the document actually ended
         // up different. `None` here also means "nothing changed" (a
         // genuine no-op batch), which doubles as the publish gate below.
-        let last_edit_span = before_program
+        let last_edit_span = before_playbook
             .as_ref()
-            .and_then(|before| program_edit_overall_span(&before.markdown, &program.markdown));
+            .and_then(|before| playbook_edit_overall_span(&before.markdown, &playbook.markdown));
         // Apply the partial shimmer declaration against the post-edit document
         // (spec 0053): changed blocks drop their prior shimmer; declared ids set
         // pending/settled; ids that no longer exist are ignored (fail closed).
@@ -2960,8 +2927,8 @@ impl SessionManager {
         // shimmering without the pending set transiently emptying. Blocks that
         // already existed pre-edit are skipped (no re-light of an unchanged
         // heading), and explicit declarations in `shimmer` win.
-        let keep_content_ids = program_edit_keep_ids(&params.edits);
-        let post_blocks = self.program_blocks_projection(&params.session_id, &program.markdown);
+        let keep_content_ids = playbook_edit_keep_ids(&params.edits);
+        let post_blocks = self.playbook_blocks_projection(&params.session_id, &playbook.markdown);
         let mut decls = params.shimmer.clone();
         for block in post_blocks.iter().filter(|block| {
             keep_content_ids.contains(&block.content_id) && !before_refs.contains(&block.id)
@@ -2972,45 +2939,45 @@ impl SessionManager {
             // keep_pending re-adds the produced block's new id with no
             // agent tooltip (spec 0057); it renders the fallback until the
             // agent declares the new id with a tooltip.
-            decls.push(construct_protocol::ProgramShimmerDecl {
+            decls.push(construct_protocol::PlaybookShimmerDecl {
                 id: block.id.clone(),
                 shimmer: true,
                 tooltip: None,
             });
         }
-        self.narrow_program_run(&params.session_id, &program.markdown, &decls);
-        let blocks = self.program_blocks_projection(&params.session_id, &program.markdown);
-        let active_run = self.program_run_snapshot(&params.session_id);
-        self.broadcast_program_state(program.clone());
+        self.narrow_playbook_run(&params.session_id, &playbook.markdown, &decls);
+        let blocks = self.playbook_blocks_projection(&params.session_id, &playbook.markdown);
+        let active_run = self.playbook_run_snapshot(&params.session_id);
+        self.broadcast_playbook_state(playbook.clone());
         for cursor in cursor_updates {
             // A genuine rebase, not a plain-publish echo — the cursor's own
             // owner needs this broadcast just as much as every peer does, so
             // nothing is excluded.
-            let _ = self.broadcast.send(BroadcastMsg::ProgramCursor {
-                payload: construct_protocol::ProgramCursorNotificationPayload { cursor },
+            let _ = self.broadcast.send(BroadcastMsg::PlaybookCursor {
+                payload: construct_protocol::PlaybookCursorNotificationPayload { cursor },
                 skip_conn_id: None,
             });
         }
         // Publish the agent's presence cursor over the edit's real span so
         // connected clients see where the agent just wrote (spec 0065 agent
-        // presence). This reuses the same `program_cursors` map, broadcast,
+        // presence). This reuses the same `playbook_cursors` map, broadcast,
         // and one-minute TTL as human cursors. `last_edit_span` is `None`
         // for a genuine no-op batch, which skips the publish here too —
         // nothing was actually written, so there is no location to present
         // as "the agent just wrote here".
         if let (Some(conn_id), Some(span)) = (agent_conn_id, last_edit_span) {
             let harness = entry.summary.read().await.harness.clone();
-            self.publish_agent_program_cursor(
+            self.publish_agent_playbook_cursor(
                 conn_id,
                 &params.session_id,
                 &harness,
                 span,
-                program.version,
+                playbook.version,
             )
             .await;
         }
-        Ok(ProgramUpdateResult {
-            program,
+        Ok(PlaybookUpdateResult {
+            playbook,
             blocks,
             active_run,
         })
@@ -3020,7 +2987,7 @@ impl SessionManager {
     /// picking the framing its harness needs (bracketed-paste typed submit
     /// for an external agent TUI, CR-terminated PTY submit for a PTY-backed
     /// line editor, or a structured adapter input for a headless harness).
-    /// Shared by Program Run's prompt delivery and verb-drift escalation
+    /// Shared by Playbook Run's prompt delivery and verb-drift escalation
     /// (spec 0089) — both are "say this to the session as if the user typed
     /// it," differing only in the message.
     async fn deliver_text_to_session(&self, session_id: &str, text: &str) -> Result<()> {
@@ -3030,20 +2997,20 @@ impl SessionManager {
             .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
         let delivery = {
             let summary = entry.summary.read().await;
-            program_execution_delivery(&summary)
+            playbook_execution_delivery(&summary)
         };
         match delivery {
-            ProgramExecutionDelivery::ExternalPtyTypedSubmit => {
-                self.program_submit_typed_prompt(session_id, text).await?;
+            PlaybookExecutionDelivery::ExternalPtyTypedSubmit => {
+                self.playbook_submit_typed_prompt(session_id, text).await?;
             }
-            ProgramExecutionDelivery::PtySubmit => {
+            PlaybookExecutionDelivery::PtySubmit => {
                 // Delivery-awaited (not the enqueue-ACK typing path): callers
                 // start run/verb bookkeeping right after this returns, so the
                 // prompt must have actually reached the harness by then.
-                self.pty_input_delivered(session_id, program_pty_submit_bytes(text))
+                self.pty_input_delivered(session_id, playbook_pty_submit_bytes(text))
                     .await?;
             }
-            ProgramExecutionDelivery::AdapterInput => {
+            PlaybookExecutionDelivery::AdapterInput => {
                 self.send_input(session_id, text.to_string()).await?;
             }
         }
@@ -3051,9 +3018,9 @@ impl SessionManager {
     }
 
     /// Create a visible interactive same-harness fork positioned beside its
-    /// Program owner. Prompt delivery is deliberately separate so callers can
-    /// seed owner-side Program state before the fork starts acting.
-    async fn create_program_execution_fork(
+    /// Playbook owner. Prompt delivery is deliberately separate so callers can
+    /// seed owner-side Playbook state before the fork starts acting.
+    async fn create_playbook_execution_fork(
         self: &Arc<Self>,
         owner_session_id: &str,
         title: String,
@@ -3122,7 +3089,7 @@ impl SessionManager {
     /// boundary; the state machine that already drives the rest of the daemon
     /// can.
     ///
-    /// [`PROGRAM_FORK_READY_SETTLE`] of PTY quiet is kept as a fallback for
+    /// [`PLAYBOOK_FORK_READY_SETTLE`] of PTY quiet is kept as a fallback for
     /// harnesses that never report `AwaitingInput` (one that boots straight
     /// into a turn, say), so those don't pay the full `max_wait` before their
     /// prompt is delivered. `since_ms` guards both signals: the fork must have
@@ -3149,11 +3116,11 @@ impl SessionManager {
                 since_ms,
                 Utc::now().timestamp_millis(),
                 started.elapsed(),
-                PROGRAM_FORK_READY_SETTLE,
+                PLAYBOOK_FORK_READY_SETTLE,
                 max_wait,
             ) {
                 Some(ready) => return ready,
-                None => tokio::time::sleep(PROGRAM_FORK_READY_POLL).await,
+                None => tokio::time::sleep(PLAYBOOK_FORK_READY_POLL).await,
             }
         }
     }
@@ -3164,12 +3131,12 @@ impl SessionManager {
     /// cold-started harness to report itself ready (see
     /// [`Self::wait_for_fork_ready`]), then — for external agent TUIs — gates
     /// the submit Enter on the paste observably reaching the harness (see
-    /// `program_submit_typed_prompt_cold_start`). Without both, the prompt
+    /// `playbook_submit_typed_prompt_cold_start`). Without both, the prompt
     /// raced the harness's boot and either vanished or sat in the input box
     /// unsubmitted, leaving the fork idle. Blocking, potentially for seconds:
-    /// call via [`Self::spawn_program_fork_prompt_delivery`] so the IPC
+    /// call via [`Self::spawn_playbook_fork_prompt_delivery`] so the IPC
     /// dispatch loop is never stalled behind a booting fork.
-    async fn deliver_program_prompt_to_fork(
+    async fn deliver_playbook_prompt_to_fork(
         self: &Arc<Self>,
         fork_id: &str,
         created_at_ms: i64,
@@ -3181,43 +3148,43 @@ impl SessionManager {
             .ok_or_else(|| anyhow!("session not found: {fork_id}"))?;
         let (delivery, has_pty) = {
             let summary = entry.summary.read().await;
-            (program_execution_delivery(&summary), summary.has_pty)
+            (playbook_execution_delivery(&summary), summary.has_pty)
         };
         if has_pty
             && !self
-                .wait_for_fork_ready(fork_id, created_at_ms, PROGRAM_FORK_STARTUP_TIMEOUT)
+                .wait_for_fork_ready(fork_id, created_at_ms, PLAYBOOK_FORK_STARTUP_TIMEOUT)
                 .await
         {
             tracing::warn!(
                 session = %fork_id,
-                "program fork prompt: harness never reported ready; delivering anyway",
+                "playbook fork prompt: harness never reported ready; delivering anyway",
             );
         }
         match delivery {
-            ProgramExecutionDelivery::ExternalPtyTypedSubmit => {
-                self.program_submit_typed_prompt_cold_start(fork_id, prompt)
+            PlaybookExecutionDelivery::ExternalPtyTypedSubmit => {
+                self.playbook_submit_typed_prompt_cold_start(fork_id, prompt)
                     .await?;
             }
-            ProgramExecutionDelivery::PtySubmit => {
-                self.pty_input_delivered(fork_id, program_pty_submit_bytes(prompt))
+            PlaybookExecutionDelivery::PtySubmit => {
+                self.pty_input_delivered(fork_id, playbook_pty_submit_bytes(prompt))
                     .await?;
             }
-            ProgramExecutionDelivery::AdapterInput => {
+            PlaybookExecutionDelivery::AdapterInput => {
                 self.send_input(fork_id, prompt.to_string()).await?;
             }
         }
         Ok(())
     }
 
-    /// Background wrapper around [`Self::deliver_program_prompt_to_fork`]:
+    /// Background wrapper around [`Self::deliver_playbook_prompt_to_fork`]:
     /// the startup-settle wait lasts as long as the fork's harness takes to
-    /// boot, and `program.execute` / `program.verb_execute` run on the IPC
+    /// boot, and `playbook.execute` / `playbook.verb_execute` run on the IPC
     /// dispatch loop, which serves a connection's requests serially —
     /// awaiting the boot inline would freeze the requesting client's whole
     /// connection (spec 0087's lesson). Delivery failure is logged; with
     /// `verb_cleanup` set the fork's pending verb merge is dropped and the
     /// fork archived, matching the inline error path this replaced.
-    fn spawn_program_fork_prompt_delivery(
+    fn spawn_playbook_fork_prompt_delivery(
         self: &Arc<Self>,
         fork_id: String,
         created_at_ms: i64,
@@ -3227,12 +3194,12 @@ impl SessionManager {
         let mgr = self.clone();
         tokio::spawn(async move {
             if let Err(e) = mgr
-                .deliver_program_prompt_to_fork(&fork_id, created_at_ms, &prompt)
+                .deliver_playbook_prompt_to_fork(&fork_id, created_at_ms, &prompt)
                 .await
             {
                 tracing::warn!(
                     session = %fork_id, error = %e,
-                    "program fork prompt delivery failed; fork will sit idle",
+                    "playbook fork prompt delivery failed; fork will sit idle",
                 );
                 if verb_cleanup {
                     mgr.pending_verb_merges.lock().unwrap().remove(&fork_id);
@@ -3242,26 +3209,26 @@ impl SessionManager {
         });
     }
 
-    pub async fn program_execute(
+    pub async fn playbook_execute(
         self: &Arc<Self>,
-        params: ProgramExecuteParams,
-    ) -> Result<ProgramExecuteResult> {
+        params: PlaybookExecuteParams,
+    ) -> Result<PlaybookExecuteResult> {
         let entry = self
             .get_entry(&params.session_id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
-        let result = ProgramGetResult {
-            program: self.storage.read_program(&params.session_id)?,
-            revisions: self.storage.read_program_revisions(&params.session_id)?,
-            active_run: self.program_run_snapshot(&params.session_id),
+        let result = PlaybookGetResult {
+            playbook: self.storage.read_playbook(&params.session_id)?,
+            revisions: self.storage.read_playbook_revisions(&params.session_id)?,
+            active_run: self.playbook_run_snapshot(&params.session_id),
             blocks: Vec::new(),
             collaborators: Vec::new(),
         };
         if let Some(base) = params.base_version {
-            if base != result.program.version {
+            if base != result.playbook.version {
                 anyhow::bail!(
-                    "program conflict: current version is {}, attempted base version is {}",
-                    result.program.version,
+                    "playbook conflict: current version is {}, attempted base version is {}",
+                    result.playbook.version,
                     base
                 );
             }
@@ -3271,9 +3238,9 @@ impl SessionManager {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        let body = selected.unwrap_or_else(|| result.program.markdown.trim());
+        let body = selected.unwrap_or_else(|| result.playbook.markdown.trim());
         if body.is_empty() {
-            anyhow::bail!("program is empty");
+            anyhow::bail!("playbook is empty");
         }
         let run_body = body.to_string();
         let is_selection = params.selection.is_some();
@@ -3287,7 +3254,7 @@ impl SessionManager {
         // prompt-delivery path below, check whether this is a selection run
         // whose every block is a list item naming exactly one
         // `@{harness:<name>}` clip. If so, the daemon executes the dispatch
-        // mechanically — spawn a subagent per item, annotate the program,
+        // mechanically — spawn a subagent per item, annotate the playbook,
         // declare each item pending — without paying an LLM round trip
         // through the owning session. Any block that doesn't match falls the
         // *whole* selection through to the normal path unchanged.
@@ -3301,11 +3268,11 @@ impl SessionManager {
             if let Some(raw_selection) =
                 params.selection.as_deref().filter(|s| !s.trim().is_empty())
             {
-                let selection_blocks = construct_protocol::program_block_spans(raw_selection);
-                if let Some(items) = program_dispatch_plan(&selection_blocks) {
+                let selection_blocks = construct_protocol::playbook_block_spans(raw_selection);
+                if let Some(items) = playbook_dispatch_plan(&selection_blocks) {
                     let owner_cwd = entry.summary.read().await.cwd.clone();
                     return self
-                        .program_dispatch_execute(
+                        .playbook_dispatch_execute(
                             &params.session_id,
                             &owner_cwd,
                             raw_selection,
@@ -3321,18 +3288,18 @@ impl SessionManager {
         } else {
             "full"
         };
-        let run_context = program_run_context(&result.program, scope, body);
-        self.write_program_run_context(&params.session_id, &run_context)?;
+        let run_context = playbook_run_context(&result.playbook, scope, body);
+        self.write_playbook_run_context(&params.session_id, &run_context)?;
         let (execution_session_id, prompt, queued_behind_current_turn) = if params.fork {
             let fork_created_at_ms = Utc::now().timestamp_millis();
             let fork_id = self
-                .create_program_execution_fork(&params.session_id, "program selection run".into())
+                .create_playbook_execution_fork(&params.session_id, "playbook selection run".into())
                 .await?;
             // The fork's own context env points at this sidecar. Store the
-            // owner's Program context there before delivering the first turn.
-            self.write_program_run_context(&fork_id, &run_context)?;
-            let prompt = forked_program_execution_prompt(&params.session_id, &fork_id, run_comment);
-            self.spawn_program_fork_prompt_delivery(
+            // owner's Playbook context there before delivering the first turn.
+            self.write_playbook_run_context(&fork_id, &run_context)?;
+            let prompt = forked_playbook_execution_prompt(&params.session_id, &fork_id, run_comment);
+            self.spawn_playbook_fork_prompt_delivery(
                 fork_id.clone(),
                 fork_created_at_ms,
                 prompt.clone(),
@@ -3340,7 +3307,7 @@ impl SessionManager {
             );
             (fork_id, prompt, false)
         } else {
-            let prompt = program_execution_prompt_with_comment(run_comment);
+            let prompt = playbook_execution_prompt_with_comment(run_comment);
             let queued = {
                 let summary = entry.summary.read().await;
                 summary.state == construct_protocol::SessionState::Running
@@ -3349,7 +3316,7 @@ impl SessionManager {
                 .await?;
             (params.session_id.clone(), prompt, queued)
         };
-        self.start_program_run_with_dispatch_state(
+        self.start_playbook_run_with_dispatch_state(
             &params.session_id,
             &run_body,
             is_selection,
@@ -3360,10 +3327,10 @@ impl SessionManager {
 
         // A selection Run dispatched to a fork annotates the selection with
         // the fork's session clip — parity with verbs (spec 0089) and the
-        // instant-dispatch fast path: the program shows *where* the work
+        // instant-dispatch fast path: the playbook shows *where* the work
         // went, and the clip renders the fork's live state in place.
         // Owner-targeted runs (Shift) add no clip: the work stays in the
-        // Program-owning session the user is already looking at. Best
+        // Playbook-owning session the user is already looking at. Best
         // effort — a drifted/ambiguous anchor skips the clip rather than
         // failing a run whose fork already exists and is booting.
         let mut dispatch_anchor: Option<String> = None;
@@ -3374,24 +3341,24 @@ impl SessionManager {
                     // The clip lands at the end of the selection, so the
                     // *last* block is the one whose content (and id) gained
                     // it and needs its shimmer re-declared.
-                    let content_id = construct_protocol::program_block_spans(&anchor)
+                    let content_id = construct_protocol::playbook_block_spans(&anchor)
                         .into_iter()
                         .last()
                         .map(|span| span.id)
                         .unwrap_or_default();
                     let edit_result = self
-                        .program_edit_from_conn(
-                            ProgramEditParams {
+                        .playbook_edit_from_conn(
+                            PlaybookEditParams {
                                 session_id: params.session_id.clone(),
-                                edits: vec![construct_protocol::ProgramEdit {
+                                edits: vec![construct_protocol::PlaybookEdit {
                                     old_string: raw_selection.to_string(),
                                     new_string: anchor.clone(),
                                     replace_all: false,
                                     keep_pending: true,
                                 }],
-                                actor: construct_protocol::ProgramUpdateActor::Agent,
+                                actor: construct_protocol::PlaybookUpdateActor::Agent,
                                 note: Some("selection run".to_string()),
-                                shimmer: vec![construct_protocol::ProgramShimmerDecl {
+                                shimmer: vec![construct_protocol::PlaybookShimmerDecl {
                                     id: content_id,
                                     shimmer: true,
                                     tooltip: Some("Running".to_string()),
@@ -3437,22 +3404,22 @@ impl SessionManager {
                 },
             );
         }
-        // The annotation edit broadcasts the updated program (with the
+        // The annotation edit broadcasts the updated playbook (with the
         // seeded run) itself; only the un-annotated path still owes one.
-        let (program, blocks) = match annotated {
-            Some(edit_result) => (edit_result.program, edit_result.blocks),
+        let (playbook, blocks) = match annotated {
+            Some(edit_result) => (edit_result.playbook, edit_result.blocks),
             None => {
-                self.broadcast_program_state(result.program.clone());
+                self.broadcast_playbook_state(result.playbook.clone());
                 let blocks =
-                    self.program_blocks_projection(&params.session_id, &result.program.markdown);
-                (result.program, blocks)
+                    self.playbook_blocks_projection(&params.session_id, &result.playbook.markdown);
+                (result.playbook, blocks)
             }
         };
         // Re-snapshot after the edit: `keep_pending` remaps the annotated
         // block's pending ref to its post-clip id.
-        let active_run = self.program_run_snapshot(&params.session_id);
-        Ok(ProgramExecuteResult {
-            program,
+        let active_run = self.playbook_run_snapshot(&params.session_id);
+        Ok(PlaybookExecuteResult {
+            playbook,
             prompt,
             active_run,
             blocks,
@@ -3466,13 +3433,13 @@ impl SessionManager {
     /// tooltip "Dispatched". No prompt is delivered to `session_id` — the
     /// daemon executes this dispatch mechanically instead of routing it
     /// through the owning session's agent.
-    async fn program_dispatch_execute(
+    async fn playbook_dispatch_execute(
         self: &Arc<Self>,
         session_id: &str,
         owner_cwd: &str,
         body: &str,
-        items: Vec<ProgramDispatchItem>,
-    ) -> Result<ProgramExecuteResult> {
+        items: Vec<PlaybookDispatchItem>,
+    ) -> Result<PlaybookExecuteResult> {
         let mut edits = Vec::with_capacity(items.len());
         let mut shimmer = Vec::with_capacity(items.len());
         for item in &items {
@@ -3504,18 +3471,18 @@ impl SessionManager {
                 })
                 .await?;
             let new_string = format!("{} @{{session:{}}}", item.text, subagent_id);
-            let content_id = construct_protocol::program_block_spans(&new_string)
+            let content_id = construct_protocol::playbook_block_spans(&new_string)
                 .into_iter()
                 .next()
                 .map(|span| span.id)
                 .unwrap_or_default();
-            edits.push(construct_protocol::ProgramEdit {
+            edits.push(construct_protocol::PlaybookEdit {
                 old_string: item.text.clone(),
                 new_string,
                 replace_all: false,
                 keep_pending: true,
             });
-            shimmer.push(construct_protocol::ProgramShimmerDecl {
+            shimmer.push(construct_protocol::PlaybookShimmerDecl {
                 id: content_id,
                 shimmer: true,
                 tooltip: Some("Dispatched".to_string()),
@@ -3525,13 +3492,13 @@ impl SessionManager {
         // Seed the run's pending set over every dispatched item now that every
         // subagent exists, so the response/active_run projection reflects the
         // started run (spec 0042) even before the edit below lands. No
-        // `selection_block_ids` to thread here: `program_dispatch_plan` (this
+        // `selection_block_ids` to thread here: `playbook_dispatch_plan` (this
         // function's only caller) only ever matches when every re-parsed span
         // is a whole list item containing exactly one `@{harness:<name>}`
         // clip, which a strict partial-line/partial-block selection can never
         // satisfy (the marker and/or clip would be cut off) — this path is
         // unreachable for the substring-selection bug this param exists to fix.
-        self.start_program_run_with_dispatch_state(
+        self.start_playbook_run_with_dispatch_state(
             session_id,
             body,
             true,
@@ -3540,14 +3507,14 @@ impl SessionManager {
             None,
         );
 
-        // The edit below broadcasts `program/state` after applying the
+        // The edit below broadcasts `playbook/state` after applying the
         // dispatch annotations, and that snapshot includes the seeded run.
         let edit_result = self
-            .program_edit_from_conn(
-                ProgramEditParams {
+            .playbook_edit_from_conn(
+                PlaybookEditParams {
                     session_id: session_id.to_string(),
                     edits,
-                    actor: construct_protocol::ProgramUpdateActor::Agent,
+                    actor: construct_protocol::PlaybookUpdateActor::Agent,
                     note: Some("instant dispatch".to_string()),
                     shimmer,
                 },
@@ -3555,8 +3522,8 @@ impl SessionManager {
             )
             .await?;
 
-        Ok(ProgramExecuteResult {
-            program: edit_result.program,
+        Ok(PlaybookExecuteResult {
+            playbook: edit_result.playbook,
             prompt: String::new(),
             active_run: edit_result.active_run,
             blocks: edit_result.blocks,
@@ -3564,45 +3531,45 @@ impl SessionManager {
         })
     }
 
-    pub fn program_templates(&self) -> Result<ProgramListTemplatesResult> {
-        Ok(ProgramListTemplatesResult {
-            templates: self.storage.program_templates()?,
+    pub fn playbook_templates(&self) -> Result<PlaybookListTemplatesResult> {
+        Ok(PlaybookListTemplatesResult {
+            templates: self.storage.playbook_templates()?,
         })
     }
 
-    pub fn program_verbs(&self) -> ProgramListVerbsResult {
-        ProgramListVerbsResult {
-            verbs: self.storage.program_verbs(),
+    pub fn playbook_verbs(&self) -> PlaybookListVerbsResult {
+        PlaybookListVerbsResult {
+            verbs: self.storage.playbook_verbs(),
         }
     }
 
-    /// Run a Program selection verb (spec 0089): fork the owning session
+    /// Run a Playbook selection verb (spec 0089): fork the owning session
     /// into a new sibling scoped to `params.selection`, annotate the
     /// selection with that session's clip (the same in-flight affordance as
     /// the 0066 fast path), and record a pending merge that resolves once
     /// the verb session delivers a result — see
     /// [`Self::maybe_complete_verb_merge`].
-    pub async fn program_verb_execute(
+    pub async fn playbook_verb_execute(
         self: &Arc<Self>,
-        params: ProgramVerbExecuteParams,
-    ) -> Result<ProgramVerbExecuteResult> {
+        params: PlaybookVerbExecuteParams,
+    ) -> Result<PlaybookVerbExecuteResult> {
         let entry = self
             .get_entry(&params.session_id)
             .await
             .ok_or_else(|| anyhow!("session not found: {}", params.session_id))?;
         let verb = self
             .storage
-            .program_verbs()
+            .playbook_verbs()
             .into_iter()
             .find(|v| v.name == params.verb)
-            .ok_or_else(|| anyhow!("unknown program verb: {}", params.verb))?;
+            .ok_or_else(|| anyhow!("unknown playbook verb: {}", params.verb))?;
 
-        let program = self.storage.read_program(&params.session_id)?;
+        let playbook = self.storage.read_playbook(&params.session_id)?;
         if let Some(base) = params.base_version {
-            if base != program.version {
+            if base != playbook.version {
                 anyhow::bail!(
-                    "program conflict: current version is {}, attempted base version is {}",
-                    program.version,
+                    "playbook conflict: current version is {}, attempted base version is {}",
+                    playbook.version,
                     base
                 );
             }
@@ -3622,7 +3589,7 @@ impl SessionManager {
         // not consulted here. Honoring `run_on_owner` on its own also keeps a
         // caller that asks for the owner from silently getting a fork.
         if params.run_on_owner {
-            self.start_program_run_with_dispatch_state(
+            self.start_playbook_run_with_dispatch_state(
                 &params.session_id,
                 &params.selection,
                 true,
@@ -3630,20 +3597,20 @@ impl SessionManager {
                 entry.summary.read().await.state == construct_protocol::SessionState::Running,
                 params.selection_block_ids.as_deref(),
             );
-            let prompt = program_verb_prompt(
+            let prompt = playbook_verb_prompt(
                 &verb,
                 &params.session_id,
-                &program.markdown,
+                &playbook.markdown,
                 selection_trimmed,
                 comment,
                 Some((&params.session_id, &params.selection)),
             );
             self.deliver_text_to_session(&params.session_id, &prompt)
                 .await?;
-            self.broadcast_program_state(program.clone());
-            let blocks = self.program_blocks_projection(&params.session_id, &program.markdown);
-            return Ok(ProgramVerbExecuteResult {
-                program,
+            self.broadcast_playbook_state(playbook.clone());
+            let blocks = self.playbook_blocks_projection(&params.session_id, &playbook.markdown);
+            return Ok(PlaybookVerbExecuteResult {
+                playbook,
                 subagent_session_id: params.session_id,
                 verb: verb.name,
                 blocks,
@@ -3664,19 +3631,19 @@ impl SessionManager {
         // remembers the past but still needs to be told what to do now.
         let verb_created_at_ms = Utc::now().timestamp_millis();
         let verb_session_id = self
-            .create_program_execution_fork(&params.session_id, format!("verb:{}", verb.name))
+            .create_playbook_execution_fork(&params.session_id, format!("verb:{}", verb.name))
             .await?;
 
         // Seed the run's pending set over the verb's selection before the
         // provisional edit below declares it, so that edit's
-        // `ProgramShimmerDecl` isn't a no-op: `narrow_program_run` only
+        // `PlaybookShimmerDecl` isn't a no-op: `narrow_playbook_run` only
         // narrows an *existing* run (spec 0053) and creates nothing on its
         // own, so without this the selected block would never visibly
         // shimmer unless a real Run happened to already be in flight on the
         // same session. `is_selection: true` means a concurrently active
         // Run's own pending set is added to, not clobbered, mirroring
         // selection Run's own semantics (spec 0042).
-        self.start_program_run_with_dispatch_state(
+        self.start_playbook_run_with_dispatch_state(
             &params.session_id,
             &params.selection,
             true,
@@ -3686,24 +3653,24 @@ impl SessionManager {
         );
 
         let anchor = format!("{} @{{session:{}}}", params.selection, verb_session_id);
-        let content_id = construct_protocol::program_block_spans(&anchor)
+        let content_id = construct_protocol::playbook_block_spans(&anchor)
             .into_iter()
             .next()
             .map(|span| span.id)
             .unwrap_or_default();
         let edit_result = self
-            .program_edit_from_conn(
-                ProgramEditParams {
+            .playbook_edit_from_conn(
+                PlaybookEditParams {
                     session_id: params.session_id.clone(),
-                    edits: vec![construct_protocol::ProgramEdit {
+                    edits: vec![construct_protocol::PlaybookEdit {
                         old_string: params.selection.clone(),
                         new_string: anchor.clone(),
                         replace_all: false,
                         keep_pending: true,
                     }],
-                    actor: construct_protocol::ProgramUpdateActor::Agent,
+                    actor: construct_protocol::PlaybookUpdateActor::Agent,
                     note: Some(format!("verb: {}", verb.name)),
-                    shimmer: vec![construct_protocol::ProgramShimmerDecl {
+                    shimmer: vec![construct_protocol::PlaybookShimmerDecl {
                         id: content_id,
                         shimmer: true,
                         tooltip: Some(verb.label.clone()),
@@ -3724,10 +3691,10 @@ impl SessionManager {
             }
         };
 
-        let prompt = program_verb_prompt(
+        let prompt = playbook_verb_prompt(
             &verb,
             &params.session_id,
-            &program.markdown,
+            &playbook.markdown,
             selection_trimmed,
             comment,
             params
@@ -3739,7 +3706,7 @@ impl SessionManager {
             self.pending_verb_merges.lock().unwrap().insert(
                 verb_session_id.clone(),
                 PendingVerbMerge {
-                    program_session_id: params.session_id.clone(),
+                    playbook_session_id: params.session_id.clone(),
                     verb: verb.clone(),
                     anchor: anchor.clone(),
                     // Sentinel path: direct writers never receive it, so
@@ -3752,14 +3719,14 @@ impl SessionManager {
             );
             // Registered before delivery: the background task's failure
             // cleanup (drop merge + archive) relies on the entry existing.
-            self.spawn_program_fork_prompt_delivery(
+            self.spawn_playbook_fork_prompt_delivery(
                 verb_session_id.clone(),
                 verb_created_at_ms,
                 prompt,
                 true,
             );
-            return Ok(ProgramVerbExecuteResult {
-                program: edit_result.program,
+            return Ok(PlaybookVerbExecuteResult {
+                playbook: edit_result.playbook,
                 subagent_session_id: verb_session_id,
                 verb: verb.name,
                 blocks: edit_result.blocks,
@@ -3769,7 +3736,7 @@ impl SessionManager {
         self.pending_verb_merges.lock().unwrap().insert(
             verb_session_id.clone(),
             PendingVerbMerge {
-                program_session_id: params.session_id.clone(),
+                playbook_session_id: params.session_id.clone(),
                 verb: verb.clone(),
                 anchor,
                 result_file: self
@@ -3778,15 +3745,15 @@ impl SessionManager {
                     .join("verb-result.json"),
             },
         );
-        self.spawn_program_fork_prompt_delivery(
+        self.spawn_playbook_fork_prompt_delivery(
             verb_session_id.clone(),
             verb_created_at_ms,
             prompt,
             true,
         );
 
-        Ok(ProgramVerbExecuteResult {
-            program: edit_result.program,
+        Ok(PlaybookVerbExecuteResult {
+            playbook: edit_result.playbook,
             subagent_session_id: verb_session_id,
             verb: verb.name,
             blocks: edit_result.blocks,
@@ -3823,7 +3790,7 @@ impl SessionManager {
                 tracing::info!(
                     session = %session_id,
                     verb = %pending.verb.name,
-                    "verb session ended without a result; leaving program untouched"
+                    "verb session ended without a result; leaving playbook untouched"
                 );
             }
             return;
@@ -3832,17 +3799,17 @@ impl SessionManager {
         // while the merge below is in flight can't double-apply it.
         self.pending_verb_merges.lock().unwrap().remove(session_id);
         if let Err(e) = self.apply_verb_merge(session_id, pending).await {
-            tracing::warn!(session = %session_id, error = %e, "program verb merge failed");
+            tracing::warn!(session = %session_id, error = %e, "playbook verb merge failed");
         }
     }
 
     /// Shimmer-settle declarations for every block of a verb's anchor.
     /// Content ids that no longer exist in the live document are ignored by
     /// the narrowing (fail closed), so these are always safe to over-declare.
-    fn verb_anchor_settle_decls(anchor: &str) -> Vec<construct_protocol::ProgramShimmerDecl> {
-        construct_protocol::program_block_spans(anchor)
+    fn verb_anchor_settle_decls(anchor: &str) -> Vec<construct_protocol::PlaybookShimmerDecl> {
+        construct_protocol::playbook_block_spans(anchor)
             .into_iter()
-            .map(|span| construct_protocol::ProgramShimmerDecl {
+            .map(|span| construct_protocol::PlaybookShimmerDecl {
                 id: span.id,
                 shimmer: false,
                 tooltip: None,
@@ -3863,17 +3830,17 @@ impl SessionManager {
         if decls.is_empty() {
             return;
         }
-        let Ok(program) = self.storage.read_program(&pending.program_session_id) else {
+        let Ok(playbook) = self.storage.read_playbook(&pending.playbook_session_id) else {
             return;
         };
-        self.narrow_program_run(&pending.program_session_id, &program.markdown, &decls);
-        self.broadcast_program_state(program);
+        self.narrow_playbook_run(&pending.playbook_session_id, &playbook.markdown, &decls);
+        self.broadcast_playbook_state(playbook);
     }
 
     /// Deterministic backstop for a closing selection-Run fork (spec 0137):
     /// settle the shimmer of every block the fork was dispatched for, so a
     /// fork that archives (or is deleted) without making its own settle
-    /// edit can never leave the owner Program shimmering forever. Two
+    /// edit can never leave the owner Playbook shimmering forever. Two
     /// complementary sources identify the fork's blocks:
     /// - the dispatch anchor's content ids, which settle blocks the fork
     ///   never edited (mirroring `settle_verb_shimmer`), and
@@ -3888,15 +3855,15 @@ impl SessionManager {
         let Some(dispatch) = dispatch else {
             return;
         };
-        let Ok(program) = self.storage.read_program(&dispatch.owner_session_id) else {
+        let Ok(playbook) = self.storage.read_playbook(&dispatch.owner_session_id) else {
             return;
         };
         let mut decls = Self::verb_anchor_settle_decls(&dispatch.anchor);
         let clip = format!("@{{session:{fork_id}}}");
-        let blocks = self.program_blocks_projection(&dispatch.owner_session_id, &program.markdown);
+        let blocks = self.playbook_blocks_projection(&dispatch.owner_session_id, &playbook.markdown);
         for block in &blocks {
             if block.text.contains(&clip) && !decls.iter().any(|decl| decl.id == block.content_id) {
-                decls.push(construct_protocol::ProgramShimmerDecl {
+                decls.push(construct_protocol::PlaybookShimmerDecl {
                     id: block.content_id.clone(),
                     shimmer: false,
                     tooltip: None,
@@ -3906,8 +3873,8 @@ impl SessionManager {
         if decls.is_empty() {
             return;
         }
-        self.narrow_program_run(&dispatch.owner_session_id, &program.markdown, &decls);
-        self.broadcast_program_state(program);
+        self.narrow_playbook_run(&dispatch.owner_session_id, &playbook.markdown, &decls);
+        self.broadcast_playbook_state(playbook);
     }
 
     async fn apply_verb_merge(
@@ -3925,10 +3892,10 @@ impl SessionManager {
         }
         let clip = format!("@{{session:{verb_session_id}}}");
         let new_string = match pending.verb.effect {
-            construct_protocol::ProgramVerbEffect::Annotate => {
+            construct_protocol::PlaybookVerbEffect::Annotate => {
                 format!("{}\n\n{}", pending.anchor, content)
             }
-            construct_protocol::ProgramVerbEffect::Rewrite => {
+            construct_protocol::PlaybookVerbEffect::Rewrite => {
                 if content.contains(&clip) {
                     content.to_string()
                 } else {
@@ -3937,16 +3904,16 @@ impl SessionManager {
             }
         };
         let merge = self
-            .program_edit_from_conn(
-                ProgramEditParams {
-                    session_id: pending.program_session_id.clone(),
-                    edits: vec![construct_protocol::ProgramEdit {
+            .playbook_edit_from_conn(
+                PlaybookEditParams {
+                    session_id: pending.playbook_session_id.clone(),
+                    edits: vec![construct_protocol::PlaybookEdit {
                         old_string: pending.anchor.clone(),
                         new_string,
                         replace_all: false,
                         keep_pending: false,
                     }],
-                    actor: construct_protocol::ProgramUpdateActor::Agent,
+                    actor: construct_protocol::PlaybookUpdateActor::Agent,
                     note: Some(format!("verb: {}", pending.verb.name)),
                     // Settle the verb's shimmer in the same edit. An annotate
                     // merge keeps the anchor blocks' text — and therefore
@@ -3968,7 +3935,7 @@ impl SessionManager {
             Err(_) => {
                 // The anchor drifted underneath the verb — the user (or
                 // another edit) touched the selection while it was in
-                // flight. Escalate to the Program-owning session rather
+                // flight. Escalate to the Playbook-owning session rather
                 // than silently discarding a completed verb session's
                 // result. Archive unconditionally, even if delivery itself
                 // fails (e.g. the owning session has no live adapter right
@@ -4003,55 +3970,55 @@ impl SessionManager {
         content: &str,
     ) -> Result<()> {
         let effect_label = match pending.verb.effect {
-            construct_protocol::ProgramVerbEffect::Annotate => "annotate",
-            construct_protocol::ProgramVerbEffect::Rewrite => "rewrite",
+            construct_protocol::PlaybookVerbEffect::Annotate => "annotate",
+            construct_protocol::PlaybookVerbEffect::Rewrite => "rewrite",
         };
         let message = format!(
-            "The \"{label}\" verb (session {verb_session_id}) finished on a Program selection \
+            "The \"{label}\" verb (session {verb_session_id}) finished on a Playbook selection \
              that has since changed, so its result could not be merged automatically.\n\n\
              Original selection anchor:\n{anchor}\n\n\
              Verb result ({effect_label}):\n{content}\n\n\
-             Please reconcile: read the current program, then apply an anchored edit that \
+             Please reconcile: read the current playbook, then apply an anchored edit that \
              incorporates this result into the document as it stands now, using whichever \
-             program-edit tool you have available (construct_program_edit via MCP, or \
-             agentd_program_edit natively).",
+             playbook-edit tool you have available (construct_playbook_edit via MCP, or \
+             agentd_playbook_edit natively).",
             label = pending.verb.label,
             anchor = pending.anchor,
         );
-        self.deliver_text_to_session(&pending.program_session_id, &message)
+        self.deliver_text_to_session(&pending.playbook_session_id, &message)
             .await
     }
 
-    fn broadcast_program_state(&self, program: ProgramDocument) {
-        let active_run = self.program_run_snapshot(&program.session_id);
-        let blocks = self.program_blocks_projection(&program.session_id, &program.markdown);
-        let _ = self.broadcast.send(BroadcastMsg::ProgramState(
-            ProgramStateNotificationPayload {
-                program,
+    fn broadcast_playbook_state(&self, playbook: PlaybookDocument) {
+        let active_run = self.playbook_run_snapshot(&playbook.session_id);
+        let blocks = self.playbook_blocks_projection(&playbook.session_id, &playbook.markdown);
+        let _ = self.broadcast.send(BroadcastMsg::PlaybookState(
+            PlaybookStateNotificationPayload {
+                playbook,
                 active_run,
                 blocks,
             },
         ));
     }
 
-    /// Rebases every peer's Program cursor through a just-applied batch of
+    /// Rebases every peer's Playbook cursor through a just-applied batch of
     /// edits, returning the updates to broadcast. `exclude_conn_id`
     /// additionally skips one more cursor besides the source connection —
     /// the agent's own reserved pseudo-cursor from a prior edit, whose stale
     /// span is about to be superseded by the fresh one this edit produces
-    /// (see [`Self::publish_agent_program_cursor`]), so rebasing (and
+    /// (see [`Self::publish_agent_playbook_cursor`]), so rebasing (and
     /// broadcasting) it here would be a spurious update immediately followed
     /// by the correct one.
-    fn rebase_program_cursors_after_edit(
+    fn rebase_playbook_cursors_after_edit(
         &self,
         session_id: &str,
         before_markdown: &str,
-        edits: &[construct_protocol::ProgramEdit],
+        edits: &[construct_protocol::PlaybookEdit],
         version: u64,
         source_conn_id: Option<u64>,
         exclude_conn_id: Option<u64>,
-    ) -> Vec<construct_protocol::ProgramCursor> {
-        let Ok(replacements) = program_cursor_replacements(before_markdown, edits) else {
+    ) -> Vec<construct_protocol::PlaybookCursor> {
+        let Ok(replacements) = playbook_cursor_replacements(before_markdown, edits) else {
             return Vec::new();
         };
         if replacements.is_empty() {
@@ -4059,7 +4026,7 @@ impl SessionManager {
         }
         let now = chrono::Utc::now().timestamp_millis();
         let mut updates = Vec::new();
-        if let Ok(mut cursors) = self.program_cursors.lock() {
+        if let Ok(mut cursors) = self.playbook_cursors.lock() {
             for (conn_id, cursor) in cursors.iter_mut() {
                 if Some(*conn_id) == source_conn_id
                     || Some(*conn_id) == exclude_conn_id
@@ -4071,13 +4038,13 @@ impl SessionManager {
                 let old_cursor = cursor.cursor;
                 let old_anchor = cursor.selection_anchor;
                 let old_head = cursor.selection_head;
-                cursor.cursor = program_rebase_offset(cursor.cursor, &replacements);
+                cursor.cursor = playbook_rebase_offset(cursor.cursor, &replacements);
                 cursor.selection_anchor = cursor
                     .selection_anchor
-                    .map(|p| program_rebase_offset(p, &replacements));
+                    .map(|p| playbook_rebase_offset(p, &replacements));
                 cursor.selection_head = cursor
                     .selection_head
-                    .map(|p| program_rebase_offset(p, &replacements));
+                    .map(|p| playbook_rebase_offset(p, &replacements));
                 cursor.version = Some(version);
                 if cursor.cursor != old_cursor
                     || cursor.selection_anchor != old_anchor
@@ -4087,7 +4054,7 @@ impl SessionManager {
                     // this cursor's freshness stamp just because a
                     // *different* edit shifted its position underneath it —
                     // only the agent's own writes
-                    // (`publish_agent_program_cursor`) should renew "the
+                    // (`publish_agent_playbook_cursor`) should renew "the
                     // agent just wrote here" for clients gating the reveal
                     // highlight off `updated_at_ms`. The position is still
                     // corrected and broadcast either way.
@@ -4102,10 +4069,10 @@ impl SessionManager {
     }
 
     /// Reserve (or reuse) a synthetic connection id for `session_id`'s
-    /// agent-authored Program cursor. Allocated from the same counter as real
+    /// agent-authored Playbook cursor. Allocated from the same counter as real
     /// client connections so it can never collide with one.
-    fn agent_program_cursor_conn_id(&self, session_id: &str) -> u64 {
-        if let Ok(mut ids) = self.agent_program_cursor_conn_ids.lock() {
+    fn agent_playbook_cursor_conn_id(&self, session_id: &str) -> u64 {
+        if let Ok(mut ids) = self.agent_playbook_cursor_conn_ids.lock() {
             if let Some(id) = ids.get(session_id) {
                 return *id;
             }
@@ -4116,17 +4083,17 @@ impl SessionManager {
         self.alloc_conn_id()
     }
 
-    /// Publish an ephemeral Program cursor for an agent-authored edit (spec
+    /// Publish an ephemeral Playbook cursor for an agent-authored edit (spec
     /// 0065 agent presence): a labeled point cursor at the end of the last
     /// applied edit (`span.1`), with `selection_anchor`/`selection_head` set
     /// to `span` so clients can briefly reveal-highlight where it landed.
-    /// Delegates to the same [`Self::program_cursor`] human cursors go
+    /// Delegates to the same [`Self::playbook_cursor`] human cursors go
     /// through, so label-uniqueness, storage, and broadcast stay in one
     /// place; `kind: "agent"` is what lets renderers style it distinctly and
     /// interpret the selection fields as a reveal span rather than a real
     /// text selection. The caller (`conn_id`) is the session's reserved
-    /// pseudo-connection id from [`Self::agent_program_cursor_conn_id`].
-    async fn publish_agent_program_cursor(
+    /// pseudo-connection id from [`Self::agent_playbook_cursor_conn_id`].
+    async fn publish_agent_playbook_cursor(
         &self,
         conn_id: u64,
         session_id: &str,
@@ -4134,17 +4101,17 @@ impl SessionManager {
         span: (usize, usize),
         version: u64,
     ) {
-        // An empty/unknown harness name defers to `program_cursor`'s own
-        // `program_default_cursor_label("agent")` fallback rather than
+        // An empty/unknown harness name defers to `playbook_cursor`'s own
+        // `playbook_default_cursor_label("agent")` fallback rather than
         // hardcoding "agent" here too, so the two stay in sync if that
         // fallback is ever given a nicer label (as "web"/"tui" already have).
         let trimmed = harness.trim();
         let label = (!trimmed.is_empty()).then(|| trimmed.to_string());
         let _ = self
-            .program_cursor(
+            .playbook_cursor(
                 conn_id,
                 "agent",
-                construct_protocol::ProgramCursorParams {
+                construct_protocol::PlaybookCursorParams {
                     session_id: session_id.to_string(),
                     cursor: span.1,
                     selection_anchor: Some(span.0),
@@ -4157,33 +4124,33 @@ impl SessionManager {
             .await;
     }
 
-    fn program_run_context_path(&self, session_id: &str) -> PathBuf {
+    fn playbook_run_context_path(&self, session_id: &str) -> PathBuf {
         self.storage
             .session_dir(session_id)
-            .join("program-run-context.json")
+            .join("playbook-run-context.json")
     }
 
-    fn install_program_run_context_env(&self, env: &mut HashMap<String, String>, session_id: &str) {
+    fn install_playbook_run_context_env(&self, env: &mut HashMap<String, String>, session_id: &str) {
         env.insert(
-            agent_context::ENV_PROGRAM_RUN_CONTEXT_FILE.to_string(),
-            self.program_run_context_path(session_id)
+            agent_context::ENV_PLAYBOOK_RUN_CONTEXT_FILE.to_string(),
+            self.playbook_run_context_path(session_id)
                 .to_string_lossy()
                 .to_string(),
         );
     }
 
-    fn write_program_run_context(
+    fn write_playbook_run_context(
         &self,
         session_id: &str,
-        context: &agent_context::ProgramRunContext,
+        context: &agent_context::PlaybookRunContext,
     ) -> Result<()> {
-        let path = self.program_run_context_path(session_id);
+        let path = self.playbook_run_context_path(session_id);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
         }
         let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_vec_pretty(context).context("serialize program run context")?;
+        let json = serde_json::to_vec_pretty(context).context("serialize playbook run context")?;
         std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
         std::fs::rename(&tmp, &path)
             .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
@@ -6324,15 +6291,15 @@ impl SessionManager {
     }
 }
 
-fn program_cursor_is_visible(
-    cursor: &construct_protocol::ProgramCursor,
+fn playbook_cursor_is_visible(
+    cursor: &construct_protocol::PlaybookCursor,
     session_id: &str,
     now_ms: i64,
 ) -> bool {
     let ttl_ms = if cursor.kind == "agent" {
-        PROGRAM_AGENT_CURSOR_TTL_MS
+        PLAYBOOK_AGENT_CURSOR_TTL_MS
     } else {
-        PROGRAM_CURSOR_TTL_MS
+        PLAYBOOK_CURSOR_TTL_MS
     };
     cursor.active
         && cursor.session_id == session_id
@@ -7037,29 +7004,29 @@ mod tests {
     }
 
     fn test_verb_for_prompt(
-        effect: construct_protocol::ProgramVerbEffect,
-    ) -> construct_protocol::ProgramVerb {
-        construct_protocol::ProgramVerb {
+        effect: construct_protocol::PlaybookVerbEffect,
+    ) -> construct_protocol::PlaybookVerb {
+        construct_protocol::PlaybookVerb {
             name: "simplify".to_string(),
             label: "Simplify".to_string(),
             description: None,
             effect,
-            interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+            interaction: construct_protocol::PlaybookVerbInteraction::SingleShot,
             order: 0,
             built_in: true,
             prompt: "Be the Simplifier.".to_string(),
         }
     }
 
-    /// spec 0089: the full Program document is inlined as context alongside
+    /// spec 0089: the full Playbook document is inlined as context alongside
     /// the selection, and the "no edit tool" instruction no longer claims the
     /// document is hidden — it's readable, just not editable.
     #[test]
-    fn program_verb_prompt_includes_full_document_as_context() {
-        let verb = test_verb_for_prompt(construct_protocol::ProgramVerbEffect::Rewrite);
+    fn playbook_verb_prompt_includes_full_document_as_context() {
+        let verb = test_verb_for_prompt(construct_protocol::PlaybookVerbEffect::Rewrite);
         let doc = "# Plan\n\nSection A.\n\nSection B: do the thing.\n\nSection C.\n";
         let prompt =
-            program_verb_prompt(&verb, "owner1", doc, "Section B: do the thing.", None, None);
+            playbook_verb_prompt(&verb, "owner1", doc, "Section B: do the thing.", None, None);
         assert!(
             prompt.contains("Section A.") && prompt.contains("Section C."),
             "full document, not just the selection, must appear in the prompt: {prompt}"
@@ -7079,11 +7046,11 @@ mod tests {
     /// referenced variable substitutes in place and suppresses its default
     /// framing section, so nothing appears twice.
     #[test]
-    fn program_verb_prompt_substitutes_template_variables() {
-        let mut verb = test_verb_for_prompt(construct_protocol::ProgramVerbEffect::Rewrite);
-        verb.prompt = "Given this document:\n{{ program.content }}\nfocus on:\n{{ program.selected_text }}\nwith guidance: {{ program.additional_instruction }}".to_string();
+    fn playbook_verb_prompt_substitutes_template_variables() {
+        let mut verb = test_verb_for_prompt(construct_protocol::PlaybookVerbEffect::Rewrite);
+        verb.prompt = "Given this document:\n{{ playbook.content }}\nfocus on:\n{{ playbook.selected_text }}\nwith guidance: {{ playbook.additional_instruction }}".to_string();
         let doc = "# Plan\n\nSection B: do the thing.\n";
-        let prompt = program_verb_prompt(
+        let prompt = playbook_verb_prompt(
             &verb,
             "owner7",
             doc,
@@ -7104,16 +7071,16 @@ mod tests {
             "instruction substitutes in place: {prompt}"
         );
         assert!(
-            !prompt.contains("For context, here is the full Program"),
-            "referencing program.content suppresses the default document framing: {prompt}"
+            !prompt.contains("For context, here is the full Playbook"),
+            "referencing playbook.content suppresses the default document framing: {prompt}"
         );
         assert!(
             !prompt.contains("Your jurisdiction is exactly the following"),
-            "referencing program.selected_text suppresses the default jurisdiction block: {prompt}"
+            "referencing playbook.selected_text suppresses the default jurisdiction block: {prompt}"
         );
         assert!(
             !prompt.contains("Additional user instruction for this verb:"),
-            "referencing program.additional_instruction suppresses the default framing: {prompt}"
+            "referencing playbook.additional_instruction suppresses the default framing: {prompt}"
         );
         assert!(
             prompt.contains("verb-result.json"),
@@ -7125,16 +7092,16 @@ mod tests {
     /// live read tool + the owning session id, rather than growing the
     /// prompt unboundedly.
     #[test]
-    fn program_verb_prompt_truncates_oversized_document_with_a_pointer() {
-        let verb = test_verb_for_prompt(construct_protocol::ProgramVerbEffect::Annotate);
-        let huge_doc = "x".repeat(PROGRAM_VERB_INLINE_DOC_MAX_CHARS + 5_000);
-        let prompt = program_verb_prompt(&verb, "owner42", &huge_doc, "selected bit", None, None);
+    fn playbook_verb_prompt_truncates_oversized_document_with_a_pointer() {
+        let verb = test_verb_for_prompt(construct_protocol::PlaybookVerbEffect::Annotate);
+        let huge_doc = "x".repeat(PLAYBOOK_VERB_INLINE_DOC_MAX_CHARS + 5_000);
+        let prompt = playbook_verb_prompt(&verb, "owner42", &huge_doc, "selected bit", None, None);
         assert!(
             prompt.contains("truncated"),
             "oversized document must be flagged as truncated: {prompt}"
         );
         assert!(
-            prompt.contains("agentd_program_get") && prompt.contains("owner42"),
+            prompt.contains("agentd_playbook_get") && prompt.contains("owner42"),
             "truncation notice must point at the live read tool with the owning session id: {prompt}"
         );
         assert!(
@@ -7144,9 +7111,9 @@ mod tests {
     }
 
     #[test]
-    fn direct_program_verb_prompt_targets_owner_and_forbids_return_merge() {
-        let verb = test_verb_for_prompt(construct_protocol::ProgramVerbEffect::Rewrite);
-        let prompt = program_verb_prompt(
+    fn direct_playbook_verb_prompt_targets_owner_and_forbids_return_merge() {
+        let verb = test_verb_for_prompt(construct_protocol::PlaybookVerbEffect::Rewrite);
+        let prompt = playbook_verb_prompt(
             &verb,
             "owner-direct",
             "# Plan\n\nold text @{session:fork1}",
@@ -7154,7 +7121,7 @@ mod tests {
             None,
             Some(("owner-direct", "old text @{session:fork1}")),
         );
-        assert!(prompt.contains("Update the Program directly"));
+        assert!(prompt.contains("Update the Playbook directly"));
         assert!(prompt.contains("session_id `owner-direct`"));
         assert!(prompt.contains("old text @{session:fork1}"));
         assert!(prompt.contains("do not return a result"));
@@ -7352,25 +7319,25 @@ mod tests {
     }
 
     #[test]
-    fn program_execution_submits_to_pty_backed_sessions() {
+    fn playbook_execution_submits_to_pty_backed_sessions() {
         let summary = placement_summary("s1", 0, None, construct_protocol::SessionKind::User);
 
         assert_eq!(
-            program_execution_delivery(&summary),
-            ProgramExecutionDelivery::PtySubmit
+            playbook_execution_delivery(&summary),
+            PlaybookExecutionDelivery::PtySubmit
         );
     }
 
     #[test]
-    fn program_pty_submit_terminates_with_carriage_return() {
+    fn playbook_pty_submit_terminates_with_carriage_return() {
         // Smith's line editor submits on CR and treats LF as a newline
         // insertion, so the PtySubmit terminator must be `\r`. An LF here
-        // regresses to the bug where the program prompt landed in smith's
+        // regresses to the bug where the playbook prompt landed in smith's
         // input editor but never submitted.
-        let bytes = program_pty_submit_bytes("run the program");
+        let bytes = playbook_pty_submit_bytes("run the playbook");
         assert_eq!(bytes.last(), Some(&b'\r'));
         assert!(!bytes.contains(&b'\n'));
-        assert_eq!(&bytes[..bytes.len() - 1], b"run the program");
+        assert_eq!(&bytes[..bytes.len() - 1], b"run the playbook");
     }
 
     #[test]
@@ -7427,52 +7394,52 @@ mod tests {
     }
 
     #[test]
-    fn program_execution_typed_submit_for_external_agent_pty_sessions() {
+    fn playbook_execution_typed_submit_for_external_agent_pty_sessions() {
         let mut summary = placement_summary("s1", 0, None, construct_protocol::SessionKind::User);
         summary.harness = "claude".to_string();
 
         assert_eq!(
-            program_execution_delivery(&summary),
-            ProgramExecutionDelivery::ExternalPtyTypedSubmit
+            playbook_execution_delivery(&summary),
+            PlaybookExecutionDelivery::ExternalPtyTypedSubmit
         );
     }
 
     #[test]
-    fn program_bracketed_paste_frames_and_sanitizes_body() {
+    fn playbook_bracketed_paste_frames_and_sanitizes_body() {
         // A plain multi-line body is wrapped in the paste markers a real
         // terminal sends, so the external agent TUI buffers it as one paste
         // (its multiline guard fires) instead of submitting on the first
         // newline.
         assert_eq!(
-            program_bracketed_paste_bytes("line one\nline two"),
+            playbook_bracketed_paste_bytes("line one\nline two"),
             b"\x1b[200~line one\nline two\x1b[201~".to_vec()
         );
         // An embedded end marker is stripped so a malicious / accidental
-        // `ESC[201~` in the program can't terminate the paste early.
+        // `ESC[201~` in the playbook can't terminate the paste early.
         assert_eq!(
-            program_bracketed_paste_bytes("a\x1b[201~b"),
+            playbook_bracketed_paste_bytes("a\x1b[201~b"),
             b"\x1b[200~ab\x1b[201~".to_vec()
         );
     }
 
     #[test]
-    fn program_execution_prompt_requires_autonomous_run() {
-        let prompt = program_execution_prompt();
+    fn playbook_execution_prompt_requires_autonomous_run() {
+        let prompt = playbook_execution_prompt();
 
         assert!(prompt.contains("autonomously"));
         assert!(prompt.contains("agentd_context"));
         assert!(prompt.contains("construct_context"));
-        assert!(prompt.contains("program_run"));
-        assert!(prompt.contains("latest program content"));
+        assert!(prompt.contains("playbook_run"));
+        assert!(prompt.contains("latest playbook content"));
         assert!(prompt.contains("pending map"));
         assert!(prompt.contains("settle_others"));
         assert!(!prompt.contains("Compare options and summarize findings."));
     }
 
     #[test]
-    fn program_execution_prompt_appends_run_comment_as_one_line() {
+    fn playbook_execution_prompt_appends_run_comment_as_one_line() {
         let prompt =
-            program_execution_prompt_with_comment(Some("  focus tests\nand keep output short  "));
+            playbook_execution_prompt_with_comment(Some("  focus tests\nand keep output short  "));
 
         assert!(prompt.contains("autonomously"));
         assert!(prompt.contains(
@@ -7488,10 +7455,10 @@ mod tests {
     /// The owner-targeting contract must survive alongside it.
     #[test]
     fn forked_run_prompt_instructs_self_archive_on_completion() {
-        let prompt = forked_program_execution_prompt("owner1", "fork1", None);
+        let prompt = forked_playbook_execution_prompt("owner1", "fork1", None);
 
         assert!(prompt.contains("session_id: \"owner1\""));
-        assert!(prompt.contains("do not edit a Program belonging to this fork"));
+        assert!(prompt.contains("do not edit a Playbook belonging to this fork"));
         assert!(prompt.contains("construct_archive_session"));
         assert!(prompt.contains("session_id: \"fork1\""));
         assert!(prompt.contains("settles every block"));
@@ -7501,19 +7468,19 @@ mod tests {
     }
 
     #[test]
-    fn program_run_context_carries_run_contract_and_registered_smart_clips() {
-        let program = ProgramDocument {
+    fn playbook_run_context_carries_run_contract_and_registered_smart_clips() {
+        let playbook = PlaybookDocument {
             session_id: "s123".to_string(),
             markdown: "# Research brief\n\nCompare options and summarize findings.\n".to_string(),
             version: 9,
             updated_at_ms: 1234,
             template_id: None,
         };
-        let context = program_run_context(&program, "selection", "- selected work");
+        let context = playbook_run_context(&playbook, "selection", "- selected work");
 
         assert_eq!(context.session_id, "s123");
-        assert_eq!(context.program_version, 9);
-        assert_eq!(context.program_updated_at_ms, 1234);
+        assert_eq!(context.playbook_version, 9);
+        assert_eq!(context.playbook_updated_at_ms, 1234);
         assert_eq!(context.scope, "selection");
         assert_eq!(context.markdown, "- selected work");
         assert!(context
@@ -7531,9 +7498,9 @@ mod tests {
         assert!(context
             .instructions
             .iter()
-            .any(|s| s.contains("Do not ask the user to run the program again")));
+            .any(|s| s.contains("Do not ask the user to run the playbook again")));
         assert!(context.instructions.iter().any(|s| s
-            .contains("status-only construct_program_edit")
+            .contains("status-only construct_playbook_edit")
             && s.contains("settle_others")));
         assert!(context
             .instructions
@@ -7542,8 +7509,8 @@ mod tests {
         assert!(context
             .instructions
             .iter()
-            .any(|s| s.contains("running the program never triggers the links")));
-        for ext in dialect::extensions_for_surface(dialect::SURFACE_PROGRAM)
+            .any(|s| s.contains("running the playbook never triggers the links")));
+        for ext in dialect::extensions_for_surface(dialect::SURFACE_PLAYBOOK)
             .filter(|ext| ext.kind == dialect::KIND_REFERENCE)
         {
             assert!(
@@ -7560,28 +7527,28 @@ mod tests {
             !context
                 .smart_clips
                 .iter()
-                .any(|registered| registered.type_name == "program-section"),
-            "widget-only extensions stay out of the program run reference"
+                .any(|registered| registered.type_name == "playbook-section"),
+            "widget-only extensions stay out of the playbook run reference"
         );
     }
 
     #[test]
-    fn program_execution_uses_adapter_input_for_headless_sessions() {
+    fn playbook_execution_uses_adapter_input_for_headless_sessions() {
         let mut summary = placement_summary("s1", 0, None, construct_protocol::SessionKind::User);
         summary.has_pty = false;
 
         assert_eq!(
-            program_execution_delivery(&summary),
-            ProgramExecutionDelivery::AdapterInput
+            playbook_execution_delivery(&summary),
+            PlaybookExecutionDelivery::AdapterInput
         );
     }
 
-    fn dispatch_plan(markdown: &str) -> Option<Vec<ProgramDispatchItem>> {
-        program_dispatch_plan(&construct_protocol::program_block_spans(markdown))
+    fn dispatch_plan(markdown: &str) -> Option<Vec<PlaybookDispatchItem>> {
+        playbook_dispatch_plan(&construct_protocol::playbook_block_spans(markdown))
     }
 
     #[test]
-    fn program_dispatch_plan_matches_single_item_with_harness_clip() {
+    fn playbook_dispatch_plan_matches_single_item_with_harness_clip() {
         let items = dispatch_plan("- Fix bug @{harness:codex}\n").expect("plan");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].harness, "codex");
@@ -7590,7 +7557,7 @@ mod tests {
     }
 
     #[test]
-    fn program_dispatch_plan_strips_ordered_marker_and_collapses_wrapped_lines() {
+    fn playbook_dispatch_plan_strips_ordered_marker_and_collapses_wrapped_lines() {
         let items =
             dispatch_plan("1. Investigate\n   the flaky test @{harness:claude}\n").expect("plan");
         assert_eq!(items.len(), 1);
@@ -7599,27 +7566,27 @@ mod tests {
     }
 
     #[test]
-    fn program_dispatch_plan_none_for_heading() {
+    fn playbook_dispatch_plan_none_for_heading() {
         assert!(dispatch_plan("# Title @{harness:codex}\n").is_none());
     }
 
     #[test]
-    fn program_dispatch_plan_none_for_missing_clip() {
+    fn playbook_dispatch_plan_none_for_missing_clip() {
         assert!(dispatch_plan("- just a task\n").is_none());
     }
 
     #[test]
-    fn program_dispatch_plan_none_for_multiple_clips() {
+    fn playbook_dispatch_plan_none_for_multiple_clips() {
         assert!(dispatch_plan("- do X @{harness:codex} and @{session:s1}\n").is_none());
     }
 
     #[test]
-    fn program_dispatch_plan_none_for_non_harness_clip() {
+    fn playbook_dispatch_plan_none_for_non_harness_clip() {
         assert!(dispatch_plan("- do X @{session:s1}\n").is_none());
     }
 
     #[test]
-    fn program_dispatch_plan_none_for_mixed_selection() {
+    fn playbook_dispatch_plan_none_for_mixed_selection() {
         // Whole selection falls through to the normal path when any block
         // doesn't match the fast-path shape, even if another block does.
         assert!(dispatch_plan("- item one @{harness:codex}\n- item two\n").is_none());
@@ -7905,29 +7872,29 @@ mod tests {
         entry
     }
 
-    fn test_verb(effect: construct_protocol::ProgramVerbEffect) -> construct_protocol::ProgramVerb {
-        construct_protocol::ProgramVerb {
+    fn test_verb(effect: construct_protocol::PlaybookVerbEffect) -> construct_protocol::PlaybookVerb {
+        construct_protocol::PlaybookVerb {
             name: "simplify".to_string(),
             label: "Simplify".to_string(),
             description: None,
             effect,
-            interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+            interaction: construct_protocol::PlaybookVerbInteraction::SingleShot,
             order: 0,
             built_in: true,
             prompt: "test verb".to_string(),
         }
     }
 
-    /// spec 0089/0042: `narrow_program_run` only narrows an *existing* run —
-    /// it creates nothing on its own — so a `ProgramShimmerDecl` on an edit
-    /// is silently dropped unless something seeded a `ProgramRunProgress`
-    /// for the session first. This reproduces `program_verb_execute`'s own
+    /// spec 0089/0042: `narrow_playbook_run` only narrows an *existing* run —
+    /// it creates nothing on its own — so a `PlaybookShimmerDecl` on an edit
+    /// is silently dropped unless something seeded a `PlaybookRunProgress`
+    /// for the session first. This reproduces `playbook_verb_execute`'s own
     /// seed-then-edit sequence directly (without spawning a real verb
     /// session) to prove the seed step is load-bearing: the shimmer decl
-    /// takes effect only when `start_program_run_with_dispatch_state` runs
+    /// takes effect only when `start_playbook_run_with_dispatch_state` runs
     /// first.
     #[tokio::test]
-    async fn program_shimmer_decl_is_a_no_op_without_seeding_a_run_first() {
+    async fn playbook_shimmer_decl_is_a_no_op_without_seeding_a_run_first() {
         use tempfile::tempdir;
 
         let tmp = tempdir().expect("tempdir");
@@ -7944,38 +7911,38 @@ mod tests {
             synthetic_entry("vshim", construct_protocol::SessionKind::User, 0),
         );
         storage
-            .update_program(
+            .update_playbook(
                 "vshim",
                 "# Plan\n\nDo the thing.\n".to_string(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 None,
                 None,
                 None,
             )
-            .expect("seed program");
+            .expect("seed playbook");
 
-        let content_id = construct_protocol::program_block_spans("Do the thing.")
+        let content_id = construct_protocol::playbook_block_spans("Do the thing.")
             .into_iter()
             .next()
             .map(|span| span.id)
             .unwrap_or_default();
-        let decl = construct_protocol::ProgramShimmerDecl {
+        let decl = construct_protocol::PlaybookShimmerDecl {
             id: content_id,
             shimmer: true,
             tooltip: Some("Simplify".to_string()),
         };
 
         // Without seeding: no run exists yet, so the decl is dropped.
-        mgr.program_edit_from_conn(
-            ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            PlaybookEditParams {
                 session_id: "vshim".to_string(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "Do the thing.".to_string(),
                     new_string: "Do the thing. @{session:vshim-verb}".to_string(),
                     replace_all: false,
                     keep_pending: true,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: vec![decl.clone()],
             },
@@ -7984,23 +7951,23 @@ mod tests {
         .await
         .expect("edit applies");
         assert!(
-            mgr.program_run_snapshot("vshim").is_none(),
+            mgr.playbook_run_snapshot("vshim").is_none(),
             "shimmer decl must not fabricate a run out of thin air"
         );
 
         // Reset the doc and repeat, this time seeding first — mirrors
-        // program_verb_execute's own call order.
+        // playbook_verb_execute's own call order.
         storage
-            .update_program(
+            .update_playbook(
                 "vshim",
                 "# Plan\n\nDo the thing.\n".to_string(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 None,
                 None,
                 None,
             )
-            .expect("reset program");
-        mgr.start_program_run_with_dispatch_state(
+            .expect("reset playbook");
+        mgr.start_playbook_run_with_dispatch_state(
             "vshim",
             "Do the thing.",
             true,
@@ -8009,20 +7976,20 @@ mod tests {
             None,
         );
         assert!(
-            mgr.program_run_snapshot("vshim").is_some(),
+            mgr.playbook_run_snapshot("vshim").is_some(),
             "seeding creates a run"
         );
         let edit_result = mgr
-            .program_edit_from_conn(
-                ProgramEditParams {
+            .playbook_edit_from_conn(
+                PlaybookEditParams {
                     session_id: "vshim".to_string(),
-                    edits: vec![construct_protocol::ProgramEdit {
+                    edits: vec![construct_protocol::PlaybookEdit {
                         old_string: "Do the thing.".to_string(),
                         new_string: "Do the thing. @{session:vshim-verb}".to_string(),
                         replace_all: false,
                         keep_pending: true,
                     }],
-                    actor: construct_protocol::ProgramUpdateActor::Agent,
+                    actor: construct_protocol::PlaybookUpdateActor::Agent,
                     note: None,
                     shimmer: vec![decl],
                 },
@@ -8046,7 +8013,7 @@ mod tests {
     /// it mechanically — no escalation, no LLM round trip — and retires the
     /// verb session.
     #[tokio::test]
-    async fn program_verb_merge_applies_mechanically_when_anchor_is_unchanged() {
+    async fn playbook_verb_merge_applies_mechanically_when_anchor_is_unchanged() {
         use tempfile::tempdir;
 
         let tmp = tempdir().expect("tempdir");
@@ -8068,28 +8035,28 @@ mod tests {
         );
 
         storage
-            .update_program(
+            .update_playbook(
                 "vowner",
                 "# Plan\n\nDo the thing.\n".to_string(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 None,
                 None,
                 None,
             )
-            .expect("seed program");
-        // Mirrors the provisional clip-annotation edit `program_verb_execute`
+            .expect("seed playbook");
+        // Mirrors the provisional clip-annotation edit `playbook_verb_execute`
         // applies at spawn time, before any merge is pending.
         let anchor = "Do the thing. @{session:vsub}".to_string();
         storage
-            .edit_program(
+            .edit_playbook(
                 "vowner",
-                &[construct_protocol::ProgramEdit {
+                &[construct_protocol::PlaybookEdit {
                     old_string: "Do the thing.".to_string(),
                     new_string: anchor.clone(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                construct_protocol::ProgramUpdateActor::Agent,
+                construct_protocol::PlaybookUpdateActor::Agent,
                 None,
             )
             .expect("seed provisional anchor");
@@ -8102,8 +8069,8 @@ mod tests {
         mgr.pending_verb_merges.lock().unwrap().insert(
             "vsub".to_string(),
             PendingVerbMerge {
-                program_session_id: "vowner".to_string(),
-                verb: test_verb(construct_protocol::ProgramVerbEffect::Rewrite),
+                playbook_session_id: "vowner".to_string(),
+                verb: test_verb(construct_protocol::PlaybookVerbEffect::Rewrite),
                 anchor,
                 result_file,
             },
@@ -8120,16 +8087,16 @@ mod tests {
                 .is_none(),
             "pending merge is consumed"
         );
-        let program = storage.read_program("vowner").expect("read program");
+        let playbook = storage.read_playbook("vowner").expect("read playbook");
         assert!(
-            program.markdown.contains("Do the thing, carefully."),
+            playbook.markdown.contains("Do the thing, carefully."),
             "verb result applied: {}",
-            program.markdown
+            playbook.markdown
         );
         assert!(
-            program.markdown.contains("@{session:vsub}"),
+            playbook.markdown.contains("@{session:vsub}"),
             "rewrite preserves the subagent's provenance clip: {}",
-            program.markdown
+            playbook.markdown
         );
         assert!(
             mgr.get_entry("vsub")
@@ -8147,7 +8114,7 @@ mod tests {
     /// retires even though delivering the escalation message fails here (the
     /// synthetic owner session has no live adapter to deliver into).
     #[tokio::test]
-    async fn program_verb_merge_leaves_document_untouched_when_anchor_has_drifted() {
+    async fn playbook_verb_merge_leaves_document_untouched_when_anchor_has_drifted() {
         use tempfile::tempdir;
 
         let tmp = tempdir().expect("tempdir");
@@ -8170,15 +8137,15 @@ mod tests {
 
         let drifted_markdown = "# Plan\n\nSomething entirely different now.\n";
         storage
-            .update_program(
+            .update_playbook(
                 "vowner2",
                 drifted_markdown.to_string(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 None,
                 None,
                 None,
             )
-            .expect("seed program");
+            .expect("seed playbook");
 
         let widgets_dir = storage.widgets_dir("vsub2");
         std::fs::create_dir_all(&widgets_dir).unwrap();
@@ -8188,8 +8155,8 @@ mod tests {
         mgr.pending_verb_merges.lock().unwrap().insert(
             "vsub2".to_string(),
             PendingVerbMerge {
-                program_session_id: "vowner2".to_string(),
-                verb: test_verb(construct_protocol::ProgramVerbEffect::Rewrite),
+                playbook_session_id: "vowner2".to_string(),
+                verb: test_verb(construct_protocol::PlaybookVerbEffect::Rewrite),
                 // References text no longer present in the document.
                 anchor: "Do the thing. @{session:vsub2}".to_string(),
                 result_file,
@@ -8207,9 +8174,9 @@ mod tests {
                 .is_none(),
             "pending merge is consumed even when escalation delivery fails"
         );
-        let program = storage.read_program("vowner2").expect("read program");
+        let playbook = storage.read_playbook("vowner2").expect("read playbook");
         assert_eq!(
-            program.markdown, drifted_markdown,
+            playbook.markdown, drifted_markdown,
             "a drifted anchor must never partially merge into the document"
         );
         assert!(
@@ -8226,7 +8193,7 @@ mod tests {
     /// writing a result is abandoned — the document is untouched and the
     /// pending entry is cleared so it doesn't linger forever.
     #[tokio::test]
-    async fn program_verb_merge_abandoned_when_session_ends_without_result() {
+    async fn playbook_verb_merge_abandoned_when_session_ends_without_result() {
         use tempfile::tempdir;
 
         let tmp = tempdir().expect("tempdir");
@@ -8249,21 +8216,21 @@ mod tests {
 
         let markdown = "# Plan\n\nDo the thing.\n";
         storage
-            .update_program(
+            .update_playbook(
                 "vowner3",
                 markdown.to_string(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 None,
                 None,
                 None,
             )
-            .expect("seed program");
+            .expect("seed playbook");
 
         mgr.pending_verb_merges.lock().unwrap().insert(
             "vsub3".to_string(),
             PendingVerbMerge {
-                program_session_id: "vowner3".to_string(),
-                verb: test_verb(construct_protocol::ProgramVerbEffect::Annotate),
+                playbook_session_id: "vowner3".to_string(),
+                verb: test_verb(construct_protocol::PlaybookVerbEffect::Annotate),
                 anchor: "Do the thing.".to_string(),
                 // Never written — the subagent errored before producing one.
                 result_file: storage.widgets_dir("vsub3").join("verb-result.json"),
@@ -8281,9 +8248,9 @@ mod tests {
                 .is_none(),
             "abandoned verb clears its pending entry"
         );
-        let program = storage.read_program("vowner3").expect("read program");
+        let playbook = storage.read_playbook("vowner3").expect("read playbook");
         assert_eq!(
-            program.markdown, markdown,
+            playbook.markdown, markdown,
             "an abandoned verb must not touch the document"
         );
     }
@@ -8294,7 +8261,7 @@ mod tests {
     /// the merge explicitly declares it settled, the block stays in the
     /// run's pending set and shimmers forever after the verb is done.
     #[tokio::test]
-    async fn program_verb_annotate_merge_settles_anchor_shimmer() {
+    async fn playbook_verb_annotate_merge_settles_anchor_shimmer() {
         use tempfile::tempdir;
 
         let tmp = tempdir().expect("tempdir");
@@ -8316,19 +8283,19 @@ mod tests {
         );
 
         storage
-            .update_program(
+            .update_playbook(
                 "vowner4",
                 "# Plan\n\nDo the thing.\n".to_string(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 None,
                 None,
                 None,
             )
-            .expect("seed program");
-        // Mirror `program_verb_execute`'s spawn sequence: seed the run's
+            .expect("seed playbook");
+        // Mirror `playbook_verb_execute`'s spawn sequence: seed the run's
         // pending set over the selection, then apply the provisional
         // clip-annotation edit with its shimmer declaration.
-        mgr.start_program_run_with_dispatch_state(
+        mgr.start_playbook_run_with_dispatch_state(
             "vowner4",
             "Do the thing.",
             true,
@@ -8337,24 +8304,24 @@ mod tests {
             None,
         );
         let anchor = "Do the thing. @{session:vsub4}".to_string();
-        let content_id = construct_protocol::program_block_spans(&anchor)
+        let content_id = construct_protocol::playbook_block_spans(&anchor)
             .into_iter()
             .next()
             .map(|span| span.id)
             .unwrap_or_default();
         let edit_result = mgr
-            .program_edit_from_conn(
-                ProgramEditParams {
+            .playbook_edit_from_conn(
+                PlaybookEditParams {
                     session_id: "vowner4".to_string(),
-                    edits: vec![construct_protocol::ProgramEdit {
+                    edits: vec![construct_protocol::PlaybookEdit {
                         old_string: "Do the thing.".to_string(),
                         new_string: anchor.clone(),
                         replace_all: false,
                         keep_pending: true,
                     }],
-                    actor: construct_protocol::ProgramUpdateActor::Agent,
+                    actor: construct_protocol::PlaybookUpdateActor::Agent,
                     note: Some("verb: test".to_string()),
-                    shimmer: vec![construct_protocol::ProgramShimmerDecl {
+                    shimmer: vec![construct_protocol::PlaybookShimmerDecl {
                         id: content_id,
                         shimmer: true,
                         tooltip: Some("Test verb".to_string()),
@@ -8384,8 +8351,8 @@ mod tests {
         mgr.pending_verb_merges.lock().unwrap().insert(
             "vsub4".to_string(),
             PendingVerbMerge {
-                program_session_id: "vowner4".to_string(),
-                verb: test_verb(construct_protocol::ProgramVerbEffect::Annotate),
+                playbook_session_id: "vowner4".to_string(),
+                verb: test_verb(construct_protocol::PlaybookVerbEffect::Annotate),
                 anchor: anchor.clone(),
                 result_file,
             },
@@ -8394,14 +8361,14 @@ mod tests {
         mgr.maybe_complete_verb_merge("vsub4", construct_protocol::SessionState::Done)
             .await;
 
-        let program = storage.read_program("vowner4").expect("read program");
+        let playbook = storage.read_playbook("vowner4").expect("read playbook");
         assert!(
-            program.markdown.contains(&anchor)
-                && program.markdown.contains("Assumption: the thing exists."),
+            playbook.markdown.contains(&anchor)
+                && playbook.markdown.contains("Assumption: the thing exists."),
             "annotate keeps the anchor and inserts the result below it: {}",
-            program.markdown
+            playbook.markdown
         );
-        let blocks = mgr.program_blocks_projection("vowner4", &program.markdown);
+        let blocks = mgr.playbook_blocks_projection("vowner4", &playbook.markdown);
         assert!(
             blocks.iter().all(|block| !block.shimmer),
             "a completed verb leaves no block shimmering: {blocks:?}"
@@ -8439,16 +8406,16 @@ mod tests {
         // session clip survived, and the fork never settled its shimmer.
         let anchor = "- say hello @{session:ffork}".to_string();
         storage
-            .update_program(
+            .update_playbook(
                 "fowner",
                 "# Todo\n\n- said hello, done @{session:ffork}\n".to_string(),
-                construct_protocol::ProgramUpdateActor::Agent,
+                construct_protocol::PlaybookUpdateActor::Agent,
                 None,
                 None,
                 None,
             )
-            .expect("seed program");
-        mgr.start_program_run_with_dispatch_state(
+            .expect("seed playbook");
+        mgr.start_playbook_run_with_dispatch_state(
             "fowner",
             "- said hello, done @{session:ffork}",
             true,
@@ -8456,7 +8423,7 @@ mod tests {
             false,
             None,
         );
-        let before = mgr.program_run_snapshot("fowner").expect("run seeded");
+        let before = mgr.playbook_run_snapshot("fowner").expect("run seeded");
         assert!(
             !before.pending_block_refs.is_empty(),
             "the dispatched block starts pending"
@@ -8472,7 +8439,7 @@ mod tests {
 
         mgr.settle_run_fork_dispatch("ffork").await;
 
-        let after = mgr.program_run_snapshot("fowner");
+        let after = mgr.playbook_run_snapshot("fowner");
         assert!(
             after
                 .as_ref()
@@ -9280,7 +9247,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_run_context_env_points_at_session_sidecar() {
+    async fn playbook_run_context_env_points_at_session_sidecar() {
         use tempfile::tempdir;
 
         let tmp = tempdir().expect("tempdir");
@@ -9293,14 +9260,14 @@ mod tests {
                 .expect("session manager");
         let mut env = HashMap::new();
 
-        mgr.install_program_run_context_env(&mut env, "s123");
+        mgr.install_playbook_run_context_env(&mut env, "s123");
 
         assert_eq!(
-            env.get(agent_context::ENV_PROGRAM_RUN_CONTEXT_FILE),
+            env.get(agent_context::ENV_PLAYBOOK_RUN_CONTEXT_FILE),
             Some(
                 &storage
                     .session_dir("s123")
-                    .join("program-run-context.json")
+                    .join("playbook-run-context.json")
                     .to_string_lossy()
                     .to_string()
             )
@@ -9308,7 +9275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_program_run_context_persists_readable_json() {
+    async fn write_playbook_run_context_persists_readable_json() {
         use tempfile::tempdir;
 
         let tmp = tempdir().expect("tempdir");
@@ -9319,36 +9286,36 @@ mod tests {
             SessionManager::new(storage, config, tmp.path().join("run"))
                 .await
                 .expect("session manager");
-        let context = agent_context::ProgramRunContext {
+        let context = agent_context::PlaybookRunContext {
             session_id: "s123".to_string(),
-            program_version: 1,
-            program_updated_at_ms: 2,
+            playbook_version: 1,
+            playbook_updated_at_ms: 2,
             scope: "full".to_string(),
             instructions: vec!["run".to_string()],
             smart_clips: Vec::new(),
-            markdown: "# Program".to_string(),
+            markdown: "# Playbook".to_string(),
         };
 
-        mgr.write_program_run_context("s123", &context)
-            .expect("write program run context");
+        mgr.write_playbook_run_context("s123", &context)
+            .expect("write playbook run context");
 
-        let bytes = std::fs::read(mgr.program_run_context_path("s123")).unwrap();
-        let parsed: agent_context::ProgramRunContext = serde_json::from_slice(&bytes).unwrap();
+        let bytes = std::fs::read(mgr.playbook_run_context_path("s123")).unwrap();
+        let parsed: agent_context::PlaybookRunContext = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed, context);
     }
 
     #[test]
-    fn program_run_instructions_require_atomic_move_edits() {
-        let instructions = program_run_instructions().join("\n");
+    fn playbook_run_instructions_require_atomic_move_edits() {
+        let instructions = playbook_run_instructions().join("\n");
 
         assert!(
             instructions
-                .contains("one construct_program_edit call containing multiple `edits` entries"),
-            "program runs should tell agents to move blocks in one edit call"
+                .contains("one construct_playbook_edit call containing multiple `edits` entries"),
+            "playbook runs should tell agents to move blocks in one edit call"
         );
         assert!(
             instructions.contains("viewers can briefly see the block disappear"),
-            "instruction should explain the transient Program-view failure mode"
+            "instruction should explain the transient Playbook-view failure mode"
         );
     }
 
@@ -11645,7 +11612,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_program_run_lifecycle_daemon() {
+    async fn test_playbook_run_lifecycle_daemon() {
         use tempfile::tempdir;
 
         let tmp = tempdir().expect("tempdir");
@@ -11657,15 +11624,15 @@ mod tests {
                 .await
                 .expect("session manager");
 
-        let id = "sprogramrun";
+        let id = "splaybookrun";
         let entry = synthetic_entry(id, construct_protocol::SessionKind::User, 0);
         mgr.sessions.write().await.insert(id.into(), entry.clone());
 
-        // Start a program run
+        // Start a playbook run
         let body = "# Todo\n- a\n";
         let run = mgr
-            .start_program_run(id, body, false, None)
-            .expect("start_program_run");
+            .start_playbook_run(id, body, false, None)
+            .expect("start_playbook_run");
         assert!(!run.seen_running);
         assert!(!run.first_output_seen);
 
@@ -11679,11 +11646,11 @@ mod tests {
         )
         .await;
 
-        let run = mgr.program_run_snapshot(id).expect("run snapshot");
+        let run = mgr.playbook_run_snapshot(id).expect("run snapshot");
         assert!(run.seen_running);
         assert!(!run.first_output_seen);
 
-        // Send program output (reasoning)
+        // Send playbook output (reasoning)
         mgr.handle_event(
             &entry,
             SessionEvent::Reasoning {
@@ -11693,7 +11660,7 @@ mod tests {
         .await;
 
         // Run is NOT cleared, but first_output_seen is set to true
-        let run = mgr.program_run_snapshot(id).expect("run snapshot");
+        let run = mgr.playbook_run_snapshot(id).expect("run snapshot");
         assert!(run.seen_running);
         assert!(run.first_output_seen);
 
@@ -11708,12 +11675,12 @@ mod tests {
         .await;
 
         // Run should now be cleared
-        assert!(mgr.program_run_snapshot(id).is_none());
+        assert!(mgr.playbook_run_snapshot(id).is_none());
     }
 
     // Build a SessionManager with one synthetic session that owns `markdown` as
-    // its program. Returns (manager, storage, session_id) for program tests.
-    async fn program_test_mgr(
+    // its playbook. Returns (manager, storage, session_id) for playbook tests.
+    async fn playbook_test_mgr(
         markdown: &str,
     ) -> (SessionManager, Arc<crate::storage::Storage>, String) {
         use tempfile::tempdir;
@@ -11731,28 +11698,28 @@ mod tests {
             synthetic_entry(&id, construct_protocol::SessionKind::User, 0),
         );
         storage
-            .update_program(
+            .update_playbook(
                 &id,
                 markdown.to_string(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 None,
                 None,
                 None,
             )
-            .expect("seed program");
+            .expect("seed playbook");
         (mgr, storage, id)
     }
 
     #[tokio::test]
-    async fn program_cursor_presence_snapshots_broadcasts_and_clears() {
-        let (mgr, _storage, id) = program_test_mgr("- one\n").await;
+    async fn playbook_cursor_presence_snapshots_broadcasts_and_clears() {
+        let (mgr, _storage, id) = playbook_test_mgr("- one\n").await;
         let mut rx = mgr.subscribe();
 
         let result = mgr
-            .program_cursor(
+            .playbook_cursor(
                 7,
                 "tui",
-                construct_protocol::ProgramCursorParams {
+                construct_protocol::PlaybookCursorParams {
                     session_id: id.clone(),
                     cursor: 3,
                     selection_anchor: Some(1),
@@ -11769,14 +11736,14 @@ mod tests {
         assert_eq!(result.cursor.label, "Desk");
         assert_eq!(result.cursor.kind, "tui");
         assert!(result.cursor.active);
-        assert_eq!(mgr.program_collaborators(&id).len(), 1);
-        let get = mgr.program_get(&id).await.expect("program get");
+        assert_eq!(mgr.playbook_collaborators(&id).len(), 1);
+        let get = mgr.playbook_get(&id).await.expect("playbook get");
         assert_eq!(get.collaborators.len(), 1);
         assert_eq!(get.collaborators[0].client_id, "c7");
 
         let broadcast = rx.recv().await.expect("broadcast");
         match broadcast {
-            BroadcastMsg::ProgramCursor {
+            BroadcastMsg::PlaybookCursor {
                 payload,
                 skip_conn_id,
             } => {
@@ -11792,10 +11759,10 @@ mod tests {
         }
 
         mgr.clear_conn(7);
-        assert!(mgr.program_collaborators(&id).is_empty());
+        assert!(mgr.playbook_collaborators(&id).is_empty());
         let broadcast = rx.recv().await.expect("clear broadcast");
         match broadcast {
-            BroadcastMsg::ProgramCursor {
+            BroadcastMsg::PlaybookCursor {
                 payload,
                 skip_conn_id,
             } => {
@@ -11808,38 +11775,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_cursor_presence_expires_from_snapshots_after_inactivity() {
-        let (mgr, _storage, id) = program_test_mgr("- one\n").await;
-        let cursor = put_program_cursor(&mgr, &id, 7, "tui", 3).await;
+    async fn playbook_cursor_presence_expires_from_snapshots_after_inactivity() {
+        let (mgr, _storage, id) = playbook_test_mgr("- one\n").await;
+        let cursor = put_playbook_cursor(&mgr, &id, 7, "tui", 3).await;
         assert_eq!(cursor.client_id, "c7");
-        assert_eq!(mgr.program_collaborators(&id).len(), 1);
+        assert_eq!(mgr.playbook_collaborators(&id).len(), 1);
 
-        if let Ok(mut cursors) = mgr.program_cursors.lock() {
+        if let Ok(mut cursors) = mgr.playbook_cursors.lock() {
             let cursor = cursors.get_mut(&7).expect("stored cursor");
             cursor.updated_at_ms = chrono::Utc::now()
                 .timestamp_millis()
-                .saturating_sub(PROGRAM_CURSOR_TTL_MS + 1);
+                .saturating_sub(PLAYBOOK_CURSOR_TTL_MS + 1);
         }
 
-        assert!(mgr.program_collaborators(&id).is_empty());
-        let get = mgr.program_get(&id).await.expect("program get");
+        assert!(mgr.playbook_collaborators(&id).is_empty());
+        let get = mgr.playbook_get(&id).await.expect("playbook get");
         assert!(
             get.collaborators.is_empty(),
-            "program.get should not return stale collaborators"
+            "playbook.get should not return stale collaborators"
         );
     }
 
-    async fn put_program_cursor(
+    async fn put_playbook_cursor(
         mgr: &SessionManager,
         session_id: &str,
         conn_id: u64,
         kind: &str,
         cursor: usize,
-    ) -> construct_protocol::ProgramCursor {
-        mgr.program_cursor(
+    ) -> construct_protocol::PlaybookCursor {
+        mgr.playbook_cursor(
             conn_id,
             kind,
-            construct_protocol::ProgramCursorParams {
+            construct_protocol::PlaybookCursorParams {
                 session_id: session_id.to_string(),
                 cursor,
                 selection_anchor: None,
@@ -11862,8 +11829,8 @@ mod tests {
         mgr: &SessionManager,
         session_id: &str,
         client_id: &str,
-    ) -> construct_protocol::ProgramCursor {
-        mgr.program_collaborators(session_id)
+    ) -> construct_protocol::PlaybookCursor {
+        mgr.playbook_collaborators(session_id)
             .into_iter()
             .find(|cursor| cursor.client_id == client_id)
             .expect("collaborator")
@@ -11874,25 +11841,25 @@ mod tests {
     fn agent_collaborator(
         mgr: &SessionManager,
         session_id: &str,
-    ) -> construct_protocol::ProgramCursor {
-        mgr.program_collaborators(session_id)
+    ) -> construct_protocol::PlaybookCursor {
+        mgr.playbook_collaborators(session_id)
             .into_iter()
             .find(|cursor| cursor.kind == "agent")
             .expect("agent collaborator")
     }
 
     #[tokio::test]
-    async fn program_cursor_labels_are_unique_per_connected_client() {
-        let (mgr, _storage, id) = program_test_mgr("abc\n").await;
+    async fn playbook_cursor_labels_are_unique_per_connected_client() {
+        let (mgr, _storage, id) = playbook_test_mgr("abc\n").await;
 
-        let a = put_program_cursor(&mgr, &id, 1, "tui", 0).await;
-        let b = put_program_cursor(&mgr, &id, 2, "tui", 1).await;
-        let c = put_program_cursor(&mgr, &id, 3, "web", 2).await;
+        let a = put_playbook_cursor(&mgr, &id, 1, "tui", 0).await;
+        let b = put_playbook_cursor(&mgr, &id, 2, "tui", 1).await;
+        let c = put_playbook_cursor(&mgr, &id, 3, "web", 2).await;
         let d = mgr
-            .program_cursor(
+            .playbook_cursor(
                 4,
                 "tui",
-                construct_protocol::ProgramCursorParams {
+                construct_protocol::PlaybookCursorParams {
                     session_id: id.clone(),
                     cursor: 3,
                     selection_anchor: None,
@@ -11906,10 +11873,10 @@ mod tests {
             .expect("custom cursor")
             .cursor;
         let e = mgr
-            .program_cursor(
+            .playbook_cursor(
                 5,
                 "tui",
-                construct_protocol::ProgramCursorParams {
+                construct_protocol::PlaybookCursorParams {
                     session_id: id.clone(),
                     cursor: 4,
                     selection_anchor: None,
@@ -11931,22 +11898,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_rebases_peer_cursor_after_source_insert() {
-        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
-        put_program_cursor(&mgr, &id, 1, "tui", 4).await;
-        put_program_cursor(&mgr, &id, 2, "web", 6).await;
+    async fn playbook_edit_rebases_peer_cursor_after_source_insert() {
+        let (mgr, _storage, id) = playbook_test_mgr("123456789\n").await;
+        put_playbook_cursor(&mgr, &id, 1, "tui", 4).await;
+        put_playbook_cursor(&mgr, &id, 2, "web", 6).await;
 
         let result = mgr
-            .program_edit_from_conn(
-                construct_protocol::ProgramEditParams {
+            .playbook_edit_from_conn(
+                construct_protocol::PlaybookEditParams {
                     session_id: id.clone(),
-                    edits: vec![construct_protocol::ProgramEdit {
+                    edits: vec![construct_protocol::PlaybookEdit {
                         old_string: "123456".to_string(),
                         new_string: "123X456".to_string(),
                         replace_all: false,
                         keep_pending: false,
                     }],
-                    actor: construct_protocol::ProgramUpdateActor::Human,
+                    actor: construct_protocol::PlaybookUpdateActor::Human,
                     note: None,
                     shimmer: Vec::new(),
                 },
@@ -11955,7 +11922,7 @@ mod tests {
             .await
             .expect("edit");
 
-        assert_eq!(result.program.markdown, "123X456789\n");
+        assert_eq!(result.playbook.markdown, "123X456789\n");
         assert_eq!(
             collaborator(&mgr, &id, "c1").cursor,
             4,
@@ -11963,16 +11930,16 @@ mod tests {
         );
         let peer = collaborator(&mgr, &id, "c2");
         assert_eq!(peer.cursor, 7);
-        assert_eq!(peer.version, Some(result.program.version));
+        assert_eq!(peer.version, Some(result.playbook.version));
     }
 
     #[tokio::test]
-    async fn program_edit_rebases_peer_cursor_and_selection_after_delete() {
-        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
-        mgr.program_cursor(
+    async fn playbook_edit_rebases_peer_cursor_and_selection_after_delete() {
+        let (mgr, _storage, id) = playbook_test_mgr("123456789\n").await;
+        mgr.playbook_cursor(
             2,
             "web",
-            construct_protocol::ProgramCursorParams {
+            construct_protocol::PlaybookCursorParams {
                 session_id: id.clone(),
                 cursor: 6,
                 selection_anchor: Some(4),
@@ -11985,16 +11952,16 @@ mod tests {
         .await
         .expect("peer cursor");
 
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "123456".to_string(),
                     new_string: "12356".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Human,
+                actor: construct_protocol::PlaybookUpdateActor::Human,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12010,20 +11977,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_clamps_peer_cursor_inside_deleted_text() {
-        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
-        put_program_cursor(&mgr, &id, 2, "web", 4).await;
+    async fn playbook_edit_clamps_peer_cursor_inside_deleted_text() {
+        let (mgr, _storage, id) = playbook_test_mgr("123456789\n").await;
+        put_playbook_cursor(&mgr, &id, 2, "web", 4).await;
 
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "3456".to_string(),
                     new_string: "".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Human,
+                actor: construct_protocol::PlaybookUpdateActor::Human,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12036,21 +12003,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_rebases_replacements_after_multiple_replace_all_matches() {
-        let (mgr, _storage, id) = program_test_mgr("aXaXa\n").await;
-        put_program_cursor(&mgr, &id, 2, "web", 2).await; // before second `a`
-        put_program_cursor(&mgr, &id, 3, "web", 3).await; // after second `a`
-        put_program_cursor(&mgr, &id, 4, "web", 5).await; // after third `a`
+    async fn playbook_edit_rebases_replacements_after_multiple_replace_all_matches() {
+        let (mgr, _storage, id) = playbook_test_mgr("aXaXa\n").await;
+        put_playbook_cursor(&mgr, &id, 2, "web", 2).await; // before second `a`
+        put_playbook_cursor(&mgr, &id, 3, "web", 3).await; // after second `a`
+        put_playbook_cursor(&mgr, &id, 4, "web", 5).await; // after third `a`
 
-        mgr.program_edit(construct_protocol::ProgramEditParams {
+        mgr.playbook_edit(construct_protocol::PlaybookEditParams {
             session_id: id.clone(),
-            edits: vec![construct_protocol::ProgramEdit {
+            edits: vec![construct_protocol::PlaybookEdit {
                 old_string: "a".to_string(),
                 new_string: "ab".to_string(),
                 replace_all: true,
                 keep_pending: false,
             }],
-            actor: construct_protocol::ProgramUpdateActor::Agent,
+            actor: construct_protocol::PlaybookUpdateActor::Agent,
             note: None,
             shimmer: Vec::new(),
         })
@@ -12063,20 +12030,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_agent_publishes_presence_cursor_at_end_of_last_edit() {
-        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
+    async fn playbook_edit_agent_publishes_presence_cursor_at_end_of_last_edit() {
+        let (mgr, _storage, id) = playbook_test_mgr("123456789\n").await;
 
         let result = mgr
-            .program_edit_from_conn(
-                construct_protocol::ProgramEditParams {
+            .playbook_edit_from_conn(
+                construct_protocol::PlaybookEditParams {
                     session_id: id.clone(),
-                    edits: vec![construct_protocol::ProgramEdit {
+                    edits: vec![construct_protocol::PlaybookEdit {
                         old_string: "456".to_string(),
                         new_string: "XYZ".to_string(),
                         replace_all: false,
                         keep_pending: false,
                     }],
-                    actor: construct_protocol::ProgramUpdateActor::Agent,
+                    actor: construct_protocol::PlaybookUpdateActor::Agent,
                     note: None,
                     shimmer: Vec::new(),
                 },
@@ -12085,7 +12052,7 @@ mod tests {
             .await
             .expect("agent edit");
 
-        assert_eq!(result.program.markdown, "123XYZ789\n");
+        assert_eq!(result.playbook.markdown, "123XYZ789\n");
         let cursor = agent_collaborator(&mgr, &id);
         assert_eq!(cursor.kind, "agent");
         assert_eq!(
@@ -12099,27 +12066,27 @@ mod tests {
         );
         assert_eq!(cursor.selection_anchor, Some(3), "start of the edited span");
         assert_eq!(cursor.selection_head, Some(6), "end of the edited span");
-        assert_eq!(cursor.version, Some(result.program.version));
+        assert_eq!(cursor.version, Some(result.playbook.version));
     }
 
     #[tokio::test]
-    async fn program_edit_agent_presence_cursor_falls_back_to_generic_label() {
-        let (mgr, _storage, id) = program_test_mgr("hello\n").await;
+    async fn playbook_edit_agent_presence_cursor_falls_back_to_generic_label() {
+        let (mgr, _storage, id) = playbook_test_mgr("hello\n").await;
         {
             let entry = mgr.get_entry(&id).await.expect("entry");
             entry.summary.write().await.harness = String::new();
         }
 
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "hello".to_string(),
                     new_string: "hello world".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12136,19 +12103,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_agent_presence_cursor_reuses_same_client_across_edits() {
-        let (mgr, _storage, id) = program_test_mgr("abc def\n").await;
+    async fn playbook_edit_agent_presence_cursor_reuses_same_client_across_edits() {
+        let (mgr, _storage, id) = playbook_test_mgr("abc def\n").await;
 
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "abc".to_string(),
                     new_string: "abcd".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12158,16 +12125,16 @@ mod tests {
         .expect("first agent edit");
         let first_client_id = agent_collaborator(&mgr, &id).client_id.clone();
 
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "def".to_string(),
                     new_string: "defg".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12176,7 +12143,7 @@ mod tests {
         .await
         .expect("second agent edit");
 
-        let collaborators = mgr.program_collaborators(&id);
+        let collaborators = mgr.playbook_collaborators(&id);
         let agent_cursors: Vec<_> = collaborators.iter().filter(|c| c.kind == "agent").collect();
         assert_eq!(
             agent_cursors.len(),
@@ -12187,20 +12154,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_human_edit_does_not_publish_agent_presence_cursor() {
-        let (mgr, _storage, id) = program_test_mgr("abc\n").await;
-        put_program_cursor(&mgr, &id, 1, "tui", 0).await;
+    async fn playbook_edit_human_edit_does_not_publish_agent_presence_cursor() {
+        let (mgr, _storage, id) = playbook_test_mgr("abc\n").await;
+        put_playbook_cursor(&mgr, &id, 1, "tui", 0).await;
 
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "abc".to_string(),
                     new_string: "abcd".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Human,
+                actor: construct_protocol::PlaybookUpdateActor::Human,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12210,7 +12177,7 @@ mod tests {
         .expect("human edit");
 
         assert!(
-            mgr.program_collaborators(&id)
+            mgr.playbook_collaborators(&id)
                 .iter()
                 .all(|c| c.kind != "agent"),
             "a human-sourced edit must not publish an agent presence cursor"
@@ -12218,24 +12185,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_agent_edit_rebases_peer_cursor_and_publishes_agent_cursor() {
-        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
+    async fn playbook_edit_agent_edit_rebases_peer_cursor_and_publishes_agent_cursor() {
+        let (mgr, _storage, id) = playbook_test_mgr("123456789\n").await;
         // conn_id 5: distinct from the agent's own reserved pseudo-conn-id,
-        // which `put_program_cursor`'s hardcoded conn_id bypasses allocating
+        // which `put_playbook_cursor`'s hardcoded conn_id bypasses allocating
         // from the same counter (unlike a real connection).
-        put_program_cursor(&mgr, &id, 5, "tui", 8).await; // sits after the edit region
+        put_playbook_cursor(&mgr, &id, 5, "tui", 8).await; // sits after the edit region
 
         let result = mgr
-            .program_edit_from_conn(
-                construct_protocol::ProgramEditParams {
+            .playbook_edit_from_conn(
+                construct_protocol::PlaybookEditParams {
                     session_id: id.clone(),
-                    edits: vec![construct_protocol::ProgramEdit {
+                    edits: vec![construct_protocol::PlaybookEdit {
                         old_string: "456".to_string(),
                         new_string: "XY".to_string(),
                         replace_all: false,
                         keep_pending: false,
                     }],
-                    actor: construct_protocol::ProgramUpdateActor::Agent,
+                    actor: construct_protocol::PlaybookUpdateActor::Agent,
                     note: None,
                     shimmer: Vec::new(),
                 },
@@ -12244,7 +12211,7 @@ mod tests {
             .await
             .expect("agent edit");
 
-        assert_eq!(result.program.markdown, "123XY789\n");
+        assert_eq!(result.playbook.markdown, "123XY789\n");
         // Spec 0065: a source-less (agent-authored) edit rebases every active
         // cursor, not just the ones excluding a source connection.
         assert_eq!(collaborator(&mgr, &id, "c5").cursor, 7);
@@ -12255,22 +12222,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_second_agent_edit_does_not_rebroadcast_stale_own_cursor() {
-        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
+    async fn playbook_edit_second_agent_edit_does_not_rebroadcast_stale_own_cursor() {
+        let (mgr, _storage, id) = playbook_test_mgr("123456789\n").await;
         let mut rx = mgr.subscribe();
 
         // Edit 1 lands near the end and grows the document, so the agent's
         // stored presence cursor sits at (6, 10) afterward.
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "789".to_string(),
                     new_string: "XYZW".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12284,16 +12251,16 @@ mod tests {
         // (rather than excluded), would shift that stale (6, 10) span to a
         // different, still-wrong (4, 8) and get broadcast before the correct
         // publish overwrites it.
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "123".to_string(),
                     new_string: "Q".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12302,12 +12269,12 @@ mod tests {
         .await
         .expect("second agent edit");
 
-        // Collect every ProgramCursor notification for the agent's own
+        // Collect every PlaybookCursor notification for the agent's own
         // client_id across both edits.
         let agent_client_id = agent_collaborator(&mgr, &id).client_id.clone();
         let mut agent_cursor_broadcasts = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let BroadcastMsg::ProgramCursor { payload, .. } = msg {
+            if let BroadcastMsg::PlaybookCursor { payload, .. } = msg {
                 if payload.cursor.client_id == agent_client_id {
                     agent_cursor_broadcasts.push(payload.cursor);
                 }
@@ -12316,7 +12283,7 @@ mod tests {
         assert_eq!(
             agent_cursor_broadcasts.len(),
             2,
-            "exactly one ProgramCursor broadcast per edit for the agent's own \
+            "exactly one PlaybookCursor broadcast per edit for the agent's own \
              cursor, not a stale rebase-broadcast followed by the fresh publish: {agent_cursor_broadcasts:?}"
         );
         // The second edit's broadcast (the one that matters here) must carry
@@ -12328,19 +12295,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_noop_agent_edit_does_not_publish_presence_cursor() {
-        let (mgr, _storage, id) = program_test_mgr("abc\n").await;
+    async fn playbook_edit_noop_agent_edit_does_not_publish_presence_cursor() {
+        let (mgr, _storage, id) = playbook_test_mgr("abc\n").await;
 
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "abc".to_string(),
                     new_string: "abc".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12350,7 +12317,7 @@ mod tests {
         .expect("no-op agent edit");
 
         assert!(
-            mgr.program_collaborators(&id)
+            mgr.playbook_collaborators(&id)
                 .iter()
                 .all(|c| c.kind != "agent"),
             "a no-op edit (old_string == new_string) writes nothing, so it must not \
@@ -12359,32 +12326,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_agent_presence_cursor_ignores_trailing_noop_edit_in_batch() {
-        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
+    async fn playbook_edit_agent_presence_cursor_ignores_trailing_noop_edit_in_batch() {
+        let (mgr, _storage, id) = playbook_test_mgr("123456789\n").await;
 
         // A logical change submitted as two edits in one call (spec 0041):
         // a real rewrite, plus a no-op restatement of an unrelated anchor
         // (e.g. an unchanged heading) tacked on afterward. The presence
         // cursor must land at the real edit, not the degenerate trailing one.
         let result = mgr
-            .program_edit_from_conn(
-                construct_protocol::ProgramEditParams {
+            .playbook_edit_from_conn(
+                construct_protocol::PlaybookEditParams {
                     session_id: id.clone(),
                     edits: vec![
-                        construct_protocol::ProgramEdit {
+                        construct_protocol::PlaybookEdit {
                             old_string: "456".to_string(),
                             new_string: "XYZ".to_string(),
                             replace_all: false,
                             keep_pending: false,
                         },
-                        construct_protocol::ProgramEdit {
+                        construct_protocol::PlaybookEdit {
                             old_string: "789".to_string(),
                             new_string: "789".to_string(),
                             replace_all: false,
                             keep_pending: false,
                         },
                     ],
-                    actor: construct_protocol::ProgramUpdateActor::Agent,
+                    actor: construct_protocol::PlaybookUpdateActor::Agent,
                     note: None,
                     shimmer: Vec::new(),
                 },
@@ -12393,7 +12360,7 @@ mod tests {
             .await
             .expect("agent edit batch");
 
-        assert_eq!(result.program.markdown, "123XYZ789\n");
+        assert_eq!(result.playbook.markdown, "123XYZ789\n");
         let cursor = agent_collaborator(&mgr, &id);
         assert_eq!(
             cursor.selection_anchor,
@@ -12405,8 +12372,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_agent_presence_cursor_ignores_edits_that_cancel_out() {
-        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
+    async fn playbook_edit_agent_presence_cursor_ignores_edits_that_cancel_out() {
+        let (mgr, _storage, id) = playbook_test_mgr("123456789\n").await;
 
         // Each individual edit is non-degenerate (real old_len/new_len), but
         // the second and third cancel each other out — the batch's real
@@ -12414,30 +12381,30 @@ mod tests {
         // the real change ("123" -> "abc"), not on the untouched "789"
         // that the last individual replacement happens to reference.
         let result = mgr
-            .program_edit_from_conn(
-                construct_protocol::ProgramEditParams {
+            .playbook_edit_from_conn(
+                construct_protocol::PlaybookEditParams {
                     session_id: id.clone(),
                     edits: vec![
-                        construct_protocol::ProgramEdit {
+                        construct_protocol::PlaybookEdit {
                             old_string: "123".to_string(),
                             new_string: "abc".to_string(),
                             replace_all: false,
                             keep_pending: false,
                         },
-                        construct_protocol::ProgramEdit {
+                        construct_protocol::PlaybookEdit {
                             old_string: "789".to_string(),
                             new_string: "XYZ".to_string(),
                             replace_all: false,
                             keep_pending: false,
                         },
-                        construct_protocol::ProgramEdit {
+                        construct_protocol::PlaybookEdit {
                             old_string: "XYZ".to_string(),
                             new_string: "789".to_string(),
                             replace_all: false,
                             keep_pending: false,
                         },
                     ],
-                    actor: construct_protocol::ProgramUpdateActor::Agent,
+                    actor: construct_protocol::PlaybookUpdateActor::Agent,
                     note: None,
                     shimmer: Vec::new(),
                 },
@@ -12446,7 +12413,7 @@ mod tests {
             .await
             .expect("agent edit batch");
 
-        assert_eq!(result.program.markdown, "abc456789\n");
+        assert_eq!(result.playbook.markdown, "abc456789\n");
         let cursor = agent_collaborator(&mgr, &id);
         assert_eq!(
             cursor.selection_anchor,
@@ -12458,20 +12425,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_rebasing_agent_cursor_for_unrelated_edit_does_not_renew_its_freshness() {
-        let (mgr, _storage, id) = program_test_mgr("123456789\n").await;
+    async fn playbook_edit_rebasing_agent_cursor_for_unrelated_edit_does_not_renew_its_freshness() {
+        let (mgr, _storage, id) = playbook_test_mgr("123456789\n").await;
 
         // The agent writes near the end; its presence cursor is now fresh.
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "789".to_string(),
                     new_string: "XYZ".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12484,9 +12451,9 @@ mod tests {
         // Backdate it inside the short agent presence TTL so a renewed stamp
         // would be obvious, then let a *human* edit elsewhere shift its
         // position.
-        if let Ok(mut cursors) = mgr.program_cursors.lock() {
+        if let Ok(mut cursors) = mgr.playbook_cursors.lock() {
             let agent_conn_id = *mgr
-                .agent_program_cursor_conn_ids
+                .agent_playbook_cursor_conn_ids
                 .lock()
                 .expect("lock")
                 .get(&id)
@@ -12498,16 +12465,16 @@ mod tests {
         }
         let backdated_at = stamped_at - 500;
 
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "123".to_string(),
                     new_string: "Q".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Human,
+                actor: construct_protocol::PlaybookUpdateActor::Human,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12530,19 +12497,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_edit_agent_presence_cursor_expires_after_inactivity() {
-        let (mgr, _storage, id) = program_test_mgr("abc\n").await;
+    async fn playbook_edit_agent_presence_cursor_expires_after_inactivity() {
+        let (mgr, _storage, id) = playbook_test_mgr("abc\n").await;
 
-        mgr.program_edit_from_conn(
-            construct_protocol::ProgramEditParams {
+        mgr.playbook_edit_from_conn(
+            construct_protocol::PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "abc".to_string(),
                     new_string: "abcd".to_string(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: Vec::new(),
             },
@@ -12551,32 +12518,32 @@ mod tests {
         .await
         .expect("agent edit");
         assert!(mgr
-            .program_collaborators(&id)
+            .playbook_collaborators(&id)
             .iter()
             .any(|c| c.kind == "agent"));
 
         let agent_conn_id = *mgr
-            .agent_program_cursor_conn_ids
+            .agent_playbook_cursor_conn_ids
             .lock()
             .expect("lock")
             .get(&id)
             .expect("reserved agent conn id");
-        if let Ok(mut cursors) = mgr.program_cursors.lock() {
+        if let Ok(mut cursors) = mgr.playbook_cursors.lock() {
             let cursor = cursors
                 .get_mut(&agent_conn_id)
                 .expect("stored agent cursor");
             cursor.updated_at_ms = chrono::Utc::now()
                 .timestamp_millis()
-                .saturating_sub(PROGRAM_AGENT_CURSOR_TTL_MS + 1);
+                .saturating_sub(PLAYBOOK_AGENT_CURSOR_TTL_MS + 1);
         }
 
         assert!(
-            mgr.program_collaborators(&id)
+            mgr.playbook_collaborators(&id)
                 .iter()
                 .all(|c| c.kind != "agent"),
             "an idle agent cursor must age out via the shorter agent-specific TTL"
         );
-        let get = mgr.program_get(&id).await.expect("program get");
+        let get = mgr.playbook_get(&id).await.expect("playbook get");
         assert!(get.collaborators.iter().all(|c| c.kind != "agent"));
     }
 
@@ -12586,15 +12553,15 @@ mod tests {
     // (inert blocks never change, so they could never settle) and the animation
     // came out inverted.
     #[tokio::test]
-    async fn program_planning_pass_clears_inert_blocks_without_text_change() {
+    async fn playbook_planning_pass_clears_inert_blocks_without_text_change() {
         // `## In progress` and its two items are one block (no blank line between).
         let md = "# Rule\n\n## TODO\n\n## In progress\n* item one\n* item two\n\n## Done\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
 
         // A Run starts every block shimmering (optimistic).
-        mgr.start_program_run(&id, md, false, None)
+        mgr.start_playbook_run(&id, md, false, None)
             .expect("start run");
-        let before = mgr.program_get(&id).await.expect("get");
+        let before = mgr.playbook_get(&id).await.expect("get");
         assert!(
             before.blocks.iter().all(|b| b.shimmer),
             "every block shimmers at run start"
@@ -12613,33 +12580,33 @@ mod tests {
         // headings settled. The only edit is a content no-op (anchor == new),
         // so no block's text — and no id — changes.
         let res = mgr
-            .program_edit(ProgramEditParams {
+            .playbook_edit(PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "# Rule".into(),
                     new_string: "# Rule".into(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: vec![
-                    construct_protocol::ProgramShimmerDecl {
+                    construct_protocol::PlaybookShimmerDecl {
                         id: id_of("# Rule"),
                         shimmer: false,
                         tooltip: None,
                     },
-                    construct_protocol::ProgramShimmerDecl {
+                    construct_protocol::PlaybookShimmerDecl {
                         id: id_of("## TODO"),
                         shimmer: false,
                         tooltip: None,
                     },
-                    construct_protocol::ProgramShimmerDecl {
+                    construct_protocol::PlaybookShimmerDecl {
                         id: id_of("## Done"),
                         shimmer: false,
                         tooltip: None,
                     },
-                    construct_protocol::ProgramShimmerDecl {
+                    construct_protocol::PlaybookShimmerDecl {
                         id: id_of("item one"),
                         shimmer: true,
                         tooltip: Some("Running item one".into()),
@@ -12680,19 +12647,19 @@ mod tests {
     // A complete declaration on update authoritatively sets the pending set, and
     // a length mismatch is rejected before anything is written.
     #[tokio::test]
-    async fn program_update_complete_shimmer_declaration() {
+    async fn playbook_update_complete_shimmer_declaration() {
         let md = "# A\n\n# B\n\n# C\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None)
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None)
             .expect("start run");
 
         // Wrong length fails (3 blocks, 2 booleans).
         let err = mgr
-            .program_update(ProgramUpdateParams {
+            .playbook_update(PlaybookUpdateParams {
                 session_id: id.clone(),
                 markdown: md.to_string(),
                 base_version: None,
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 template_id: None,
                 note: None,
                 shimmer: Some(vec![true, false]),
@@ -12704,11 +12671,11 @@ mod tests {
 
         // Correct length: only the middle block stays pending.
         let res = mgr
-            .program_update(ProgramUpdateParams {
+            .playbook_update(PlaybookUpdateParams {
                 session_id: id.clone(),
                 markdown: md.to_string(),
                 base_version: None,
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 template_id: None,
                 note: None,
                 shimmer: Some(vec![false, true, false]),
@@ -12740,10 +12707,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_update_then_execute_broadcasts_started_run() {
+    async fn playbook_update_then_execute_broadcasts_started_run() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (mgr, _storage, id) = program_test_mgr("# Old\n").await;
+        let (mgr, _storage, id) = playbook_test_mgr("# Old\n").await;
         let mgr = Arc::new(mgr);
         let adapter_dir = tempfile::tempdir().expect("adapter tempdir");
         let adapter_path = adapter_dir.path().join("mock-adapter.sh");
@@ -12786,11 +12753,11 @@ done
 
         let mut rx = mgr.subscribe();
         let update = mgr
-            .program_update(ProgramUpdateParams {
+            .playbook_update(PlaybookUpdateParams {
                 session_id: id.clone(),
                 markdown: "# New\n".to_string(),
                 base_version: None,
-                actor: construct_protocol::ProgramUpdateActor::Human,
+                actor: construct_protocol::PlaybookUpdateActor::Human,
                 template_id: None,
                 note: None,
                 shimmer: None,
@@ -12801,10 +12768,10 @@ done
         assert!(update.active_run.is_none());
 
         let execute = mgr
-            .program_execute(ProgramExecuteParams {
+            .playbook_execute(PlaybookExecuteParams {
                 session_id: id.clone(),
                 selection: None,
-                base_version: Some(update.program.version),
+                base_version: Some(update.playbook.version),
                 comment: None,
                 shimmer: None,
                 selection_block_ids: None,
@@ -12819,13 +12786,13 @@ done
 
         let mut state_runs = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let BroadcastMsg::ProgramState(payload) = msg {
+            if let BroadcastMsg::PlaybookState(payload) = msg {
                 state_runs.push(payload.active_run.is_some());
             }
         }
         assert!(
             state_runs.len() >= 2,
-            "dirty save and execute should each broadcast program/state, got {state_runs:?}"
+            "dirty save and execute should each broadcast playbook/state, got {state_runs:?}"
         );
         assert_eq!(
             state_runs.last().copied(),
@@ -12908,7 +12875,7 @@ done
     #[tokio::test]
     async fn pty_input_acks_on_enqueue_not_on_adapter_delivery() {
         use base64::Engine as _;
-        let (mgr, _storage, id) = program_test_mgr("# T\n").await;
+        let (mgr, _storage, id) = playbook_test_mgr("# T\n").await;
         let dir = tempfile::tempdir().expect("tempdir");
         let (record, release, _adapter_rx) =
             install_blocking_pty_mock_adapter(&mgr, &id, dir.path()).await;
@@ -12940,7 +12907,7 @@ done
 
     #[tokio::test]
     async fn missing_adapter_closes_session_for_restart() {
-        let (mgr, storage, id) = program_test_mgr("# T\n").await;
+        let (mgr, storage, id) = playbook_test_mgr("# T\n").await;
         let mut updates = mgr.subscribe();
 
         let err = mgr
@@ -12968,7 +12935,7 @@ done
     #[tokio::test]
     async fn pty_input_queue_preserves_order_and_awaited_variant_waits() {
         use base64::Engine as _;
-        let (mgr, _storage, id) = program_test_mgr("# T\n").await;
+        let (mgr, _storage, id) = playbook_test_mgr("# T\n").await;
         let mgr = Arc::new(mgr);
         let dir = tempfile::tempdir().expect("tempdir");
         let (record, release, _adapter_rx) =
@@ -13024,7 +12991,7 @@ done
     fn fork_ready_outcome_rejects_a_pause_inside_the_startup_draw() {
         use construct_protocol::SessionState;
         let since = 1_000_000i64;
-        let settle = PROGRAM_FORK_READY_SETTLE;
+        let settle = PLAYBOOK_FORK_READY_SETTLE;
         let max_wait = settle + Duration::from_secs(10);
         // Drew 750ms ago and still Running: that is a gap in the boot draw,
         // not the end of it. Keep waiting.
@@ -13069,7 +13036,7 @@ done
     fn fork_ready_outcome_fallback_and_liveness_guards() {
         use construct_protocol::SessionState;
         let since = 1_000_000i64;
-        let settle = PROGRAM_FORK_READY_SETTLE;
+        let settle = PLAYBOOK_FORK_READY_SETTLE;
         let max_wait = settle + Duration::from_secs(10);
         let quiet = settle.as_millis() as i64;
         // Quiet for the full settle while still Running -> fallback fires.
@@ -13147,15 +13114,15 @@ done
     // agent-managed lifecycle bit that keeps delegated work shimmering while
     // the owning session is idle.
     #[tokio::test]
-    async fn program_selection_run_unions_with_managed_inflight_run() {
+    async fn playbook_selection_run_unions_with_managed_inflight_run() {
         use construct_protocol::SessionState;
 
         let md = "# A\n\n# B\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None)
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None)
             .expect("start full run");
-        mgr.note_session_state_for_program_run(&id, SessionState::Running);
-        let get = mgr.program_get(&id).await.expect("get");
+        mgr.note_session_state_for_playbook_run(&id, SessionState::Running);
+        let get = mgr.playbook_get(&id).await.expect("get");
         let block_ref = |needle: &str| {
             get.blocks
                 .iter()
@@ -13172,12 +13139,12 @@ done
             &id,
             "# A",
             vec![
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: a_ref.clone(),
                     shimmer: true,
                     tooltip: Some("Working A".into()),
                 },
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: b_ref.clone(),
                     shimmer: false,
                     tooltip: None,
@@ -13185,12 +13152,12 @@ done
             ],
         )
         .await;
-        let narrowed = mgr.program_run_snapshot(&id).expect("narrowed run");
+        let narrowed = mgr.playbook_run_snapshot(&id).expect("narrowed run");
         assert!(narrowed.agent_managed);
         assert_eq!(narrowed.pending_block_refs, vec![a_ref.clone()]);
 
         let selection_run = mgr
-            .start_program_run_with_dispatch_state(&id, "# B\n", true, Some(&[true]), true, None)
+            .start_playbook_run_with_dispatch_state(&id, "# B\n", true, Some(&[true]), true, None)
             .expect("selection run");
 
         assert!(
@@ -13218,18 +13185,18 @@ done
             "existing pending tooltips are preserved"
         );
 
-        mgr.note_session_state_for_program_run(&id, SessionState::AwaitingInput);
+        mgr.note_session_state_for_playbook_run(&id, SessionState::AwaitingInput);
         assert!(
-            mgr.program_run_snapshot(&id).is_some(),
+            mgr.playbook_run_snapshot(&id).is_some(),
             "the unioned managed run survives the owning session going idle"
         );
     }
 
     #[tokio::test]
-    async fn program_selection_run_without_active_run_starts_selection_only() {
+    async fn playbook_selection_run_without_active_run_starts_selection_only() {
         let md = "# A\n\n# B\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        let get = mgr.program_get(&id).await.expect("get");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        let get = mgr.playbook_get(&id).await.expect("get");
         let b_ref = get
             .blocks
             .iter()
@@ -13239,7 +13206,7 @@ done
             .clone();
 
         let run = mgr
-            .start_program_run_with_dispatch_state(&id, "# B\n", true, Some(&[true]), false, None)
+            .start_playbook_run_with_dispatch_state(&id, "# B\n", true, Some(&[true]), false, None)
             .expect("selection run");
 
         assert_eq!(run.pending_block_refs, vec![b_ref]);
@@ -13257,14 +13224,14 @@ done
     // containment against the saved blocks) still recovers the real block
     // when exactly one candidate contains the substring.
     #[tokio::test]
-    async fn program_partial_line_selection_without_ids_resolves_via_containment_fallback() {
+    async fn playbook_partial_line_selection_without_ids_resolves_via_containment_fallback() {
         let md = "Some long text here\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        let get = mgr.program_get(&id).await.expect("get");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        let get = mgr.playbook_get(&id).await.expect("get");
         let real_ref = get.blocks[0].id.clone();
 
         let run = mgr
-            .start_program_run_with_dispatch_state(&id, "long text", true, None, false, None)
+            .start_playbook_run_with_dispatch_state(&id, "long text", true, None, false, None)
             .expect("selection run");
 
         assert_eq!(
@@ -13280,14 +13247,14 @@ done
     // that identity directly instead of re-parsing/hash-matching the raw
     // selected substring at all.
     #[tokio::test]
-    async fn program_partial_line_selection_with_explicit_ids_resolves_real_block() {
+    async fn playbook_partial_line_selection_with_explicit_ids_resolves_real_block() {
         let md = "Some long text here\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        let get = mgr.program_get(&id).await.expect("get");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        let get = mgr.playbook_get(&id).await.expect("get");
         let real_ref = get.blocks[0].id.clone();
 
         let run = mgr
-            .start_program_run_with_dispatch_state(
+            .start_playbook_run_with_dispatch_state(
                 &id,
                 "long text",
                 true,
@@ -13308,14 +13275,14 @@ done
     // alone — a known limitation of running without `selection_block_ids`.
     // Supplying the explicit id resolves it unambiguously regardless.
     #[tokio::test]
-    async fn program_partial_line_selection_duplicate_content_ambiguous_without_ids() {
+    async fn playbook_partial_line_selection_duplicate_content_ambiguous_without_ids() {
         let md = "Some long text here\n\nAnother long text passage\n";
 
         // Two independent sessions/managers: a selection run always adds to
         // (rather than replaces) an already in-flight run for the same
         // session (spec 0042), so the two scenarios below must not share one.
-        let (mgr_a, _storage_a, id_a) = program_test_mgr(md).await;
-        let get_a = mgr_a.program_get(&id_a).await.expect("get");
+        let (mgr_a, _storage_a, id_a) = playbook_test_mgr(md).await;
+        let get_a = mgr_a.playbook_get(&id_a).await.expect("get");
         let first_ref = get_a
             .blocks
             .iter()
@@ -13332,7 +13299,7 @@ done
             .clone();
 
         let ambiguous = mgr_a
-            .start_program_run_with_dispatch_state(&id_a, "long text", true, None, false, None)
+            .start_playbook_run_with_dispatch_state(&id_a, "long text", true, None, false, None)
             .expect("selection run");
         assert!(
             !ambiguous.pending_block_refs.contains(&first_ref)
@@ -13342,9 +13309,9 @@ done
             ambiguous.pending_block_refs
         );
 
-        let (mgr_b, _storage_b, id_b) = program_test_mgr(md).await;
+        let (mgr_b, _storage_b, id_b) = playbook_test_mgr(md).await;
         let resolved = mgr_b
-            .start_program_run_with_dispatch_state(
+            .start_playbook_run_with_dispatch_state(
                 &id_b,
                 "long text",
                 true,
@@ -13361,16 +13328,16 @@ done
     }
 
     #[tokio::test]
-    async fn program_full_rerun_with_explicit_shimmer_includes_user_edited_block() {
+    async fn playbook_full_rerun_with_explicit_shimmer_includes_user_edited_block() {
         use construct_protocol::SessionState;
 
         let md = "# A\n\n# B\n";
         let edited = "# A\n\n# B edited\n";
-        let (mgr, storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None)
+        let (mgr, storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None)
             .expect("start full run");
-        mgr.note_session_state_for_program_run(&id, SessionState::Running);
-        let get = mgr.program_get(&id).await.expect("get");
+        mgr.note_session_state_for_playbook_run(&id, SessionState::Running);
+        let get = mgr.playbook_get(&id).await.expect("get");
         let block_ref = |needle: &str| {
             get.blocks
                 .iter()
@@ -13387,12 +13354,12 @@ done
             &id,
             "# A",
             vec![
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: a_ref.clone(),
                     shimmer: true,
                     tooltip: Some("Working A".into()),
                 },
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: b_ref,
                     shimmer: false,
                     tooltip: None,
@@ -13401,23 +13368,23 @@ done
         )
         .await;
         assert_eq!(
-            mgr.program_run_snapshot(&id)
+            mgr.playbook_run_snapshot(&id)
                 .expect("narrowed run")
                 .pending_block_refs,
             vec![a_ref.clone()]
         );
 
         storage
-            .update_program(
+            .update_playbook(
                 &id,
                 edited.to_string(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 None,
                 None,
                 None,
             )
-            .expect("save edited program");
-        let edited_get = mgr.program_get(&id).await.expect("edited get");
+            .expect("save edited playbook");
+        let edited_get = mgr.playbook_get(&id).await.expect("edited get");
         let edited_b_ref = edited_get
             .blocks
             .iter()
@@ -13427,7 +13394,7 @@ done
             .clone();
 
         let run = mgr
-            .start_program_run_with_dispatch_state(
+            .start_playbook_run_with_dispatch_state(
                 &id,
                 edited,
                 false,
@@ -13451,30 +13418,30 @@ done
     // An edit's shimmer declaration for an id that no longer exists is dropped
     // (fail closed), and other blocks are untouched.
     #[tokio::test]
-    async fn program_edit_shimmer_unknown_id_is_ignored() {
+    async fn playbook_edit_shimmer_unknown_id_is_ignored() {
         let md = "# A\n\n# B\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None)
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None)
             .expect("start run");
-        let a = construct_protocol::program_block_id("# A");
+        let a = construct_protocol::playbook_block_id("# A");
         let res = mgr
-            .program_edit(ProgramEditParams {
+            .playbook_edit(PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "# A".into(),
                     new_string: "# A".into(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: vec![
-                    construct_protocol::ProgramShimmerDecl {
+                    construct_protocol::PlaybookShimmerDecl {
                         id: "deadbeefdeadbeef".into(),
                         shimmer: false,
                         tooltip: None,
                     },
-                    construct_protocol::ProgramShimmerDecl {
+                    construct_protocol::PlaybookShimmerDecl {
                         id: a,
                         shimmer: false,
                         tooltip: None,
@@ -13501,17 +13468,17 @@ done
         mgr: &SessionManager,
         id: &str,
         anchor: &str,
-        decls: Vec<construct_protocol::ProgramShimmerDecl>,
-    ) -> ProgramUpdateResult {
-        mgr.program_edit(ProgramEditParams {
+        decls: Vec<construct_protocol::PlaybookShimmerDecl>,
+    ) -> PlaybookUpdateResult {
+        mgr.playbook_edit(PlaybookEditParams {
             session_id: id.to_string(),
-            edits: vec![construct_protocol::ProgramEdit {
+            edits: vec![construct_protocol::PlaybookEdit {
                 old_string: anchor.to_string(),
                 new_string: anchor.to_string(),
                 replace_all: false,
                 keep_pending: false,
             }],
-            actor: construct_protocol::ProgramUpdateActor::Agent,
+            actor: construct_protocol::PlaybookUpdateActor::Agent,
             note: None,
             shimmer: decls,
         })
@@ -13525,11 +13492,11 @@ done
     // re-declaration of the new id revives the shimmer. Before this fix the run
     // was reaped on the transient empty and the re-declare was a silent no-op.
     #[tokio::test]
-    async fn program_run_survives_transient_empty_and_revives() {
+    async fn playbook_run_survives_transient_empty_and_revives() {
         let md = "# Tasks\n\n* do the thing\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
-        let get = mgr.program_get(&id).await.expect("get");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
+        let get = mgr.playbook_get(&id).await.expect("get");
         let id_of = |n: &str| {
             get.blocks
                 .iter()
@@ -13544,12 +13511,12 @@ done
             &id,
             "# Tasks",
             vec![
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("# Tasks"),
                     shimmer: false,
                     tooltip: None,
                 },
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("do the thing"),
                     shimmer: true,
                     tooltip: Some("Doing the thing".into()),
@@ -13560,15 +13527,15 @@ done
 
         // Move/annotate the task WITHOUT keep_pending and WITHOUT re-declaring:
         // its old id drops and the pending set transiently empties.
-        mgr.program_edit(ProgramEditParams {
+        mgr.playbook_edit(PlaybookEditParams {
             session_id: id.clone(),
-            edits: vec![construct_protocol::ProgramEdit {
+            edits: vec![construct_protocol::PlaybookEdit {
                 old_string: "* do the thing".into(),
                 new_string: "* do the thing — @{session:sub1}".into(),
                 replace_all: false,
                 keep_pending: false,
             }],
-            actor: construct_protocol::ProgramUpdateActor::Agent,
+            actor: construct_protocol::PlaybookUpdateActor::Agent,
             note: None,
             shimmer: vec![],
         })
@@ -13576,7 +13543,7 @@ done
         .expect("move");
 
         // Nothing shimmers right now (pending emptied) ...
-        let mid = mgr.program_get(&id).await.expect("get mid");
+        let mid = mgr.playbook_get(&id).await.expect("get mid");
         assert!(
             mid.blocks.iter().all(|b| !b.shimmer),
             "transient empty: nothing pending"
@@ -13593,7 +13560,7 @@ done
             &mgr,
             &id,
             "# Tasks",
-            vec![construct_protocol::ProgramShimmerDecl {
+            vec![construct_protocol::PlaybookShimmerDecl {
                 id: new_id,
                 shimmer: true,
                 tooltip: Some("Reviving moved task".into()),
@@ -13614,11 +13581,11 @@ done
     // in the SAME call, so moving/annotating a still-pending block keeps it
     // shimmering atomically — the pending set never transiently empties.
     #[tokio::test]
-    async fn program_edit_keep_pending_keeps_moved_block_shimmering() {
+    async fn playbook_edit_keep_pending_keeps_moved_block_shimmering() {
         let md = "# Tasks\n\n* do the thing\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
-        let get = mgr.program_get(&id).await.expect("get");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
+        let get = mgr.playbook_get(&id).await.expect("get");
         let id_of = |n: &str| {
             get.blocks
                 .iter()
@@ -13633,12 +13600,12 @@ done
             &id,
             "# Tasks",
             vec![
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("# Tasks"),
                     shimmer: false,
                     tooltip: None,
                 },
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("do the thing"),
                     shimmer: true,
                     tooltip: Some("Doing the thing".into()),
@@ -13650,15 +13617,15 @@ done
         // Move the task WITH keep_pending — its id changes but it stays pending
         // in one call (no transient empty, no need to know the new id).
         let res = mgr
-            .program_edit(ProgramEditParams {
+            .playbook_edit(PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "* do the thing".into(),
                     new_string: "* do the thing — @{session:sub1}".into(),
                     replace_all: false,
                     keep_pending: true,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: vec![],
             })
@@ -13696,11 +13663,11 @@ done
     // unchanged heading. This is the canonical "move task into In progress"
     // orchestration step.
     #[tokio::test]
-    async fn program_edit_keep_pending_lights_inserted_item_not_anchor_heading() {
+    async fn playbook_edit_keep_pending_lights_inserted_item_not_anchor_heading() {
         let md = "# Todo\n\n* ship X\n\n# In progress\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
-        let g = mgr.program_get(&id).await.expect("get");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
+        let g = mgr.playbook_get(&id).await.expect("get");
         let id_of = |n: &str| {
             g.blocks
                 .iter()
@@ -13710,28 +13677,28 @@ done
                 .clone()
         };
         // Planning pass: settle headings, keep the todo task pending.
-        mgr.program_edit(ProgramEditParams {
+        mgr.playbook_edit(PlaybookEditParams {
             session_id: id.clone(),
-            edits: vec![construct_protocol::ProgramEdit {
+            edits: vec![construct_protocol::PlaybookEdit {
                 old_string: "# Todo".into(),
                 new_string: "# Todo".into(),
                 replace_all: false,
                 keep_pending: false,
             }],
-            actor: construct_protocol::ProgramUpdateActor::Agent,
+            actor: construct_protocol::PlaybookUpdateActor::Agent,
             note: None,
             shimmer: vec![
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("# Todo"),
                     shimmer: false,
                     tooltip: Some("Task list settled".into()),
                 },
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("# In progress"),
                     shimmer: false,
                     tooltip: None,
                 },
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("ship X"),
                     shimmer: true,
                     tooltip: Some("Shipping X".into()),
@@ -13742,30 +13709,30 @@ done
         .expect("planning");
         // Remove from Todo, then insert under the In progress heading via a
         // heading-anchored edit whose new_string spans heading + new item.
-        mgr.program_edit(ProgramEditParams {
+        mgr.playbook_edit(PlaybookEditParams {
             session_id: id.clone(),
-            edits: vec![construct_protocol::ProgramEdit {
+            edits: vec![construct_protocol::PlaybookEdit {
                 old_string: "* ship X\n".into(),
                 new_string: "".into(),
                 replace_all: false,
                 keep_pending: false,
             }],
-            actor: construct_protocol::ProgramUpdateActor::Agent,
+            actor: construct_protocol::PlaybookUpdateActor::Agent,
             note: None,
             shimmer: vec![],
         })
         .await
         .expect("remove from todo");
         let res = mgr
-            .program_edit(ProgramEditParams {
+            .playbook_edit(PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "# In progress\n".into(),
                     new_string: "# In progress\n\n* ship X — @{session:s9}\n".into(),
                     replace_all: false,
                     keep_pending: true,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: vec![],
             })
@@ -13792,12 +13759,12 @@ done
     // missing clip_id after an agent moved a pending task into In progress; that
     // should not settle the task's shimmer by changing only clip instance metadata.
     #[tokio::test]
-    async fn program_update_adding_smart_clip_id_preserves_pending_block() {
+    async fn playbook_update_adding_smart_clip_id_preserves_pending_block() {
         let md = "# In progress\n\n* task — @{session:s1}\n";
         let normalized = "# In progress\n\n* task — @{session:s1 clip_id=clip_4}\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
-        let g = mgr.program_get(&id).await.expect("get");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
+        let g = mgr.playbook_get(&id).await.expect("get");
         let before_task = g
             .blocks
             .iter()
@@ -13812,23 +13779,23 @@ done
                 .id
                 .clone()
         };
-        mgr.program_edit(ProgramEditParams {
+        mgr.playbook_edit(PlaybookEditParams {
             session_id: id.clone(),
-            edits: vec![construct_protocol::ProgramEdit {
+            edits: vec![construct_protocol::PlaybookEdit {
                 old_string: "# In progress".into(),
                 new_string: "# In progress".into(),
                 replace_all: false,
                 keep_pending: false,
             }],
-            actor: construct_protocol::ProgramUpdateActor::Agent,
+            actor: construct_protocol::PlaybookUpdateActor::Agent,
             note: None,
             shimmer: vec![
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("# In progress"),
                     shimmer: false,
                     tooltip: None,
                 },
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("task"),
                     shimmer: true,
                     tooltip: Some("Still working".into()),
@@ -13839,11 +13806,11 @@ done
         .expect("planning");
 
         let res = mgr
-            .program_update(ProgramUpdateParams {
+            .playbook_update(PlaybookUpdateParams {
                 session_id: id.clone(),
                 markdown: normalized.to_string(),
                 base_version: None,
-                actor: construct_protocol::ProgramUpdateActor::Human,
+                actor: construct_protocol::PlaybookUpdateActor::Human,
                 template_id: None,
                 note: Some("Normalize smart clip ids".into()),
                 shimmer: None,
@@ -13871,11 +13838,11 @@ done
     // address block instances by daemon-owned refs. Settling one duplicate must
     // not settle or re-light its twin.
     #[tokio::test]
-    async fn program_shimmer_stable_refs_distinguish_duplicate_blocks() {
+    async fn playbook_shimmer_stable_refs_distinguish_duplicate_blocks() {
         let md = "* duplicate\n* duplicate\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
-        let g = mgr.program_get(&id).await.expect("get");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
+        let g = mgr.playbook_get(&id).await.expect("get");
         assert_eq!(g.blocks.len(), 2);
         assert_eq!(g.blocks[0].content_id, g.blocks[1].content_id);
         assert_ne!(g.blocks[0].id, g.blocks[1].id);
@@ -13884,17 +13851,17 @@ done
         let first_ref = g.blocks[0].id.clone();
         let second_ref = g.blocks[1].id.clone();
         let res = mgr
-            .program_edit(ProgramEditParams {
+            .playbook_edit(PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: md.into(),
                     new_string: md.into(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
-                shimmer: vec![construct_protocol::ProgramShimmerDecl {
+                shimmer: vec![construct_protocol::PlaybookShimmerDecl {
                     id: first_ref,
                     shimmer: false,
                     tooltip: None,
@@ -13914,18 +13881,18 @@ done
     // A human semantic edit changes the block's content epoch. The old pending
     // ref no longer matches the new meaning, so stale shimmer drops fail-closed.
     #[tokio::test]
-    async fn program_shimmer_semantic_edit_changes_epoch_and_drops_pending() {
+    async fn playbook_shimmer_semantic_edit_changes_epoch_and_drops_pending() {
         let md = "* task\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
-        let before = mgr.program_get(&id).await.expect("get").blocks[0].clone();
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
+        let before = mgr.playbook_get(&id).await.expect("get").blocks[0].clone();
 
         let res = mgr
-            .program_update(ProgramUpdateParams {
+            .playbook_update(PlaybookUpdateParams {
                 session_id: id.clone(),
                 markdown: "* task changed\n".into(),
                 base_version: None,
-                actor: construct_protocol::ProgramUpdateActor::Human,
+                actor: construct_protocol::PlaybookUpdateActor::Human,
                 template_id: None,
                 note: None,
                 shimmer: None,
@@ -13951,22 +13918,22 @@ done
     // keep_pending is the explicit opt-in for semantic edits that should remain
     // in flight: the edit creates a new epoch and atomically re-adds that new ref.
     #[tokio::test]
-    async fn program_edit_keep_pending_relights_new_epoch() {
+    async fn playbook_edit_keep_pending_relights_new_epoch() {
         let md = "* task\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
-        let before = mgr.program_get(&id).await.expect("get").blocks[0].clone();
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
+        let before = mgr.playbook_get(&id).await.expect("get").blocks[0].clone();
 
         let res = mgr
-            .program_edit(ProgramEditParams {
+            .playbook_edit(PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "* task".into(),
                     new_string: "* task @{session:s1}".into(),
                     replace_all: false,
                     keep_pending: true,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: vec![],
             })
@@ -13983,13 +13950,13 @@ done
     // Moving unchanged text is not a semantic change: the block ref follows the
     // block to its new location and keeps shimmer without keep_pending.
     #[tokio::test]
-    async fn program_shimmer_ref_follows_unchanged_moved_block() {
+    async fn playbook_shimmer_ref_follows_unchanged_moved_block() {
         let md = "# Todo\n\n* task\n\n# Doing\n";
         let moved = "# Todo\n\n# Doing\n\n* task\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
         let before = mgr
-            .program_get(&id)
+            .playbook_get(&id)
             .await
             .expect("get")
             .blocks
@@ -13998,30 +13965,30 @@ done
             .unwrap();
 
         let res = mgr
-            .program_edit(ProgramEditParams {
+            .playbook_edit(PlaybookEditParams {
                 session_id: id.clone(),
                 edits: vec![
-                    construct_protocol::ProgramEdit {
+                    construct_protocol::PlaybookEdit {
                         old_string: "* task\n\n".into(),
                         new_string: "".into(),
                         replace_all: false,
                         keep_pending: false,
                     },
-                    construct_protocol::ProgramEdit {
+                    construct_protocol::PlaybookEdit {
                         old_string: "# Doing\n".into(),
                         new_string: "# Doing\n\n* task\n".into(),
                         replace_all: false,
                         keep_pending: false,
                     },
                 ],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
                 shimmer: vec![],
             })
             .await
             .expect("move unchanged block");
 
-        assert_eq!(res.program.markdown, moved);
+        assert_eq!(res.playbook.markdown, moved);
         let after = res.blocks.iter().find(|b| b.text.contains("task")).unwrap();
         assert_eq!(
             after.id, before.id,
@@ -14032,7 +13999,7 @@ done
         assert_eq!(after.start_line, 4);
     }
 
-    // Regression: a human co-edit save (program_update with no shimmer decl)
+    // Regression: a human co-edit save (playbook_update with no shimmer decl)
     // that merely *inserts* a brand-new block ahead of untouched siblings must
     // not disturb those siblings' identity. Block-identity reconciliation used
     // to fall back to raw positional-index alignment for any block it could
@@ -14040,28 +14007,28 @@ done
     // every later block being treated as "semantically edited" — silently
     // dropping their shimmer even though their text never changed.
     #[tokio::test]
-    async fn program_human_insert_before_siblings_preserves_their_shimmer() {
+    async fn playbook_human_insert_before_siblings_preserves_their_shimmer() {
         let md = "* alpha\n* beta\n* gamma\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
-        let g = mgr.program_get(&id).await.expect("get");
-        let id_of = |blocks: &[construct_protocol::ProgramBlockView], n: &str| {
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
+        let g = mgr.playbook_get(&id).await.expect("get");
+        let id_of = |blocks: &[construct_protocol::PlaybookBlockView], n: &str| {
             blocks.iter().find(|b| b.text.contains(n)).unwrap().clone()
         };
         // Settle "alpha" (as a planning pass / prior turn would) so only beta
         // and gamma are still pending — mirroring a mid-run document where
         // some work already settled before the human edits the document.
-        mgr.program_edit(ProgramEditParams {
+        mgr.playbook_edit(PlaybookEditParams {
             session_id: id.clone(),
-            edits: vec![construct_protocol::ProgramEdit {
+            edits: vec![construct_protocol::PlaybookEdit {
                 old_string: "* alpha".into(),
                 new_string: "* alpha".into(),
                 replace_all: false,
                 keep_pending: false,
             }],
-            actor: construct_protocol::ProgramUpdateActor::Agent,
+            actor: construct_protocol::PlaybookUpdateActor::Agent,
             note: None,
-            shimmer: vec![construct_protocol::ProgramShimmerDecl {
+            shimmer: vec![construct_protocol::PlaybookShimmerDecl {
                 id: id_of(&g.blocks, "alpha").id,
                 shimmer: false,
                 tooltip: None,
@@ -14076,11 +14043,11 @@ done
         // of alpha/beta/gamma changes.
         let edited = "* zero\n* alpha\n* beta\n* gamma\n";
         let res = mgr
-            .program_update(ProgramUpdateParams {
+            .playbook_update(PlaybookUpdateParams {
                 session_id: id.clone(),
                 markdown: edited.to_string(),
                 base_version: None,
-                actor: construct_protocol::ProgramUpdateActor::Human,
+                actor: construct_protocol::PlaybookUpdateActor::Human,
                 template_id: None,
                 note: None,
                 shimmer: None,
@@ -14117,11 +14084,11 @@ done
     // edited block — an untouched block sitting between the insert and the
     // edit must keep its ref and shimmer.
     #[tokio::test]
-    async fn program_human_insert_and_edit_scopes_epoch_bump_to_edited_block() {
+    async fn playbook_human_insert_and_edit_scopes_epoch_bump_to_edited_block() {
         let md = "* alpha\n* beta\n* gamma\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
-        let g = mgr.program_get(&id).await.expect("get");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
+        let g = mgr.playbook_get(&id).await.expect("get");
         let before_beta = g
             .blocks
             .iter()
@@ -14133,11 +14100,11 @@ done
         // "beta" sits untouched between the insert and the edit.
         let edited = "* zero\n* alpha\n* beta\n* gamma2\n";
         let res = mgr
-            .program_update(ProgramUpdateParams {
+            .playbook_update(PlaybookUpdateParams {
                 session_id: id.clone(),
                 markdown: edited.to_string(),
                 base_version: None,
-                actor: construct_protocol::ProgramUpdateActor::Human,
+                actor: construct_protocol::PlaybookUpdateActor::Human,
                 template_id: None,
                 note: None,
                 shimmer: None,
@@ -14171,11 +14138,11 @@ done
     // lines between them) is many blocks, so one item can settle while its
     // siblings keep shimmering — and the heading is its own block too.
     #[tokio::test]
-    async fn program_consecutive_items_shimmer_independently() {
+    async fn playbook_consecutive_items_shimmer_independently() {
         let md = "# In progress\n* task A\n* task B\n* task C\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
-        let g = mgr.program_get(&id).await.expect("get");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
+        let g = mgr.playbook_get(&id).await.expect("get");
         // Each line is its own block: heading + three items.
         assert_eq!(g.blocks.len(), 4, "section splits into heading + 3 items");
         let id_of = |n: &str| {
@@ -14187,33 +14154,33 @@ done
                 .clone()
         };
         // Planning pass: settle the heading, keep all three items pending.
-        mgr.program_edit(ProgramEditParams {
+        mgr.playbook_edit(PlaybookEditParams {
             session_id: id.clone(),
-            edits: vec![construct_protocol::ProgramEdit {
+            edits: vec![construct_protocol::PlaybookEdit {
                 old_string: "# In progress".into(),
                 new_string: "# In progress".into(),
                 replace_all: false,
                 keep_pending: false,
             }],
-            actor: construct_protocol::ProgramUpdateActor::Agent,
+            actor: construct_protocol::PlaybookUpdateActor::Agent,
             note: None,
             shimmer: vec![
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("# In progress"),
                     shimmer: false,
                     tooltip: None,
                 },
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("task A"),
                     shimmer: true,
                     tooltip: None,
                 },
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("task B"),
                     shimmer: true,
                     tooltip: None,
                 },
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: id_of("task C"),
                     shimmer: true,
                     tooltip: None,
@@ -14224,17 +14191,17 @@ done
         .expect("planning");
         // Settle ONLY task B (its work finished) — A and C must keep shimmering.
         let res = mgr
-            .program_edit(ProgramEditParams {
+            .playbook_edit(PlaybookEditParams {
                 session_id: id.clone(),
-                edits: vec![construct_protocol::ProgramEdit {
+                edits: vec![construct_protocol::PlaybookEdit {
                     old_string: "# In progress".into(),
                     new_string: "# In progress".into(),
                     replace_all: false,
                     keep_pending: false,
                 }],
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: None,
-                shimmer: vec![construct_protocol::ProgramShimmerDecl {
+                shimmer: vec![construct_protocol::PlaybookShimmerDecl {
                     id: id_of("task B"),
                     shimmer: false,
                     tooltip: None,
@@ -14259,24 +14226,24 @@ done
     // empty record does not linger to the backstop — and a later declaration no
     // longer revives it (contrast with the mid-turn survival above).
     #[tokio::test]
-    async fn program_run_empty_clears_when_owning_session_idle() {
+    async fn playbook_run_empty_clears_when_owning_session_idle() {
         use construct_protocol::SessionState;
         let md = "# A\n\n# B\n";
-        let (mgr, _storage, id) = program_test_mgr(md).await;
-        mgr.start_program_run(&id, md, false, None).expect("start");
-        mgr.note_session_state_for_program_run(&id, SessionState::Running);
-        let b = construct_protocol::program_block_id("# B");
+        let (mgr, _storage, id) = playbook_test_mgr(md).await;
+        mgr.start_playbook_run(&id, md, false, None).expect("start");
+        mgr.note_session_state_for_playbook_run(&id, SessionState::Running);
+        let b = construct_protocol::playbook_block_id("# B");
         // Settle every block → pending empties; the record survives mid-turn.
-        mgr.narrow_program_run(
+        mgr.narrow_playbook_run(
             &id,
             md,
             &[
-                construct_protocol::ProgramShimmerDecl {
-                    id: construct_protocol::program_block_id("# A"),
+                construct_protocol::PlaybookShimmerDecl {
+                    id: construct_protocol::playbook_block_id("# A"),
                     shimmer: false,
                     tooltip: None,
                 },
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id: b.clone(),
                     shimmer: false,
                     tooltip: None,
@@ -14284,23 +14251,23 @@ done
             ],
         );
         assert!(
-            mgr.program_run_snapshot(&id).is_none(),
+            mgr.playbook_run_snapshot(&id).is_none(),
             "empty pending shows no shimmer"
         );
         // Owning session goes idle with nothing pending → the empty run is reaped.
-        mgr.note_session_state_for_program_run(&id, SessionState::AwaitingInput);
+        mgr.note_session_state_for_playbook_run(&id, SessionState::AwaitingInput);
         // A re-declaration can no longer revive it: the record is gone.
-        mgr.narrow_program_run(
+        mgr.narrow_playbook_run(
             &id,
             md,
-            &[construct_protocol::ProgramShimmerDecl {
+            &[construct_protocol::PlaybookShimmerDecl {
                 id: b,
                 shimmer: true,
                 tooltip: None,
             }],
         );
         assert!(
-            mgr.program_run_snapshot(&id).is_none(),
+            mgr.playbook_run_snapshot(&id).is_none(),
             "reaped on idle; a re-declaration does not revive a cleared run"
         );
     }
@@ -14310,38 +14277,38 @@ done
     // the agent delegated work and its own turn ended while that work is still
     // pending. It clears only when its pending set empties (spec 0042).
     #[tokio::test]
-    async fn program_run_managed_survives_idle_and_clears_on_settle() {
+    async fn playbook_run_managed_survives_idle_and_clears_on_settle() {
         use construct_protocol::SessionState;
         let body = "# Alpha\n\n# Beta\n";
-        let (mgr, _storage, id) = program_test_mgr(body).await;
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
 
         // Fresh run: unmanaged, both blocks pending.
         let run = mgr
-            .start_program_run(&id, body, false, None)
-            .expect("start_program_run");
+            .start_playbook_run(&id, body, false, None)
+            .expect("start_playbook_run");
         assert!(!run.agent_managed, "a fresh run is unmanaged");
         assert_eq!(run.pending_block_refs.len(), 2);
 
         // Owning session is seen running.
-        mgr.note_session_state_for_program_run(&id, SessionState::Running);
+        mgr.note_session_state_for_playbook_run(&id, SessionState::Running);
         assert!(
-            mgr.program_run_snapshot(&id)
+            mgr.playbook_run_snapshot(&id)
                 .expect("run present")
                 .seen_running
         );
 
         // Planning-pass-style declaration narrows the run (text unchanged, so
         // both blocks stay pending) and marks it agent-managed.
-        mgr.narrow_program_run(&id, body, &[]);
-        let run = mgr.program_run_snapshot(&id).expect("managed run present");
+        mgr.narrow_playbook_run(&id, body, &[]);
+        let run = mgr.playbook_run_snapshot(&id).expect("managed run present");
         assert!(run.agent_managed, "an in-run declaration marks it managed");
         assert_eq!(run.pending_block_ids.len(), 2);
 
         // The agent delegates and its own turn ends → AwaitingInput. The
         // managed run must NOT clear: delegated work is still pending.
-        mgr.note_session_state_for_program_run(&id, SessionState::AwaitingInput);
+        mgr.note_session_state_for_playbook_run(&id, SessionState::AwaitingInput);
         assert_eq!(
-            mgr.program_run_snapshot(&id)
+            mgr.playbook_run_snapshot(&id)
                 .expect("managed run survives the owning session going idle")
                 .pending_block_ids
                 .len(),
@@ -14349,17 +14316,17 @@ done
         );
 
         // Repeated wake/idle cycles (e.g. a /loop monitor) keep it alive.
-        mgr.note_session_state_for_program_run(&id, SessionState::Running);
-        mgr.note_session_state_for_program_run(&id, SessionState::AwaitingInput);
-        assert!(mgr.program_run_snapshot(&id).is_some(), "still pending");
+        mgr.note_session_state_for_playbook_run(&id, SessionState::Running);
+        mgr.note_session_state_for_playbook_run(&id, SessionState::AwaitingInput);
+        assert!(mgr.playbook_run_snapshot(&id).is_some(), "still pending");
 
         // Settle one block (its text changes, dropping its signature); the
         // other stays pending and the run lives on.
-        mgr.program_update(ProgramUpdateParams {
+        mgr.playbook_update(PlaybookUpdateParams {
             session_id: id.clone(),
             markdown: "# Alpha done\n\n# Beta\n".into(),
             base_version: None,
-            actor: construct_protocol::ProgramUpdateActor::Agent,
+            actor: construct_protocol::PlaybookUpdateActor::Agent,
             template_id: None,
             note: None,
             shimmer: None,
@@ -14368,18 +14335,18 @@ done
         .await
         .expect("settle alpha");
         assert_eq!(
-            mgr.program_run_snapshot(&id)
+            mgr.playbook_run_snapshot(&id)
                 .expect("one block still pending")
                 .pending_block_ids,
-            vec![construct_protocol::program_block_id("# Beta")]
+            vec![construct_protocol::playbook_block_id("# Beta")]
         );
 
         // Settling the last block empties the pending set → the run clears.
-        mgr.program_update(ProgramUpdateParams {
+        mgr.playbook_update(PlaybookUpdateParams {
             session_id: id.clone(),
             markdown: "# Alpha done\n\n# Beta done\n".into(),
             base_version: None,
-            actor: construct_protocol::ProgramUpdateActor::Agent,
+            actor: construct_protocol::PlaybookUpdateActor::Agent,
             template_id: None,
             note: None,
             shimmer: None,
@@ -14388,78 +14355,78 @@ done
         .await
         .expect("settle beta");
         assert!(
-            mgr.program_run_snapshot(&id).is_none(),
+            mgr.playbook_run_snapshot(&id).is_none(),
             "an empty pending set clears the run"
         );
     }
 
     #[tokio::test]
-    async fn program_run_system_status_tracks_dispatch_and_output_state() {
+    async fn playbook_run_system_status_tracks_dispatch_and_output_state() {
         use construct_protocol::{
-            SessionState, PROGRAM_SHIMMER_STATUS_AGENT_WORKING, PROGRAM_SHIMMER_STATUS_DELIVERED,
-            PROGRAM_SHIMMER_STATUS_QUEUED,
+            SessionState, PLAYBOOK_SHIMMER_STATUS_AGENT_WORKING, PLAYBOOK_SHIMMER_STATUS_DELIVERED,
+            PLAYBOOK_SHIMMER_STATUS_QUEUED,
         };
         let body = "# Alpha\n\n# Beta\n";
-        let (mgr, _storage, id) = program_test_mgr(body).await;
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
 
         let run = mgr
-            .start_program_run(&id, body, false, None)
+            .start_playbook_run(&id, body, false, None)
             .expect("start idle-dispatched run");
         assert_eq!(
             run.system_status.as_deref(),
-            Some(PROGRAM_SHIMMER_STATUS_DELIVERED)
+            Some(PLAYBOOK_SHIMMER_STATUS_DELIVERED)
         );
 
         let run = mgr
-            .start_program_run_with_dispatch_state(&id, body, false, None, true, None)
+            .start_playbook_run_with_dispatch_state(&id, body, false, None, true, None)
             .expect("start queued run");
         assert_eq!(
             run.system_status.as_deref(),
-            Some(PROGRAM_SHIMMER_STATUS_QUEUED)
+            Some(PLAYBOOK_SHIMMER_STATUS_QUEUED)
         );
 
-        mgr.note_session_state_for_program_run(&id, SessionState::Running);
+        mgr.note_session_state_for_playbook_run(&id, SessionState::Running);
         assert_eq!(
-            mgr.program_run_snapshot(&id)
+            mgr.playbook_run_snapshot(&id)
                 .expect("running snapshot")
                 .system_status
                 .as_deref(),
-            Some(PROGRAM_SHIMMER_STATUS_DELIVERED),
-            "once this program turn starts it is no longer queued"
+            Some(PLAYBOOK_SHIMMER_STATUS_DELIVERED),
+            "once this playbook turn starts it is no longer queued"
         );
 
-        mgr.mark_program_run_output_seen(&id);
+        mgr.mark_playbook_run_output_seen(&id);
         assert_eq!(
-            mgr.program_run_snapshot(&id)
+            mgr.playbook_run_snapshot(&id)
                 .expect("output snapshot")
                 .system_status
                 .as_deref(),
-            Some(PROGRAM_SHIMMER_STATUS_AGENT_WORKING)
+            Some(PLAYBOOK_SHIMMER_STATUS_AGENT_WORKING)
         );
     }
 
     // A terminal owning-session state clears even a managed run with pending
     // blocks: the agent is gone and can never settle them (spec 0042).
     #[tokio::test]
-    async fn program_run_managed_clears_on_terminal_state() {
+    async fn playbook_run_managed_clears_on_terminal_state() {
         use construct_protocol::SessionState;
         let body = "# Alpha\n\n# Beta\n";
-        let (mgr, _storage, id) = program_test_mgr(body).await;
-        mgr.start_program_run(&id, body, false, None)
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        mgr.start_playbook_run(&id, body, false, None)
             .expect("start");
-        mgr.note_session_state_for_program_run(&id, SessionState::Running);
-        mgr.narrow_program_run(&id, body, &[]);
+        mgr.note_session_state_for_playbook_run(&id, SessionState::Running);
+        mgr.narrow_playbook_run(&id, body, &[]);
         assert!(
-            mgr.program_run_snapshot(&id)
+            mgr.playbook_run_snapshot(&id)
                 .expect("managed")
                 .agent_managed,
             "run is managed with pending blocks"
         );
 
         // Errored is terminal → clear despite still-pending blocks.
-        mgr.note_session_state_for_program_run(&id, SessionState::Errored);
+        mgr.note_session_state_for_playbook_run(&id, SessionState::Errored);
         assert!(
-            mgr.program_run_snapshot(&id).is_none(),
+            mgr.playbook_run_snapshot(&id).is_none(),
             "a terminal state clears a managed run"
         );
     }

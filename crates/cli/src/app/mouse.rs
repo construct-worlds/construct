@@ -11,13 +11,13 @@ impl App {
             return Some("↔");
         }
 
-        // A program-toggle glyph on a horizontal split divider is clickable;
+        // A playbook-toggle glyph on a horizontal split divider is clickable;
         // mouse-down deliberately lets it through instead of starting a drag.
-        let on_pane_program_toggle = self.layout.main_window_areas.iter().any(|pane| {
-            let (x_start, x_end, y) = crate::ui::view_program_toggle_button_range(pane.area);
+        let on_pane_playbook_toggle = self.layout.main_window_areas.iter().any(|pane| {
+            let (x_start, x_end, y) = crate::ui::view_playbook_toggle_button_range(pane.area);
             row == y && col >= x_start && col < x_end
         });
-        if !on_pane_program_toggle {
+        if !on_pane_playbook_toggle {
             if let Some(hit) = self
                 .layout
                 .main_window_dividers
@@ -36,13 +36,13 @@ impl App {
             || self.is_on_matrix_rain_title_bar(col, row)
             || self
                 .layout
-                .program_resize_hit
+                .playbook_resize_hit
                 .is_some_and(|hit| Self::rect_contains(hit, col, row))
             // Resize grab zone of an expanded inline attachment image
             // (spec 0099): the persistent handle row plus the row below.
             || self
                 .layout
-                .program_attachment_resize_zones
+                .playbook_attachment_resize_zones
                 .iter()
                 .any(|(r, _, _)| Self::rect_contains(*r, col, row)))
         .then_some("↕")

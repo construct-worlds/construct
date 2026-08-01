@@ -11,7 +11,7 @@ The web UI's baseline design language follows the conventions users already
 know from mainstream AI chat apps:
 
 - Sans-serif system UI font for chrome and chat; monospace is reserved for
-  terminal output, code, tool call cards, and the program editor.
+  terminal output, code, tool call cards, and the playbook editor.
 - Chat transcript rendered as a centered reading column: user messages as
   right-aligned rounded bubbles, assistant messages as plain text on the page
   background (no bubble), tool calls as rounded bordered cards, and no

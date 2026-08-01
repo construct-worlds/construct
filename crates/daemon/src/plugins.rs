@@ -1,6 +1,6 @@
 //! Plugin system (spec 0152): manifest parsing, the installed-plugin
 //! registry, and the merge of plugin contributions into the daemon's
-//! existing extension seams (adapters, program verbs, program templates,
+//! existing extension seams (adapters, playbook verbs, playbook templates,
 //! injected MCP servers).
 //!
 //! A plugin is a directory containing a `construct-plugin.toml` manifest.
@@ -44,10 +44,10 @@ pub struct PluginManifest {
     /// AHP harnesses this plugin contributes.
     #[serde(default)]
     pub adapters: Vec<PluginAdapterDecl>,
-    /// Directory of program-verb definition files, relative to the root.
+    /// Directory of playbook-verb definition files, relative to the root.
     #[serde(default)]
     pub verbs: Option<PluginDirSection>,
-    /// Directory of program-template files, relative to the root.
+    /// Directory of playbook-template files, relative to the root.
     #[serde(default)]
     pub templates: Option<PluginDirSection>,
     /// MCP tool servers injected into harness sessions alongside the
@@ -793,9 +793,9 @@ impl PluginRuntime {
         extra_env: HashMap<String, String>,
         label: String,
     ) -> Result<()> {
-        let (program, args) = command.split_first().context("empty command")?;
-        let program = plugin.resolve(program);
-        let mut cmd = tokio::process::Command::new(&program);
+        let (playbook, args) = command.split_first().context("empty command")?;
+        let playbook = plugin.resolve(playbook);
+        let mut cmd = tokio::process::Command::new(&playbook);
         cmd.args(args)
             .current_dir(&plugin.root)
             .envs(plugin.env(&self.paths))
@@ -813,7 +813,7 @@ impl PluginRuntime {
         }
         let mut child = cmd
             .spawn()
-            .with_context(|| format!("spawn `{}`", program.display()))?;
+            .with_context(|| format!("spawn `{}`", playbook.display()))?;
         let plugin_id = plugin.id.clone();
         tokio::spawn(async move {
             let stderr = child.stderr.take();
@@ -934,12 +934,12 @@ pub fn finalize_checkout(
 /// stdio so the user sees compiler output. Any failing step aborts.
 pub fn run_build_steps(root: &Path, manifest: &PluginManifest) -> Result<()> {
     for step in &manifest.build {
-        let (program, args) = step
+        let (playbook, args) = step
             .command
             .split_first()
             .context("build step with empty command")?;
         println!("[{}] build: {}", manifest.plugin.id, step.command.join(" "));
-        let status = std::process::Command::new(program)
+        let status = std::process::Command::new(playbook)
             .args(args)
             .current_dir(root)
             .status()

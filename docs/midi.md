@@ -112,7 +112,7 @@ MIDI channel 10. Its third encoder (CC 2) sends Up/Down, and its fourth encoder
 uses the first value received from each encoder only to establish its position.
 Later changes produce one action per MIDI message; increasing values move or
 scroll down and decreasing values move or scroll up. The scroll encoder follows
-TUI focus: it scrolls the session list, focused lineage diagram, program
+TUI focus: it scrolls the session list, focused lineage diagram, playbook
 document, dynamic panel, help, chat, or terminal history rather than always
 targeting the session pane. Crossing between 127 and 0 preserves the physical
 direction.

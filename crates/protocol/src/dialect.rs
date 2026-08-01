@@ -3,18 +3,18 @@
 //! One registry describes every construct Markdown extension — display
 //! blocks, typed references (smart clips), and action links. The registry is
 //! the single source of truth for both agent-facing guidance (agent context,
-//! program-run payloads) and client rendering: an extension is defined once
+//! playbook-run payloads) and client rendering: an extension is defined once
 //! and is available on every session Markdown surface unless its entry
 //! records an explicit restriction.
 
 use serde::{Deserialize, Serialize};
 
-/// The co-edited, runnable program document.
-pub const SURFACE_PROGRAM: &str = "program";
+/// The co-edited, runnable playbook document.
+pub const SURFACE_PLAYBOOK: &str = "playbook";
 /// Agent-authored session widget panels.
 pub const SURFACE_WIDGET: &str = "widget";
 
-const ALL_SURFACES: &[&str] = &[SURFACE_PROGRAM, SURFACE_WIDGET];
+const ALL_SURFACES: &[&str] = &[SURFACE_PLAYBOOK, SURFACE_WIDGET];
 
 /// Extension renders content (timelines, tables).
 pub const KIND_DISPLAY: &str = "display";
@@ -75,7 +75,7 @@ impl From<&MarkdownExtensionDescriptor> for MarkdownExtension {
 }
 
 /// Every construct Markdown extension. Adding an entry here updates agent
-/// guidance (agent context and program-run payloads) and the surface gating
+/// guidance (agent context and playbook-run payloads) and the surface gating
 /// clients consult; client renderers implement the entry once and reuse it on
 /// every listed surface.
 pub const CONSTRUCT_MARKDOWN_EXTENSIONS: &[MarkdownExtensionDescriptor] = &[
@@ -101,8 +101,8 @@ pub const CONSTRUCT_MARKDOWN_EXTENSIONS: &[MarkdownExtensionDescriptor] = &[
         name: "action-link",
         kind: KIND_ACTION,
         syntax: "[Run checks](agentd:action/run-checks?key=r&close=1)",
-        description: "An inline Markdown link using the `agentd:action/<action-id>` scheme. Activating it delivers `OBSERVATION: ui.action <action-id>` to the owning session as user intent, still subject to normal approval and safety policy. `?key=<key>` adds a keyboard shortcut (active only when explicit); `close=1` dismisses the surface after activation. Only the user activates action links: running a program never triggers the links it contains.",
-        use_when: "Use for compact steering affordances — run, pause, approve, open — in widget or program Markdown.",
+        description: "An inline Markdown link using the `agentd:action/<action-id>` scheme. Activating it delivers `OBSERVATION: ui.action <action-id>` to the owning session as user intent, still subject to normal approval and safety policy. `?key=<key>` adds a keyboard shortcut (active only when explicit); `close=1` dismisses the surface after activation. Only the user activates action links: running a playbook never triggers the links it contains.",
+        use_when: "Use for compact steering affordances — run, pause, approve, open — in widget or playbook Markdown.",
         surfaces: ALL_SURFACES,
         restriction: None,
     },
@@ -111,7 +111,7 @@ pub const CONSTRUCT_MARKDOWN_EXTENSIONS: &[MarkdownExtensionDescriptor] = &[
         kind: KIND_REFERENCE,
         syntax: "@{session:<session_id> ...}",
         description: "References an existing session; inspect, resume, focus, or summarize that session when relevant. Clients render it as a live chip showing the session's current state.",
-        use_when: "Use to tie a line of Markdown to the session doing that work, in a program or a widget.",
+        use_when: "Use to tie a line of Markdown to the session doing that work, in a playbook or a widget.",
         surfaces: ALL_SURFACES,
         restriction: None,
     },
@@ -119,7 +119,7 @@ pub const CONSTRUCT_MARKDOWN_EXTENSIONS: &[MarkdownExtensionDescriptor] = &[
         name: "harness",
         kind: KIND_REFERENCE,
         syntax: "@{harness:<name> ...}",
-        description: "References an agent harness such as codex, claude, or shell; create or resume a suitable subagent when the program calls for delegated work.",
+        description: "References an agent harness such as codex, claude, or shell; create or resume a suitable subagent when the playbook calls for delegated work.",
         use_when: "Use to declare which harness should pick up an item of delegated work.",
         surfaces: ALL_SURFACES,
         restriction: None,
@@ -152,14 +152,14 @@ pub const CONSTRUCT_MARKDOWN_EXTENSIONS: &[MarkdownExtensionDescriptor] = &[
         restriction: None,
     },
     MarkdownExtensionDescriptor {
-        name: "program-section",
+        name: "playbook-section",
         kind: KIND_REFERENCE,
-        syntax: ":::clip program\nsection=\"<heading>\"\n:::",
-        description: "Projects the named section (a heading and its content) of the owning session's program document, read-only and live. One source of truth: edits happen on the program through its own write path, and every projection follows automatically.",
-        use_when: "Use in a widget to mirror program state — for example a Progress section — instead of maintaining a second copy that can go stale.",
+        syntax: ":::clip playbook\nsection=\"<heading>\"\n:::",
+        description: "Projects the named section (a heading and its content) of the owning session's playbook document, read-only and live. One source of truth: edits happen on the playbook through its own write path, and every projection follows automatically.",
+        use_when: "Use in a widget to mirror playbook state — for example a Progress section — instead of maintaining a second copy that can go stale.",
         surfaces: &[SURFACE_WIDGET],
         restriction: Some(
-            "Widget-only: a program projecting its own section would recurse, and cross-program projection is out of scope; programs reference other sessions with @{session:...} instead.",
+            "Widget-only: a playbook projecting its own section would recurse, and cross-playbook projection is out of scope; playbooks reference other sessions with @{session:...} instead.",
         ),
     },
 ];
@@ -223,8 +223,8 @@ mod tests {
     }
 
     #[test]
-    fn program_surface_gets_display_action_and_reference_extensions() {
-        let kinds: std::collections::HashSet<&str> = extensions_for_surface(SURFACE_PROGRAM)
+    fn playbook_surface_gets_display_action_and_reference_extensions() {
+        let kinds: std::collections::HashSet<&str> = extensions_for_surface(SURFACE_PLAYBOOK)
             .map(|e| e.kind)
             .collect();
         assert!(kinds.contains(KIND_DISPLAY));
@@ -235,6 +235,6 @@ mod tests {
     #[test]
     fn widget_surface_gets_smart_clips() {
         assert!(extensions_for_surface(SURFACE_WIDGET).any(|e| e.name == "session"));
-        assert!(extensions_for_surface(SURFACE_WIDGET).any(|e| e.name == "program-section"));
+        assert!(extensions_for_surface(SURFACE_WIDGET).any(|e| e.name == "playbook-section"));
     }
 }

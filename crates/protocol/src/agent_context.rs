@@ -10,17 +10,17 @@ use std::path::{Path, PathBuf};
 pub const TOOL_NAME: &str = "agentd_context";
 pub const ENV_GLOBAL_MEMORY_FILE: &str = "CONSTRUCT_GLOBAL_MEMORY_FILE";
 pub const ENV_PROJECT_MEMORY_FILE: &str = "CONSTRUCT_PROJECT_MEMORY_FILE";
-pub const ENV_PROGRAM_RUN_CONTEXT_FILE: &str = "CONSTRUCT_PROGRAM_RUN_CONTEXT_FILE";
+pub const ENV_PLAYBOOK_RUN_CONTEXT_FILE: &str = "CONSTRUCT_PLAYBOOK_RUN_CONTEXT_FILE";
 pub const ENV_PROJECT_ID: &str = "CONSTRUCT_PROJECT_ID";
 pub const ENV_SESSION_ID: &str = "CONSTRUCT_SESSION_ID";
 pub const ENV_SESSION_WIDGETS_DIR: &str = "CONSTRUCT_SESSION_WIDGETS_DIR";
 pub const MAX_MEMORY_BYTES: usize = 24 * 1024;
-pub const MAX_PROGRAM_RUN_CONTEXT_BYTES: usize = 1024 * 1024;
+pub const MAX_PLAYBOOK_RUN_CONTEXT_BYTES: usize = 1024 * 1024;
 
 pub const MCP_CONTEXT_ENV_VARS: &[&str] = &[
     ENV_GLOBAL_MEMORY_FILE,
     ENV_PROJECT_MEMORY_FILE,
-    ENV_PROGRAM_RUN_CONTEXT_FILE,
+    ENV_PLAYBOOK_RUN_CONTEXT_FILE,
     ENV_PROJECT_ID,
     ENV_SESSION_WIDGETS_DIR,
     "CONSTRUCT_RUNTIME_DIR",
@@ -31,7 +31,7 @@ pub const MCP_CONTEXT_ENV_VARS: &[&str] = &[
 ];
 
 pub const TOOL_DESCRIPTION: &str =
-    "Load construct global/project memory, pending program-run context, session widget paths, and operating context. Call this before starting any user task. If program_run is present, treat it as the authoritative current program execution payload. Use the returned memory as durable context, update listed Markdown memory files with normal file tools when you learn durable information, and create/update session widgets when compact task status or actions would help the user. Repeat calls omit static fields and content already served to you; pass refresh:true to resend everything (do this if earlier results were compacted out of your context), skip_memory:true to omit memory content you already hold, and include_reference:true for the full memory/widget policy and Markdown extension reference.";
+    "Load construct global/project memory, pending playbook-run context, session widget paths, and operating context. Call this before starting any user task. If playbook_run is present, treat it as the authoritative current playbook execution payload. Use the returned memory as durable context, update listed Markdown memory files with normal file tools when you learn durable information, and create/update session widgets when compact task status or actions would help the user. Repeat calls omit static fields and content already served to you; pass refresh:true to resend everything (do this if earlier results were compacted out of your context), skip_memory:true to omit memory content you already hold, and include_reference:true for the full memory/widget policy and Markdown extension reference.";
 
 const WIDGET_POLICY: &[&str] = &[
     "Use session widgets for compact task status, checklists, decision prompts, and action links that help the user monitor or steer the current session.",
@@ -43,7 +43,7 @@ const WIDGET_POLICY: &[&str] = &[
     "Use the widget filename as the user-facing title fallback; choose short descriptive names such as `task-status.md` or `review.md`.",
     "Consult markdown_extensions for the shared construct Markdown dialect; every listed extension whose surfaces include `widget` is valid in widget Markdown, including smart clips such as `@{session:<id>}` for a live session chip.",
     "Keep widget Markdown concise and safe; prefer headings, checklists, tables, supported markdown_extensions such as timeline blocks, and agentd action links like `[Run checks](agentd:action/run-checks)` or `[Run checks](agentd:action/run-checks?key=r)` for a keyboard shortcut; shortcuts are only active when `?key=` is explicit.",
-    "When a widget mirrors program state, prefer projecting the program section with the program-section clip block instead of maintaining a second copy that can go stale.",
+    "When a widget mirrors playbook state, prefer projecting the playbook section with the playbook-section clip block instead of maintaining a second copy that can go stale.",
     "Treat clicked widget actions (`OBSERVATION: ui.action ...`) as user intent, but still follow normal tool approval and safety policy.",
     "Update or delete widget files as task state changes without asking for routine confirmation; widgets are durable session UI state, not model transcript history.",
 ];
@@ -76,13 +76,13 @@ pub struct AgentdContext {
     pub widget_policy: Vec<String>,
     /// The shared construct Markdown dialect (spec 0074): every extension,
     /// with the surfaces it applies to. One registry serves widgets and
-    /// programs alike.
+    /// playbooks alike.
     pub markdown_extensions: Vec<crate::dialect::MarkdownExtension>,
     pub global_memory: Option<MemoryFile>,
     pub project_memory: Option<MemoryFile>,
     pub session_widgets: Option<WidgetDirectory>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub program_run: Option<ProgramRunContext>,
+    pub playbook_run: Option<PlaybookRunContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,18 +102,18 @@ pub struct WidgetDirectory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProgramRunContext {
+pub struct PlaybookRunContext {
     pub session_id: String,
-    pub program_version: u64,
-    pub program_updated_at_ms: i64,
+    pub playbook_version: u64,
+    pub playbook_updated_at_ms: i64,
     pub scope: String,
     pub instructions: Vec<String>,
-    pub smart_clips: Vec<ProgramSmartClipReference>,
+    pub smart_clips: Vec<PlaybookSmartClipReference>,
     pub markdown: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProgramSmartClipReference {
+pub struct PlaybookSmartClipReference {
     pub type_name: String,
     pub syntax: String,
     pub description: String,
@@ -123,7 +123,7 @@ pub fn build_from_env() -> AgentdContext {
     let global_path = std::env::var_os(ENV_GLOBAL_MEMORY_FILE).map(PathBuf::from);
     let project_path = std::env::var_os(ENV_PROJECT_MEMORY_FILE).map(PathBuf::from);
     let widgets_dir = std::env::var_os(ENV_SESSION_WIDGETS_DIR).map(PathBuf::from);
-    let program_run_path = std::env::var_os(ENV_PROGRAM_RUN_CONTEXT_FILE).map(PathBuf::from);
+    let playbook_run_path = std::env::var_os(ENV_PLAYBOOK_RUN_CONTEXT_FILE).map(PathBuf::from);
     AgentdContext {
         session_id: std::env::var(ENV_SESSION_ID).ok(),
         project_id: std::env::var(ENV_PROJECT_ID).ok(),
@@ -131,7 +131,7 @@ pub fn build_from_env() -> AgentdContext {
             "Use this context before starting work in this construct session.".to_string(),
             "Read global_memory and project_memory, if present, before planning or making changes."
                 .to_string(),
-            "If program_run is present, read it before acting; it contains the latest program Markdown, selected/full scope, smart clip reference, and autonomous run instructions for a program execution turn.".to_string(),
+            "If playbook_run is present, read it before acting; it contains the latest playbook Markdown, selected/full scope, smart clip reference, and autonomous run instructions for a playbook execution turn.".to_string(),
             "When you learn durable information, update the listed Markdown memory file directly with normal file tools according to memory_policy.".to_string(),
             "When compact task status or actions would help the user, create/update Markdown widgets in session_widgets.dir according to widget_policy.".to_string(),
         ],
@@ -141,7 +141,7 @@ pub fn build_from_env() -> AgentdContext {
         global_memory: global_path.as_deref().and_then(load_bounded),
         project_memory: project_path.as_deref().and_then(load_bounded),
         session_widgets: widgets_dir.as_deref().map(widget_directory),
-        program_run: program_run_path.as_deref().and_then(load_program_run_context),
+        playbook_run: playbook_run_path.as_deref().and_then(load_playbook_run_context),
     }
 }
 
@@ -179,9 +179,9 @@ fn load_bounded(path: &Path) -> Option<MemoryFile> {
     })
 }
 
-fn load_program_run_context(path: &Path) -> Option<ProgramRunContext> {
+fn load_playbook_run_context(path: &Path) -> Option<PlaybookRunContext> {
     let bytes = std::fs::read(path).ok()?;
-    if bytes.len() > MAX_PROGRAM_RUN_CONTEXT_BYTES {
+    if bytes.len() > MAX_PLAYBOOK_RUN_CONTEXT_BYTES {
         return None;
     }
     serde_json::from_slice(&bytes).ok()
@@ -208,13 +208,13 @@ pub fn content_etag(text: &str) -> String {
 /// whenever the agent's context is compacted (the agent no longer holds what
 /// was served): smith resets it natively on auto-compact, MCP agents pass
 /// `refresh: true`. Everything omitted stays disk-recoverable — memory by
-/// path, the program via the program-get tool — so a stale state degrades to
+/// path, the playbook via the playbook-get tool — so a stale state degrades to
 /// an extra fetch, never to data loss.
 #[derive(Debug, Default, Clone)]
 pub struct ContextServeState {
     global_etag: Option<String>,
     project_etag: Option<String>,
-    program_markdown_etag: Option<String>,
+    playbook_markdown_etag: Option<String>,
     run_reference_etag: Option<String>,
     static_served: bool,
 }
@@ -236,7 +236,7 @@ pub struct ContextRequest {
     pub refresh: bool,
     pub known_global: Option<String>,
     pub known_project: Option<String>,
-    pub known_program: Option<String>,
+    pub known_playbook: Option<String>,
 }
 
 impl ContextRequest {
@@ -257,7 +257,7 @@ impl ContextRequest {
             refresh: flag("refresh"),
             known_global: text("known_global"),
             known_project: text("known_project"),
-            known_program: text("known_program"),
+            known_playbook: text("known_playbook"),
         }
     }
 }
@@ -295,13 +295,13 @@ fn serve_memory_file(
     Some(value)
 }
 
-fn serve_program_run(
-    run: Option<ProgramRunContext>,
+fn serve_playbook_run(
+    run: Option<PlaybookRunContext>,
     req: &ContextRequest,
     state: &mut ContextServeState,
 ) -> Option<serde_json::Value> {
     let run = run?;
-    // Two independent etags: the markdown changes every program edit, while
+    // Two independent etags: the markdown changes every playbook edit, while
     // the run instructions + smart-clip reference are static per daemon
     // build. A monolithic etag would resend the static bulk on every edit.
     let markdown_etag = content_etag(&run.markdown);
@@ -312,17 +312,17 @@ fn serve_program_run(
     let mut out = serde_json::Map::new();
     out.insert("session_id".into(), serde_json::json!(run.session_id));
     out.insert(
-        "program_version".into(),
-        serde_json::json!(run.program_version),
+        "playbook_version".into(),
+        serde_json::json!(run.playbook_version),
     );
     out.insert(
-        "program_updated_at_ms".into(),
-        serde_json::json!(run.program_updated_at_ms),
+        "playbook_updated_at_ms".into(),
+        serde_json::json!(run.playbook_updated_at_ms),
     );
     out.insert("scope".into(), serde_json::json!(run.scope));
     out.insert("etag".into(), serde_json::json!(markdown_etag));
-    let markdown_held = req.known_program.as_deref() == Some(markdown_etag.as_str())
-        || state.program_markdown_etag.as_deref() == Some(markdown_etag.as_str());
+    let markdown_held = req.known_playbook.as_deref() == Some(markdown_etag.as_str())
+        || state.playbook_markdown_etag.as_deref() == Some(markdown_etag.as_str());
     if markdown_held {
         out.insert("unchanged".into(), serde_json::json!(true));
     } else {
@@ -332,14 +332,14 @@ fn serve_program_run(
         out.insert("instructions".into(), serde_json::json!(run.instructions));
         out.insert("smart_clips".into(), serde_json::json!(run.smart_clips));
     }
-    state.program_markdown_etag = Some(markdown_etag);
+    state.playbook_markdown_etag = Some(markdown_etag);
     state.run_reference_etag = Some(reference_etag);
     Some(serde_json::Value::Object(out))
 }
 
 /// Build the model-facing response for one context-tool call, updating the
 /// serve state. Static fields (instructions, widget paths, the reference
-/// hint) go out once per process; memory and program payloads carry etags and
+/// hint) go out once per process; memory and playbook payloads carry etags and
 /// collapse to `unchanged: true` when this process already served them.
 pub fn compact_response(
     mut context: AgentdContext,
@@ -361,7 +361,7 @@ pub fn compact_response(
         &mut state.project_etag,
         req.skip_memory,
     );
-    let program = serve_program_run(context.program_run.take(), req, state);
+    let playbook = serve_playbook_run(context.playbook_run.take(), req, state);
 
     let first_serve = !state.static_served;
     let mut out = serde_json::Map::new();
@@ -383,8 +383,8 @@ pub fn compact_response(
     if let Some(memory) = project {
         out.insert("project_memory".into(), memory);
     }
-    if let Some(program) = program {
-        out.insert("program_run".into(), program);
+    if let Some(playbook) = playbook {
+        out.insert("playbook_run".into(), playbook);
     }
     if req.include_reference {
         out.insert("memory_policy".into(), serde_json::json!(context.memory_policy));
@@ -465,7 +465,7 @@ mod tests {
             .any(|ext| ext.name == "timeline"
                 && ext.syntax.contains(":::timeline")
                 && ext.surfaces.iter().any(|s| s == "widget")
-                && ext.surfaces.iter().any(|s| s == "program")));
+                && ext.surfaces.iter().any(|s| s == "playbook")));
         assert!(context
             .markdown_extensions
             .iter()
@@ -532,31 +532,31 @@ mod tests {
     }
 
     #[test]
-    fn loads_program_run_context_from_env() {
+    fn loads_playbook_run_context_from_env() {
         let _g = ENV_LOCK.lock().unwrap();
-        let tmp = temp_dir("program-run");
-        let program_run = tmp.join("program-run-context.json");
-        let body = ProgramRunContext {
+        let tmp = temp_dir("playbook-run");
+        let playbook_run = tmp.join("playbook-run-context.json");
+        let body = PlaybookRunContext {
             session_id: "s123".to_string(),
-            program_version: 7,
-            program_updated_at_ms: 42,
+            playbook_version: 7,
+            playbook_updated_at_ms: 42,
             scope: "selection".to_string(),
-            instructions: vec!["Read this program run before acting.".to_string()],
-            smart_clips: vec![ProgramSmartClipReference {
+            instructions: vec!["Read this playbook run before acting.".to_string()],
+            smart_clips: vec![PlaybookSmartClipReference {
                 type_name: "session".to_string(),
                 syntax: "@{session:<session_id> ...}".to_string(),
                 description: "References an existing session.".to_string(),
             }],
             markdown: "# Plan\n\n- ship it".to_string(),
         };
-        std::fs::write(&program_run, serde_json::to_vec(&body).unwrap()).unwrap();
-        std::env::set_var(ENV_PROGRAM_RUN_CONTEXT_FILE, &program_run);
+        std::fs::write(&playbook_run, serde_json::to_vec(&body).unwrap()).unwrap();
+        std::env::set_var(ENV_PLAYBOOK_RUN_CONTEXT_FILE, &playbook_run);
 
         let context = build_from_env();
 
         clear_env();
 
-        assert_eq!(context.program_run, Some(body));
+        assert_eq!(context.playbook_run, Some(body));
         let _ = std::fs::remove_dir_all(tmp);
     }
 
@@ -581,12 +581,12 @@ mod tests {
                 title_source: "filename".into(),
                 action_link_scheme: "agentd:action/<action-id>".into(),
             }),
-            program_run: Some(ProgramRunContext {
+            playbook_run: Some(PlaybookRunContext {
                 session_id: "s1".into(),
-                program_version: 3,
-                program_updated_at_ms: 42,
+                playbook_version: 3,
+                playbook_updated_at_ms: 42,
                 scope: "full".into(),
-                instructions: vec!["run the program".into()],
+                instructions: vec!["run the playbook".into()],
                 smart_clips: vec![],
                 markdown: "# Plan\n\n- ship it".into(),
             }),
@@ -600,8 +600,8 @@ mod tests {
 
         let first = compact_response(sample_context(), &req, &mut state);
         assert_eq!(first["global_memory"]["content"], "remember this");
-        assert_eq!(first["program_run"]["markdown"], "# Plan\n\n- ship it");
-        assert_eq!(first["program_run"]["instructions"][0], "run the program");
+        assert_eq!(first["playbook_run"]["markdown"], "# Plan\n\n- ship it");
+        assert_eq!(first["playbook_run"]["instructions"][0], "run the playbook");
         assert!(first.get("instructions").is_some());
         assert!(first.get("session_widgets").is_some());
         assert!(first.get("reference").is_some());
@@ -610,16 +610,16 @@ mod tests {
         let second = compact_response(sample_context(), &req, &mut state);
         assert_eq!(second["global_memory"]["unchanged"], true);
         assert!(second["global_memory"].get("content").is_none());
-        assert_eq!(second["program_run"]["unchanged"], true);
-        assert!(second["program_run"].get("markdown").is_none());
-        assert!(second["program_run"].get("instructions").is_none());
+        assert_eq!(second["playbook_run"]["unchanged"], true);
+        assert!(second["playbook_run"].get("markdown").is_none());
+        assert!(second["playbook_run"].get("instructions").is_none());
         assert!(second.get("instructions").is_none());
         assert!(second.get("session_widgets").is_none());
         assert!(second.get("reference").is_none());
         // Identity and paths stay present so omitted content is recoverable.
         assert_eq!(second["session_id"], "s1");
         assert_eq!(second["global_memory"]["path"], "/tmp/global.md");
-        assert_eq!(second["program_run"]["program_version"], 3);
+        assert_eq!(second["playbook_run"]["playbook_version"], 3);
     }
 
     #[test]
@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(refreshed["global_memory"]["content"], "remember this");
         assert!(refreshed.get("instructions").is_some());
         assert!(refreshed.get("session_widgets").is_some());
-        assert_eq!(refreshed["program_run"]["markdown"], "# Plan\n\n- ship it");
+        assert_eq!(refreshed["playbook_run"]["markdown"], "# Plan\n\n- ship it");
     }
 
     #[test]
@@ -647,16 +647,16 @@ mod tests {
         let _ = compact_response(sample_context(), &ContextRequest::default(), &mut state);
 
         let mut context = sample_context();
-        context.program_run.as_mut().unwrap().markdown = "# Plan\n\n- shipped".into();
-        context.program_run.as_mut().unwrap().program_version = 4;
+        context.playbook_run.as_mut().unwrap().markdown = "# Plan\n\n- shipped".into();
+        context.playbook_run.as_mut().unwrap().playbook_version = 4;
         let second = compact_response(context, &ContextRequest::default(), &mut state);
-        assert_eq!(second["program_run"]["markdown"], "# Plan\n\n- shipped");
-        assert_eq!(second["program_run"]["program_version"], 4);
+        assert_eq!(second["playbook_run"]["markdown"], "# Plan\n\n- shipped");
+        assert_eq!(second["playbook_run"]["playbook_version"], 4);
         assert!(
-            second["program_run"].get("instructions").is_none(),
+            second["playbook_run"].get("instructions").is_none(),
             "static run instructions must not ride along with markdown changes"
         );
-        assert!(second["program_run"].get("smart_clips").is_none());
+        assert!(second["playbook_run"].get("smart_clips").is_none());
     }
 
     #[test]
@@ -720,7 +720,7 @@ mod tests {
         std::env::remove_var(ENV_PROJECT_MEMORY_FILE);
         std::env::remove_var(ENV_PROJECT_ID);
         std::env::remove_var(ENV_SESSION_WIDGETS_DIR);
-        std::env::remove_var(ENV_PROGRAM_RUN_CONTEXT_FILE);
+        std::env::remove_var(ENV_PLAYBOOK_RUN_CONTEXT_FILE);
     }
 
     fn temp_dir(name: &str) -> PathBuf {

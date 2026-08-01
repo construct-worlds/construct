@@ -106,7 +106,7 @@ rest. This gating relies on the probe command being short enough that the
 harness echoes its literal text; harnesses collapse long pastes into a
 placeholder that never echoes the text, which is why the gate belongs to
 the probe's delivery specifically and must not be generalized to
-arbitrary-length prompt delivery (e.g. program runs) as-is.
+arbitrary-length prompt delivery (e.g. playbook runs) as-is.
 
 ### Probe working directory avoids per-directory trust gates
 

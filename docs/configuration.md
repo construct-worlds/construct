@@ -13,7 +13,10 @@ If `CONSTRUCT_HOME` is set, all other directories default to paths under it, i.e
 | Data (sessions, projects, memory) | `~/.local/share/construct` | `CONSTRUCT_DATA_DIR` | `$CONSTRUCT_HOME/data` |
 | Socket | `$XDG_RUNTIME_DIR/construct/construct.sock` (falls back to state) | `CONSTRUCT_RUNTIME_DIR` | `$CONSTRUCT_HOME/run` |
 
-`construct paths` prints the resolved layout.
+`construct paths` prints the resolved layout. `construct doctor` checks it —
+whether each directory exists and is writable, whether the config file parses,
+and what else on the machine construct depends on — without changing anything;
+it exits non-zero only when construct genuinely cannot run.
 
 The data directory stores durable, user-editable runtime data:
 

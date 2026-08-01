@@ -571,15 +571,15 @@ impl SessionManager {
             let s = entry.summary.read().await;
             s.state
         };
-        self.note_session_state_for_program_run(&entry.id, new_state);
+        self.note_session_state_for_playbook_run(&entry.id, new_state);
         // Boxed: this indirectly re-enters `handle_event` (verb-drift
         // escalation delivers a prompt, which can synthesize a Message
         // event), which would otherwise make this async fn's state machine
         // infinitely recursive at compile time.
         Box::pin(self.maybe_complete_verb_merge(&entry.id, new_state)).await;
 
-        if session_event_is_program_output(&event) {
-            self.mark_program_run_output_seen(&entry.id);
+        if session_event_is_playbook_output(&event) {
+            self.mark_playbook_run_output_seen(&entry.id);
         }
         // Update the per-session task registry from lifecycle events
         // so `session.list_tasks` has live state to return.
@@ -906,7 +906,7 @@ pub(super) fn event_is_unseen_activity(e: &SessionEvent) -> bool {
     )
 }
 
-fn session_event_is_program_output(event: &SessionEvent) -> bool {
+fn session_event_is_playbook_output(event: &SessionEvent) -> bool {
     matches!(
         event,
         SessionEvent::Reasoning { .. }

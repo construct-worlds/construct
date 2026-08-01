@@ -16,7 +16,7 @@ data-file extensions:
 - **Adapters** — AHP harnesses, merged into the same adapter registry that
   config-file community adapters use. Exposed as harness `<plugin-id>` when
   the adapter name equals the plugin id, `<plugin-id>:<name>` otherwise.
-- **Program verbs and templates** — directories of markdown definition
+- **Playbook verbs and templates** — directories of markdown definition
   files, merged into the existing verb/template registries under forced
   `<plugin-id>:` namespacing. A plugin can never override a built-in or a
   user's own verb/template by name; only the user's own directories have

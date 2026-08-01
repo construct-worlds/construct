@@ -108,6 +108,10 @@ See [smith built-in agent](smith.md) for details.
 those tools exactly as installed on your machine, but inside the same construct
 fleet.
 
+Because these depend on binaries and logins construct does not own, `construct
+doctor` reports which ones it can find, which logins have expired, and whether
+the running daemon sees a different `PATH` than your shell does.
+
 CLI-backed harnesses keep their native behavior. If an upstream CLI does not
 expose a setting — for example, path-scoped tool auto-approval — construct cannot
 always force that behavior from outside the process. In those cases the session
@@ -144,7 +148,7 @@ and `construct new <harness>` both create interactive sessions unless you pass
 - A non-empty prompt is recorded as the first user turn and run immediately. For
   headless clients this is the structured-output path (for example, `shell`
   runs `$SHELL -lc "<prompt>"` once and exits).
-- An empty prompt launches the harness's interactive program (for example,
+- An empty prompt launches the harness's interactive playbook (for example,
   `shell` runs `$SHELL -il`), which you can attach to and type into.
 
 Pass `--mode` to choose explicitly (optionally alongside a seed prompt):
