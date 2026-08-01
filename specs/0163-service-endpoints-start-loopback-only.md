@@ -30,6 +30,13 @@ service. Global `C-x` chords remain available while the service view is
 focused; session-only commands such as `C-x .` explain their scope instead of
 being silently swallowed.
 
+While editing, `C-n` and `C-p` move between definition fields alongside the
+arrow and Tab keys. Harness and model are picker-backed fields: Enter opens an
+inline list of detected harnesses or harness-advertised models, and the same
+motion keys move the highlighted choice before Enter applies it. The current
+value remains selectable when it is not present in the detected catalog, so
+editing an older or custom definition never silently discards its value.
+
 The WebTUI mirrors this surface at `/services/<name>`. Services appear in the
 same list model as sessions, using the same `◈` glyph and row selection. Its
 wide service view uses the same definition/help columns, and narrow layouts

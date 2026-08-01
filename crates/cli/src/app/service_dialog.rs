@@ -3,11 +3,26 @@
 use super::*;
 
 const FIELD_COUNT: usize = 8;
+pub const SERVICE_PICKER_VISIBLE_ROWS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceDialogMode {
     Create,
     Edit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceDialogPickerKind {
+    Harness,
+    Model,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceDialogPickerOption {
+    pub value: String,
+    pub label: String,
+    pub detail: String,
+    pub available: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -18,6 +33,9 @@ pub struct ServiceDialog {
     pub note: Option<String>,
     pub new_token: Option<String>,
     pub confirm_delete: bool,
+    pub picker: Option<ServiceDialogPickerKind>,
+    pub picker_selected: usize,
+    pub picker_scroll: usize,
 }
 
 impl ServiceDialog {
@@ -42,6 +60,76 @@ impl ServiceDialog {
                 }
             }
             _ => String::new(),
+        }
+    }
+
+    pub fn picker_options(&self, app: &App) -> Vec<ServiceDialogPickerOption> {
+        match self.picker {
+            Some(ServiceDialogPickerKind::Harness) => {
+                let mut options: Vec<_> = app
+                    .harnesses
+                    .iter()
+                    .map(|harness| ServiceDialogPickerOption {
+                        value: harness.name.clone(),
+                        label: harness.name.clone(),
+                        detail: harness
+                            .detail
+                            .clone()
+                            .or_else(|| harness.description.clone())
+                            .unwrap_or_default(),
+                        available: harness.available,
+                    })
+                    .collect();
+                if !options
+                    .iter()
+                    .any(|option| option.value == self.service.harness)
+                {
+                    options.insert(
+                        0,
+                        ServiceDialogPickerOption {
+                            value: self.service.harness.clone(),
+                            label: self.service.harness.clone(),
+                            detail: "current value; no daemon probe available".to_string(),
+                            available: false,
+                        },
+                    );
+                }
+                options
+            }
+            Some(ServiceDialogPickerKind::Model) => {
+                let mut options = vec![ServiceDialogPickerOption {
+                    value: String::new(),
+                    label: "Default".to_string(),
+                    detail: "let the selected harness choose its default model".to_string(),
+                    available: true,
+                }];
+                if let Some(harness) = app
+                    .harnesses
+                    .iter()
+                    .find(|harness| harness.name == self.service.harness)
+                {
+                    options.extend(harness.capabilities.models.iter().map(|model| {
+                        ServiceDialogPickerOption {
+                            value: model.clone(),
+                            label: model.clone(),
+                            detail: "advertised by this harness".to_string(),
+                            available: true,
+                        }
+                    }));
+                }
+                if let Some(current) = self.service.model.as_deref() {
+                    if !options.iter().any(|option| option.value == current) {
+                        options.push(ServiceDialogPickerOption {
+                            value: current.to_string(),
+                            label: current.to_string(),
+                            detail: "current value; not advertised by this harness".to_string(),
+                            available: false,
+                        });
+                    }
+                }
+                options
+            }
+            None => Vec::new(),
         }
     }
 }
@@ -98,6 +186,9 @@ impl App {
             note: Some("Enter saves this service as its own TOML file.".to_string()),
             new_token: None,
             confirm_delete: false,
+            picker: None,
+            picker_selected: 0,
+            picker_scroll: 0,
         });
     }
 
@@ -121,8 +212,89 @@ impl App {
             note: Some("Changes apply after the daemon restarts.".to_string()),
             new_token: None,
             confirm_delete: false,
+            picker: None,
+            picker_selected: 0,
+            picker_scroll: 0,
         });
         true
+    }
+
+    fn open_service_picker(&mut self, kind: ServiceDialogPickerKind) {
+        let Some(mut dialog) = self.service_dialog.clone() else {
+            return;
+        };
+        dialog.picker = Some(kind);
+        dialog.picker_scroll = 0;
+        let options = dialog.picker_options(self);
+        let current = match kind {
+            ServiceDialogPickerKind::Harness => dialog.service.harness.as_str(),
+            ServiceDialogPickerKind::Model => dialog.service.model.as_deref().unwrap_or(""),
+        };
+        dialog.picker_selected = options
+            .iter()
+            .position(|option| option.value == current)
+            .unwrap_or(0);
+        self.service_dialog = Some(dialog);
+        self.ensure_service_picker_visible();
+    }
+
+    fn ensure_service_picker_visible(&mut self) {
+        let Some(dialog) = self.service_dialog.as_mut() else {
+            return;
+        };
+        if dialog.picker_selected < dialog.picker_scroll {
+            dialog.picker_scroll = dialog.picker_selected;
+        } else if dialog.picker_selected >= dialog.picker_scroll + SERVICE_PICKER_VISIBLE_ROWS {
+            dialog.picker_scroll = dialog
+                .picker_selected
+                .saturating_sub(SERVICE_PICKER_VISIBLE_ROWS - 1);
+        }
+    }
+
+    fn move_service_picker(&mut self, delta: isize) {
+        let Some(snapshot) = self.service_dialog.clone() else {
+            return;
+        };
+        if snapshot.picker.is_none() {
+            return;
+        }
+        let options = snapshot.picker_options(self);
+        if options.is_empty() {
+            return;
+        }
+        if let Some(dialog) = self.service_dialog.as_mut() {
+            dialog.picker_selected = (dialog.picker_selected as isize + delta)
+                .rem_euclid(options.len() as isize) as usize;
+        }
+        self.ensure_service_picker_visible();
+    }
+
+    fn choose_service_picker(&mut self) {
+        let Some(snapshot) = self.service_dialog.clone() else {
+            return;
+        };
+        let Some(kind) = snapshot.picker else {
+            return;
+        };
+        let options = snapshot.picker_options(self);
+        let Some(option) = options.get(snapshot.picker_selected) else {
+            return;
+        };
+        let value = option.value.clone();
+        if let Some(dialog) = self.service_dialog.as_mut() {
+            match kind {
+                ServiceDialogPickerKind::Harness => dialog.service.harness = value,
+                ServiceDialogPickerKind::Model => {
+                    dialog.service.model = (!value.is_empty()).then_some(value)
+                }
+            }
+            dialog.picker = None;
+            dialog.picker_selected = 0;
+            dialog.picker_scroll = 0;
+            dialog.note = None;
+            dialog.new_token = None;
+            dialog.confirm_delete = false;
+        }
     }
 
     fn edit_service_dialog_text(&mut self, mut edit: impl FnMut(&mut String)) {
@@ -303,6 +475,33 @@ impl App {
             }
             return true;
         }
+        if snapshot.picker.is_some() {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Esc => {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        dialog.picker = None;
+                        dialog.picker_selected = 0;
+                        dialog.picker_scroll = 0;
+                    }
+                }
+                KeyCode::Enter => self.choose_service_picker(),
+                KeyCode::Up => self.move_service_picker(-1),
+                KeyCode::Down => self.move_service_picker(1),
+                KeyCode::Char('p') if ctrl => self.move_service_picker(-1),
+                KeyCode::Char('n') if ctrl => self.move_service_picker(1),
+                KeyCode::Char('x') if ctrl => {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        dialog.picker = None;
+                        dialog.picker_selected = 0;
+                        dialog.picker_scroll = 0;
+                    }
+                    return false;
+                }
+                _ => {}
+            }
+            return true;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('s') => {
@@ -327,12 +526,31 @@ impl App {
                     self.service_dialog = None;
                     return false;
                 }
+                KeyCode::Char('p') => {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        dialog.selected_field = dialog
+                            .selected_field
+                            .checked_sub(1)
+                            .unwrap_or(FIELD_COUNT - 1);
+                    }
+                    return true;
+                }
+                KeyCode::Char('n') => {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        dialog.selected_field = (dialog.selected_field + 1) % FIELD_COUNT;
+                    }
+                    return true;
+                }
                 _ => {}
             }
         }
         match key.code {
             KeyCode::Esc => self.service_dialog = None,
-            KeyCode::Enter => self.save_service_dialog(false).await,
+            KeyCode::Enter => match snapshot.selected_field {
+                2 => self.open_service_picker(ServiceDialogPickerKind::Harness),
+                3 => self.open_service_picker(ServiceDialogPickerKind::Model),
+                _ => self.save_service_dialog(false).await,
+            },
             KeyCode::Tab | KeyCode::Down => {
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     dialog.selected_field = (dialog.selected_field + 1) % FIELD_COUNT;

@@ -52,7 +52,9 @@ pub use configure::{
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
 };
-pub use service_dialog::{ServiceDialog, ServiceDialogMode};
+pub use service_dialog::{
+    ServiceDialog, ServiceDialogMode, ServiceDialogPickerKind, SERVICE_PICKER_VISIBLE_ROWS,
+};
 #[cfg(test)]
 pub use tutorial::Step1Phase;
 pub use tutorial::TutorialState;
@@ -40446,6 +40448,98 @@ mod tests {
             app.service_dialog.as_ref().map(|dialog| dialog.mode),
             Some(ServiceDialogMode::Edit)
         ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_editor_ctrl_n_and_ctrl_p_navigate_fields() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.open_edit_service_view("assistant");
+        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 1);
+
+        let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+        app.on_key(ctrl('n')).await;
+        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 2);
+        app.on_key(ctrl('p')).await;
+        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_editor_harness_and_model_use_pickers() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.harnesses = vec![
+            construct_protocol::HarnessInfo {
+                name: "smith".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("Built-in agent harness".to_string()),
+                capabilities: construct_protocol::Capabilities::default(),
+            },
+            construct_protocol::HarnessInfo {
+                name: "shell".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("Generic shell runner".to_string()),
+                capabilities: construct_protocol::Capabilities {
+                    models: vec!["gpt-5".to_string()],
+                    ..Default::default()
+                },
+            },
+        ];
+        app.open_edit_service_view("assistant");
+
+        let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+        app.on_key(ctrl('n')).await;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().picker,
+            Some(ServiceDialogPickerKind::Harness)
+        );
+        app.session_transitions.clear();
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let picker_text = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(picker_text.contains("Choose harness"));
+        assert!(picker_text.contains("shell"));
+
+        app.on_key(ctrl('n')).await;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().service.harness,
+            "shell"
+        );
+
+        if let Some(dialog) = app.service_dialog.as_mut() {
+            dialog.selected_field = 3;
+            dialog.service.model = None;
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().picker,
+            Some(ServiceDialogPickerKind::Model)
+        );
+        app.on_key(ctrl('n')).await;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().service.model.as_deref(),
+            Some("gpt-5")
+        );
         server.abort();
     }
 

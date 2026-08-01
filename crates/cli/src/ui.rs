@@ -7917,6 +7917,70 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
     }
 }
 
+fn service_picker_lines(
+    dialog: &crate::app::ServiceDialog,
+    app: &App,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let title = match dialog.picker {
+        Some(crate::app::ServiceDialogPickerKind::Harness) => "Choose harness",
+        Some(crate::app::ServiceDialogPickerKind::Model) => "Choose model",
+        None => "",
+    };
+    let options = dialog.picker_options(app);
+    let mut lines = vec![Line::from(Span::styled(
+        title,
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    if options.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No options available.",
+            Style::default().fg(app.theme.dim),
+        )));
+    } else {
+        for (index, option) in options
+            .iter()
+            .enumerate()
+            .skip(dialog.picker_scroll)
+            .take(crate::app::SERVICE_PICKER_VISIBLE_ROWS)
+        {
+            let marker = if index == dialog.picker_selected { "›" } else { " " };
+            let detail = if option.available {
+                option.detail.as_str()
+            } else {
+                "unavailable"
+            };
+            let text = if detail.is_empty() {
+                format!("{marker} {}", option.label)
+            } else {
+                format!("{marker} {}  {detail}", option.label)
+            };
+            let mut style = if option.available {
+                Style::default().fg(app.theme.text)
+            } else {
+                Style::default().fg(app.theme.dim)
+            };
+            if index == dialog.picker_selected {
+                style = style
+                    .fg(app.theme.highlight_fg)
+                    .bg(app.theme.highlight_bg);
+            }
+            lines.push(Line::from(Span::styled(
+                truncate_to_width(&text, width.saturating_sub(1) as usize),
+                style,
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ C-p/C-n move · Enter choose · Esc cancel",
+        Style::default().fg(app.theme.dim),
+    )));
+    lines
+}
+
 /// Render a service as a normal split-pane surface. The editor state is the
 /// same editor state used before the service view existed, but the service now owns the whole
 /// pane: its definition and contextual help stay visible while the operator
@@ -7961,6 +8025,9 @@ fn render_service_view(
         note: None,
         new_token: None,
         confirm_delete: false,
+        picker: None,
+        picker_selected: 0,
+        picker_scroll: 0,
     };
     let dialog = app
         .service_dialog
@@ -8010,6 +8077,7 @@ fn render_service_view(
         let suffix = match index {
             5 => "  ←/→ cycle",
             7 => "  Space toggle",
+            2 | 3 => "  Enter picker",
             _ if locked => "  locked",
             _ => "",
         };
@@ -8029,20 +8097,6 @@ fn render_service_view(
         )));
     }
 
-    let (help_title, help_body, help_hint) = service_dialog_field_help(&dialog);
-    let help_lines = vec![
-        Line::from(Span::styled(
-            help_title,
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(help_body, Style::default().fg(app.theme.text))),
-        Line::from(""),
-        Line::from(Span::styled(help_hint, Style::default().fg(app.theme.dim))),
-    ];
-
     let top_h = 9.min(inner.height.saturating_sub(4));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -8060,6 +8114,23 @@ fn render_service_view(
             Constraint::Min(20),
         ])
         .split(chunks[0]);
+    let help_lines = if dialog.picker.is_some() {
+        service_picker_lines(&dialog, app, columns[2].width)
+    } else {
+        let (help_title, help_body, help_hint) = service_dialog_field_help(&dialog);
+        vec![
+            Line::from(Span::styled(
+                help_title,
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(help_body, Style::default().fg(app.theme.text))),
+            Line::from(""),
+            Line::from(Span::styled(help_hint, Style::default().fg(app.theme.dim))),
+        ]
+    };
     f.render_widget(Paragraph::new(field_lines), columns[0]);
     let divider_x = columns[1].x.saturating_add(columns[1].width / 2);
     for y in columns[1].top()..columns[1].bottom() {
