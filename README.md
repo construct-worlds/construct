@@ -12,7 +12,8 @@
 
 ### Quick start
 
-On macOS, install the latest Homebrew package:
+On macOS, install the latest Homebrew package once the formula is available in
+Homebrew Core:
 
 ```sh
 brew install construct
