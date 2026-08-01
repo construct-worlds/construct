@@ -18,9 +18,7 @@
 use construct_adapter_common::context_breakdown::{
     estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin,
 };
-use construct_adapter_common::{
-    codex_sessions_root, drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome,
-};
+use construct_adapter_common::{codex_sessions_root, drive_turn, next_native_seq, TurnOutcome};
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
 use construct_protocol::adapter::{
     run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter,
@@ -1236,13 +1234,18 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         let child_stderr = child.stderr.take().expect("piped");
         let captured_sid = Arc::new(StdMutex::new(None::<String>));
         let stdout_task = spawn_stdout(child_stdout, emit.clone(), captured_sid.clone());
-        let stderr_task = spawn_stderr_log(child_stderr, emit.clone());
+        let stderr_task = spawn_headless_stderr(child_stderr, emit.clone());
 
         let outcome = drive_turn(&mut child, &mut inbox, &emit, &mut pending).await;
 
         let _ = stdout_task.await;
-        let _ = stderr_task.await;
+        let stderr_error = stderr_task.await.ok().flatten();
         let _ = child.wait().await;
+
+        if let Some(message) = stderr_error {
+            emit.emit(SessionEvent::Error { message });
+            break 1;
+        }
 
         // Always adopt the latest native id so a mid-run reset is honored
         // on subsequent turns (and written for daemon resume).
@@ -1267,6 +1270,33 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
     };
 
     emit.emit(SessionEvent::Done { exit_code });
+}
+
+fn headless_error_message(line: &str) -> Option<String> {
+    line.strip_prefix("ERROR:")
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn spawn_headless_stderr<R>(
+    reader: R,
+    emit: EventEmitter,
+) -> tokio::task::JoinHandle<Option<String>>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
+        let mut error = None;
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(message) = headless_error_message(&line) {
+                error = Some(message);
+            }
+            emit.log(format!("stderr: {line}"));
+        }
+        error
+    })
 }
 
 fn spawn_stdout<R>(
@@ -1604,6 +1634,19 @@ mod tests {
             uuid_from_rollout_name(name).as_deref(),
             Some("019e32aa-014a-7ff0-9a3f-7ae773961a37"),
         );
+    }
+
+    #[test]
+    fn headless_codex_errors_are_promoted_out_of_stderr() {
+        assert_eq!(
+            headless_error_message(
+                r#"ERROR: {"detail":"The 'sonnet' model is not supported."}"#
+            )
+            .as_deref(),
+            Some(r#"{"detail":"The 'sonnet' model is not supported."}"#)
+        );
+        assert_eq!(headless_error_message("warning: retrying"), None);
+        assert_eq!(headless_error_message("ERROR:   "), None);
     }
 
     #[test]

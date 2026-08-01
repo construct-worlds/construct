@@ -42,6 +42,13 @@ gateway-model cache and uses a non-auth session capability for loopback
 requests; it does not install an API key or auth token, so a claude.ai login
 remains authoritative and its organization connectors remain available.
 
+Service definitions that select a published route/model pair persist the
+ordinary `construct-<route>/<model>` id as their harness-neutral routing
+authority. When a service creates a session, Construct materializes that id
+for the selected harness, including Claude's required `claude-construct-`
+prefix. A client must never reduce a route-aware service selection to the
+target model name alone.
+
 ## Reason
 
 The harness already owns model selection and delegation. Publishing routes
@@ -70,6 +77,9 @@ origin-safety rule in [0113](0113-model-routing-is-proxy-transported.md).
   because they cannot be inferred safely.
 - The published id, not display text or catalog order, is the routing
   authority.
+- A service may change between supported native-catalog harnesses without
+  losing its selected route; the durable id is adapted when each new session
+  starts.
 - Request selection overrides a manual session pin for that request only.
   The pin remains unchanged for native model ids and future requests.
 - Catalog-enabled sessions inspect only the harness's fixed model host.

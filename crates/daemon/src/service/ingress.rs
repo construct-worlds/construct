@@ -349,13 +349,14 @@ impl ServiceIngress {
         } else {
             format!("{}\n\n{}", config.instruction.trim(), message)
         };
+        let model = service_session_model(&config.harness, config.model.as_deref())?;
         self.shared
             .manager
             .create(CreateSessionParams {
                 harness: config.harness.clone(),
                 cwd: config.cwd.clone(),
                 prompt: Some(prompt),
-                model: config.model.clone(),
+                model,
                 title,
                 mode: Some("headless".to_string()),
                 pty_size: None,
@@ -370,6 +371,20 @@ impl ServiceIngress {
             })
             .await
     }
+}
+
+/// Turn a durable service model selection into the id accepted by the
+/// session's native model surface. Plain harness-native models pass through;
+/// Construct route/model ids retain both halves and receive Claude's special
+/// gateway prefix only when a Claude session is actually spawned.
+fn service_session_model(harness: &str, model: Option<&str>) -> Result<Option<String>> {
+    let Some(model) = model else {
+        return Ok(None);
+    };
+    Ok(Some(
+        construct_protocol::published_model::published_model_id_for_harness_from_id(harness, model)?
+            .unwrap_or_else(|| model.to_string()),
+    ))
 }
 
 pub(super) struct IngressReceipt {
@@ -535,6 +550,30 @@ mod tests {
                 "waited_seconds": 120,
                 "outcome": "denied_on_timeout",
             })
+        );
+    }
+
+    #[test]
+    fn service_gateway_model_keeps_its_route_when_spawning_codex() {
+        assert_eq!(
+            service_session_model("codex", Some("construct-claude-oauth/sonnet")).unwrap(),
+            Some("construct-claude-oauth/sonnet".into())
+        );
+    }
+
+    #[test]
+    fn service_gateway_model_uses_claudes_native_gateway_prefix() {
+        assert_eq!(
+            service_session_model("claude", Some("construct-codex-oauth/gpt-5.6-sol")).unwrap(),
+            Some("claude-construct-codex-oauth/gpt-5.6-sol".into())
+        );
+    }
+
+    #[test]
+    fn service_native_model_passes_through_unchanged() {
+        assert_eq!(
+            service_session_model("codex", Some("gpt-5.6-sol")).unwrap(),
+            Some("gpt-5.6-sol".into())
         );
     }
 }
