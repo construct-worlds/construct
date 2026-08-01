@@ -43,11 +43,12 @@ through unchanged. The channel listener remains the final authority and
 revalidates its own credential. A returned HTTP URL includes the channel's
 canonical request path, so callers reach the same route locally and publicly.
 
-The current transport supports loopback TCP ingress. HTTP uses that boundary
-today. WebSocket and opaque TCP protocols fit it without changing publication
-lifecycle. UDP requires a provider and reverse transport that explicitly
-support UDP. Outbound channels such as broker subscriptions expose no local
-ingress and therefore need no publication.
+The current first-party provider supports HTTP over loopback TCP. WebSocket and
+opaque TCP protocols fit the boundary without changing publication lifecycle,
+but a backend must advertise and implement each combination before it can be
+selected. UDP likewise requires a provider and reverse transport that
+explicitly support UDP. Outbound channels such as broker subscriptions expose
+no local ingress and therefore need no publication.
 
 ## Reason
 

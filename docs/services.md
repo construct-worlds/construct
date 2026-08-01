@@ -53,6 +53,9 @@ later resume or reattachment stays loopback-only until explicitly published
 again. Publication is runtime-only and is not restored after daemon restart.
 
 The UI distinguishes `authorizing`, `connecting`, `ready`, and `error` states.
+The first-party `tunnel.zarvis.ai` provider currently publishes HTTP over
+loopback TCP. It rejects other combinations locally before opening owner
+authorization.
 For development against another compatible publication control plane, set
 `CONSTRUCT_CHANNEL_PUBLICATION_API_URL`; its default is
 `https://tunnel.zarvis.ai/api/v1/channel-publications`.
@@ -65,7 +68,7 @@ metadata needed to form a public edge. The tunnel transports bytes and owns
 public routing; the channel continues to parse requests, authenticate callers,
 and route sessions.
 
-HTTP and WebSocket channels receive public URLs. A future opaque TCP channel
-can receive a public host and port through the same boundary. UDP needs a
-provider that explicitly supports it, while outbound broker or polling
-channels need no inbound tunnel at all.
+Providers that support HTTP and WebSocket channels return public URLs. A future
+provider for opaque TCP can return a public host and port through the same
+boundary. UDP needs a provider that explicitly supports it, while outbound
+broker or polling channels need no inbound tunnel at all.

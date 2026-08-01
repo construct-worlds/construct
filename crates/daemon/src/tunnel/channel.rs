@@ -112,6 +112,15 @@ impl PublicationBackend for ConstructChannelBackend {
                 anyhow::bail!("the Construct provider does not support UDP channels")
             }
         }
+        match &endpoint.protocol {
+            ApplicationProtocol::Http { .. } => {}
+            ApplicationProtocol::WebSocket { .. } => {
+                anyhow::bail!("the Construct provider currently supports only HTTP channels")
+            }
+            ApplicationProtocol::Opaque(_) => {
+                anyhow::bail!("the Construct provider does not yet expose public TCP sockets")
+            }
+        }
         registration_profile(endpoint).map(|_| ())
     }
 
@@ -440,6 +449,28 @@ mod tests {
             "/svc/alerts?debug=1"
         ))
         .is_err());
+    }
+
+    #[test]
+    fn first_party_backend_advertises_only_deployed_edge_capabilities() {
+        let backend = ConstructChannelBackend;
+        assert!(backend
+            .supports(&ChannelIngressEndpoint::loopback_http(8787, "/svc/alerts"))
+            .is_ok());
+        assert!(backend
+            .supports(&ChannelIngressEndpoint {
+                transport: IngressTransport::Tcp("127.0.0.1:9001".parse().unwrap()),
+                protocol: ApplicationProtocol::WebSocket {
+                    path: "/events".into(),
+                },
+            })
+            .is_err());
+        assert!(backend
+            .supports(&ChannelIngressEndpoint {
+                transport: IngressTransport::Tcp("127.0.0.1:5432".parse().unwrap()),
+                protocol: ApplicationProtocol::Opaque("postgres".into()),
+            })
+            .is_err());
     }
 
     #[test]
