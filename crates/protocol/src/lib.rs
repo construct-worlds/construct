@@ -1152,6 +1152,11 @@ impl SessionState {
         match self {
             SessionState::Pending => "○",
             SessionState::Running => "●",
+            // Deliberately the same dot as `Running`. `AwaitingInput` means
+            // "at a prompt", which is overwhelmingly just idle — it is not
+            // the "waiting on you" signal, and dressing it up as one cries
+            // wolf on every idle session. The sticky attention marker (spec
+            // 0054) carries that meaning instead (spec 0169).
             SessionState::AwaitingInput => "●",
             SessionState::Paused => "⏸",
             SessionState::Done => "✓",
@@ -4432,6 +4437,65 @@ mod auto_title_tests {
         let huge = "Word ".repeat(50);
         let out = sanitize_auto_title(&huge);
         assert!(out.len() <= 48);
+    }
+}
+
+#[cfg(test)]
+mod session_state_glyph_tests {
+    use super::*;
+
+    const ALL: [SessionState; 6] = [
+        SessionState::Pending,
+        SessionState::Running,
+        SessionState::AwaitingInput,
+        SessionState::Paused,
+        SessionState::Done,
+        SessionState::Errored,
+    ];
+
+    /// `Running` and `AwaitingInput` intentionally share a dot: both mean
+    /// "alive, nothing wrong", and a session sitting at a prompt is usually
+    /// just idle rather than blocked on the operator. Pinned so a future
+    /// change has to argue with spec 0169 rather than quietly re-split them
+    /// and re-introduce a per-row "waiting" signal that cries wolf.
+    #[test]
+    fn running_and_awaiting_share_a_dot() {
+        assert_eq!(
+            SessionState::Running.glyph(),
+            SessionState::AwaitingInput.glyph()
+        );
+    }
+
+    /// The states that *are* separate readings must stay separately
+    /// readable without color — a monochrome terminal still has to tell a
+    /// crash from a pause from a queued session.
+    #[test]
+    fn distinct_readings_have_distinct_glyphs() {
+        let distinct = [
+            SessionState::Pending,
+            SessionState::Running,
+            SessionState::Paused,
+            SessionState::Done,
+            SessionState::Errored,
+        ];
+        for (i, a) in distinct.iter().enumerate() {
+            for b in &distinct[i + 1..] {
+                assert_ne!(a.glyph(), b.glyph(), "{a:?} and {b:?} share a glyph");
+            }
+        }
+    }
+
+    /// Status glyphs sit in a fixed-width column in every client's session
+    /// list, so a wide or combining glyph would shear the rows beside it.
+    #[test]
+    fn glyphs_occupy_one_cell() {
+        for s in ALL {
+            assert_eq!(
+                s.glyph().chars().count(),
+                1,
+                "{s:?} glyph is not a single char"
+            );
+        }
     }
 }
 

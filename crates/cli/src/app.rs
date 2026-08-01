@@ -31,6 +31,7 @@ use tokio::sync::mpsc;
 mod configure;
 mod dynamic_ui;
 mod editor;
+mod fleet_panel;
 mod lineage_section;
 mod matrix_clicks;
 mod minibuffer;
@@ -1311,6 +1312,76 @@ impl MatrixWidgetHit {
     }
 }
 
+/// One fleet tally's clickable bounds on the session-list title row.
+/// Carries its bucket so hover and click can resolve the same panel
+/// without re-deriving it from the x position (spec 0169).
+#[derive(Debug, Clone)]
+pub struct FleetTallyHit {
+    pub kind: crate::ui::FleetTally,
+    pub row: u16,
+    pub start_col: u16,
+    pub end_col: u16,
+}
+
+impl FleetTallyHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col <= self.end_col
+    }
+}
+
+/// The panel a fleet tally opens: the rows that tally counted, listed and
+/// clickable, so a number the operator can't act on becomes a way to reach
+/// the sessions behind it (spec 0169).
+///
+/// Held open while the pointer is over the tally *or* over the panel
+/// itself, plus a short grace period after leaving either — a panel that
+/// vanished the instant the pointer left the tally could never be reached
+/// to click. Clicking the tally instead pins it, which is the only way in
+/// on terminals that never forward mouse motion.
+#[derive(Debug, Clone)]
+pub struct FleetTallyPanel {
+    pub kind: crate::ui::FleetTally,
+    /// Recomputed from the live list every update, so the panel can never
+    /// list a row the tally no longer counts.
+    pub rows: Vec<crate::ui::FleetPanelRow>,
+    /// Rows beyond the height cap, summarized as a trailing "+N more".
+    pub overflow: usize,
+    /// Screen coordinates. Owned here rather than in `LayoutSnapshot`
+    /// because the panel paints after the main-block slide, so render and
+    /// hit-test read one value that never needs translating.
+    pub area: ratatui::layout::Rect,
+    /// The tally row this panel hangs from, in screen coordinates.
+    pub anchor: FleetTallyHit,
+    /// Clicked open: survives mouse-leave until Escape or a click away.
+    pub pinned: bool,
+    /// Armed when the pointer leaves both surfaces; cleared when it returns.
+    pub hide_after: Option<Instant>,
+}
+
+impl FleetTallyPanel {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        col >= self.area.x
+            && col < self.area.x.saturating_add(self.area.width)
+            && row >= self.area.y
+            && row < self.area.y.saturating_add(self.area.height)
+    }
+
+    /// The listed row under the pointer, if any. The border and the
+    /// trailing "+N more" summary are not targets.
+    pub fn item_at(&self, col: u16, row: u16) -> Option<&crate::ui::FleetPanelRow> {
+        if !self.contains(col, row)
+            || col == self.area.x
+            || col + 1 >= self.area.x.saturating_add(self.area.width)
+            || row == self.area.y
+            || row + 1 >= self.area.y.saturating_add(self.area.height)
+        {
+            return None;
+        }
+        let idx = row.saturating_sub(self.area.y).saturating_sub(1) as usize;
+        self.rows.get(idx)
+    }
+}
+
 /// A widget panel shown transiently because the cursor is over its title
 /// square (or, briefly after a create/update, auto-revealed). `until` is the
 /// expiry; each hover frame pushes it out. Cleared when it lapses or the cursor
@@ -1788,6 +1859,12 @@ pub struct App {
     pub layout: LayoutSnapshot,
     /// Session-view title hamburger dropdown.
     pub session_title_menu: Option<SessionTitleMenu>,
+    /// Open fleet-tally panel listing the rows one tally counted (spec 0169).
+    pub fleet_panel: Option<FleetTallyPanel>,
+    /// A session or group the list should scroll into view on the next
+    /// render. Held as an id, not an index: indices go stale between the
+    /// click and the frame that consumes them, ids don't.
+    pub list_scroll_target: Option<String>,
     /// Open model-route picker, anchored to the modeline's model
     /// indicator (spec 0114).
     pub route_menu: Option<route_menu::RouteMenu>,
@@ -3932,6 +4009,11 @@ pub struct LayoutSnapshot {
     /// frames leave it unset because the theme switcher lives in the
     /// minibuffer shortcut hints.
     pub matrix_theme_hit: Option<(u16, u16, u16)>,
+    /// Session-list title fleet-tally bounds, one entry per rendered tally,
+    /// so hovering or clicking a count can open the panel listing the rows
+    /// it stands for (spec 0169). Empty when the tallies don't fit or all
+    /// read zero.
+    pub list_title_tally_hits: Vec<FleetTallyHit>,
     /// Matrix-rain title-bar widget viewport affordances for the operator session.
     pub matrix_widget_hits: Vec<MatrixWidgetHit>,
     /// Dynamic UI title-bar affordance bounds: `(x_start, x_end, y, session_id)`.
@@ -4178,6 +4260,7 @@ impl LayoutSnapshot {
             matrix_panel_mode_hit,
             matrix_token_graph_area,
             matrix_theme_hit,
+            list_title_tally_hits,
             matrix_widget_hits,
             dynamic_ui_trigger,
             dynamic_ui_triggers,
@@ -4285,6 +4368,7 @@ impl LayoutSnapshot {
         shift.retain_rows(dynamic_ui_widget_hits, |hit| &mut hit.row);
         shift.retain_rows(dynamic_ui_panel_close_hits, |hit| &mut hit.row);
         shift.retain_rows(matrix_widget_hits, |hit| &mut hit.row);
+        shift.retain_rows(list_title_tally_hits, |hit| &mut hit.row);
         shift.retain_rows(playbook_clip_hits, |hit| &mut hit.row);
         shift.retain_rows(playbook_attachment_hits, |hit| &mut hit.row);
         shift.retain_rows(playbook_action_link_hits, |hit| &mut hit.row);
@@ -5073,6 +5157,8 @@ async fn run_with_socket_initial_selection(
         start_instant: now,
         layout: LayoutSnapshot::default(),
         session_title_menu: None,
+        fleet_panel: None,
+        list_scroll_target: None,
         route_menu: None,
         suggest_deck: None,
         suggestion_hands: HashMap::new(),
@@ -5512,6 +5598,11 @@ async fn run_loop(
         // held key (delete / arrow across long text) cheap: one
         // render per output batch instead of one per keypress.
         app.report_view();
+        // Before the paint, not on the frame timer: this body also runs
+        // after every mouse event, so a hovered tally opens its panel on
+        // the very next frame instead of waiting out a tick. The tick is
+        // what expires it once the pointer leaves.
+        app.update_fleet_tally_panel(Instant::now());
         let skip_draw = std::mem::take(&mut app.skip_redraw_after_event);
         if !skip_draw {
             // Repair palette collisions before painting, and again whenever the
@@ -10286,6 +10377,7 @@ impl App {
                 // so the session scrollback underneath does not move.
                 if self.scroll_suggest_deck(ev.column, ev.row, -1)
                     || self.scroll_route_menu(ev.column, ev.row, -1)
+                    || self.fleet_panel_owns_wheel(ev.column, ev.row)
                 {
                     return;
                 }
@@ -10316,6 +10408,7 @@ impl App {
             MouseEventKind::ScrollDown => {
                 if self.scroll_suggest_deck(ev.column, ev.row, 1)
                     || self.scroll_route_menu(ev.column, ev.row, 1)
+                    || self.fleet_panel_owns_wheel(ev.column, ev.row)
                 {
                     return;
                 }
@@ -10740,6 +10833,37 @@ impl App {
     async fn handle_left_click(&mut self, col: u16, row: u16) {
         fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
             c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
+        }
+        // The fleet-tally panel is sized to its content and overhangs the
+        // sidebar into the view pane, so it has to claim its own cells
+        // before any pane branch below sees them.
+        if let Some(panel) = self.fleet_panel.clone() {
+            if let Some(entry) = panel.item_at(col, row) {
+                self.activate_fleet_panel_row(entry);
+                return;
+            }
+            if panel.contains(col, row) {
+                return;
+            }
+            if panel.anchor.contains(col, row) {
+                // Toggle-off has to close *here* and return. The generic
+                // dismissal below falls through into `click_list`, which
+                // would pin the panel straight back open.
+                if panel.pinned {
+                    self.fleet_panel = None;
+                    return;
+                }
+                // Merely hover-open: fall through with the panel intact so
+                // `click_list` pins it, keeping the focus / vim-mode reset
+                // that a title-row click owes the list pane.
+            } else {
+                // A click elsewhere dismisses the panel and still acts on
+                // whatever it landed on.
+                self.fleet_panel = None;
+            }
+            // A click elsewhere dismisses the panel and still acts on
+            // whatever it landed on.
+            self.fleet_panel = None;
         }
         if let Some(menu) = self.session_title_menu.clone() {
             if let Some(action) = menu.item_at(col, row) {
@@ -11266,6 +11390,46 @@ impl App {
         0
     }
 
+    /// Smallest scroll offset that puts `target_idx` fully on screen, or
+    /// `current` when it already is. Measured in display rows, like
+    /// [`Self::list_max_scroll`], so a full-mode card counts as two.
+    ///
+    /// Always `<= list_max_scroll(items, visible_rows)`: that is the smallest
+    /// offset reaching the *last* item, and this one reaches `target_idx`,
+    /// which is never past it. The clamp at the call site is a no-op here.
+    pub(crate) fn list_scroll_offset_for_visible(
+        &self,
+        items: &[ListItem],
+        target_idx: usize,
+        visible_rows: usize,
+        current: usize,
+    ) -> usize {
+        if target_idx >= items.len() {
+            return current;
+        }
+        // Above the fold: scroll up just far enough to sit at the top.
+        if target_idx < current {
+            return target_idx;
+        }
+        // Walk back from the target, accumulating heights, and stop at the
+        // last offset whose slice still fits. A target taller than the
+        // viewport pins to itself rather than scrolling past.
+        let mut rows = 0usize;
+        let mut offset = target_idx;
+        for (idx, item) in items[..=target_idx].iter().enumerate().rev() {
+            rows += self.list_item_display_height(item);
+            if rows > visible_rows {
+                break;
+            }
+            offset = idx;
+        }
+        // Already fully visible — don't move the viewport under the user.
+        if offset <= current {
+            return current;
+        }
+        offset
+    }
+
     pub(crate) fn is_orchestrator_panel_open(&self) -> bool {
         matches!(
             self.minibuffer.as_ref().map(|m| &m.intent),
@@ -11438,6 +11602,16 @@ impl App {
                 KeymapResult::Unhandled => {}
             }
             return;
+        }
+        // A *pinned* fleet-tally panel dismisses on Esc, and on any other key
+        // falls through so the keystroke still takes its normal route. Gated
+        // on `pinned` deliberately: a panel that merely followed the pointer
+        // must not steal Esc from a focused PTY.
+        if self.fleet_panel.as_ref().is_some_and(|p| p.pinned) {
+            self.fleet_panel = None;
+            if key.code == KeyCode::Esc {
+                return;
+            }
         }
         // The route picker is a small transient popup: while it is open it
         // owns navigation keys, and any other key dismisses it rather than
@@ -15439,6 +15613,7 @@ mod tests {
             matrix_token_graph_area: None,
             matrix_operator_title_hit: None,
             matrix_theme_hit: None,
+            list_title_tally_hits: Vec::new(),
             matrix_widget_hits: Vec::new(),
             dynamic_ui_trigger: None,
             dynamic_ui_triggers: Vec::new(),
@@ -15636,6 +15811,8 @@ mod tests {
             start_instant: now,
             layout: LayoutSnapshot::default(),
             session_title_menu: None,
+            fleet_panel: None,
+            list_scroll_target: None,
             route_menu: None,
             suggest_deck: None,
             suggestion_hands: HashMap::new(),
@@ -23346,6 +23523,704 @@ mod tests {
         server.abort();
     }
 
+    /// The tally's hover geometry is computed by hand from the title's span
+    /// widths, so it can silently drift off the glyphs it labels. Render for
+    /// real, take the registered hit zone, and hover it: the tooltip is the
+    /// only place the tally's vocabulary is written out, and a hit zone that
+    /// misses means the glyphs are never explained.
+    #[tokio::test]
+    async fn fleet_tally_hover_names_the_bucket_it_sits_on() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut working = summary_with_kind(construct_protocol::SessionKind::User);
+        working.id = "run".into();
+        working.state = construct_protocol::SessionState::Running;
+        let mut flagged = summary_with_kind(construct_protocol::SessionKind::User);
+        flagged.id = "ask".into();
+        flagged.state = construct_protocol::SessionState::AwaitingInput;
+        flagged.needs_attention = true;
+        let mut broken = summary_with_kind(construct_protocol::SessionKind::User);
+        broken.id = "bad".into();
+        broken.state = construct_protocol::SessionState::Errored;
+        app.sessions = vec![working, flagged, broken];
+        app.selection = Selection::Session("run".into());
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("list should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("1● 1● 1✗"),
+            "one session per bucket should tally as `1● 1● 1✗` — working and \
+             wants-you share the dot and are told apart by hue: {text}"
+        );
+
+        let hits = app.layout.list_title_tally_hits.clone();
+        assert_eq!(hits.len(), 3, "one hit zone per rendered tally: {hits:?}");
+        // The middle tally is "wants you" — the one whose meaning is least
+        // guessable from its glyph, so it is the one worth pinning down.
+        let crate::app::FleetTallyHit {
+            kind,
+            row: y,
+            start_col: xs,
+            end_col: xe,
+        } = hits[1];
+        assert_eq!(kind, crate::ui::FleetTally::NeedsYou);
+        // Working and wants-you now render the same `1●` text, so matching
+        // symbols proves nothing about which tally the zone landed on — a
+        // hit zone drifted one tally to the left would read identically.
+        // Color is the only thing that separates them, so assert on that.
+        for x in xs..=xe {
+            let cell = term
+                .backend()
+                .buffer()
+                .cell((x, y))
+                .expect("cell inside the hit zone")
+                .clone();
+            assert!(
+                cell.symbol() == "1" || cell.symbol() == "●",
+                "the wants-you hit zone must cover its own count and glyph, \
+                 found {:?} at x={x}",
+                cell.symbol()
+            );
+            assert_eq!(
+                cell.style().fg,
+                Some(app.theme.info),
+                "the hit zone must sit on the wants-you tally, not the \
+                 identically-spelled working tally beside it (x={x})"
+            );
+        }
+
+        app.mouse_pos = Some((xs, y));
+        app.update_fleet_tally_panel(Instant::now());
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover panel should render");
+        let hovered = rendered_text(term.backend().buffer());
+        assert!(
+            hovered.contains("1 session needs you"),
+            "hovering the wants-you tally should name it in words: {hovered}"
+        );
+        // And the panel lists the very row it counted, so the operator can
+        // reach it rather than hunt the list for the dot.
+        let panel = app.fleet_panel.as_ref().expect("hover opens the panel");
+        assert_eq!(
+            panel.rows.iter().map(|r| &r.target).collect::<Vec<_>>(),
+            vec![&crate::ui::FleetPanelTarget::Session("ask".into())]
+        );
+        server.abort();
+    }
+
+    /// Unfocused, the tally recedes — but by attribute, not by desaturating
+    /// to gray. Working and wants-you share a glyph and are told apart by
+    /// hue alone, so a dimming that dropped the color would merge them into
+    /// two identical numbers.
+    #[tokio::test]
+    async fn unfocused_tally_dims_but_keeps_its_bucket_hue() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut flagged = summary_with_kind(construct_protocol::SessionKind::User);
+        flagged.id = "ask".into();
+        flagged.state = construct_protocol::SessionState::AwaitingInput;
+        flagged.needs_attention = true;
+        app.sessions = vec![flagged];
+        app.selection = Selection::Session("ask".into());
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+
+        app.focus = PaneFocus::List;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("focused list should render");
+        let hit = app.layout.list_title_tally_hits[0].clone();
+        let (xs, y) = (hit.start_col, hit.row);
+        let focused_cell = term
+            .backend()
+            .buffer()
+            .cell((xs, y))
+            .expect("tally cell")
+            .clone();
+        assert!(
+            !focused_cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM),
+            "a focused sidebar should show the tally at full strength"
+        );
+
+        app.focus = PaneFocus::View;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("unfocused list should render");
+        let unfocused_cell = term
+            .backend()
+            .buffer()
+            .cell((xs, y))
+            .expect("tally cell")
+            .clone();
+        assert!(
+            unfocused_cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM),
+            "an unfocused sidebar should dim the tally"
+        );
+        assert_eq!(
+            unfocused_cell.style().fg,
+            focused_cell.style().fg,
+            "dimming must not drop the bucket hue — it is the only thing \
+             separating working from wants-you"
+        );
+        server.abort();
+    }
+
+    /// A fleet with one session per bucket plus `extra` spare working
+    /// sessions, rendered once so the tally hit zones and list geometry are
+    /// live. Returns the app and the wants-you tally's hit zone.
+    async fn app_with_tallies(
+        extra: usize,
+    ) -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        let (mut app, dir, server) = empty_app().await;
+        let mut working = summary_with_kind(construct_protocol::SessionKind::User);
+        working.id = "run".into();
+        working.state = construct_protocol::SessionState::Running;
+        let mut flagged = summary_with_kind(construct_protocol::SessionKind::User);
+        flagged.id = "ask".into();
+        flagged.state = construct_protocol::SessionState::AwaitingInput;
+        flagged.needs_attention = true;
+        let mut sessions = vec![working, flagged];
+        for i in 0..extra {
+            let mut s = summary_with_kind(construct_protocol::SessionKind::User);
+            s.id = format!("busy{i}");
+            s.title = Some(format!("busy {i}"));
+            s.state = construct_protocol::SessionState::Running;
+            sessions.push(s);
+        }
+        app.sessions = sessions;
+        app.selection = Selection::Session("run".into());
+        (app, dir, server)
+    }
+
+    /// Two of the three buckets are homogeneous: everything under "working"
+    /// is running, everything under "errored" failed, and their marks only
+    /// confirm the title. Wants-you is a *marker*, not a state — it collects
+    /// a session that stopped at a prompt beside one that finished, and
+    /// those are different things to do next. Bare names would print them
+    /// identically, so the mark is the only thing carrying the difference.
+    #[tokio::test]
+    async fn fleet_panel_rows_wear_the_state_that_flagged_them() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut waiting = summary_with_kind(construct_protocol::SessionKind::User);
+        waiting.id = "ask".into();
+        waiting.title = Some("waiting on a reply".into());
+        waiting.state = construct_protocol::SessionState::AwaitingInput;
+        waiting.needs_attention = true;
+        let mut finished = summary_with_kind(construct_protocol::SessionKind::User);
+        finished.id = "fin".into();
+        finished.title = Some("finished its work".into());
+        finished.state = construct_protocol::SessionState::Done;
+        finished.needs_attention = true;
+        app.sessions = vec![waiting, finished];
+        app.selection = Selection::Session("ask".into());
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("list should render");
+        let hit = tally_hit(&app, crate::ui::FleetTally::NeedsYou);
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        app.update_fleet_tally_panel(Instant::now());
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover panel should render");
+
+        let panel = app
+            .fleet_panel
+            .as_ref()
+            .expect("hovering the wants-you tally opens its panel");
+        assert_eq!(panel.rows.len(), 2, "both flagged sessions are listed");
+        // Row order follows the list, which the test does not fix — read the
+        // mark that actually sits beside each label instead of assuming it.
+        let marks: Vec<(String, Option<ratatui::style::Color>)> = panel
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                // Border, then the body padding, then the mark — derived
+                // rather than hardcoded so a padding change moves the
+                // assertion with it instead of silently reading a blank.
+                let mark_x = panel.area.x + 1 + crate::ui::FLEET_PANEL_PAD_W;
+                let cell = term
+                    .backend()
+                    .buffer()
+                    .cell((mark_x, panel.area.y + 1 + i as u16))
+                    .expect("mark cell inside the panel")
+                    .clone();
+                (cell.symbol().to_string(), cell.style().fg)
+            })
+            .collect();
+        let labelled: Vec<(&str, &(String, Option<ratatui::style::Color>))> = panel
+            .rows
+            .iter()
+            .map(|r| r.label.as_str())
+            .zip(marks.iter())
+            .collect();
+
+        let waiting_mark = labelled
+            .iter()
+            .find(|(label, _)| label.starts_with("waiting"))
+            .expect("the waiting session is listed")
+            .1;
+        let finished_mark = labelled
+            .iter()
+            .find(|(label, _)| label.starts_with("finished"))
+            .expect("the finished session is listed")
+            .1;
+        assert_eq!(
+            waiting_mark.0, "●",
+            "a session stopped at a prompt keeps the running dot: {labelled:?}"
+        );
+        assert_eq!(
+            finished_mark.0, "✓",
+            "a finished session wears the done check, not a dot: {labelled:?}"
+        );
+        assert_eq!(waiting_mark.1, Some(app.theme.success));
+        assert_eq!(
+            finished_mark.1,
+            Some(app.theme.info),
+            "the mark must take the list's own hue for that state, so the \
+             panel and the row beneath it cannot disagree"
+        );
+        server.abort();
+    }
+
+    /// A group header has no run state of its own — it stands in for flagged
+    /// members hidden inside it. Clicking it lands on the group, where the
+    /// operator still has to expand to find the session, so its mark has to
+    /// warn that it is a way in rather than a destination.
+    #[test]
+    fn a_group_panel_row_wears_its_disclosure_not_a_state_glyph() {
+        let items = vec![crate::app::ListItem::GroupHeader {
+            group: construct_protocol::GroupSummary {
+                id: "g1".into(),
+                name: "infra".into(),
+                created_at: chrono::Utc::now(),
+                position: 0,
+                collapsed: true,
+            },
+            member_count: 3,
+            attention_rollup: true,
+        }];
+        let rows = crate::ui::fleet_status_buckets(&items)
+            .bucket(crate::ui::FleetTally::NeedsYou)
+            .to_vec();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].glyph,
+            crate::ui::FleetPanelGlyph::Group { collapsed: true }
+        );
+        assert_eq!(
+            rows[0].glyph.glyph(),
+            "▶",
+            "a collapsed group shows the same triangle the list row shows"
+        );
+        let states = [
+            construct_protocol::SessionState::Running,
+            construct_protocol::SessionState::AwaitingInput,
+            construct_protocol::SessionState::Done,
+            construct_protocol::SessionState::Errored,
+            construct_protocol::SessionState::Paused,
+            construct_protocol::SessionState::Pending,
+        ];
+        for state in states {
+            assert_ne!(
+                rows[0].glyph.glyph(),
+                crate::ui::FleetPanelGlyph::State(state).glyph(),
+                "a group must not be mistakable for a session in any state"
+            );
+        }
+    }
+
+    /// The body keeps a blank column against each border. Without it the
+    /// mark butts against the left border and reads as part of the frame
+    /// rather than as the first column of content. The hover band is
+    /// deliberately *not* inset — it spans the full inner width — so this
+    /// checks the margin on an unhovered row, where a bare space is the
+    /// honest signal.
+    #[tokio::test]
+    async fn fleet_panel_keeps_a_blank_margin_inside_its_border() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut waiting = summary_with_kind(construct_protocol::SessionKind::User);
+        waiting.id = "ask".into();
+        waiting.title = Some("waiting on a reply".into());
+        waiting.state = construct_protocol::SessionState::AwaitingInput;
+        waiting.needs_attention = true;
+        app.sessions = vec![waiting];
+        app.selection = Selection::Session("ask".into());
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("list should render");
+        let hit = tally_hit(&app, crate::ui::FleetTally::NeedsYou);
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        app.update_fleet_tally_panel(Instant::now());
+        // Park the pointer back on the tally so the single row is not the
+        // hovered one; the margin must hold on an unstyled row too.
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover panel should render");
+
+        let panel = app
+            .fleet_panel
+            .as_ref()
+            .expect("hovering the wants-you tally opens its panel");
+        let row = panel.area.y + 1;
+        let pad = crate::ui::FLEET_PANEL_PAD_W;
+        let cell_at = |x: u16| {
+            term.backend()
+                .buffer()
+                .cell((x, row))
+                .expect("cell inside the panel")
+                .symbol()
+                .to_string()
+        };
+
+        for i in 0..pad {
+            assert_eq!(
+                cell_at(panel.area.x + 1 + i),
+                " ",
+                "the body holds a blank column between the left border and its mark"
+            );
+            assert_eq!(
+                cell_at(panel.area.x + panel.area.width - 2 - i),
+                " ",
+                "and the same margin on the right, so a label never touches the frame"
+            );
+        }
+        assert_eq!(
+            cell_at(panel.area.x + 1 + pad),
+            "\u{25cf}",
+            "the mark sits immediately past the padding"
+        );
+        server.abort();
+    }
+
+    /// Clicks dispatch on mouse-*up*, so a test that sends only the press
+    /// exercises nothing.
+    async fn click_at(app: &mut App, col: u16, row: u16) {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.on_mouse(MouseEvent {
+                kind,
+                column: col,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+            .await;
+        }
+    }
+
+    fn tally_hit(app: &App, kind: crate::ui::FleetTally) -> FleetTallyHit {
+        app.layout
+            .list_title_tally_hits
+            .iter()
+            .find(|h| h.kind == kind)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {kind:?} tally rendered"))
+    }
+
+    /// The panel outlives the pointer by half a second. Without the grace it
+    /// would close in the gap between the tally and the panel below it, and
+    /// no row could ever be clicked.
+    #[tokio::test]
+    async fn fleet_tally_panel_lingers_half_a_second_after_the_pointer_leaves() {
+        let (mut app, _dir, server) = app_with_tallies(0).await;
+        let _ = rendered(&mut app, 120, 30);
+        let hit = tally_hit(&app, crate::ui::FleetTally::NeedsYou);
+
+        let t0 = Instant::now();
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        app.update_fleet_tally_panel(t0);
+        assert!(app.fleet_panel.is_some(), "hover opens the panel");
+
+        // Pointer leaves for somewhere that is neither tally nor panel.
+        app.mouse_pos = Some((100, 25));
+        app.update_fleet_tally_panel(t0);
+        app.update_fleet_tally_panel(t0 + Duration::from_millis(400));
+        assert!(
+            app.fleet_panel.is_some(),
+            "the panel must survive the trip from tally to panel"
+        );
+        app.update_fleet_tally_panel(t0 + Duration::from_millis(600));
+        assert!(app.fleet_panel.is_none(), "the grace period must expire");
+        server.abort();
+    }
+
+    /// Once the pointer is on the panel, the panel stays — otherwise it would
+    /// close under the very cursor trying to click one of its rows.
+    #[tokio::test]
+    async fn fleet_tally_panel_is_held_open_while_the_pointer_is_over_it() {
+        let (mut app, _dir, server) = app_with_tallies(0).await;
+        let _ = rendered(&mut app, 120, 30);
+        let hit = tally_hit(&app, crate::ui::FleetTally::NeedsYou);
+
+        let t0 = Instant::now();
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        app.update_fleet_tally_panel(t0);
+        let area = app.fleet_panel.as_ref().expect("open").area;
+
+        app.mouse_pos = Some((area.x + 1, area.y + 1));
+        app.update_fleet_tally_panel(t0 + Duration::from_millis(100));
+        app.update_fleet_tally_panel(t0 + Duration::from_secs(30));
+        assert!(
+            app.fleet_panel.is_some(),
+            "a pointer resting on the panel must hold it open indefinitely"
+        );
+        server.abort();
+    }
+
+    /// Terminals that never report mouse motion (macOS Terminal.app among
+    /// them) would otherwise never see this panel at all. Clicking the tally
+    /// is the way in, and clicking it again is the way back out.
+    #[tokio::test]
+    async fn clicking_a_fleet_tally_pins_its_panel_and_clicking_again_closes_it() {
+        let (mut app, _dir, server) = app_with_tallies(0).await;
+        let _ = rendered(&mut app, 120, 30);
+        let hit = tally_hit(&app, crate::ui::FleetTally::NeedsYou);
+
+        click_at(&mut app, hit.start_col, hit.row).await;
+        let panel = app.fleet_panel.as_ref().expect("click opens the panel");
+        assert!(panel.pinned, "a clicked panel must not expire on a timer");
+        // Pinned panels ignore the linger entirely.
+        app.update_fleet_tally_panel(Instant::now() + Duration::from_secs(60));
+        assert!(app.fleet_panel.is_some(), "pinning opts out of expiry");
+
+        let _ = rendered(&mut app, 120, 30);
+        click_at(&mut app, hit.start_col, hit.row).await;
+        assert!(
+            app.fleet_panel.is_none(),
+            "clicking the pinned tally again must close it, not re-pin it"
+        );
+        server.abort();
+    }
+
+    /// Esc is the universal dismissal, but only for a panel the operator
+    /// deliberately pinned — a panel merely following the pointer must not
+    /// swallow Esc from a focused PTY.
+    #[tokio::test]
+    async fn escape_unpins_the_fleet_tally_panel() {
+        let (mut app, _dir, server) = app_with_tallies(0).await;
+        let _ = rendered(&mut app, 120, 30);
+        let hit = tally_hit(&app, crate::ui::FleetTally::NeedsYou);
+
+        app.toggle_fleet_tally_panel(&hit);
+        assert!(app.fleet_panel.as_ref().is_some_and(|p| p.pinned));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert!(app.fleet_panel.is_none(), "Esc must close a pinned panel");
+
+        // Hover-open (unpinned): Esc belongs to whatever is focused.
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        app.update_fleet_tally_panel(Instant::now());
+        assert!(app.fleet_panel.as_ref().is_some_and(|p| !p.pinned));
+        server.abort();
+    }
+
+    /// Clicking a row is the whole point: it selects the session the tally
+    /// counted and hands the keyboard to the list, so the operator lands
+    /// where they can act.
+    #[tokio::test]
+    async fn clicking_a_fleet_panel_row_selects_it_and_focuses_the_list() {
+        let (mut app, _dir, server) = app_with_tallies(0).await;
+        app.focus = PaneFocus::View;
+        let _ = rendered(&mut app, 120, 30);
+        let hit = tally_hit(&app, crate::ui::FleetTally::NeedsYou);
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        app.update_fleet_tally_panel(Instant::now());
+        let area = app.fleet_panel.as_ref().expect("open").area;
+
+        click_at(&mut app, area.x + 1, area.y + 1).await;
+
+        assert_eq!(app.selection, Selection::Session("ask".into()));
+        assert_eq!(app.focus, PaneFocus::List);
+        assert!(
+            app.fleet_panel.is_none(),
+            "activating a row closes the panel it was on"
+        );
+        server.abort();
+    }
+
+    /// The panel floats over the list, so a row click must be claimed by the
+    /// panel and never also land on whatever session sits underneath it.
+    #[tokio::test]
+    async fn a_fleet_panel_row_click_does_not_leak_to_the_list_row_underneath() {
+        let (mut app, _dir, server) = app_with_tallies(6).await;
+        let _ = rendered(&mut app, 120, 30);
+        let hit = tally_hit(&app, crate::ui::FleetTally::Working);
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        app.update_fleet_tally_panel(Instant::now());
+        let (area, first) = {
+            let p = app.fleet_panel.as_ref().expect("open");
+            (p.area, p.rows[0].target.clone())
+        };
+        // The panel must actually overlap list rows or this proves nothing.
+        let items_area = app.layout.list_items_area.expect("list rendered");
+        let rows = app.layout.list_visible_rows.len() as u16;
+        assert!(
+            items_area.y < area.y + area.height && area.y < items_area.y + rows,
+            "the panel should overlap the list for this test to mean anything"
+        );
+
+        click_at(&mut app, area.x + 1, area.y + 1).await;
+
+        let crate::ui::FleetPanelTarget::Session(expected) = first else {
+            panic!("working bucket holds sessions");
+        };
+        assert_eq!(
+            app.selection,
+            Selection::Session(expected),
+            "the panel's own row must win over the list row beneath it"
+        );
+        server.abort();
+    }
+
+    /// The bug that prompted the panel: the list never scrolls to follow
+    /// selection, so a flagged session below the fold stayed invisible even
+    /// after the tally announced it. Clicking its row has to bring it on
+    /// screen, not just select it.
+    #[tokio::test]
+    async fn clicking_a_fleet_panel_row_scrolls_it_into_view() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut sessions = Vec::new();
+        for i in 0..30 {
+            let mut s = summary_with_kind(construct_protocol::SessionKind::User);
+            s.id = format!("s{i:02}");
+            s.title = Some(format!("session {i}"));
+            s.position = i as i64;
+            s.state = construct_protocol::SessionState::Paused;
+            sessions.push(s);
+        }
+        // The last one is the only flagged session, and it starts far below
+        // the fold of a 20-row terminal.
+        let last = sessions.len() - 1;
+        sessions[last].state = construct_protocol::SessionState::AwaitingInput;
+        sessions[last].needs_attention = true;
+        let target = sessions[last].id.clone();
+        app.sessions = sessions;
+        app.selection = Selection::Session("s00".into());
+
+        let _ = rendered(&mut app, 120, 20);
+        let visible = |app: &App| -> bool {
+            let items = app.list_items();
+            let Some(idx) = items.iter().position(|i| match i {
+                ListItem::Session { summary, .. } => summary.id == target,
+                _ => false,
+            }) else {
+                panic!("the flagged session must be in the list at all");
+            };
+            app.layout
+                .list_visible_rows
+                .iter()
+                .any(|r| r.item_index == idx)
+        };
+        assert!(!visible(&app), "the flagged row must start below the fold");
+
+        app.activate_fleet_panel_row(&crate::ui::FleetPanelRow {
+            target: crate::ui::FleetPanelTarget::Session(target.clone()),
+            label: "session 29".into(),
+            glyph: crate::ui::FleetPanelGlyph::State(
+                construct_protocol::SessionState::Running,
+            ),
+        });
+        let _ = rendered(&mut app, 120, 20);
+        assert!(
+            visible(&app),
+            "clicking the row must scroll it onto the screen, not just select it"
+        );
+        server.abort();
+    }
+
+    /// The tally is a summary of the rows the list paints. A daemon-internal
+    /// probe is hidden from every list by design, so counting it advertises
+    /// work against a row the operator can never find.
+    #[tokio::test]
+    async fn fleet_tally_excludes_sessions_the_list_never_renders() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut visible = summary_with_kind(construct_protocol::SessionKind::User);
+        visible.id = "run".into();
+        visible.state = construct_protocol::SessionState::Running;
+        let mut probe = summary_with_kind(construct_protocol::SessionKind::UsageProbe);
+        probe.id = "probe".into();
+        probe.state = construct_protocol::SessionState::Running;
+        app.sessions = vec![visible, probe];
+        app.selection = Selection::Session("run".into());
+
+        let text = rendered(&mut app, 120, 30);
+        assert!(
+            text.contains("1●"),
+            "one visible running session should tally as `1●`: {text}"
+        );
+        assert!(
+            !text.contains("2●"),
+            "a hidden usage probe must not inflate the working tally: {text}"
+        );
+        server.abort();
+    }
+
+    /// Collapsing or zooming skips the list render entirely, so hit zones
+    /// registered on the last frame would stay clickable at coordinates that
+    /// now belong to another surface — a phantom button, once a click there
+    /// pins a panel.
+    #[tokio::test]
+    async fn fleet_tally_hits_are_cleared_when_the_list_is_not_rendered() {
+        let (mut app, _dir, server) = app_with_tallies(0).await;
+        let _ = rendered(&mut app, 120, 30);
+        assert!(!app.layout.list_title_tally_hits.is_empty());
+
+        app.list_collapsed = true;
+        app.focus = PaneFocus::View;
+        let _ = rendered(&mut app, 120, 30);
+        assert!(
+            app.layout.list_title_tally_hits.is_empty(),
+            "a collapsed sidebar must not leave tally hit zones behind"
+        );
+
+        app.list_collapsed = false;
+        app.focus = PaneFocus::List;
+        let _ = rendered(&mut app, 120, 30);
+        assert!(!app.layout.list_title_tally_hits.is_empty());
+        app.zoom = ZoomMode::View;
+        let _ = rendered(&mut app, 120, 30);
+        assert!(
+            app.layout.list_title_tally_hits.is_empty(),
+            "a zoomed view must not leave tally hit zones behind"
+        );
+        server.abort();
+    }
+
+    /// The panel is a live view of its bucket, not a snapshot. When the last
+    /// session in the bucket is dealt with, the panel goes away with the
+    /// tally rather than listing rows the tally no longer claims.
+    #[tokio::test]
+    async fn fleet_panel_closes_when_its_bucket_empties() {
+        let (mut app, _dir, server) = app_with_tallies(0).await;
+        let _ = rendered(&mut app, 120, 30);
+        let hit = tally_hit(&app, crate::ui::FleetTally::NeedsYou);
+        app.toggle_fleet_tally_panel(&hit);
+        app.update_fleet_tally_panel(Instant::now());
+        assert!(app.fleet_panel.is_some());
+
+        for s in &mut app.sessions {
+            s.needs_attention = false;
+        }
+        let _ = rendered(&mut app, 120, 30);
+        app.update_fleet_tally_panel(Instant::now());
+        assert!(
+            app.fleet_panel.is_none(),
+            "an emptied bucket must take its panel with it, pinned or not"
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn playbook_clip_hover_shows_missing_session_tooltip() {
         let (mut app, _dir, server) = empty_app().await;
@@ -30649,6 +31524,92 @@ mod tests {
         app.list_mode = SessionListViewMode::Full;
         // Four rows fit two 2-row cards, so the last page starts at item 8.
         assert_eq!(app.list_max_scroll(&items, 4), 8);
+        server.abort();
+    }
+
+    /// Scroll-into-view measures display rows, not items. In full mode a
+    /// card is two rows tall, so an offset computed by item count would put
+    /// the target's second line just past the bottom edge — visible enough to
+    /// pass a naive check, and clipped in the terminal.
+    #[tokio::test]
+    async fn list_scroll_offset_for_visible_puts_a_full_mode_card_fully_on_screen() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.sessions = (0..10)
+            .map(|index| {
+                let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+                session.id = format!("s{index}");
+                session.position = index;
+                session
+            })
+            .collect();
+        let items = app.list_items();
+
+        // Compact: four one-row items fit, so item 9 sits at offset 6.
+        assert_eq!(app.list_scroll_offset_for_visible(&items, 9, 4, 0), 6);
+        app.list_mode = SessionListViewMode::Full;
+        // Full: only two 2-row cards fit, so item 9 sits at offset 8.
+        assert_eq!(app.list_scroll_offset_for_visible(&items, 9, 4, 0), 8);
+        server.abort();
+    }
+
+    /// The render site clamps the result against `list_max_scroll`. That
+    /// clamp must never bite: the smallest offset reaching some item can't
+    /// exceed the smallest offset reaching the last one, or a scroll request
+    /// would land short of the row it was asked for.
+    #[tokio::test]
+    async fn list_scroll_offset_for_visible_never_exceeds_list_max_scroll() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.sessions = (0..17)
+            .map(|index| {
+                let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+                session.id = format!("s{index}");
+                session.position = index;
+                session
+            })
+            .collect();
+        let items = app.list_items();
+        for mode in [SessionListViewMode::Compact, SessionListViewMode::Full] {
+            app.list_mode = mode;
+            for visible_rows in 1..12usize {
+                let max = app.list_max_scroll(&items, visible_rows);
+                for target in 0..items.len() {
+                    for current in [0usize, 3, 9] {
+                        let got =
+                            app.list_scroll_offset_for_visible(&items, target, visible_rows, current);
+                        assert!(
+                            got <= max.max(current),
+                            "{mode:?}: target {target} at {visible_rows} rows gave \
+                             offset {got}, past max {max}"
+                        );
+                    }
+                }
+            }
+        }
+        server.abort();
+    }
+
+    /// A row already on screen must not move the viewport. The panel selects
+    /// as much as it scrolls, and jerking the list for a row the operator can
+    /// already see loses their place for nothing.
+    #[tokio::test]
+    async fn list_scroll_offset_for_visible_leaves_an_already_visible_row_alone() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.sessions = (0..10)
+            .map(|index| {
+                let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+                session.id = format!("s{index}");
+                session.position = index;
+                session
+            })
+            .collect();
+        let items = app.list_items();
+        // Showing items 4..=8; every one of them is a no-op.
+        for target in 4..=8 {
+            assert_eq!(app.list_scroll_offset_for_visible(&items, target, 5, 4), 4);
+        }
+        // Above the fold scrolls up to sit at the top; below scrolls down.
+        assert_eq!(app.list_scroll_offset_for_visible(&items, 1, 5, 4), 1);
+        assert_eq!(app.list_scroll_offset_for_visible(&items, 9, 5, 4), 5);
         server.abort();
     }
 

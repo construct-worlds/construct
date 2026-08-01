@@ -367,6 +367,20 @@ impl App {
                     return;
                 }
             }
+            // Fleet tallies share this row but can never shadow the buttons
+            // above: the title is dropped wholesale if it would reach the
+            // right-hand controls. Clicking one pins its panel open — the
+            // only way in on terminals that never report mouse motion.
+            if let Some(hit) = self
+                .layout
+                .list_title_tally_hits
+                .iter()
+                .find(|h| h.contains(col, row))
+                .cloned()
+            {
+                self.toggle_fleet_tally_panel(&hit);
+                return;
+            }
         }
         // Top + bottom border are 1 row each; rows outside the inner
         // content area only handle the focus change above.

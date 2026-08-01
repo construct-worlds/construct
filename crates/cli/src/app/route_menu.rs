@@ -17,6 +17,8 @@ impl App {
                 return;
             }
         };
+        // One floating surface at a time.
+        self.fleet_panel = None;
         let active = listed.active.clone();
         // Live pin model/effort come from the session record, not the
         // route option defaults (list_routes does not rewrite those).
