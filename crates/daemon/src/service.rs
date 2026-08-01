@@ -208,7 +208,7 @@ pub fn put_definition(
     write_definition(dir, &params.service.name, &config)?;
     Ok(construct_protocol::ServicePutResult {
         service: summary(params.service.name, &config),
-        restart_required: true,
+        applied: Default::default(),
     })
 }
 
@@ -413,7 +413,7 @@ pub fn put_channel(
     Ok(construct_protocol::ServiceChannelPutResult {
         channel: summary,
         new_secret,
-        restart_required: true,
+        applied: Default::default(),
     })
 }
 
@@ -478,7 +478,7 @@ pub fn attach_channel(
             Some(params.service_name),
         ),
         new_secret: None,
-        restart_required: true,
+        applied: Default::default(),
     })
 }
 
@@ -512,7 +512,7 @@ pub fn detach_channel(
     Ok(construct_protocol::ServiceChannelPutResult {
         channel: channel_summary(params.channel_id, &config, None),
         new_secret: None,
-        restart_required: true,
+        applied: Default::default(),
     })
 }
 
@@ -556,7 +556,7 @@ pub fn rotate_channel_secret(
     Ok(construct_protocol::ServiceChannelPutResult {
         channel: summary,
         new_secret: Some(secret),
-        restart_required: true,
+        applied: Default::default(),
     })
 }
 
@@ -649,45 +649,37 @@ fn validate_service_name(name: &str) -> Result<()> {
     }
 }
 
-pub fn spawn_all(
-    manager: Arc<SessionManager>,
-    services: BTreeMap<String, ServiceConfig>,
-    data_dir: PathBuf,
-) {
-    for (name, service) in services {
-        if service.paused {
-            continue;
-        }
-        let shared = ServiceShared::load(name.clone(), service.clone(), manager.clone(), data_dir.clone());
-        for (channel_id, channel) in service.channels {
-            if !channel.enabled {
-                continue;
-            }
-            if channel_kind(&channel_id, &channel) != "http" {
-                tracing::warn!(service = %name, channel = %channel_id, "unsupported service channel kind; skipping");
-                continue;
-            }
-            let Some(port) = channel.port else {
-                tracing::warn!(service = %name, channel = %channel_id, "HTTP channel has no port; skipping");
-                continue;
-            };
-            let Some(token) = channel.token.filter(|token| !token.is_empty()) else {
-                tracing::warn!(service = %name, channel = %channel_id, "HTTP channel has no token; skipping");
-                continue;
-            };
-            let runtime = Arc::new(ServiceRuntime {
-                channel_id: channel_id.clone(),
-                token,
-                shared: shared.clone(),
-            });
-            let service_name = name.clone();
-            tokio::spawn(async move {
-                if let Err(error) = serve(runtime, port).await {
-                    tracing::error!(service = %service_name, channel = %channel_id, %error, "service endpoint stopped");
-                }
-            });
-        }
+/// Build the runtime for one channel of an already-loaded service.
+///
+/// The supervisor owns the decision of *which* channels should exist; this
+/// only turns one of those decisions into something `serve` can drive.
+pub(crate) fn channel_runtime(shared: Arc<ServiceShared>, channel_id: String) -> Arc<ServiceRuntime> {
+    Arc::new(ServiceRuntime { channel_id, shared })
+}
+
+/// Whether a channel is one this daemon knows how to bind, logging the reason
+/// when it is not. Used by the supervisor to build the desired listener set.
+pub(crate) fn bindable_port(
+    service: &str,
+    channel_id: &str,
+    channel: &ServiceChannelConfig,
+) -> Option<u16> {
+    if !channel.enabled {
+        return None;
     }
+    if channel_kind(channel_id, channel) != "http" {
+        tracing::warn!(service = %service, channel = %channel_id, "unsupported service channel kind; skipping");
+        return None;
+    }
+    let Some(port) = channel.port else {
+        tracing::warn!(service = %service, channel = %channel_id, "HTTP channel has no port; skipping");
+        return None;
+    };
+    if channel.token.as_deref().unwrap_or("").is_empty() {
+        tracing::warn!(service = %service, channel = %channel_id, "HTTP channel has no token; skipping");
+        return None;
+    }
+    Some(port)
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -707,9 +699,19 @@ impl PersistedState {
     }
 }
 
-struct ServiceShared {
+/// Per-service state that outlives any one definition.
+///
+/// **Exactly one of these exists per service name for the life of the daemon.**
+/// A reload swaps [`ServiceShared::config`] in place; it must never build a
+/// second `ServiceShared` for a name that already has one. Two of them would
+/// both persist to the same state file — last writer wins, and the routed
+/// session map silently loses entries — and the dedup ring, which is memory
+/// only, would reset, so a retried delivery would open a second conversation.
+pub(crate) struct ServiceShared {
     name: String,
-    config: ServiceConfig,
+    /// Read through [`ServiceShared::config`] at the point of use, never
+    /// cached across an await, so an edit reaches the next read.
+    config: std::sync::RwLock<Arc<ServiceConfig>>,
     manager: Arc<SessionManager>,
     state_path: PathBuf,
     state: Mutex<PersistedState>,
@@ -717,7 +719,7 @@ struct ServiceShared {
 }
 
 impl ServiceShared {
-    fn load(
+    pub(crate) fn load(
         name: String,
         config: ServiceConfig,
         manager: Arc<SessionManager>,
@@ -731,24 +733,68 @@ impl ServiceShared {
         state.normalize_legacy_ownership();
         Arc::new(Self {
             name,
-            config,
+            config: std::sync::RwLock::new(Arc::new(config)),
             manager,
             state_path,
             state: Mutex::new(state),
             seen_requests: Mutex::new(Default::default()),
         })
     }
+
+    /// The definition in force right now. The guard is released before the
+    /// caller can await, so a reload is never blocked by an in-flight turn.
+    pub(crate) fn config(&self) -> Arc<ServiceConfig> {
+        self.config
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Publish a new definition to every in-flight and future reader.
+    pub(crate) fn set_config(&self, config: ServiceConfig) {
+        let mut slot = self
+            .config
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Arc::new(config);
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
 }
 
-struct ServiceRuntime {
+pub(crate) struct ServiceRuntime {
     channel_id: String,
-    token: String,
     shared: Arc<ServiceShared>,
 }
 
 impl ServiceRuntime {
     fn name(&self) -> &str {
         &self.shared.name
+    }
+
+    /// The credential this channel currently accepts, or `None` if the channel
+    /// has been detached or stripped of its secret since the listener bound.
+    fn token(&self) -> Option<String> {
+        self.shared
+            .config()
+            .channels
+            .get(&self.channel_id)
+            .and_then(|channel| channel.token.clone())
+            .filter(|token| !token.is_empty())
+    }
+
+    /// Whether this channel should answer right now. Consulted per request so
+    /// pausing a service stops it serving even before its listener is torn
+    /// down.
+    fn serving(&self) -> bool {
+        let cfg = self.shared.config();
+        !cfg.paused
+            && cfg
+                .channels
+                .get(&self.channel_id)
+                .is_some_and(|channel| channel.enabled)
     }
 
     async fn route(&self, body: ServiceRequest) -> Result<String> {
@@ -769,7 +815,8 @@ impl ServiceRuntime {
                 }
             }
         }
-        let key = match self.shared.config.routing {
+        let cfg = self.shared.config();
+        let key = match cfg.routing {
             ServiceRouting::PerEvent => None,
             ServiceRouting::Single => Some("__single__".to_string()),
             ServiceRouting::SessionKey => Some(
@@ -820,7 +867,12 @@ impl ServiceRuntime {
         if let Some(parent) = self.shared.state_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        tokio::fs::write(&self.shared.state_path, snapshot).await?;
+        // Write and rename like the definition writer does. This file is the
+        // only record of which session serves which key; a crash partway
+        // through a plain write would strand every live conversation.
+        let temporary = self.shared.state_path.with_extension("json.tmp");
+        tokio::fs::write(&temporary, snapshot).await?;
+        tokio::fs::rename(&temporary, &self.shared.state_path).await?;
         Ok(())
     }
 
@@ -850,7 +902,7 @@ impl ServiceRuntime {
         let mut blocked = None;
         if let Some(pending) = pending_approval(&detail.events) {
             let waited = (chrono::Utc::now() - pending.since).num_seconds().max(0);
-            let timeout = self.shared.config.approval_timeout_secs;
+            let timeout = self.shared.config().approval_timeout_secs;
             if timeout > 0 && waited >= timeout as i64 {
                 // Nobody answered in the window the operator allowed, so stop
                 // holding the caller: deny, let the turn resume, and report the
@@ -894,22 +946,26 @@ impl ServiceRuntime {
     }
 
     async fn create(&self, message: String, title: Option<String>) -> Result<String> {
-        let prompt = if self.shared.config.instruction.trim().is_empty() {
+        // One snapshot for the whole creation: a reload landing mid-create
+        // must not build a session from half of one definition and half of
+        // another.
+        let cfg = self.shared.config();
+        let prompt = if cfg.instruction.trim().is_empty() {
             message
         } else {
-            format!("{}\n\n{}", self.shared.config.instruction.trim(), message)
+            format!("{}\n\n{}", cfg.instruction.trim(), message)
         };
         self.shared.manager
             .create(CreateSessionParams {
-                harness: self.shared.config.harness.clone(),
-                cwd: self.shared.config.cwd.clone(),
+                harness: cfg.harness.clone(),
+                cwd: cfg.cwd.clone(),
                 prompt: Some(prompt),
-                model: self.shared.config.model.clone(),
+                model: cfg.model.clone(),
                 title,
                 mode: Some("headless".to_string()),
                 pty_size: None,
                 worktree: false,
-                env: self.shared.config.sandbox.session_env(),
+                env: cfg.sandbox.session_env(),
                 args: Vec::new(),
                 kind: SessionKind::User,
                 parent_session_id: None,
@@ -930,19 +986,40 @@ struct ServiceRequest {
     request_id: Option<String>,
 }
 
-async fn serve(runtime: Arc<ServiceRuntime>, port: u16) -> Result<()> {
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
-        .await
-        .context("bind loopback service endpoint")?;
+/// Accept loop for one bound channel.
+///
+/// The listener is bound by the caller so a bind failure is reported to
+/// whoever asked for the reload instead of vanishing into a detached task.
+///
+/// Cancellation stops *accepting* and drops the socket, freeing the port; it
+/// deliberately does not touch connections already in flight, because each one
+/// has an agent turn behind it. Connections hold their own `Arc<ServiceRuntime>`,
+/// so they keep working through a rebind. In short: connections drain, sockets
+/// rebind.
+pub(crate) async fn serve(
+    runtime: Arc<ServiceRuntime>,
+    listener: TcpListener,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let port = listener.local_addr().map(|addr| addr.port()).unwrap_or(0);
     tracing::info!(service = %runtime.name(), channel = %runtime.channel_id, port, "service http endpoint ready (loopback only)");
     loop {
-        let (stream, _) = listener.accept().await?;
-        let runtime = runtime.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle(stream, runtime).await {
-                tracing::debug!(%error, "service request failed");
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                tracing::info!(service = %runtime.name(), channel = %runtime.channel_id, port, "service http endpoint released");
+                return Ok(());
             }
-        });
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let runtime = runtime.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle(stream, runtime).await {
+                        tracing::debug!(%error, "service request failed");
+                    }
+                });
+            }
+        }
     }
 }
 
@@ -978,14 +1055,27 @@ async fn handle(mut stream: TcpStream, runtime: Arc<ServiceRuntime>) -> Result<(
         Ok(route) => route,
         Err((status, message)) => return respond(&mut stream, status, message).await,
     };
-    let authorized = lines
-        .filter_map(|line| line.split_once(':'))
-        .any(|(name, value)| {
-            name.eq_ignore_ascii_case("authorization")
-                && value.trim() == format!("Bearer {}", runtime.token)
-        });
+    // Read the credential per request, so a rotation takes effect on the next
+    // call without rebinding the socket. A channel detached out from under a
+    // live listener has no credential at all, and nothing can authenticate.
+    let expected = runtime.token();
+    let authorized = expected.is_some_and(|token| {
+        lines
+            .filter_map(|line| line.split_once(':'))
+            .any(|(name, value)| {
+                name.eq_ignore_ascii_case("authorization")
+                    && value.trim() == format!("Bearer {token}")
+            })
+    });
     if !authorized {
         return respond(&mut stream, 401, "unauthorized").await;
+    }
+    // Checked after auth: an unauthenticated caller should not be able to
+    // learn which services exist by comparing 401 against 503. The listener
+    // also goes down on pause, so this covers the window between the config
+    // swap and the socket actually closing.
+    if !runtime.serving() {
+        return respond(&mut stream, 503, "service paused").await;
     }
     match route {
         HttpRoute::Submit => {

@@ -13788,8 +13788,9 @@ impl App {
                             Ok(result) => {
                                 self.refresh_services().await;
                                 self.set_status(format!(
-                                    "{} saved; restart daemon to apply",
-                                    result.service.name
+                                    "{} {}",
+                                    result.service.name,
+                                    result.applied.summary()
                                 ));
                             }
                             Err(error) => self.set_status(format!("service update failed: {error}")),
@@ -41139,11 +41140,11 @@ mod tests {
             .collect::<Vec<_>>();
         let note_row = view_rows
             .iter()
-            .position(|row| row.contains("Changes apply after the daemon restarts."))
-            .expect("service restart note is visible");
+            .position(|row| row.contains("Saved edits apply live"))
+            .expect("service propagation note is visible");
         assert!(
             note_row > 0 && view_rows[note_row - 1].trim().is_empty(),
-            "restart note has a spacer above it"
+            "propagation note has a spacer above it"
         );
         let footer_row = view_rows
             .iter()

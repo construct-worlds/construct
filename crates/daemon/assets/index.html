@@ -4762,13 +4762,13 @@ function serviceFieldHelp(field, service) {
   const route = service?.routing || "session-key";
   const descriptions = {
     name: ["Service name", "Stable identifier used in the service URL and TOML filename.", "Locked after creation."],
-    instruction: ["Instruction", "Prepended to every incoming message. Define the service role, boundaries, and response behavior here.", "Applies after daemon restart."],
-    harness: ["Harness", "Agent harness used for new service sessions, such as smith, claude, or codex.", "Applies after daemon restart."],
-    model: ["Model", "Optional model override passed to the harness. Blank uses the harness default.", "Applies after daemon restart."],
-    cwd: ["Working directory", "Directory where service sessions start and relative paths resolve.", "Applies after daemon restart."],
-    routing: ["Routing", route === "per-event" ? "Creates a fresh session for every accepted request." : route === "single" ? "Routes every request into one shared session." : "Reuses one session for each caller-supplied session_key.", "Applies after daemon restart."],
+    instruction: ["Instruction", "Prepended to every incoming message. Define the service role, boundaries, and response behavior here.", "Applies to new sessions."],
+    harness: ["Harness", "Agent harness used for new service sessions, such as smith, claude, or codex.", "Applies to new sessions."],
+    model: ["Model", "Optional model override passed to the harness. Blank uses the harness default.", "Applies to new sessions."],
+    cwd: ["Working directory", "Directory where service sessions start and relative paths resolve.", "Applies to new sessions."],
+    routing: ["Routing", route === "per-event" ? "Creates a fresh session for every accepted request." : route === "single" ? "Routes every request into one shared session." : "Reuses one session for each caller-supplied session_key.", "Applies to the next request."],
     channels: ["Channels", "Transport endpoints attached to this service. Each HTTP channel has its own loopback port, enabled state, and credential.", "Add, edit, disable, rotate, or delete channels below."],
-    paused: ["State", "Paused services refuse new requests while keeping their definition and history.", "Applies after daemon restart."],
+    paused: ["State", "Paused services stop their listeners and refuse requests, keeping the definition and history.", "Applies immediately."],
   };
   return descriptions[field] || descriptions.instruction;
 }
@@ -4907,7 +4907,7 @@ async function toggleServiceChannel(id) {
     await refreshSessions();
     state.serviceChannelDraft = null;
     renderServiceView();
-    serviceViewFooterEl.textContent = `Channel '${id}' ${attach ? "attached" : "detached"}; restart the daemon to apply.`;
+    serviceViewFooterEl.textContent = `Channel '${id}' ${attach ? "attached" : "detached"}.`;
   } catch (e) {
     serviceViewFooterEl.textContent = `Channel ${attach ? "attach" : "detach"} failed: ${e.message}`;
     renderServiceView();

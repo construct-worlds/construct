@@ -3257,8 +3257,137 @@ pub struct ServicePutParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServicePutResult {
     pub service: ServiceSummary,
-    /// V1 persists atomically; the current daemon adopts changes on restart.
-    pub restart_required: bool,
+    /// What the running daemon did with this edit.
+    #[serde(default)]
+    pub applied: ServiceApplyResult,
+}
+
+/// When an edit to a service field reaches the running system.
+///
+/// Clients render the class beside the field being edited, and the daemon
+/// obeys the same table, so the promise an operator reads is the promise the
+/// daemon keeps. Adding a field to a service definition means giving it a
+/// class here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PropagationClass {
+    /// The listener is started, stopped, or rebound as part of saving.
+    Immediate,
+    /// Read when the next request arrives; nothing to restart.
+    NextRequest,
+    /// Read when a session is created. Conversations already running keep the
+    /// definition they started with, because no harness can be re-instructed
+    /// or re-modelled in place.
+    NextSession,
+}
+
+impl PropagationClass {
+    pub fn label(self) -> &'static str {
+        match self {
+            PropagationClass::Immediate => "applies immediately",
+            PropagationClass::NextRequest => "applies to the next request",
+            PropagationClass::NextSession => "applies to new sessions",
+        }
+    }
+}
+
+/// Every editable part of a service definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceField {
+    Instruction,
+    Harness,
+    Model,
+    Cwd,
+    Routing,
+    Paused,
+    ApprovalTimeout,
+    Sandbox,
+    ChannelAttachment,
+    ChannelPort,
+    ChannelState,
+    ChannelCredential,
+}
+
+impl ServiceField {
+    pub const ALL: &'static [ServiceField] = &[
+        ServiceField::Instruction,
+        ServiceField::Harness,
+        ServiceField::Model,
+        ServiceField::Cwd,
+        ServiceField::Routing,
+        ServiceField::Paused,
+        ServiceField::ApprovalTimeout,
+        ServiceField::Sandbox,
+        ServiceField::ChannelAttachment,
+        ServiceField::ChannelPort,
+        ServiceField::ChannelState,
+        ServiceField::ChannelCredential,
+    ];
+
+    pub fn propagation(self) -> PropagationClass {
+        match self {
+            // Channel shape is listener state: saving it binds or unbinds.
+            ServiceField::ChannelAttachment
+            | ServiceField::ChannelPort
+            | ServiceField::ChannelState
+            | ServiceField::ChannelCredential => PropagationClass::Immediate,
+            // Consulted while handling a request, before any session is touched.
+            ServiceField::Routing | ServiceField::Paused | ServiceField::ApprovalTimeout => {
+                PropagationClass::NextRequest
+            }
+            // Consulted only when a session is built.
+            ServiceField::Instruction
+            | ServiceField::Harness
+            | ServiceField::Model
+            | ServiceField::Cwd
+            | ServiceField::Sandbox => PropagationClass::NextSession,
+        }
+    }
+}
+
+/// The effect an accepted service edit had on the running daemon.
+///
+/// Definitions are applied live, so a client can state what happened rather
+/// than telling the operator to restart and hope.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceApplyResult {
+    /// False when no supervisor is running (the edit is persisted and will be
+    /// picked up when one starts).
+    pub reloaded: bool,
+    pub started: usize,
+    pub stopped: usize,
+    pub rebound: usize,
+    /// Channels that were wanted but could not be bound — a held port, most
+    /// often. The edit is still saved; these are what did not take effect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<String>,
+}
+
+impl ServiceApplyResult {
+    /// One line for an operator: what changed, or what stopped it.
+    pub fn summary(&self) -> String {
+        if !self.failures.is_empty() {
+            return format!("saved; {}", self.failures.join("; "));
+        }
+        if !self.reloaded {
+            return "saved".to_string();
+        }
+        let mut parts = Vec::new();
+        if self.started > 0 {
+            parts.push(format!("{} channel(s) started", self.started));
+        }
+        if self.stopped > 0 {
+            parts.push(format!("{} stopped", self.stopped));
+        }
+        if self.rebound > 0 {
+            parts.push(format!("{} rebound", self.rebound));
+        }
+        if parts.is_empty() {
+            "saved and applied".to_string()
+        } else {
+            format!("saved and applied: {}", parts.join(", "))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3289,7 +3418,9 @@ pub struct ServiceChannelPutResult {
     pub channel: ServiceChannelSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_secret: Option<String>,
-    pub restart_required: bool,
+    /// What the running daemon did with this edit.
+    #[serde(default)]
+    pub applied: ServiceApplyResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

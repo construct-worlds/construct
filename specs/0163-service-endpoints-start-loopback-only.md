@@ -116,8 +116,9 @@ visible and recoverable in the fleet.
   this boundary; none is implied by enabling a service.
 - Service views participate in shared split layout state across TUI and
   WebTUI, while keyboard/pointer focus remains client-local.
-- V1 does not promise runtime definition reload, sandbox-policy enforcement,
-  channel plugins, response streaming, or public exposure.
+- V1 does not promise channel plugins, response streaming, or public exposure.
+  Runtime definition reload was subsequently added; see the spec on applying
+  service definitions without a restart, which supersedes this consequence.
 
 ## Non-Goals
 

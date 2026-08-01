@@ -28,6 +28,7 @@ mod remote_supervisor;
 mod router;
 mod server;
 mod service;
+mod service_supervisor;
 mod session;
 mod storage;
 mod tunnel;
@@ -239,7 +240,24 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     // surface.  They do not reuse the remote-control listener: a service's
     // bearer credential is scoped to that service, while remote control
     // remains protected by its owner-login boundary.
-    service::spawn_all(manager.clone(), service_definitions, paths.data_dir.clone());
+    //
+    // The supervisor owns every listener and is the only thing that binds one,
+    // so an edit — over IPC or by hand in the config dir — reaches the running
+    // system without a restart. It is handed the paths resolved at startup
+    // rather than rediscovering them, so it and the IPC handlers can never
+    // disagree about which directory holds the definitions.
+    {
+        let (service_handle, service_rx) = service_supervisor::channel();
+        manager.set_service_supervisor(service_handle.clone());
+        tokio::spawn(service_supervisor::run(
+            manager.clone(),
+            paths.clone(),
+            service_handle.clone(),
+            service_rx,
+        ));
+        service_handle.reload_detached(service_supervisor::ReloadReason::Boot);
+        service_supervisor::spawn_watcher(paths.clone(), service_handle);
+    }
     // Loop scheduler: wakes every second, fires due loops by
     // calling `SessionManager::send_input`. Persisted per-session
     // in `sessions/<id>/loops.json`; daemon restart picks them

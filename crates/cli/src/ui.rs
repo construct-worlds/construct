@@ -549,22 +549,22 @@ fn service_dialog_field_help(
         1 => (
             "Instruction",
             "Prepended to every incoming message. Define the service's role, boundaries, and response behavior here.",
-            "Type to edit · applies after restart.",
+            "Type to edit · applies to new sessions.",
         ),
         2 => (
             "Harness",
             "Agent harness used for new service sessions, such as smith, claude, or codex.",
-            "Enter opens the picker · applies after restart.",
+            "Enter opens the picker · applies to new sessions.",
         ),
         3 => (
             "Model",
             "Optional model override passed to the harness. Leave it blank to use that harness's default model.",
-            "Enter opens the picker · applies after restart.",
+            "Enter opens the picker · applies to new sessions.",
         ),
         4 => (
             "Working directory",
             "Directory where service sessions start and from which relative paths are resolved.",
-            "Type to edit · applies after restart.",
+            "Type to edit · applies to new sessions.",
         ),
         5 => {
             let explanation = match dialog.service.routing.as_str() {
@@ -581,7 +581,7 @@ fn service_dialog_field_help(
             (
                 "Routing",
                 explanation,
-                "←/→ or Space cycles · applies after restart.",
+                "←/→ or Space cycles · applies to the next request.",
             )
         }
         6 => (
@@ -591,8 +591,8 @@ fn service_dialog_field_help(
         ),
         7 => (
             "State",
-            "Serving starts the listener. Paused keeps the definition but does not start its listener after restart.",
-            "Space or ←/→ toggles · applies after restart.",
+            "Serving starts the listener. Pausing stops it and releases its port; callers get 503 until it resumes.",
+            "Space or ←/→ toggles · applies immediately.",
         ),
         _ => ("Service field", "", ""),
     }
@@ -8365,8 +8365,8 @@ fn render_service_channel_editor(
     let (title, body, hint) = match editor.selected_field {
         0 => ("Channel ID", "Stable name for this channel. It becomes part of the service's local configuration and is locked after creation.", "Type to edit when creating.") ,
         1 => ("Kind", "The transport implementation. HTTP is the only built-in channel in v1; future channel plugins can add other kinds.", "Fixed to HTTP in v1."),
-        2 => ("HTTP port", "Loopback TCP port for this channel. No two channels on one service may share a port.", "Type a port · applies after restart."),
-        3 => ("State", "Disabled channels remain configured but do not accept requests after the daemon restarts.", "Space or ←/→ toggles."),
+        2 => ("HTTP port", "Loopback TCP port for this channel. No two channels on one service may share a port.", "Type a port · rebinds immediately."),
+        3 => ("State", "Disabled channels remain configured but release their port and stop accepting requests.", "Space or ←/→ toggles · applies immediately."),
         _ => ("Channel", "", ""),
     };
     let mut help = vec![Line::from(Span::styled(title, Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD))), Line::from(""), Line::from(Span::styled(body, Style::default().fg(app.theme.text))), Line::from(""), Line::from(Span::styled(hint, Style::default().fg(app.theme.dim)))];

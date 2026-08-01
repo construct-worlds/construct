@@ -1334,6 +1334,10 @@ pub struct SessionManager {
     /// Plugin action/event-hook runtime (spec 0152 phase 2). Set once from
     /// daemon startup after construction; empty when no plugins are loaded.
     plugins: std::sync::OnceLock<Arc<crate::plugins::PluginRuntime>>,
+    /// Handle to the service supervisor, so any caller can ask for a
+    /// definition reload without depending on its internals. Set once from
+    /// daemon startup; absent in tests, which never spawn one.
+    services: std::sync::OnceLock<crate::service_supervisor::ServiceHandle>,
     adapter_runtime_dir: PathBuf,
     sessions: RwLock<HashMap<String, Arc<SessionEntry>>>,
     /// The sessions the operator currently has visible/focused (via `mark_seen` or `set_focused_sessions`).
@@ -1873,6 +1877,7 @@ impl SessionManager {
                 storage,
                 config,
                 plugins: std::sync::OnceLock::new(),
+                services: std::sync::OnceLock::new(),
                 adapter_runtime_dir,
                 sessions: RwLock::new(sessions),
                 focused_sessions: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1928,6 +1933,32 @@ impl SessionManager {
 
     pub(crate) fn plugin_runtime(&self) -> Option<&Arc<crate::plugins::PluginRuntime>> {
         self.plugins.get()
+    }
+
+    /// Install the service supervisor handle. Called once from daemon startup.
+    pub fn set_service_supervisor(&self, handle: crate::service_supervisor::ServiceHandle) {
+        let _ = self.services.set(handle);
+    }
+
+    /// Apply the definitions currently on disk to the running services.
+    ///
+    /// Errors when no supervisor is installed, which is the case in tests —
+    /// callers should treat that as "nothing to reload", not as a failure of
+    /// the edit they just persisted.
+    pub async fn reload_services(
+        &self,
+        reason: crate::service_supervisor::ReloadReason,
+    ) -> anyhow::Result<crate::service_supervisor::ReloadReport> {
+        let Some(handle) = self.services.get() else {
+            anyhow::bail!("service supervisor is not running");
+        };
+        handle.reload(reason).await
+    }
+
+    pub(crate) fn service_supervisor(
+        &self,
+    ) -> Option<&crate::service_supervisor::ServiceHandle> {
+        self.services.get()
     }
 
     /// Every plugin-contributed action, for `plugin.list_actions`.
