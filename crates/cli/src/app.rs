@@ -23742,10 +23742,14 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, _)| {
+                // Border, then the body padding, then the mark — derived
+                // rather than hardcoded so a padding change moves the
+                // assertion with it instead of silently reading a blank.
+                let mark_x = panel.area.x + 1 + crate::ui::FLEET_PANEL_PAD_W;
                 let cell = term
                     .backend()
                     .buffer()
-                    .cell((panel.area.x + 1, panel.area.y + 1 + i as u16))
+                    .cell((mark_x, panel.area.y + 1 + i as u16))
                     .expect("mark cell inside the panel")
                     .clone();
                 (cell.symbol().to_string(), cell.style().fg)
@@ -23831,6 +23835,70 @@ mod tests {
                 "a group must not be mistakable for a session in any state"
             );
         }
+    }
+
+    /// The body keeps a blank column against each border. Without it the
+    /// mark butts against the left border and reads as part of the frame
+    /// rather than as the first column of content. The hover band is
+    /// deliberately *not* inset — it spans the full inner width — so this
+    /// checks the margin on an unhovered row, where a bare space is the
+    /// honest signal.
+    #[tokio::test]
+    async fn fleet_panel_keeps_a_blank_margin_inside_its_border() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut waiting = summary_with_kind(construct_protocol::SessionKind::User);
+        waiting.id = "ask".into();
+        waiting.title = Some("waiting on a reply".into());
+        waiting.state = construct_protocol::SessionState::AwaitingInput;
+        waiting.needs_attention = true;
+        app.sessions = vec![waiting];
+        app.selection = Selection::Session("ask".into());
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("list should render");
+        let hit = tally_hit(&app, crate::ui::FleetTally::NeedsYou);
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        app.update_fleet_tally_panel(Instant::now());
+        // Park the pointer back on the tally so the single row is not the
+        // hovered one; the margin must hold on an unstyled row too.
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover panel should render");
+
+        let panel = app
+            .fleet_panel
+            .as_ref()
+            .expect("hovering the wants-you tally opens its panel");
+        let row = panel.area.y + 1;
+        let pad = crate::ui::FLEET_PANEL_PAD_W;
+        let cell_at = |x: u16| {
+            term.backend()
+                .buffer()
+                .cell((x, row))
+                .expect("cell inside the panel")
+                .symbol()
+                .to_string()
+        };
+
+        for i in 0..pad {
+            assert_eq!(
+                cell_at(panel.area.x + 1 + i),
+                " ",
+                "the body holds a blank column between the left border and its mark"
+            );
+            assert_eq!(
+                cell_at(panel.area.x + panel.area.width - 2 - i),
+                " ",
+                "and the same margin on the right, so a label never touches the frame"
+            );
+        }
+        assert_eq!(
+            cell_at(panel.area.x + 1 + pad),
+            "\u{25cf}",
+            "the mark sits immediately past the padding"
+        );
+        server.abort();
     }
 
     /// Clicks dispatch on mouse-*up*, so a test that sends only the press

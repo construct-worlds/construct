@@ -2884,6 +2884,12 @@ const FLEET_PANEL_MAX_INNER_W: u16 = 44;
 /// space. Every row pays it, including the "+N more" tail, so the labels
 /// form one column the eye can run down.
 const FLEET_PANEL_GLYPH_W: usize = 2;
+/// Blank cells held between the border and the body on each side. Without
+/// it the row's mark butts against the left border and reads as part of the
+/// frame rather than as the first column of content. The hover highlight
+/// still spans the full inner width — the padding insets the text, not the
+/// band, so a hovered row stays one unbroken bar.
+pub(crate) const FLEET_PANEL_PAD_W: u16 = 1;
 /// Most rows a tally panel lists before the rest collapse into "+N more".
 /// The working bucket can hold the whole fleet; a floating index taller
 /// than the pane it summarizes would be worse than the number it replaced.
@@ -2923,7 +2929,8 @@ pub(crate) fn fleet_tally_panel_geometry(
         .max()
         .unwrap_or(0)
         .max(UnicodeWidthStr::width(title));
-    let inner_w = (widest as u16 + 2).min(FLEET_PANEL_MAX_INNER_W);
+    let inner_w =
+        (widest as u16 + FLEET_PANEL_PAD_W * 2).min(FLEET_PANEL_MAX_INNER_W);
     let w = (inner_w + 2).min(frame.width.max(3));
     let h = (body_rows as u16 + 2).min(frame.height.max(3));
     (
@@ -7317,6 +7324,16 @@ fn render_fleet_tally_panel(f: &mut Frame, app: &App) {
     f.render_widget(block, area);
 
     let last_row = area.y.saturating_add(area.height).saturating_sub(1);
+    // Body text lives inside a rect inset by the padding; the highlight
+    // band is painted against the full `area` first, so hover reads as one
+    // bar running border to border while the text keeps its margins.
+    let text_area = Rect {
+        x: area.x.saturating_add(FLEET_PANEL_PAD_W),
+        width: area.width.saturating_sub(FLEET_PANEL_PAD_W * 2),
+        ..area
+    };
+    let band_x = area.x.saturating_add(1);
+    let band_w = area.width.saturating_sub(2) as usize;
     for (idx, entry) in panel.rows.iter().enumerate() {
         let row = area.y.saturating_add(1).saturating_add(idx as u16);
         if row >= last_row {
@@ -7333,20 +7350,22 @@ fn render_fleet_tally_panel(f: &mut Frame, app: &App) {
         } else {
             Style::default().fg(app.theme.text)
         };
+        f.buffer_mut()
+            .set_string(band_x, row, " ".repeat(band_w), style);
         // Indent the label past the mark, then overwrite the mark's cells
         // in its own hue. Patching `style`'s fg keeps the row's background,
         // so a hovered row highlights as one band rather than losing its
         // first two cells.
         render_session_title_menu_row(
             f,
-            area,
+            text_area,
             row,
             &format!("{:width$}{}", "", entry.label, width = FLEET_PANEL_GLYPH_W),
             None,
             style,
         );
         f.buffer_mut().set_string(
-            area.x.saturating_add(1),
+            text_area.x.saturating_add(1),
             row,
             entry.glyph.glyph(),
             style.fg(
@@ -7366,7 +7385,7 @@ fn render_fleet_tally_panel(f: &mut Frame, app: &App) {
         if row < last_row {
             render_session_title_menu_row(
                 f,
-                area,
+                text_area,
                 row,
                 &format!(
                     "{:width$}+{} more",
