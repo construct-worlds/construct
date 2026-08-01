@@ -167,11 +167,16 @@ impl Bucket {
     /// column-to-column can't be read as layers at all: the eye tracks a
     /// band's continuity, not its rank.
     ///
-    /// Each model contributes up to two adjacent bands: its new work sits at
-    /// the base of its own band and the cache-served remainder directly on
-    /// top, so a model is still one contiguous run of its color. A part that
-    /// is zero produces no band at all rather than a hairline that rounds up
-    /// to a visible slice.
+    /// Each model contributes up to two adjacent bands, so a model is still
+    /// one contiguous run of its color. A part that is zero produces no band
+    /// at all rather than a hairline that rounds up to a visible slice.
+    ///
+    /// Cache-served volume sits at the base of a model's run and new work on
+    /// top of it — the foundation of re-sent context under the work actually
+    /// done on it. That order is also what the renderer needs: the two parts
+    /// share a color, so their boundary can only be carried by fill, and the
+    /// one cell that cannot carry it is the partial cell topping the run.
+    /// Putting new work there makes a solid block the correct answer.
     pub fn stacked(&self) -> Vec<(Band, u64)> {
         let mut slices: Vec<Slice> = self.entries.clone();
         slices.sort_by_key(|s| s.model);
@@ -179,11 +184,11 @@ impl Bucket {
         for slice in slices {
             let cached = slice.cached.min(slice.tokens);
             let fresh = slice.tokens - cached;
-            if fresh > 0 {
-                out.push(((slice.model, Part::New), fresh));
-            }
             if cached > 0 {
                 out.push(((slice.model, Part::Cached), cached));
+            }
+            if fresh > 0 {
+                out.push(((slice.model, Part::New), fresh));
             }
         }
         out
@@ -624,8 +629,8 @@ mod tests {
         assert_eq!(bucket.total(), 1_000, "cached must not be added on top");
         assert_eq!(
             bucket.stacked(),
-            vec![((0, Part::New), 300), ((0, Part::Cached), 700)],
-            "new work at the base, cache-served directly above it"
+            vec![((0, Part::Cached), 700), ((0, Part::New), 300)],
+            "cache-served at the base, new work directly above it"
         );
         assert_eq!(bucket.by_model(), vec![(0, 1_000, 700)]);
     }
@@ -642,10 +647,10 @@ mod tests {
         assert_eq!(
             bucket.stacked(),
             vec![
-                ((0, Part::New), 60),
                 ((0, Part::Cached), 40),
-                ((1, Part::New), 40),
+                ((0, Part::New), 60),
                 ((1, Part::Cached), 60),
+                ((1, Part::New), 40),
             ]
         );
     }

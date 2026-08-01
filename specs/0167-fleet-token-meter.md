@@ -100,16 +100,26 @@ the report twice and inflate every total on the panel.
 The cached figure is still worth showing, because most of a turn's prompt is
 context the provider has already seen: a column that is mostly cache-read is a
 much smaller amount of real work than the same column of fresh input. So each
-model's band splits in two — the part processed fresh at the base, the
-cache-served remainder directly above it — and the model stays one contiguous
-run of one hue, with the cached part recessed. Height keeps meaning billed
-volume, and shading answers how much of that volume was new work.
+model's band splits in two — the cache-served part at the base, the part
+processed fresh directly above it — and the model stays one contiguous run.
+Height keeps meaning billed volume, and the split answers how much of that
+volume was new work.
 
-Both parts must be the same hue. Two distinguishable colors would read as two
-models, which is exactly the thing series colors exist to prevent. And the
-recessed shade must be a color rather than a dimming attribute: one cell can
-hold a model's own new/cached boundary, and there the two parts are a glyph's
-foreground and its background, which an attribute cannot separate.
+A model owns exactly one color, the one on its legend dot, and both of its
+parts are drawn in it. Two distinguishable colors would read as two models,
+which is exactly the thing series colors exist to prevent. The split is
+carried by *fill* instead: the cache-served part fills its cells at half
+density, the new-work part solidly. Fill is also what a reader can name
+without a swatch to compare against — "faded" is a property of one band, where
+"darker" is only meaningful next to something else.
+
+Ordering the cache-served part at the base is a rendering requirement, not
+just a reading of the data. Two bands of one model share a color, so their
+boundary cannot be drawn as foreground-over-background, and no glyph is half
+shaded and half solid — the one cell where the two meet has to go to whichever
+owns more of it. Putting new work on top aims that cell at the band that wants
+a solid block anyway, so the fallback and the correct rendering coincide
+everywhere except that single cell.
 
 A part with no volume draws no band at all, rather than a hairline that
 rounds up to a visible slice. A harness that reports more cached than prompt
@@ -135,10 +145,14 @@ A terminal cell holds one glyph, so a band boundary that lands inside a
 cell cannot be drawn as two glyphs — the second overwrites the first and the
 lower band disappears from that column. A boundary inside a cell is drawn
 as a partial block whose filled part is the lower band and whose
-background is the upper one. This holds for a boundary between two models
-and for one between a model's own new and cached parts alike. Only the
-column's topmost cell, whose empty part must stay panel background, may hand
-the cell to a single band.
+background is the upper one.
+
+Two boundaries cannot be encoded that way, and both hand the cell to whichever
+band owns more of it. The column's topmost cell must leave its empty part as
+panel background, so there is nowhere to put a second band. And a model's own
+new/cached boundary has one color on both sides, so only fill could separate
+them, and a block cannot be partially shaded. Cache-first ordering keeps the
+second case from compounding the first.
 
 The legend must name every series it drew, wrapping onto further rows rather
 than showing only what fits on one — a colored bar whose model is named
@@ -318,8 +332,8 @@ inspecting the rest.
   a daemon restart the morning's columns still credit the morning's model.
 - A turn re-sends a 90k-token context and adds 2k of new input: the column
   grows by the whole prompt side, but nine tenths of that model's band is
-  drawn recessed, so a glance separates a long conversation being replayed
+  drawn at half fill, so a glance separates a long conversation being replayed
   from the same volume of genuinely new work.
-- A harness reports no cache figure at all: its bands are drawn entirely as
-  new work, which is what "nothing was cached" looks like — the meter does
+- A harness reports no cache figure at all: its bands are drawn solid, entirely
+  as new work, which is what "nothing was cached" looks like — the meter does
   not infer a cached share from the size of the prompt.
