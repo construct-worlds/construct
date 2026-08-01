@@ -2638,56 +2638,23 @@ impl SessionManager {
         let _ = self.broadcast.send(BroadcastMsg::FeaturesState(status));
     }
 
-    /// Probe real availability for one configured harness (spec 0068). The
-    /// built-in adapters get kind-specific probes; anything else (a
-    /// community adapter registered via `[adapters.<name>]`) falls back to
-    /// the original "does its `binary` resolve" check, since there's no
-    /// protocol-level way to ask an arbitrary AHP adapter what it wraps.
+    /// Probe real availability for one configured harness (spec 0068).
+    ///
+    /// The ladder itself lives in `availability` so `construct doctor` runs
+    /// the identical probe with no daemon in the picture (spec 0168).
     async fn probe_harness_availability(
         &self,
         name: &str,
         binary_spec: &str,
         resolved_binary: Option<&std::path::Path>,
     ) -> crate::availability::Availability {
-        use crate::availability::{probe_generic_adapter, probe_smith, probe_wrapper_cli};
-        match name {
-            "shell" => crate::availability::Availability::ready("ready"),
-            "claude" => probe_wrapper_cli("CONSTRUCT_CLAUDE_CMD", "CONSTRUCT_CLAUDE_BIN", "claude"),
-            "codex" => probe_wrapper_cli("CONSTRUCT_CODEX_CMD", "CONSTRUCT_CODEX_BIN", "codex"),
-            "opencode" => probe_wrapper_cli(
-                "CONSTRUCT_OPENCODE_CMD",
-                "CONSTRUCT_OPENCODE_BIN",
-                &construct_protocol::adapter::default_cli_bin_with_home_fallback(
-                    "opencode",
-                    std::path::Path::new(".opencode/bin/opencode"),
-                ),
-            ),
-            "antigravity" | "agy" => probe_wrapper_cli(
-                "CONSTRUCT_ANTIGRAVITY_CMD",
-                "CONSTRUCT_ANTIGRAVITY_BIN",
-                "agy",
-            ),
-            "grok" => probe_wrapper_cli("CONSTRUCT_GROK_CMD", "CONSTRUCT_GROK_BIN", "grok"),
-            "kimi" => probe_wrapper_cli(
-                "CONSTRUCT_KIMI_CMD",
-                "CONSTRUCT_KIMI_BIN",
-                &construct_protocol::adapter::default_cli_bin_with_home_fallback(
-                    "kimi",
-                    std::path::Path::new(".kimi-code/bin/kimi"),
-                ),
-            ),
-            "hermes" => probe_wrapper_cli(
-                "CONSTRUCT_HERMES_CMD",
-                "CONSTRUCT_HERMES_BIN",
-                &construct_protocol::adapter::default_cli_bin_with_home_fallback(
-                    "hermes",
-                    std::path::Path::new(".local/bin/hermes"),
-                ),
-            ),
-            "pi" => probe_wrapper_cli("CONSTRUCT_PI_CMD", "CONSTRUCT_PI_BIN", "pi"),
-            "smith" => probe_smith(&self.availability_cache).await,
-            _ => probe_generic_adapter(binary_spec, resolved_binary),
-        }
+        crate::availability::probe_harness(
+            &self.availability_cache,
+            name,
+            binary_spec,
+            resolved_binary,
+        )
+        .await
     }
 
     pub async fn list(&self) -> Vec<SessionSummary> {

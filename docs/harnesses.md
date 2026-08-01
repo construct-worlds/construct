@@ -108,6 +108,10 @@ See [smith built-in agent](smith.md) for details.
 those tools exactly as installed on your machine, but inside the same construct
 fleet.
 
+Because these depend on binaries and logins construct does not own, `construct
+doctor` reports which ones it can find, which logins have expired, and whether
+the running daemon sees a different `PATH` than your shell does.
+
 CLI-backed harnesses keep their native behavior. If an upstream CLI does not
 expose a setting — for example, path-scoped tool auto-approval — construct cannot
 always force that behavior from outside the process. In those cases the session

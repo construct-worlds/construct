@@ -102,6 +102,62 @@ fn env_present(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Probe real availability for one configured harness (spec 0068). The
+/// built-in adapters get kind-specific probes; anything else (a community
+/// adapter registered via `[adapters.<name>]`) falls back to the original
+/// "does its `binary` resolve" check, since there's no protocol-level way
+/// to ask an arbitrary AHP adapter what it wraps.
+///
+/// Free-standing rather than a `SessionManager` method so `doctor` can ask
+/// the same question the same way with no daemon running (spec 0168). A
+/// doctor that probed differently from the daemon would be worse than no
+/// doctor.
+pub async fn probe_harness(
+    cache: &std::sync::Mutex<AvailabilityCache>,
+    name: &str,
+    binary_spec: &str,
+    resolved_binary: Option<&std::path::Path>,
+) -> Availability {
+    match name {
+        "shell" => Availability::ready("ready"),
+        "claude" => probe_wrapper_cli("CONSTRUCT_CLAUDE_CMD", "CONSTRUCT_CLAUDE_BIN", "claude"),
+        "codex" => probe_wrapper_cli("CONSTRUCT_CODEX_CMD", "CONSTRUCT_CODEX_BIN", "codex"),
+        "opencode" => probe_wrapper_cli(
+            "CONSTRUCT_OPENCODE_CMD",
+            "CONSTRUCT_OPENCODE_BIN",
+            &construct_protocol::adapter::default_cli_bin_with_home_fallback(
+                "opencode",
+                std::path::Path::new(".opencode/bin/opencode"),
+            ),
+        ),
+        "antigravity" | "agy" => probe_wrapper_cli(
+            "CONSTRUCT_ANTIGRAVITY_CMD",
+            "CONSTRUCT_ANTIGRAVITY_BIN",
+            "agy",
+        ),
+        "grok" => probe_wrapper_cli("CONSTRUCT_GROK_CMD", "CONSTRUCT_GROK_BIN", "grok"),
+        "kimi" => probe_wrapper_cli(
+            "CONSTRUCT_KIMI_CMD",
+            "CONSTRUCT_KIMI_BIN",
+            &construct_protocol::adapter::default_cli_bin_with_home_fallback(
+                "kimi",
+                std::path::Path::new(".kimi-code/bin/kimi"),
+            ),
+        ),
+        "hermes" => probe_wrapper_cli(
+            "CONSTRUCT_HERMES_CMD",
+            "CONSTRUCT_HERMES_BIN",
+            &construct_protocol::adapter::default_cli_bin_with_home_fallback(
+                "hermes",
+                std::path::Path::new(".local/bin/hermes"),
+            ),
+        ),
+        "pi" => probe_wrapper_cli("CONSTRUCT_PI_CMD", "CONSTRUCT_PI_BIN", "pi"),
+        "smith" => probe_smith(cache).await,
+        _ => probe_generic_adapter(binary_spec, resolved_binary),
+    }
+}
+
 /// Probe the built-in smith harness: available when any credential path
 /// smith's own provider selection would pick up actually exists. Mirrors
 /// the precedence smith itself uses (explicit model pin, then direct API

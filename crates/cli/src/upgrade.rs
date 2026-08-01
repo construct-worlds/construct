@@ -150,6 +150,35 @@ pub fn cached_latest_version() -> Option<String> {
     is_newer(&latest, current_version()).then_some(latest)
 }
 
+/// What `construct doctor` can say about updates **without touching the
+/// network** — deliberately not [`cached_latest_version`], which spawns a
+/// refresh against `api.github.com` when the cache is stale. Doctor is run
+/// on machines that may be offline or broken, and it reports what it found
+/// rather than going to look (spec 0168), so a stale or absent cache is
+/// itself the answer.
+pub fn cached_update_probe() -> construct_daemon::doctor::UpdateProbe {
+    use construct_daemon::doctor::UpdateProbe;
+
+    if update_check_disabled() {
+        return UpdateProbe::Disabled;
+    }
+    let Some(cache) = read_cache() else {
+        return UpdateProbe::NoCache;
+    };
+    let age = now_ms()
+        .checked_sub(cache.checked_at_ms)
+        .map(std::time::Duration::from_millis);
+    let newer = cache
+        .latest
+        .as_deref()
+        .is_some_and(|l| is_newer(l, current_version()));
+    UpdateProbe::Cached {
+        latest: cache.latest,
+        age,
+        newer,
+    }
+}
+
 /// Where a background upgrade spawned via [`spawn_detached_upgrade`]
 /// redirects its stdout/stderr. The caller is typically a live TUI whose own
 /// stdout is the alternate screen, so the child must never inherit it.
