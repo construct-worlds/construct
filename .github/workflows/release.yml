@@ -112,9 +112,40 @@ jobs:
             construct-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
 
+  homebrew:
+    name: Verify Homebrew formula
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Check formula version and macOS checksums
+        run: |
+          set -eu
+          cargo_ver=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          formula_ver=$(sed -n 's/^  version "\(.*\)"/\1/p' Formula/construct.rb)
+          if [ "$cargo_ver" != "$formula_ver" ]; then
+            echo "::error::Formula/construct.rb version '$formula_ver' does not match Cargo.toml '$cargo_ver'."
+            exit 1
+          fi
+
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            checksum_file="dist/construct-${target}.tar.gz.sha256"
+            expected=$(awk '{print $1}' "$checksum_file")
+            if ! grep -Fq "$expected" Formula/construct.rb; then
+              echo "::error::Formula/construct.rb is missing the checksum for $target ($expected)."
+              exit 1
+            fi
+          done
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, homebrew]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
