@@ -4184,6 +4184,46 @@ fn layout_legend(
     LegendGrid { rows, col_w }
 }
 
+/// Split a legend cell into the name that starts it and the rate that ends
+/// it: the head, the blank gap after it, and the rate. `None` when the cell
+/// is too narrow to carry even a name.
+///
+/// The rate is anchored to the cell's right edge rather than trailing the
+/// name. Names differ in length, so a rate that follows its name starts at a
+/// different offset in every row, and comparing throughputs means finding
+/// each one first. Against the edge they form a column of their own — they
+/// are the numbers on the row, and numbers are read by comparison. The slack
+/// then falls between name and rate, where it reads as separation.
+///
+/// Names identify the series and the rate only quantifies it, so a cramped
+/// cell drops the rate before it drops a name — and truncates the name before
+/// dropping the entry.
+fn legend_cell(
+    entry: &crate::token_meter::LegendEntry,
+    room: usize,
+) -> Option<(String, usize, String)> {
+    let rate = legend_rate(entry.rate);
+    let rate_w = UnicodeWidthStr::width(rate.as_str());
+    let with_rate = UnicodeWidthStr::width("●  ") + rate_w + 1;
+    let (budget, rate) = if room > with_rate + 3 {
+        (room - with_rate, rate)
+    } else {
+        (room.saturating_sub(4), String::new())
+    };
+    if budget < 2 {
+        return None;
+    }
+    let head = format!("● {}", truncate_label(&entry.label, budget));
+    if rate.is_empty() {
+        return Some((head, 0, rate));
+    }
+    // One column of gutter keeps a rate off the next cell's dot; the rest of
+    // the slack goes between the name and the rate.
+    let head_w = UnicodeWidthStr::width(head.as_str());
+    let gap = room.saturating_sub(1).saturating_sub(head_w + rate_w);
+    Some((head, gap, rate))
+}
+
 fn render_token_meter_legend(
     f: &mut Frame,
     area: Rect,
@@ -4209,31 +4249,24 @@ fn render_token_meter_legend(
             if cell_x >= limit {
                 break;
             }
-            let rate = legend_rate(entry.rate);
             // A cell never spills into its neighbour, so the column below it
             // stays aligned; the last one may use whatever slack is left.
             let room = grid.col_w.min(limit.saturating_sub(cell_x) as usize);
-            // Names identify the series and the rate only quantifies it, so
-            // a cramped cell drops the rate before it drops a name — and
-            // truncates the name before dropping the entry.
-            let with_rate = UnicodeWidthStr::width("●  ") + rate.len() + 1;
-            let (budget, rate_part) = if room > with_rate + 3 {
-                (room - with_rate, format!(" {rate}"))
-            } else {
-                (room.saturating_sub(4), String::new())
-            };
-            if budget < 2 {
+            let Some((head, gap, rate)) = legend_cell(entry, room) else {
                 break;
-            }
-            let label = truncate_label(&entry.label, budget);
-            let head = format!("● {label}");
+            };
             let style = Style::default().fg(entry.color);
             f.buffer_mut().set_string(cell_x, y, head.as_str(), style);
-            let tail_x = cell_x + UnicodeWidthStr::width(head.as_str()) as u16;
-            let tail = format!("{rate_part} ");
-            let tail_style = legend_rate_style(entry.color, entry.rate);
-            f.buffer_mut().set_string(tail_x, y, tail.as_str(), tail_style);
-            x = tail_x + UnicodeWidthStr::width(tail.as_str()) as u16;
+            x = cell_x + UnicodeWidthStr::width(head.as_str()) as u16;
+            if !rate.is_empty() {
+                let rate_x = x + gap as u16;
+                let rate_style = legend_rate_style(entry.color, entry.rate);
+                f.buffer_mut().set_string(rate_x, y, rate.as_str(), rate_style);
+                x = rate_x + UnicodeWidthStr::width(rate.as_str()) as u16;
+            }
+            // Step past the cell's gutter, so anything appended to the row
+            // doesn't butt against the rate.
+            x += 1;
         }
         if row_idx + 1 != rows.len() {
             continue;
@@ -22778,6 +22811,33 @@ mod tests {
                 rate: Some(100.0),
             })
             .collect()
+    }
+
+    /// Rates hang off the cell's right edge, so whatever the names do the
+    /// figures land in one column and can be compared down the legend.
+    #[test]
+    fn legend_cell_anchors_the_rate_to_the_cell_edge() {
+        let room = 26;
+        for entry in legend_entries(&["a", "claude-opus-5", "a-name-that-needs-clipping"]) {
+            let (head, gap, rate) = legend_cell(&entry, room).expect("fits");
+            let used = UnicodeWidthStr::width(head.as_str())
+                + gap
+                + UnicodeWidthStr::width(rate.as_str());
+            assert_eq!(used, room - 1, "rate ends one gutter short of the edge");
+            assert!(gap >= 1, "name and rate never touch: {head:?} {rate:?}");
+        }
+    }
+
+    /// A cell too narrow for both keeps the name — an unnamed color can't be
+    /// matched to a band, while a missing rate only costs a number.
+    #[test]
+    fn legend_cell_drops_the_rate_before_the_name() {
+        let entry = legend_entries(&["claude-opus-5"]).remove(0);
+        let (head, gap, rate) = legend_cell(&entry, 12).expect("a name still fits");
+        assert!(rate.is_empty(), "the rate goes first: {rate:?}");
+        assert_eq!(gap, 0);
+        assert!(head.starts_with("● claude"), "{head:?}");
+        assert!(legend_cell(&entry, 4).is_none(), "nothing readable fits");
     }
 
     /// Every series gets named: a legend too wide for one row wraps instead
