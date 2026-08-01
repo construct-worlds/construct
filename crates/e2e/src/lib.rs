@@ -387,6 +387,28 @@ impl Tui {
         let mut cmd = portable_pty::CommandBuilder::new(&client);
         cmd.args(["tui", "--socket"]);
         cmd.arg(socket);
+        // Hermetic env, for the same reason `Daemon::spawn_inner` scrubs:
+        // this test process may itself be running inside a construct
+        // session (developing agentd from agentd). `--socket` points the
+        // TUI at the fixture daemon, but every *other* CONSTRUCT_* var
+        // still leaks — so the client would read the developer's real
+        // config and state dirs and come up with their saved layout,
+        // keymap profile, and split panes instead of a clean first-run
+        // TUI, and chords the test sends would land somewhere else
+        // entirely. Strip them all, then point the client at the same
+        // tempdir tree the daemon was given (the socket lives in its
+        // `run/` dir, so the sibling dirs are one level up).
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("CONSTRUCT_") {
+                cmd.env_remove(key.to_string_lossy().as_ref());
+            }
+        }
+        if let Some(root) = socket.parent().and_then(|run| run.parent()) {
+            cmd.env("CONSTRUCT_RUNTIME_DIR", root.join("run"));
+            cmd.env("CONSTRUCT_STATE_DIR", root.join("state"));
+            cmd.env("CONSTRUCT_DATA_DIR", root.join("data"));
+            cmd.env("CONSTRUCT_CONFIG_DIR", root.join("config"));
+        }
         // The TUI looks at TERM for color handling. xterm-256color
         // is a safe default that vt100 understands.
         cmd.env("TERM", "xterm-256color");
