@@ -8195,6 +8195,7 @@ fn render_service_view(
     } else {
         "Enter/C-s save · C-r rotate token · C-d delete · Esc close"
     };
+    activity.push(Line::from(""));
     activity.push(Line::from(Span::styled(footer, Style::default().fg(app.theme.dim))));
     f.render_widget(
         Paragraph::new(activity).wrap(Wrap { trim: false }),

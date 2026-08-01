@@ -40833,6 +40833,14 @@ mod tests {
             note_row > 0 && view_rows[note_row - 1].trim().is_empty(),
             "restart note has a spacer above it"
         );
+        let footer_row = view_rows
+            .iter()
+            .position(|row| row.contains("Enter/C-s save · C-r rotate token"))
+            .expect("service editor footer is visible");
+        assert!(
+            footer_row > 0 && view_rows[footer_row - 1].trim().is_empty(),
+            "service editor footer has a spacer above it"
+        );
 
         app.service_dialog.as_mut().unwrap().selected_field = 5;
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
