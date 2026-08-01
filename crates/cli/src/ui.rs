@@ -2722,12 +2722,56 @@ pub(crate) enum FleetPanelTarget {
     Group(String),
 }
 
+/// The mark a panel row wears, kept unresolved so bucketing stays
+/// theme-free and the glyph/color pair is decided in one place at paint
+/// time — the same place the list row beside it decides its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FleetPanelGlyph {
+    State(SessionState),
+    Group { collapsed: bool },
+}
+
+impl FleetPanelGlyph {
+    /// Static glyph only — never the working-spinner frame. The panel is an
+    /// index, and a column of animating dots inside a floating box competes
+    /// with the list it is pointing at.
+    pub(crate) fn glyph(self) -> &'static str {
+        match self {
+            FleetPanelGlyph::State(state) => state.glyph(),
+            FleetPanelGlyph::Group { collapsed } => {
+                if collapsed {
+                    "▶"
+                } else {
+                    "▼"
+                }
+            }
+        }
+    }
+
+    fn style(self, theme: &Theme) -> Style {
+        match self {
+            FleetPanelGlyph::State(state) => state_style(theme, state),
+            FleetPanelGlyph::Group { .. } => Style::default().fg(theme.group),
+        }
+    }
+}
+
 /// One listed row inside a tally's hover panel: the list row this tally
-/// counted, and the label that row shows.
+/// counted, the mark that row wears, and the label it shows.
+///
+/// The mark is what keeps the panel honest. A bucket looks homogeneous but
+/// only two of the three are: everything under "working" is running and
+/// everything under "errored" failed, so their glyphs merely confirm the
+/// title. "Wants you" is a marker, not a state — it collects sessions that
+/// stopped at a prompt (`●`) alongside ones that finished (`✓`) alongside
+/// group headers standing in for flagged members (`▶`) — and those are
+/// different things to do next. Without the mark the panel would print
+/// them as identical bare names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FleetPanelRow {
     pub(crate) target: FleetPanelTarget,
     pub(crate) label: String,
+    pub(crate) glyph: FleetPanelGlyph,
 }
 
 /// Fleet tallies summarizing the session rows, in the order they render
@@ -2796,6 +2840,7 @@ pub(crate) fn fleet_status_buckets(items: &[AppListItem]) -> FleetStatusBuckets 
                 let row = FleetPanelRow {
                     target: FleetPanelTarget::Session(summary.id.clone()),
                     label: primary_label(summary),
+                    glyph: FleetPanelGlyph::State(summary.state),
                 };
                 // Mirrors the row's own `show_attention` so the tally
                 // counts precisely the dots that get painted.
@@ -2813,11 +2858,17 @@ pub(crate) fn fleet_status_buckets(items: &[AppListItem]) -> FleetStatusBuckets 
                 ..
             } => {
                 // A group header paints a dot only for hidden members; it
-                // has no run state of its own, so it joins no other bucket.
+                // has no run state of its own, so it joins no other bucket
+                // and wears its disclosure triangle rather than a state
+                // glyph — the mark that warns this row is a way in, not a
+                // destination.
                 if *attention_rollup {
                     buckets.needs_you.push(FleetPanelRow {
                         target: FleetPanelTarget::Group(group.id.clone()),
                         label: group.name.clone(),
+                        glyph: FleetPanelGlyph::Group {
+                            collapsed: group.collapsed,
+                        },
                     });
                 }
             }
@@ -2829,6 +2880,10 @@ pub(crate) fn fleet_status_buckets(items: &[AppListItem]) -> FleetStatusBuckets 
 
 /// Widest a tally panel's inner content grows before labels are ellipsized.
 const FLEET_PANEL_MAX_INNER_W: u16 = 44;
+/// Cells the per-row mark reserves ahead of every label: the glyph plus one
+/// space. Every row pays it, including the "+N more" tail, so the labels
+/// form one column the eye can run down.
+const FLEET_PANEL_GLYPH_W: usize = 2;
 /// Most rows a tally panel lists before the rest collapse into "+N more".
 /// The working bucket can hold the whole fleet; a floating index taller
 /// than the pane it summarizes would be worse than the number it replaced.
@@ -2864,7 +2919,7 @@ pub(crate) fn fleet_tally_panel_geometry(
     let widest = rows
         .iter()
         .take(shown)
-        .map(|r| UnicodeWidthStr::width(r.label.as_str()))
+        .map(|r| UnicodeWidthStr::width(r.label.as_str()) + FLEET_PANEL_GLYPH_W)
         .max()
         .unwrap_or(0)
         .max(UnicodeWidthStr::width(title));
@@ -7278,7 +7333,30 @@ fn render_fleet_tally_panel(f: &mut Frame, app: &App) {
         } else {
             Style::default().fg(app.theme.text)
         };
-        render_session_title_menu_row(f, area, row, &entry.label, None, style);
+        // Indent the label past the mark, then overwrite the mark's cells
+        // in its own hue. Patching `style`'s fg keeps the row's background,
+        // so a hovered row highlights as one band rather than losing its
+        // first two cells.
+        render_session_title_menu_row(
+            f,
+            area,
+            row,
+            &format!("{:width$}{}", "", entry.label, width = FLEET_PANEL_GLYPH_W),
+            None,
+            style,
+        );
+        f.buffer_mut().set_string(
+            area.x.saturating_add(1),
+            row,
+            entry.glyph.glyph(),
+            style.fg(
+                entry
+                    .glyph
+                    .style(&app.theme)
+                    .fg
+                    .unwrap_or(app.theme.text),
+            ),
+        );
     }
     // Long buckets summarize their tail rather than growing past the pane
     // they describe. Dim and unclickable — it names what was left out, it
@@ -7290,7 +7368,12 @@ fn render_fleet_tally_panel(f: &mut Frame, app: &App) {
                 f,
                 area,
                 row,
-                &format!("+{} more", panel.overflow),
+                &format!(
+                    "{:width$}+{} more",
+                    "",
+                    panel.overflow,
+                    width = FLEET_PANEL_GLYPH_W
+                ),
                 None,
                 Style::default()
                     .fg(app.theme.muted)
@@ -23707,6 +23790,7 @@ mod tests {
             .map(|i| FleetPanelRow {
                 target: FleetPanelTarget::Session(format!("s{i}")),
                 label: format!("session {i}"),
+                glyph: FleetPanelGlyph::State(SessionState::Running),
             })
             .collect()
     }

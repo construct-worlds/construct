@@ -34,6 +34,19 @@ brings it into view, scrolling the list if the row sat below the fold. The
 list is the destination — the panel closes and hands off rather than
 becoming a second place to work.
 
+**Each listed row wears the mark its list row wears.** Two of the three
+buckets are homogeneous — everything under "working" is running, everything
+under "errored" failed — so there the mark only restates the title. "Wants
+you" is not: it is a marker rather than a state, and it collects sessions
+stopped at a prompt beside sessions that finished beside rows standing in
+for flagged members. Those are different things to do next, and a panel that
+printed them as bare names would flatten the very distinction the operator
+opened it to resolve. The mark is the row's own rather than a vocabulary the
+panel mints, so a row standing in for hidden members shows its disclosure
+mark — the warning that it is a way in and not a destination. The marks are
+static: a column of animating glyphs inside a floating box competes with the
+list it is pointing at.
+
 That panel is reachable two ways, and both are required. It opens on hover
 and survives the trip to it — it lingers briefly after the pointer leaves
 and holds open while the pointer is over it, so a listed row is actually
@@ -118,6 +131,16 @@ failure, which keeps its own glyph.
 - Because two buckets share a glyph, the panel's wording is load-bearing
   rather than a convenience. Any surface that renders the tally without it
   owes the operator another way to tell those two apart.
+- The wording separates the buckets from each other; the per-row marks
+  separate a bucket's members from each other. A bucket that can hold more
+  than one kind of row owes both — naming the bucket says nothing about
+  which of its rows is at a prompt and which has finished. Anything that
+  widens what a bucket admits must check that its rows still arrive marked.
+- The panel's marks are the list's marks. Minting a panel-only glyph, or
+  drawing a distinction there the list does not draw, teaches a vocabulary
+  that exists in one place — which is why a rolled-up marker and a direct
+  one look alike in both, and why the disclosure mark on a stand-in row is
+  borrowed rather than invented.
 - The tally is now an interactive control on a title bar it shares. Its hit
   zones must stay disjoint from the controls beside it, and must not outlive
   the frame that drew them — a tally that is not rendered has no hit zone,
@@ -168,12 +191,18 @@ failure, which keeps its own glyph.
   names, and picks the second. The list scrolls until that row is visible
   and selects it — the operator never scrolled by hand looking for a dot the
   title had promised.
+- Two of those three stopped at a prompt and one ran to completion. All
+  three carry the same attention marker in the list, but each row in the
+  panel wears its own state's mark, so the operator can see before clicking
+  that one of the three is finished work to read and two are questions to
+  answer.
 - The operator focuses one of the three flagged sessions. Its marker clears,
   and the tally drops to two — without any run state having changed.
 - A group is collapsed with two flagged sessions inside it. The group's row
   carries one rolled-up marker, the tally counts one, and its panel lists
-  the group. Picking it lands on the group, where expanding reveals which
-  two.
+  the group — wearing the group's own disclosure mark rather than any state
+  glyph, since the group has no run state and the row is a way in. Picking
+  it lands on the group, where expanding reveals which two.
 - Focus moves to the transcript. The tally fades but keeps its colors, so
   "which of these is waiting on me" is still answerable from the corner of
   the eye without clicking back into the list.

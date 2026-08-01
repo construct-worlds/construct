@@ -23698,6 +23698,141 @@ mod tests {
         (app, dir, server)
     }
 
+    /// Two of the three buckets are homogeneous: everything under "working"
+    /// is running, everything under "errored" failed, and their marks only
+    /// confirm the title. Wants-you is a *marker*, not a state — it collects
+    /// a session that stopped at a prompt beside one that finished, and
+    /// those are different things to do next. Bare names would print them
+    /// identically, so the mark is the only thing carrying the difference.
+    #[tokio::test]
+    async fn fleet_panel_rows_wear_the_state_that_flagged_them() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut waiting = summary_with_kind(construct_protocol::SessionKind::User);
+        waiting.id = "ask".into();
+        waiting.title = Some("waiting on a reply".into());
+        waiting.state = construct_protocol::SessionState::AwaitingInput;
+        waiting.needs_attention = true;
+        let mut finished = summary_with_kind(construct_protocol::SessionKind::User);
+        finished.id = "fin".into();
+        finished.title = Some("finished its work".into());
+        finished.state = construct_protocol::SessionState::Done;
+        finished.needs_attention = true;
+        app.sessions = vec![waiting, finished];
+        app.selection = Selection::Session("ask".into());
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("list should render");
+        let hit = tally_hit(&app, crate::ui::FleetTally::NeedsYou);
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        app.update_fleet_tally_panel(Instant::now());
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover panel should render");
+
+        let panel = app
+            .fleet_panel
+            .as_ref()
+            .expect("hovering the wants-you tally opens its panel");
+        assert_eq!(panel.rows.len(), 2, "both flagged sessions are listed");
+        // Row order follows the list, which the test does not fix — read the
+        // mark that actually sits beside each label instead of assuming it.
+        let marks: Vec<(String, Option<ratatui::style::Color>)> = panel
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let cell = term
+                    .backend()
+                    .buffer()
+                    .cell((panel.area.x + 1, panel.area.y + 1 + i as u16))
+                    .expect("mark cell inside the panel")
+                    .clone();
+                (cell.symbol().to_string(), cell.style().fg)
+            })
+            .collect();
+        let labelled: Vec<(&str, &(String, Option<ratatui::style::Color>))> = panel
+            .rows
+            .iter()
+            .map(|r| r.label.as_str())
+            .zip(marks.iter())
+            .collect();
+
+        let waiting_mark = labelled
+            .iter()
+            .find(|(label, _)| label.starts_with("waiting"))
+            .expect("the waiting session is listed")
+            .1;
+        let finished_mark = labelled
+            .iter()
+            .find(|(label, _)| label.starts_with("finished"))
+            .expect("the finished session is listed")
+            .1;
+        assert_eq!(
+            waiting_mark.0, "●",
+            "a session stopped at a prompt keeps the running dot: {labelled:?}"
+        );
+        assert_eq!(
+            finished_mark.0, "✓",
+            "a finished session wears the done check, not a dot: {labelled:?}"
+        );
+        assert_eq!(waiting_mark.1, Some(app.theme.success));
+        assert_eq!(
+            finished_mark.1,
+            Some(app.theme.info),
+            "the mark must take the list's own hue for that state, so the \
+             panel and the row beneath it cannot disagree"
+        );
+        server.abort();
+    }
+
+    /// A group header has no run state of its own — it stands in for flagged
+    /// members hidden inside it. Clicking it lands on the group, where the
+    /// operator still has to expand to find the session, so its mark has to
+    /// warn that it is a way in rather than a destination.
+    #[test]
+    fn a_group_panel_row_wears_its_disclosure_not_a_state_glyph() {
+        let items = vec![crate::app::ListItem::GroupHeader {
+            group: construct_protocol::GroupSummary {
+                id: "g1".into(),
+                name: "infra".into(),
+                created_at: chrono::Utc::now(),
+                position: 0,
+                collapsed: true,
+            },
+            member_count: 3,
+            attention_rollup: true,
+        }];
+        let rows = crate::ui::fleet_status_buckets(&items)
+            .bucket(crate::ui::FleetTally::NeedsYou)
+            .to_vec();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].glyph,
+            crate::ui::FleetPanelGlyph::Group { collapsed: true }
+        );
+        assert_eq!(
+            rows[0].glyph.glyph(),
+            "▶",
+            "a collapsed group shows the same triangle the list row shows"
+        );
+        let states = [
+            construct_protocol::SessionState::Running,
+            construct_protocol::SessionState::AwaitingInput,
+            construct_protocol::SessionState::Done,
+            construct_protocol::SessionState::Errored,
+            construct_protocol::SessionState::Paused,
+            construct_protocol::SessionState::Pending,
+        ];
+        for state in states {
+            assert_ne!(
+                rows[0].glyph.glyph(),
+                crate::ui::FleetPanelGlyph::State(state).glyph(),
+                "a group must not be mistakable for a session in any state"
+            );
+        }
+    }
+
     /// Clicks dispatch on mouse-*up*, so a test that sends only the press
     /// exercises nothing.
     async fn click_at(app: &mut App, col: u16, row: u16) {
@@ -23924,6 +24059,9 @@ mod tests {
         app.activate_fleet_panel_row(&crate::ui::FleetPanelRow {
             target: crate::ui::FleetPanelTarget::Session(target.clone()),
             label: "session 29".into(),
+            glyph: crate::ui::FleetPanelGlyph::State(
+                construct_protocol::SessionState::Running,
+            ),
         });
         let _ = rendered(&mut app, 120, 20);
         assert!(
