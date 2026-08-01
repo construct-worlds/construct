@@ -36,6 +36,11 @@ pub struct ServiceConfig {
     pub routing: ServiceRouting,
     #[serde(default)]
     pub paused: bool,
+    /// Seconds to hold a turn stopped at an approval before denying it on the
+    /// caller's behalf. `0` waits indefinitely, which keeps the operator as
+    /// the only one who can decide.
+    #[serde(default)]
+    pub approval_timeout_secs: u64,
     #[serde(default)]
     pub sandbox: ServiceSandboxConfig,
     #[serde(default)]
@@ -193,6 +198,10 @@ pub fn put_definition(
         cwd: params.service.cwd,
         routing,
         paused: params.service.paused,
+        approval_timeout_secs: existing
+            .as_ref()
+            .map(|config| config.approval_timeout_secs)
+            .unwrap_or_default(),
         sandbox,
         channels,
     };
@@ -834,6 +843,45 @@ impl ServiceRuntime {
             detail.summary.state,
             SessionState::AwaitingInput | SessionState::Done | SessionState::Errored
         );
+
+        // A turn stopped at an approval looks exactly like a slow turn from
+        // outside, so say which it is. Left unsaid, a caller polls a session
+        // that will never move until a human it cannot reach acts.
+        let mut blocked = None;
+        if let Some(pending) = pending_approval(&detail.events) {
+            let waited = (chrono::Utc::now() - pending.since).num_seconds().max(0);
+            let timeout = self.shared.config.approval_timeout_secs;
+            if timeout > 0 && waited >= timeout as i64 {
+                // Nobody answered in the window the operator allowed, so stop
+                // holding the caller: deny, let the turn resume, and report the
+                // refusal rather than reporting "still working" forever.
+                let _ = self
+                    .shared
+                    .manager
+                    .tool_decision(session_id, pending.call_id.clone(), "deny".to_string())
+                    .await;
+                tracing::info!(
+                    service = %self.shared.name,
+                    session = %session_id,
+                    tool = %pending.tool,
+                    waited,
+                    "service approval timed out; denied"
+                );
+                blocked = Some(serde_json::json!({
+                    "tool": pending.tool,
+                    "waited_seconds": waited,
+                    "outcome": "denied_on_timeout",
+                }));
+            } else {
+                blocked = Some(serde_json::json!({
+                    "tool": pending.tool,
+                    "summary": pending.summary,
+                    "waited_seconds": waited,
+                    "outcome": "awaiting_operator",
+                }));
+            }
+        }
+
         Ok(Some(serde_json::json!({
             "service": self.shared.name,
             "channel": self.channel_id,
@@ -841,6 +889,7 @@ impl ServiceRuntime {
             "status": detail.summary.state,
             "ready": ready,
             "reply": reply,
+            "approval": blocked,
         })))
     }
 
@@ -998,6 +1047,46 @@ fn latest_assistant_reply<'a>(
     }
     parts.reverse();
     Some(parts.concat())
+}
+
+/// A tool call this session is stopped at, waiting for the operator.
+struct PendingApproval {
+    call_id: String,
+    tool: String,
+    summary: String,
+    since: chrono::DateTime<chrono::Utc>,
+}
+
+/// The approval a turn is currently stopped at, if any.
+///
+/// Resolutions are not recorded in the transcript, so a pending approval is
+/// identified positionally: it is pending exactly when the request is the last
+/// thing of consequence in the transcript. Once the operator answers, the turn
+/// resumes and appends past it — a tool result, more assistant text — and the
+/// request stops trailing.
+fn pending_approval(events: &[construct_protocol::TimestampedEvent]) -> Option<PendingApproval> {
+    for event in events.iter().rev() {
+        match &event.event {
+            SessionEvent::ToolApprovalRequest {
+                call_id,
+                tool,
+                args_summary,
+                ..
+            } => {
+                return Some(PendingApproval {
+                    call_id: call_id.clone(),
+                    tool: tool.clone(),
+                    summary: args_summary.clone(),
+                    since: event.at,
+                })
+            }
+            SessionEvent::Message { .. }
+            | SessionEvent::ToolUse { .. }
+            | SessionEvent::ToolResult { .. } => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1207,6 +1296,7 @@ mod tests {
             cwd: ".".into(),
             routing: ServiceRouting::SessionKey,
             paused: false,
+            approval_timeout_secs: 0,
             sandbox: ServiceSandboxConfig::default(),
             channels: BTreeMap::new(),
         };
@@ -1235,6 +1325,88 @@ mod tests {
         let stored = load_definitions(dir.path()).unwrap();
         assert!(stored["svc"].sandbox.fleet_control);
         assert_eq!(stored["svc"].instruction, "changed");
+    }
+
+    fn at(seq: u64, event: SessionEvent) -> construct_protocol::TimestampedEvent {
+        construct_protocol::TimestampedEvent {
+            seq,
+            at: chrono::Utc::now(),
+            event,
+        }
+    }
+
+    fn approval_request(call_id: &str, tool: &str) -> SessionEvent {
+        SessionEvent::ToolApprovalRequest {
+            call_id: call_id.to_string(),
+            tool: tool.to_string(),
+            args_summary: "…".to_string(),
+            risk: construct_protocol::ToolRisk::Risky,
+            allow_auto_review: true,
+        }
+    }
+
+    #[test]
+    fn a_trailing_approval_request_is_pending() {
+        let events = vec![
+            at(0, msg(MessageRole::User, "do it")),
+            at(
+                1,
+                SessionEvent::ToolUse {
+                    tool: "shell".into(),
+                    args: serde_json::Value::Null,
+                    call_id: Some("c1".into()),
+                },
+            ),
+            at(2, approval_request("c1", "shell")),
+            at(3, status(SessionState::Running)),
+        ];
+        let pending = pending_approval(&events).expect("pending");
+        assert_eq!(pending.call_id, "c1");
+        assert_eq!(pending.tool, "shell");
+    }
+
+    #[test]
+    fn an_answered_approval_is_not_pending() {
+        // Resolutions are never written to the transcript, so what marks this
+        // one answered is the work that followed it.
+        let events = vec![
+            at(0, msg(MessageRole::User, "do it")),
+            at(1, approval_request("c1", "shell")),
+            at(
+                2,
+                SessionEvent::ToolResult {
+                    tool: "shell".into(),
+                    ok: true,
+                    output: "done".into(),
+                    call_id: Some("c1".into()),
+                },
+            ),
+            at(3, msg(MessageRole::Assistant, "Done.")),
+        ];
+        assert!(pending_approval(&events).is_none());
+    }
+
+    #[test]
+    fn a_turn_with_no_approval_is_not_pending() {
+        let events = vec![
+            at(0, msg(MessageRole::User, "hi")),
+            at(1, msg(MessageRole::Assistant, "hello")),
+        ];
+        assert!(pending_approval(&events).is_none());
+        assert!(pending_approval(&[]).is_none());
+    }
+
+    #[test]
+    fn approval_timeout_defaults_to_waiting_forever() {
+        // The operator stays the only one who can approve unless they opt into
+        // a bound; turning this on by default would deny work nobody refused.
+        let raw = "instruction = \"x\"\nharness = \"smith\"\ncwd = \".\"\n";
+        let config: ServiceConfig = toml::from_str(raw).unwrap();
+        assert_eq!(config.approval_timeout_secs, 0);
+
+        let bounded: ServiceConfig =
+            toml::from_str(&format!("{raw}approval_timeout_secs = 120\n")).unwrap();
+        assert_eq!(bounded.approval_timeout_secs, 120);
     }
 
     #[test]
