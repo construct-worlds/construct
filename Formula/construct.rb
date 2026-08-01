@@ -19,7 +19,11 @@ class Construct < Formula
   end
 
   def install
-    binary = Dir["construct-*/construct"].first
+    # Homebrew normally enters the archive's single top-level directory before
+    # calling install, but keep the archive-root layout working too.
+    binary = ["construct", *Dir["construct-*/construct"]].find do |path|
+      File.file?(path)
+    end
     raise "construct binary not found in release archive" if binary.nil?
 
     bin.install binary => "construct"
