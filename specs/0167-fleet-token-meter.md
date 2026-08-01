@@ -112,6 +112,12 @@ than showing only what fits on one — a colored bar whose model is named
 nowhere cannot be read. When the rows the legend is allowed to take still
 can't hold them all, the remainder is counted, not silently dropped.
 
+A rate that is a reading carries the series' full strength; `idle` is the
+absence of one and is dimmed, so a glance finds the models actually working.
+It is dimmed only partway toward the neutral gray, never onto it: the row
+still identifies a colored band in the graph, and a name that goes neutral
+the moment its model goes quiet stops pointing at that band.
+
 ### Series identity and stacking order are stable
 
 A model's color is assigned when it is first seen and never reassigned, and
