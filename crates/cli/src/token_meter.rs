@@ -88,11 +88,16 @@ impl Bucket {
         self.entries.is_empty()
     }
 
-    /// Model-index/token pairs, largest first, so a stacked column draws its
-    /// dominant series at the base.
+    /// Model-index/token pairs in series order — first-seen, which is also
+    /// palette order — so every column stacks the same way.
+    ///
+    /// Ordering by size instead would reshuffle the bands whenever the
+    /// leader changed, and a stacked graph whose layers swap places
+    /// column-to-column can't be read as layers at all: the eye tracks a
+    /// band's continuity, not its rank.
     pub fn stacked(&self) -> Vec<(u16, u64)> {
         let mut out = self.entries.clone();
-        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out.sort_by_key(|(model, _)| *model);
         out
     }
 
@@ -138,7 +143,49 @@ impl TokenMeter {
         }
     }
 
-    /// Roll the history forward to `now`, appending empty buckets for the
+    /// Seed the meter with samples the daemon retained (spec 0167), each
+    /// given as its age in milliseconds at the moment the window was taken.
+    ///
+    /// A client that only remembered its own samples would come back from a
+    /// restart showing a hole exactly where the fleet kept working, so the
+    /// history is rebuilt rather than carried. Samples older than the meter
+    /// retains are dropped; the rest land in the bucket their age selects,
+    /// which is why they are passed as ages rather than wall-clock instants —
+    /// the meter's own clock is monotonic and cannot be compared to one.
+    pub fn seed(&mut self, samples: impl IntoIterator<Item = (i64, Option<String>, u64)>) {
+        for (age_ms, model, tokens) in samples {
+            if tokens == 0 || age_ms < 0 {
+                continue;
+            }
+            let back = (age_ms as u128 / BUCKET.as_millis()) as usize;
+            let len = self.buckets.len();
+            // `back == 0` is the bucket currently filling; anything older
+            // than the ring reaches is simply out of history.
+            let Some(index) = len.checked_sub(back + 1) else {
+                continue;
+            };
+            let idx = self.intern(model.as_deref().unwrap_or(UNATTRIBUTED));
+            if let Some(bucket) = self.buckets.get_mut(index) {
+                bucket.add(idx, tokens);
+                let total = bucket.total() as f64;
+                if total > self.peak {
+                    self.peak = total;
+                }
+            }
+        }
+    }
+
+    /// Fill the ring with empty buckets covering `secs` of past time, so
+    /// [`Self::seed`] has somewhere to place historical samples. A freshly
+    /// constructed meter holds only the bucket it is filling.
+    pub fn reserve_history(&mut self, secs: u64) {
+        let want = ((secs / BUCKET_SECS) as usize + 1).min(MAX_BUCKETS);
+        while self.buckets.len() < want {
+            self.buckets.push_front(Bucket::default());
+        }
+    }
+
+    /// Roll the history forward to `now`, appending empty buckets    /// Roll the history forward to `now`, appending empty buckets for the
     /// time that passed. Called every frame so idle time scrolls as a gap
     /// rather than compressing away.
     pub fn advance_to(&mut self, now: Instant) {
@@ -241,11 +288,11 @@ impl TokenMeter {
         }
     }
 
-    /// The ceiling expressed as tokens per second, which is what the legend
-    /// states — the bucket width is an implementation detail of the render,
-    /// not something a reader should have to divide by.
-    pub fn scale_per_second(&self, width: usize) -> u64 {
-        self.scale(width) / BUCKET_SECS
+    /// Wall-clock seconds the visible window spans. The legend divides by
+    /// this to state rates, so the numbers stay comparable as the panel is
+    /// resized and don't change meaning when the column width is retuned.
+    pub fn window_seconds(&self, width: usize) -> u64 {
+        (self.window(width).count() as u64).max(1) * BUCKET_SECS
     }
 
     pub fn model_label(&self, idx: u16) -> &str {
@@ -350,10 +397,40 @@ mod tests {
         m.observe(Some("codex"), 300, t0);
         let bucket = m.window(1).next().expect("current bucket");
         assert_eq!(bucket.total(), 400);
-        let stacked = bucket.stacked();
-        assert_eq!(stacked.len(), 2);
-        assert_eq!(m.model_label(stacked[0].0), "codex", "largest series first");
-        assert_eq!(stacked[0].1, 300);
+        assert_eq!(bucket.stacked().len(), 2);
+    }
+
+    /// Every column stacks its series in the same order, whatever the
+    /// per-column ranking — bands that swap places column-to-column can't be
+    /// followed across the graph.
+    #[test]
+    fn stack_order_is_stable_across_columns() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        // Column 1: "opus" dominates. Column 2: "codex" does.
+        m.observe(Some("opus"), 900, t0);
+        m.observe(Some("codex"), 100, t0);
+        let first: Vec<u16> = m
+            .window(1)
+            .next()
+            .expect("bucket")
+            .stacked()
+            .iter()
+            .map(|(model, _)| *model)
+            .collect();
+        m.advance_to(buckets_after(t0, 1));
+        m.observe(Some("opus"), 100, buckets_after(t0, 1));
+        m.observe(Some("codex"), 900, buckets_after(t0, 1));
+        let second: Vec<u16> = m
+            .window(1)
+            .next()
+            .expect("bucket")
+            .stacked()
+            .iter()
+            .map(|(model, _)| *model)
+            .collect();
+        assert_eq!(first, second, "layer order must not follow rank");
+        assert_eq!(m.model_label(first[0]), "opus", "first seen sits at the base");
     }
 
     #[test]
@@ -408,19 +485,20 @@ mod tests {
         assert_eq!(m.scale(2), MIN_SCALE, "eventually returns to the floor");
     }
 
-    /// The legend states a per-second rate, so a bucket wider than a second
-    /// must be divided out — otherwise every retune of the bucket width
-    /// silently inflates the number users read as throughput.
+    /// The legend states per-series rates, so the window's span in seconds
+    /// has to track the columns actually on screen — a fixed divisor would
+    /// misreport throughput on a resize or a partly-filled meter.
     #[test]
-    fn stated_rate_is_per_second_not_per_bucket() {
+    fn window_seconds_follows_the_visible_columns() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 900_000, t0);
-        assert_eq!(m.scale(80), 900_000, "bars scale against the bucket total");
+        assert_eq!(m.window_seconds(80), BUCKET_SECS, "one column so far");
+        m.advance_to(buckets_after(t0, 9));
+        assert_eq!(m.window_seconds(80), 10 * BUCKET_SECS);
         assert_eq!(
-            m.scale_per_second(80),
-            900_000 / BUCKET_SECS,
-            "the label states a rate"
+            m.window_seconds(4),
+            4 * BUCKET_SECS,
+            "a narrow panel spans less time"
         );
     }
 
@@ -431,6 +509,47 @@ mod tests {
         m.observe(None, 500, t0);
         assert_eq!(m.window_total(8), 500);
         assert_eq!(m.legend(8)[0].label, UNATTRIBUTED);
+    }
+
+    /// Seeded samples land in the column their age selects, so a restarted
+    /// client sees the same shape it would have drawn live.
+    #[test]
+    fn seeded_samples_land_in_their_age_bucket() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.reserve_history(BUCKET_SECS * 5);
+        let bucket_ms = (BUCKET_SECS * 1_000) as i64;
+        m.seed([
+            (0, Some("opus".to_string()), 10),
+            (bucket_ms * 2, Some("opus".to_string()), 20),
+        ]);
+        let cols: Vec<u64> = m.window(6).map(Bucket::total).collect();
+        assert_eq!(cols, vec![0, 0, 0, 20, 0, 10], "newest column is last");
+    }
+
+    /// History the ring can't reach is dropped rather than piling onto the
+    /// oldest column, which would invent a spike that never happened.
+    #[test]
+    fn seeds_older_than_the_ring_are_dropped_not_clamped() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.reserve_history(BUCKET_SECS * 2);
+        let bucket_ms = (BUCKET_SECS * 1_000) as i64;
+        m.seed([(bucket_ms * 100, Some("opus".to_string()), 999)]);
+        assert_eq!(m.window_total(64), 0);
+    }
+
+    /// Seeding then observing live must be continuous — the live sample
+    /// belongs in the newest column, next to the freshest seeded one.
+    #[test]
+    fn seeded_history_and_live_samples_share_one_timeline() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.reserve_history(BUCKET_SECS * 3);
+        m.seed([((BUCKET_SECS * 1_000) as i64, Some("opus".to_string()), 5)]);
+        m.observe(Some("opus"), 7, t0);
+        let cols: Vec<u64> = m.window(4).map(Bucket::total).collect();
+        assert_eq!(cols, vec![0, 0, 5, 7]);
     }
 
     #[test]

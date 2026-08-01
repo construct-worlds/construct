@@ -3899,13 +3899,10 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
     // and on a narrow panel a single row only ever fits one name. The graph
     // keeps the rest of the panel.
     let entries = app.token_meter.legend(area.width as usize);
-    let head = format!(
-        "peak {}/s ",
-        crate::lineage::format_token_count(app.token_meter.scale_per_second(area.width as usize))
-    );
+    let window_secs = app.token_meter.window_seconds(area.width as usize);
     let rows = wrap_legend(
         &entries,
-        UnicodeWidthStr::width(head.as_str()),
+        window_secs,
         area.width as usize,
         legend_max_rows(area.height),
     );
@@ -3957,7 +3954,7 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
     }
 
     if legend_h > 0 {
-        render_token_meter_legend(f, area, app, &entries, &head, &rows, legend_h);
+        render_token_meter_legend(f, area, app, &entries, window_secs, &rows, legend_h);
     }
 }
 
@@ -4085,23 +4082,33 @@ fn legend_max_rows(panel_h: u16) -> usize {
     }
 }
 
-/// One legend entry's rendered text: a dot, the model, and its total.
-fn legend_entry_text(entry: &crate::token_meter::LegendEntry) -> String {
-    format!(
-        "● {} {} ",
-        entry.label,
-        crate::lineage::format_token_count(entry.tokens)
-    )
+/// One legend entry's rendered text: a dot, the model, and what it averaged
+/// over the visible window.
+///
+/// A rate rather than a total, because the window scrolls: the same model at
+/// the same throughput would otherwise show a different number on a wider
+/// panel, and a total says nothing about how hard anything is working now.
+fn legend_entry_text(entry: &crate::token_meter::LegendEntry, window_secs: u64) -> String {
+    format!("● {} {} ", entry.label, legend_rate(entry.tokens, window_secs))
 }
 
-/// Pack legend entries into rows of `width` columns, reserving `indent`
-/// columns on the first row for the scale readout. Returns the entry indices
-/// per row. An entry too wide for an entire empty row is placed alone and
-/// truncated at render time; entries past `max_rows` are dropped, which the
-/// caller signals rather than hiding.
+/// `tokens` averaged over `window_secs`, formatted as a rate. Sub-unit rates
+/// round to `<1/s` rather than to `0/s`, which would read as idle.
+fn legend_rate(tokens: u64, window_secs: u64) -> String {
+    let per_sec = tokens / window_secs.max(1);
+    if per_sec == 0 && tokens > 0 {
+        return "<1/s".to_string();
+    }
+    format!("{}/s", crate::lineage::format_token_count(per_sec))
+}
+
+/// Pack legend entries into rows of `width` columns. Returns the entry
+/// indices per row. An entry too wide for an entire empty row is placed
+/// alone and truncated at render time; entries past `max_rows` are dropped,
+/// which the caller signals rather than hiding.
 fn wrap_legend(
     entries: &[crate::token_meter::LegendEntry],
-    indent: usize,
+    window_secs: u64,
     width: usize,
     max_rows: usize,
 ) -> Vec<Vec<usize>> {
@@ -4109,9 +4116,9 @@ fn wrap_legend(
         return Vec::new();
     }
     let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
-    let mut used = indent.min(width);
+    let mut used = 0usize;
     for (i, entry) in entries.iter().enumerate() {
-        let w = UnicodeWidthStr::width(legend_entry_text(entry).as_str());
+        let w = UnicodeWidthStr::width(legend_entry_text(entry, window_secs).as_str());
         // Only wrap when the row already holds something — otherwise an
         // over-wide entry would bounce to a fresh row and still not fit.
         if used + w > width && !rows.last().expect("row").is_empty() {
@@ -4124,10 +4131,6 @@ fn wrap_legend(
         rows.last_mut().expect("row").push(i);
         used += w;
     }
-    // The scale readout owns the first row even when no entry joined it.
-    if rows.len() > 1 && rows.last().is_some_and(Vec::is_empty) {
-        rows.pop();
-    }
     rows
 }
 
@@ -4136,32 +4139,29 @@ fn render_token_meter_legend(
     area: Rect,
     app: &mut App,
     entries: &[crate::token_meter::LegendEntry],
-    head: &str,
+    window_secs: u64,
     rows: &[Vec<usize>],
     legend_h: u16,
 ) {
     let dim = Style::default().fg(app.theme.dim);
     let top = area.y + area.height.saturating_sub(legend_h);
     let limit = area.x + area.width;
-    // The ceiling is stated because it moves: without it, two columns of the
-    // same height minutes apart would look like the same throughput.
-    f.buffer_mut().set_string(area.x, top, head, dim);
-    let head_w = UnicodeWidthStr::width(head) as u16;
-
     let shown: usize = rows.iter().map(Vec::len).sum();
+    let total: u64 = entries.iter().map(|e| e.tokens).sum();
+
     for (row_idx, row) in rows.iter().enumerate() {
         let y = top + row_idx as u16;
-        let mut x = if row_idx == 0 { area.x + head_w } else { area.x };
+        let mut x = area.x;
         for &i in row {
             let Some(entry) = entries.get(i) else { continue };
-            let count = crate::lineage::format_token_count(entry.tokens);
+            let rate = legend_rate(entry.tokens, window_secs);
             let room = limit.saturating_sub(x) as usize;
-            // Names identify the series and counts only quantify it, so a
-            // cramped row drops the count before it drops a name — and
+            // Names identify the series and the rate only quantifies it, so
+            // a cramped row drops the rate before it drops a name — and
             // truncates the name before dropping the entry.
-            let with_count = UnicodeWidthStr::width("●  ") + count.len() + 1;
-            let (budget, count_part) = if room > with_count + 3 {
-                (room - with_count, format!(" {count}"))
+            let with_rate = UnicodeWidthStr::width("●  ") + rate.len() + 1;
+            let (budget, rate_part) = if room > with_rate + 3 {
+                (room - with_rate, format!(" {rate}"))
             } else {
                 (room.saturating_sub(4), String::new())
             };
@@ -4169,13 +4169,16 @@ fn render_token_meter_legend(
                 break;
             }
             let label = truncate_label(&entry.label, budget);
-            let text = format!("● {label}{count_part} ");
+            let text = format!("● {label}{rate_part} ");
             f.buffer_mut()
                 .set_string(x, y, text.as_str(), Style::default().fg(entry.color));
             x += UnicodeWidthStr::width(text.as_str()) as u16;
         }
+        if row_idx + 1 != rows.len() {
+            continue;
+        }
         // Anything the rows couldn't hold is counted, not silently dropped.
-        if row_idx + 1 == rows.len() && shown < entries.len() {
+        if shown < entries.len() {
             let more = format!("+{}", entries.len() - shown);
             let w = UnicodeWidthStr::width(more.as_str()) as u16;
             if x + w <= limit {
@@ -4183,20 +4186,13 @@ fn render_token_meter_legend(
                 x += w;
             }
         }
-        // Window total, only on the last row and only if it costs no legend
-        // space.
-        if row_idx + 1 == rows.len() {
-            let total = format!(
-                " Σ {}",
-                crate::lineage::format_token_count(
-                    app.token_meter.window_total(area.width as usize)
-                )
-            );
-            let total_w = UnicodeWidthStr::width(total.as_str()) as u16;
-            if x + total_w < limit {
-                f.buffer_mut()
-                    .set_string(limit - total_w, y, total.as_str(), dim);
-            }
+        // Fleet rate, right-aligned, only if it costs no legend space. Same
+        // unit as the entries so the row doesn't mix rates and totals.
+        let sum = format!(" Σ {}", legend_rate(total, window_secs));
+        let sum_w = UnicodeWidthStr::width(sum.as_str()) as u16;
+        if x + sum_w < limit {
+            f.buffer_mut()
+                .set_string(limit - sum_w, y, sum.as_str(), dim);
         }
     }
 }
@@ -22672,6 +22668,22 @@ mod tests {
         assert_eq!(top.bg, None);
     }
 
+    /// The legend quantifies each series as a rate over the visible window,
+    /// not as a raw total — a total changes with panel width for the same
+    /// actual throughput.
+    #[test]
+    fn legend_rate_averages_over_the_window() {
+        assert_eq!(legend_rate(6_000, 60), "100/s");
+        assert_eq!(legend_rate(0, 60), "0/s");
+    }
+
+    /// A series slow enough to round to zero must not read as idle — it is
+    /// still drawing a bar.
+    #[test]
+    fn legend_rate_marks_sub_unit_throughput() {
+        assert_eq!(legend_rate(30, 60), "<1/s");
+    }
+
     /// Every series gets named: a legend too wide for one row wraps instead
     /// of silently showing only the first entry.
     #[test]
@@ -22684,8 +22696,7 @@ mod tests {
                 color: ratatui::style::Color::Reset,
             })
             .collect();
-        // ~11 cells per entry, 11 of indent: one entry on row 0, two after.
-        let rows = wrap_legend(&entries, 11, 30, 4);
+        let rows = wrap_legend(&entries, 60, 30, 4);
         assert!(rows.len() >= 2, "{rows:?}");
         let placed: usize = rows.iter().map(Vec::len).sum();
         assert_eq!(placed, 4, "every series named: {rows:?}");
@@ -22702,7 +22713,7 @@ mod tests {
                 color: ratatui::style::Color::Reset,
             })
             .collect();
-        let rows = wrap_legend(&entries, 11, 30, 2);
+        let rows = wrap_legend(&entries, 60, 30, 2);
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().map(Vec::len).sum::<usize>() < entries.len());
     }

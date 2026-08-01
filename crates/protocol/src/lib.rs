@@ -1376,6 +1376,7 @@ pub mod ipc_method {
     /// spawned in the background and this call returns immediately with
     /// `refreshing: true`. Backs the TUI's hover tooltip over a harness name.
     pub const USAGE_QUERY: &str = "usage.query";
+    pub const TOKEN_HISTORY: &str = "usage.token_history";
 }
 
 pub mod ipc_notif {
@@ -2406,6 +2407,42 @@ pub struct UsageQueryParams {
     /// refresh cadence to pick up the result.
     #[serde(default)]
     pub allow_refresh: bool,
+}
+
+/// One token-usage sample in the daemon's fleet-wide rolling window
+/// (spec 0167): when it was reported, what consumed it, and how much.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenSample {
+    /// Report time, Unix epoch ms — the same instant the transcript records,
+    /// so a client binning these into a history graph places them where they
+    /// actually happened rather than where it happened to learn of them.
+    pub at_ms: i64,
+    /// Model this usage is attributed to, already resolved by the daemon:
+    /// the model the report named, else the one the session had in effect at
+    /// that moment. `None` only when the session had never named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Prompt-side plus output tokens. Cached input is excluded — it is a
+    /// subset of the prompt side and would double-count.
+    pub tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenHistoryParams {
+    /// How far back to reach, in seconds. Clamped to the daemon's own
+    /// retention.
+    pub window_secs: i64,
+    /// Cap on returned samples. The daemon keeps the newest when it bites.
+    pub max_samples: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenHistoryResult {
+    /// Oldest first.
+    pub samples: Vec<TokenSample>,
+    /// Daemon time when the window was taken, so a client can convert
+    /// `at_ms` into an age without trusting the two clocks to agree.
+    pub now_ms: i64,
 }
 
 /// Result of `usage.query`.

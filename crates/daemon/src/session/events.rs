@@ -449,12 +449,20 @@ impl SessionManager {
                     tokens_in,
                     tokens_out,
                     tokens_cached,
-                    // Attribution is a client-side concern (spec 0167); the
-                    // session's own lifetime tally is model-agnostic.
-                    model: _,
+                    model,
                 } => {
                     s.cost_usd = Some(s.cost_usd.unwrap_or(0.0) + *usd);
+                    // The session's own lifetime tally is model-agnostic.
                     s.tokens.add(*tokens_in, *tokens_out, *tokens_cached);
+                    // The fleet history is not: it resolves the sample's
+                    // model here, while the session's current model is still
+                    // the one that produced it (spec 0167). Cached input is a
+                    // subset of the prompt side and would double-count.
+                    self.record_cost_sample(
+                        model.clone().or_else(|| s.model.clone()),
+                        tokens_in.saturating_add(*tokens_out),
+                        now.timestamp_millis(),
+                    );
                 }
                 SessionEvent::ContextUsage {
                     used_tokens,

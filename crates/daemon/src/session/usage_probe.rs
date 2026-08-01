@@ -81,6 +81,36 @@ impl SessionManager {
     /// a refresh is in flight. When `allow_refresh` is set and the cache is
     /// stale-or-missing and nothing is already running for this harness, a
     /// background probe is spawned and this call still returns immediately.
+    /// Record one usage sample into the fleet history (spec 0167).
+    pub(crate) fn record_cost_sample(&self, model: Option<String>, tokens: u64, at_ms: i64) {
+        if let Ok(mut history) = self.cost_history.lock() {
+            history.push(
+                construct_protocol::TokenSample {
+                    at_ms,
+                    model,
+                    tokens,
+                },
+                at_ms,
+            );
+        }
+    }
+
+    /// The fleet's recent token samples, oldest first, so a client can seed
+    /// its meter with history that accrued while it was closed (spec 0167).
+    pub(crate) fn token_history(
+        &self,
+        window_secs: i64,
+        max_samples: usize,
+    ) -> construct_protocol::TokenHistoryResult {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let samples = self
+            .cost_history
+            .lock()
+            .map(|h| h.recent(window_secs, max_samples, now_ms))
+            .unwrap_or_default();
+        construct_protocol::TokenHistoryResult { samples, now_ms }
+    }
+
     pub async fn usage_query(
         self: &Arc<Self>,
         harness: &str,

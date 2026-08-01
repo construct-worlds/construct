@@ -4763,6 +4763,15 @@ async fn connect_retrying(socket: &std::path::Path) -> Result<Arc<Client>> {
     Err(last_err.expect("loop runs at least once"))
 }
 
+/// How far back the TUI seeds its token meter from the daemon's window
+/// (spec 0167). Matches the meter's own retention: asking for more would
+/// only be discarded, asking for less would leave a wide terminal's left
+/// edge blank when the history exists.
+const TOKEN_HISTORY_WINDOW_SECS: i64 = 12 * 60 * 60;
+/// Cap on seeded samples, so a very busy fleet's startup fetch stays small.
+/// The daemon returns the newest when this bites.
+const TOKEN_HISTORY_MAX_SAMPLES: usize = 5_000;
+
 async fn run_with_socket_initial_selection(
     socket: std::path::PathBuf,
     initial_session_id: Option<String>,
@@ -4787,6 +4796,16 @@ async fn run_with_socket_initial_selection(
         .await
         .map(|r| r.verbs)
         .unwrap_or_default();
+    // Fleet token history (spec 0167). The daemon keeps this whether or not
+    // a client is attached, so a restarted TUI shows the minutes it missed
+    // instead of a hole where the fleet kept working.
+    let token_history = client
+        .token_history(
+            TOKEN_HISTORY_WINDOW_SECS,
+            TOKEN_HISTORY_MAX_SAMPLES,
+        )
+        .await
+        .ok();
     // Theme config is parsed now; the final palette (light vs dark) is resolved
     // after raw mode is on, once we can query the terminal background (OSC 11).
     let theme_config = crate::theme::ThemeConfig::load();
@@ -5103,7 +5122,21 @@ async fn run_with_socket_initial_selection(
         matrix_widget_hover: None,
         matrix_rain_hidden: persisted.matrix_rain_hidden,
         matrix_panel_mode: persisted.matrix_panel_mode,
-        token_meter: crate::token_meter::TokenMeter::new(now),
+        token_meter: {
+            let mut meter = crate::token_meter::TokenMeter::new(now);
+            if let Some(history) = token_history {
+                // Ages are measured against the daemon's own clock reading,
+                // not this process's, so the two never have to agree.
+                meter.reserve_history(TOKEN_HISTORY_WINDOW_SECS as u64);
+                meter.seed(
+                    history
+                        .samples
+                        .into_iter()
+                        .map(|s| (history.now_ms - s.at_ms, s.model, s.tokens)),
+                );
+            }
+            meter
+        },
         show_archived_ungrouped: false,
         show_archived_groups: HashSet::new(),
         show_archived_children: HashSet::new(),
@@ -16832,18 +16865,19 @@ mod tests {
         (app, dir, server)
     }
 
-    /// The meter draws bars and states the ceiling it scaled them against —
-    /// a bar with no stated scale can't be read (spec 0167).
+    /// The meter draws bars, and every bar's series is named in the legend
+    /// with the throughput it represents (spec 0167).
     #[tokio::test]
-    async fn token_meter_draws_bars_and_states_its_scale() {
+    async fn token_meter_draws_bars_and_names_each_series() {
         let (mut app, _dir, _server) =
-            token_meter_app(&[(Some("claude-opus-5"), None, 40_000)]).await;
+            token_meter_app(&[(Some("claude-opus-5"), None, 240_000)]).await;
         let out = rendered(&mut app, 120, 30);
-        assert!(out.contains("peak"), "scale readout missing:\n{out}");
         assert!(
             out.contains("claude-opus-5"),
             "legend missing the model:\n{out}"
         );
+        // 240k over one minute of window.
+        assert!(out.contains("4.0k/s") || out.contains("4k/s"), "{out}");
         assert!(
             out.contains('█') || out.chars().any(|c| "▁▂▃▄▅▆▇".contains(c)),
             "no bar drawn:\n{out}"
