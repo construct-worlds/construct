@@ -4081,6 +4081,11 @@ fn stacked_eighths(stacked: &[(u16, u64)], total: u64, filled: usize) -> Vec<(u1
 /// rows of relief above it.
 const GRAPH_MIN_ROWS: u16 = 3;
 
+/// How far an idle series' rate word is pulled toward the dim gray. Most of
+/// the way — enough that live figures win the row at a glance — but short of
+/// all the way, so the series keeps a trace of its own color.
+const IDLE_RATE_DIM: f32 = 0.7;
+
 /// How many rows the legend may take: everything above the graph's floor.
 ///
 /// The earlier rule capped the legend at a third of the panel, which on a
@@ -4113,6 +4118,21 @@ fn legend_rate(rate: Option<f64>) -> String {
         return "<1/s".to_string();
     }
     format!("{}/s", crate::lineage::format_token_count(per_sec as u64))
+}
+
+/// Style for a legend entry's rate word.
+///
+/// A live figure is a reading and stays at the series' full strength. `idle`
+/// is the absence of one, so it recedes toward the same gray the fleet sum
+/// uses — but only toward it: the entry keeps a trace of its own color, since
+/// the row it sits on names the band that color paints in the graph, and a
+/// legend that drops to neutral gray the moment a model goes quiet stops
+/// reading as that model's row.
+fn legend_rate_style(color: Color, dim: Color, rate: Option<f64>) -> Style {
+    if rate.is_some() {
+        return Style::default().fg(color);
+    }
+    Style::default().fg(blend_color(color, dim, IDLE_RATE_DIM))
 }
 
 /// Pack legend entries into rows of `width` columns. Returns the entry
@@ -4179,10 +4199,14 @@ fn render_token_meter_legend(
                 break;
             }
             let label = truncate_label(&entry.label, budget);
-            let text = format!("● {label}{rate_part} ");
-            f.buffer_mut()
-                .set_string(x, y, text.as_str(), Style::default().fg(entry.color));
-            x += UnicodeWidthStr::width(text.as_str()) as u16;
+            let head = format!("● {label}");
+            let style = Style::default().fg(entry.color);
+            f.buffer_mut().set_string(x, y, head.as_str(), style);
+            x += UnicodeWidthStr::width(head.as_str()) as u16;
+            let tail = format!("{rate_part} ");
+            let tail_style = legend_rate_style(entry.color, app.theme.dim, entry.rate);
+            f.buffer_mut().set_string(x, y, tail.as_str(), tail_style);
+            x += UnicodeWidthStr::width(tail.as_str()) as u16;
         }
         if row_idx + 1 != rows.len() {
             continue;
@@ -22692,6 +22716,29 @@ mod tests {
         assert_eq!(legend_rate(None), "idle");
         assert_eq!(legend_rate(Some(0.0)), "0/s");
         assert_eq!(legend_rate(Some(0.4)), "<1/s");
+    }
+
+    /// `idle` is not a reading, so it must not sit at the same strength as
+    /// the live figures beside it — but it must not go neutral either: the
+    /// row still names a colored band in the graph above.
+    #[test]
+    fn idle_rate_dims_toward_gray_without_losing_the_series_color() {
+        let color = Color::Rgb(250, 179, 135);
+        let dim = Color::Rgb(80, 80, 80);
+
+        let live = legend_rate_style(color, dim, Some(100.0));
+        assert_eq!(live.fg, Some(color), "a live rate keeps full strength");
+
+        let idle = legend_rate_style(color, dim, None);
+        let Some(Color::Rgb(r, g, b)) = idle.fg else {
+            panic!("idle rate blends to an rgb color: {:?}", idle.fg);
+        };
+        assert_ne!(idle.fg, live.fg, "idle is visibly dimmer than a reading");
+        assert_ne!(idle.fg, Some(dim), "…but keeps a trace of the series color");
+        // Pulled most of the way toward the gray: still warmer on the channel
+        // the series leads with, and darker than it started on every channel.
+        assert!(r > g && g > b, "hue survives the blend: {r},{g},{b}");
+        assert!(r < 250 && g < 179 && b > 80, "moved toward the gray: {r},{g},{b}");
     }
 
     /// Every series gets named: a legend too wide for one row wraps instead
