@@ -58,6 +58,58 @@ pub struct ServiceChannelDialog {
     pub bot_token: String,
 }
 
+/// Address-level actions exposed by a channel publication. Keeping this typed
+/// prevents the TUI from assuming every future ingress protocol produces a
+/// browser URL: URLs can be opened and copied, while socket endpoints can only
+/// be copied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceChannelActionAddress {
+    AuthorizationUrl(String),
+    PublicUrl(String),
+    PublicSocket(String),
+}
+
+impl ServiceChannelActionAddress {
+    pub fn value(&self) -> &str {
+        match self {
+            Self::AuthorizationUrl(value) | Self::PublicUrl(value) | Self::PublicSocket(value) => {
+                value
+            }
+        }
+    }
+
+    pub fn can_open(&self) -> bool {
+        matches!(self, Self::AuthorizationUrl(_) | Self::PublicUrl(_))
+    }
+
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::AuthorizationUrl(_) => "authorization URL",
+            Self::PublicUrl(_) => "public URL",
+            Self::PublicSocket(_) => "public endpoint",
+        }
+    }
+}
+
+/// The complete action surface for one attached ingress channel. Renderers
+/// consume this model instead of branching on channel kinds or publication
+/// protocol details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceChannelActions {
+    pub service_name: String,
+    pub channel_index: usize,
+    pub channel_id: String,
+    pub published: bool,
+    pub address: Option<ServiceChannelActionAddress>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ServiceChannelAction {
+    TogglePublication,
+    OpenAddress,
+    CopyAddress,
+}
+
 fn channel_field_count(editor: &ServiceChannelDialog) -> usize {
     if editor.channel.kind == "slack" {
         7
@@ -483,11 +535,8 @@ impl App {
         }
     }
 
-    async fn toggle_channel_publication(&mut self, index: usize) {
-        let Some(dialog) = self.service_dialog.as_ref() else {
-            return;
-        };
-        let service_name = dialog.service.name.clone();
+    async fn toggle_channel_publication(&mut self, service_name: &str, index: usize) {
+        let service_name = service_name.to_string();
         let Some(channel) = self.service_channel_catalog.get(index).cloned() else {
             return;
         };
@@ -533,6 +582,109 @@ impl App {
                 Err(error) => {
                     if let Some(dialog) = self.service_dialog.as_mut() {
                         dialog.note = Some(format!("Publish failed: {error}"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build the protocol-neutral action model for an attached ingress
+    /// channel. A local port is the client-visible ingress capability today;
+    /// an existing publication remains withdrawable even if its listener has
+    /// disappeared while the notification is in flight.
+    pub fn service_channel_actions(
+        &self,
+        service_name: &str,
+        index: usize,
+    ) -> Option<ServiceChannelActions> {
+        let channel = self.service_channel_catalog.get(index)?;
+        if channel.attached_to.as_deref() != Some(service_name)
+            || (channel.port.is_none() && channel.publication.is_none())
+        {
+            return None;
+        }
+
+        let address = channel.publication.as_ref().and_then(|publication| {
+            use construct_protocol::{ChannelPublicEndpoint as Endpoint, ChannelPublicationPhase};
+
+            let public = publication
+                .public_endpoint
+                .as_ref()
+                .map(|endpoint| match endpoint {
+                    Endpoint::Url { url } => ServiceChannelActionAddress::PublicUrl(url.clone()),
+                    Endpoint::Socket { .. } => {
+                        ServiceChannelActionAddress::PublicSocket(endpoint.to_string())
+                    }
+                });
+            let authorization = publication
+                .auth_url
+                .as_ref()
+                .map(|url| ServiceChannelActionAddress::AuthorizationUrl(url.clone()));
+            match publication.phase {
+                ChannelPublicationPhase::Authorizing => authorization.or(public),
+                ChannelPublicationPhase::Ready => public.or(authorization),
+                ChannelPublicationPhase::Connecting | ChannelPublicationPhase::Error => {
+                    public.or(authorization)
+                }
+            }
+        });
+
+        Some(ServiceChannelActions {
+            service_name: service_name.to_string(),
+            channel_index: index,
+            channel_id: channel.id.clone(),
+            published: channel.publication.is_some(),
+            address,
+        })
+    }
+
+    pub fn selected_service_channel_actions(
+        &self,
+        service_name: &str,
+    ) -> Option<ServiceChannelActions> {
+        let dialog = self
+            .service_dialog
+            .as_ref()
+            .filter(|dialog| dialog.service.name == service_name && dialog.selected_field == 6)?;
+        self.service_channel_actions(service_name, dialog.selected_channel)
+    }
+
+    pub(super) async fn run_service_channel_action(
+        &mut self,
+        service_name: &str,
+        index: usize,
+        action: ServiceChannelAction,
+    ) {
+        let Some(actions) = self.service_channel_actions(service_name, index) else {
+            return;
+        };
+        match action {
+            ServiceChannelAction::TogglePublication => {
+                self.toggle_channel_publication(service_name, index).await;
+            }
+            ServiceChannelAction::OpenAddress => {
+                let Some(address) = actions.address.filter(|address| address.can_open()) else {
+                    return;
+                };
+                match open_url(address.value()) {
+                    Ok(()) => self.set_status(format!("opened {}", address.noun())),
+                    Err(error) => {
+                        self.set_status(format!("open {} failed: {error}", address.noun()))
+                    }
+                }
+            }
+            ServiceChannelAction::CopyAddress => {
+                let Some(address) = actions.address else {
+                    return;
+                };
+                match copy_to_clipboard(address.value()) {
+                    Ok(outcome) => self.set_status(format!(
+                        "{} · {}",
+                        address.noun(),
+                        outcome.status(address.value().chars().count())
+                    )),
+                    Err(error) => {
+                        self.set_status(format!("copy {} failed: {error}", address.noun()))
                     }
                 }
             }
@@ -1140,8 +1292,28 @@ impl App {
                 }
             }
             KeyCode::Char('p') if snapshot.selected_field == 6 => {
-                self.toggle_channel_publication(snapshot.selected_channel)
-                    .await;
+                self.run_service_channel_action(
+                    &snapshot.service.name,
+                    snapshot.selected_channel,
+                    ServiceChannelAction::TogglePublication,
+                )
+                .await;
+            }
+            KeyCode::Char('o') if snapshot.selected_field == 6 => {
+                self.run_service_channel_action(
+                    &snapshot.service.name,
+                    snapshot.selected_channel,
+                    ServiceChannelAction::OpenAddress,
+                )
+                .await;
+            }
+            KeyCode::Char('y') if snapshot.selected_field == 6 => {
+                self.run_service_channel_action(
+                    &snapshot.service.name,
+                    snapshot.selected_channel,
+                    ServiceChannelAction::CopyAddress,
+                )
+                .await;
             }
             KeyCode::Tab | KeyCode::Down => {
                 if let Some(dialog) = self.service_dialog.as_mut() {

@@ -77,6 +77,9 @@ without teaching it the other's implementation details.
   protocol combinations fail locally and allocate no public route.
 - Publication state is pushed to connected clients. A URL is shown only after
   the gateway proves the reverse endpoint ready.
+- A selected publishable channel exposes an explicit Publish or Withdraw
+  action. Authorization and public URLs expose Open and Copy actions; typed
+  socket endpoints expose Copy without pretending to be browser-openable.
 - A channel-secret rotation does not require a new public address because
   authentication remains channel-owned and end to end.
 - Adding a provider means implementing the publication backend boundary and
@@ -98,8 +101,9 @@ without teaching it the other's implementation details.
   bearer token and JSON body; the loopback HTTP listener authenticates and
   parses both exactly as it does for a local caller.
 - A future database-protocol channel exposes a loopback TCP socket and receives
-  a public host and port. The tunnel carries opaque bytes; the database channel
-  performs its own handshake and authentication.
+  a public host and port. The UI offers Copy, but not Open, for that endpoint.
+  The tunnel carries opaque bytes; the database channel performs its own
+  handshake and authentication.
 - A service is paused while its channel is public. The publication route is
   withdrawn. Resuming restores only the loopback listener until the operator
   explicitly publishes again.

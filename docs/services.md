@@ -28,8 +28,9 @@ to the network.
 
 ## Publishing a channel
 
-Select an attached channel and press `p`, or use its **publish** button in the
-web client. The equivalent command is:
+Select an attached ingress channel. Its TUI action bar shows **Publish**; press
+`p` or click the button. The web client also exposes **publish**. The equivalent
+command is:
 
 ```text
 /service publish <service> [channel]
@@ -41,7 +42,8 @@ includes the same service request path as the loopback endpoint. Callers keep
 using the channel's bearer credential; tunnel authorization is for the owner
 publishing the route and never replaces channel authentication.
 
-Press `p` again, use **unpublish**, or run:
+While publication is active, the TUI action changes to **Withdraw**. Press `p`,
+click it, use **unpublish** in the web client, or run:
 
 ```text
 /service unpublish <service> [channel]
@@ -53,6 +55,11 @@ later resume or reattachment stays loopback-only until explicitly published
 again. Publication is runtime-only and is not restored after daemon restart.
 
 The UI distinguishes `authorizing`, `connecting`, `ready`, and `error` states.
+When an authorization or public URL is available, its action bar also shows
+**Open** (`o`) and **Copy** (`y`). Typed host-and-port endpoints show **Copy**
+without **Open**, so future non-HTTP channels are not presented as browser
+URLs.
+
 The first-party `tunnel.zarvis.ai` provider currently publishes HTTP over
 loopback TCP. It rejects other combinations locally before opening owner
 authorization.

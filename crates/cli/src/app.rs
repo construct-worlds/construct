@@ -51,8 +51,9 @@ pub use configure::{
     ConfigurePopup, ConfigureTab, CONFIGURE_TABS,
 };
 pub use service_dialog::{
-    ServiceChannelDialog, ServiceChannelDialogMode, ServiceDialog, ServiceDialogMode,
-    ServiceDialogPickerKind, SERVICE_PICKER_VISIBLE_ROWS,
+    ServiceChannelAction, ServiceChannelActionAddress, ServiceChannelActions, ServiceChannelDialog,
+    ServiceChannelDialogMode, ServiceDialog, ServiceDialogMode, ServiceDialogPickerKind,
+    SERVICE_PICKER_VISIBLE_ROWS,
 };
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
@@ -3926,6 +3927,23 @@ pub struct ServiceSessionHit {
     pub area: ratatui::layout::Rect,
 }
 
+/// One visible action button for the selected service channel. The hit keeps
+/// the service identity captured by the rendered frame so mouse dispatch
+/// cannot accidentally act on a newly selected service at the same position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceChannelActionHit {
+    pub service_name: String,
+    pub channel_index: usize,
+    pub action: ServiceChannelAction,
+    pub area: ratatui::layout::Rect,
+}
+
+impl ServiceChannelActionHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        App::rect_contains(self.area, col, row)
+    }
+}
+
 impl ServiceSessionHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         App::rect_contains(self.area, col, row)
@@ -4075,6 +4093,8 @@ pub struct LayoutSnapshot {
     pub lineage_box_hits: Vec<LineageBoxHit>,
     /// Clickable routed-session rows inside the focused service view.
     pub service_session_hits: Vec<ServiceSessionHit>,
+    /// Visible Publish/Withdraw/Open/Copy buttons for the selected channel.
+    pub service_channel_action_hits: Vec<ServiceChannelActionHit>,
     /// The "▸/▾ N subagents" group-toggle rows — click toggles that
     /// parent's group between collapsed and expanded.
     pub lineage_subagent_toggle_hits: Vec<LineageBoxHit>,
@@ -4395,6 +4415,7 @@ impl LayoutSnapshot {
             lineage_hscrollbar,
             lineage_box_hits,
             service_session_hits,
+            service_channel_action_hits,
             lineage_subagent_toggle_hits,
             playbook_title_run_hit,
             playbook_title_toggle_hit,
@@ -4539,6 +4560,7 @@ impl LayoutSnapshot {
         shift.retain_rows(dynamic_ui_triggers, |hit| &mut hit.2);
         shift.retain_rects(lineage_box_hits, |hit| &mut hit.area);
         shift.retain_rects(service_session_hits, |hit| &mut hit.area);
+        shift.retain_rects(service_channel_action_hits, |hit| &mut hit.area);
         shift.retain_rects(lineage_subagent_toggle_hits, |hit| &mut hit.area);
 
         *dynamic_ui_inline_hit = dynamic_ui_inline_hit.take().and_then(|mut hit| {
@@ -11314,6 +11336,21 @@ impl App {
                 }
                 if let Some(hit) = self
                     .layout
+                    .service_channel_action_hits
+                    .iter()
+                    .find(|hit| hit.contains(col, row))
+                    .cloned()
+                {
+                    self.run_service_channel_action(
+                        &hit.service_name,
+                        hit.channel_index,
+                        hit.action,
+                    )
+                    .await;
+                    return;
+                }
+                if let Some(hit) = self
+                    .layout
                     .service_session_hits
                     .iter()
                     .find(|hit| hit.contains(col, row))
@@ -16028,6 +16065,7 @@ mod tests {
             lineage_hscrollbar: None,
             lineage_box_hits: Vec::new(),
             service_session_hits: Vec::new(),
+            service_channel_action_hits: Vec::new(),
             lineage_subagent_toggle_hits: Vec::new(),
             lineage_segment_tooltip: None,
             playbook_title_run_hit: None,
@@ -40363,24 +40401,35 @@ mod tests {
         app.service_channel_catalog = service.channels.clone();
         app.services.push(service);
         app.select_service("assistant".to_string());
-        app.apply_channel_publication(
-            construct_protocol::ChannelPublicationNotificationPayload {
+        app.apply_channel_publication(construct_protocol::ChannelPublicationNotificationPayload {
+            service_name: "assistant".into(),
+            channel_id: "http".into(),
+            publication: Some(construct_protocol::ChannelPublicationSummary {
                 service_name: "assistant".into(),
                 channel_id: "http".into(),
-                publication: Some(construct_protocol::ChannelPublicationSummary {
-                    service_name: "assistant".into(),
-                    channel_id: "http".into(),
-                    provider: "construct".into(),
-                    phase: construct_protocol::ChannelPublicationPhase::Ready,
-                    public_endpoint: Some(construct_protocol::ChannelPublicEndpoint::Url {
-                        url: "https://alerts.example.test/".into(),
-                    }),
-                    auth_url: None,
-                    error: None,
+                provider: "construct".into(),
+                phase: construct_protocol::ChannelPublicationPhase::Ready,
+                public_endpoint: Some(construct_protocol::ChannelPublicEndpoint::Url {
+                    url: "https://alerts.example.test/".into(),
                 }),
-            },
-        );
+                auth_url: None,
+                error: None,
+            }),
+        });
+        app.open_edit_service_view("assistant");
+        app.service_dialog.as_mut().unwrap().selected_field = 6;
         app.session_transitions.clear();
+
+        let actions = app
+            .selected_service_channel_actions("assistant")
+            .expect("selected ingress channel actions");
+        assert!(actions.published);
+        assert_eq!(
+            actions.address,
+            Some(ServiceChannelActionAddress::PublicUrl(
+                "https://alerts.example.test/".into()
+            ))
+        );
 
         let backend = ratatui::backend::TestBackend::new(160, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -40392,7 +40441,133 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("public https://alerts.example.test/"), "{text}");
+        assert!(
+            text.contains("public https://alerts.example.test/"),
+            "{text}"
+        );
+        assert!(text.contains("Actions http"), "{text}");
+        assert!(text.contains("[p Withdraw]"), "{text}");
+        assert!(text.contains("[o Open]"), "{text}");
+        assert!(text.contains("[y Copy]"), "{text}");
+        let rendered_actions: HashSet<_> = app
+            .layout
+            .service_channel_action_hits
+            .iter()
+            .map(|hit| hit.action)
+            .collect();
+        assert_eq!(
+            rendered_actions,
+            HashSet::from([
+                ServiceChannelAction::TogglePublication,
+                ServiceChannelAction::OpenAddress,
+                ServiceChannelAction::CopyAddress,
+            ])
+        );
+
+        let backend = ratatui::backend::TestBackend::new(84, 40);
+        let mut narrow = ratatui::Terminal::new(backend).expect("narrow terminal");
+        narrow
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("narrow draw");
+        let narrow_text = rendered_text(narrow.backend().buffer());
+        assert!(narrow_text.contains("[p Withdraw]"), "{narrow_text}");
+        assert!(narrow_text.contains("[o Open]"), "{narrow_text}");
+        assert!(narrow_text.contains("[y Copy]"), "{narrow_text}");
+        let toggle_y = app
+            .layout
+            .service_channel_action_hits
+            .iter()
+            .find(|hit| hit.action == ServiceChannelAction::TogglePublication)
+            .expect("narrow withdraw hit")
+            .area
+            .y;
+        let copy_y = app
+            .layout
+            .service_channel_action_hits
+            .iter()
+            .find(|hit| hit.action == ServiceChannelAction::CopyAddress)
+            .expect("narrow copy hit")
+            .area
+            .y;
+        assert!(copy_y > toggle_y, "copy should wrap as a whole button");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_makes_loopback_publish_action_visible() {
+        let (mut app, _dir, server) = captured_app().await;
+        let service = service_summary_for_test("assistant");
+        app.service_channel_catalog = service.channels.clone();
+        app.services.push(service);
+        app.select_service("assistant".into());
+        app.open_edit_service_view("assistant");
+        app.service_dialog.as_mut().unwrap().selected_field = 6;
+        app.session_transitions.clear();
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let text = rendered_text(term.backend().buffer());
+        assert!(text.contains("Actions http"), "{text}");
+        assert!(text.contains("[p Publish]"), "{text}");
+        assert!(!text.contains("[o Open]"), "{text}");
+        assert!(!text.contains("[y Copy]"), "{text}");
+        assert_eq!(app.layout.service_channel_action_hits.len(), 1);
+        assert_eq!(
+            app.layout.service_channel_action_hits[0].action,
+            ServiceChannelAction::TogglePublication
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_channel_actions_keep_socket_endpoints_copy_only_and_hide_outbound_channels() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut service = service_summary_for_test("assistant");
+        service.channels[0].publication = Some(construct_protocol::ChannelPublicationSummary {
+            service_name: "assistant".into(),
+            channel_id: "http".into(),
+            provider: "construct".into(),
+            phase: construct_protocol::ChannelPublicationPhase::Ready,
+            public_endpoint: Some(construct_protocol::ChannelPublicEndpoint::Socket {
+                host: "2001:db8::1".into(),
+                port: 7443,
+            }),
+            auth_url: None,
+            error: None,
+        });
+        let mut slack = service.channels[0].clone();
+        slack.id = "slack".into();
+        slack.kind = "slack".into();
+        slack.port = None;
+        slack.publication = None;
+        service.channels.push(slack.clone());
+        app.service_channel_catalog = service.channels.clone();
+        app.services.push(service);
+        app.select_service("assistant".into());
+        app.open_edit_service_view("assistant");
+        app.service_dialog.as_mut().unwrap().selected_field = 6;
+
+        let actions = app
+            .selected_service_channel_actions("assistant")
+            .expect("socket publication actions");
+        assert_eq!(
+            actions.address,
+            Some(ServiceChannelActionAddress::PublicSocket(
+                "[2001:db8::1]:7443".into()
+            ))
+        );
+        assert!(!actions.address.as_ref().unwrap().can_open());
+
+        app.service_dialog.as_mut().unwrap().selected_channel = 1;
+        assert!(app.selected_service_channel_actions("assistant").is_none());
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let text = rendered_text(term.backend().buffer());
+        assert!(!text.contains("Actions slack"), "{text}");
+        assert!(app.layout.service_channel_action_hits.is_empty());
         server.abort();
     }
 
