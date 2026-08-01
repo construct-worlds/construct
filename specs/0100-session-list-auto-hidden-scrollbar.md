@@ -20,9 +20,12 @@ motion) and keep an overflowing list's scrollbar visible instead of hiding
 it — otherwise the bar would be unreachable by mouse in such terminals.
 
 The scrollbar is a slim right-edge overlay: it does not reserve a column,
-reflow row labels, or change the list's geometry when it appears. Its thumb
-and track retain a full-cell mouse target for dragging and jumping, while the
-existing mouse-wheel and keyboard scrolling behavior remains unchanged.
+reflow row labels, or change the list's geometry when it appears. It is
+drawn as a transparent bar — only the cell background is tinted, so the
+underlying session-row glyph stays visible (matching the session-view
+terminal scrollbar). Its thumb and track retain a full-cell mouse target
+for dragging and jumping, while the existing mouse-wheel and keyboard
+scrolling behavior remains unchanged.
 
 ## Reason
 

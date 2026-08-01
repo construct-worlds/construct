@@ -32880,18 +32880,35 @@ mod tests {
         app.focus = PaneFocus::List;
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let bar = app.layout.list_scrollbar.expect("focused scrollbar");
-        assert_eq!(
-            term.backend()
-                .buffer()
-                .cell(ratatui::layout::Position {
-                    x: bar.thumb.x,
-                    y: bar.thumb.y,
-                })
-                .expect("thumb cell")
-                .symbol(),
+        // Transparent overlay: background is tinted, but the row's glyph is
+        // preserved (must not replace the last column with a bar character).
+        let buf = term.backend().buffer();
+        let thumb_cell = buf
+            .cell(ratatui::layout::Position {
+                x: bar.thumb.x,
+                y: bar.thumb.y,
+            })
+            .expect("thumb cell");
+        assert_ne!(
+            thumb_cell.symbol(),
             "▕",
-            "the list scrollbar uses a slim right-edge glyph"
+            "list scrollbar must not overwrite the last column with a bar glyph"
         );
+        if let Some(track_y) = (bar.area.y..bar.area.y + bar.area.height).find(|&y| {
+            y < bar.thumb.y || y >= bar.thumb.y.saturating_add(bar.thumb.height)
+        }) {
+            let track_cell = buf
+                .cell(ratatui::layout::Position {
+                    x: bar.area.x,
+                    y: track_y,
+                })
+                .expect("track cell");
+            assert_ne!(
+                thumb_cell.bg,
+                track_cell.bg,
+                "thumb and track should use distinct background tints"
+            );
+        }
 
         // Clicking near the track's bottom jumps the viewport toward the end.
         app.on_mouse(MouseEvent {

@@ -3016,9 +3016,10 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.list_scroll_offset = visible_start + state.offset();
     app.list_scroll_offset = app.layout.list_scroll_offset;
     // Session rows keep their full width; the scrollbar is an auto-hidden
-    // slim edge glyph over the rightmost column, matching lineage. Hovering
-    // the session-list header or rows reveals it, while lineage/operator
-    // hover does not. An active drag keeps its bar alive until mouse-up.
+    // transparent overlay over the rightmost column (background tint only,
+    // matching the session-view terminal scrollbar). Hovering the
+    // session-list header or rows reveals it, while lineage/operator hover
+    // does not. An active drag keeps its bar alive until mouse-up.
     let list_hover_area = Rect {
         x: area.x,
         y: area.y,
@@ -3069,8 +3070,11 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     x,
                     y: list_items_area.y + row as u16,
                 }) {
-                    cell.set_symbol("▕");
-                    cell.set_fg(if row >= top && row < top + thumb_h {
+                    // Keep the row glyph/foreground intact and tint only the
+                    // cell background — same opacity approximation as the
+                    // terminal scrollbar, so the last column of session text
+                    // stays readable under the bar.
+                    cell.set_bg(if row >= top && row < top + thumb_h {
                         thumb_color
                     } else {
                         track_color
