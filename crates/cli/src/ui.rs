@@ -306,6 +306,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.session_harness_hits.clear();
     app.layout.list_visible_rows.clear();
     app.layout.list_mode_toggle_hit = None;
+    // Cleared here rather than in `render_sessions`, which the collapsed and
+    // zoomed paths skip entirely — a stale tally hit would otherwise stay
+    // clickable at coordinates that now belong to another surface.
+    app.layout.list_title_tally_hits.clear();
     app.layout.lineage_area = None;
     app.layout.lineage_header_hit = None;
     app.layout.lineage_collapse_hit = None;
@@ -487,6 +491,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     render_session_title_menu(f, app);
     render_route_menu(f, app);
+    render_fleet_tally_panel(f, app);
     render_tutorial_card(f, app);
     render_harness_unavailable_tooltip(f, app);
     render_modeline_approval_mode_tooltip(f, app);
@@ -1052,14 +1057,10 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
             return;
         }
     }
-    // Fleet tallies on the list title. The glyphs are compact by design, so
-    // hovering is what names them (spec 0169).
-    for (xs, xe, y, label) in &app.layout.list_title_tally_hits {
-        if my == *y && mx >= *xs && mx < *xe {
-            render_button_tooltip(f, &app.theme, label, *xs, y.saturating_add(2));
-            return;
-        }
-    }
+    // Fleet tallies on the list title get a panel, not a tooltip: hovering
+    // one lists the very rows it counted, and those rows are clickable
+    // (`render_fleet_tally_panel`, spec 0169). Painted with the menus after
+    // the main-block slide, so it isn't handled here.
     // Note: widget title squares no longer show a tooltip — hovering a square
     // reveals the widget itself (see `render_session_widget_title` /
     // `render_matrix_rain_header`).
@@ -2670,7 +2671,7 @@ const ATTENTION_MARKER_GLYPH: &str = "●";
 /// a prompt is usually just idle, and tallying idle sessions as if they
 /// were blocked would cry wolf on the whole fleet (spec 0169).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FleetTally {
+pub(crate) enum FleetTally {
     Working,
     NeedsYou,
     Errored,
@@ -2701,9 +2702,9 @@ impl FleetTally {
         }
     }
 
-    /// Hover text. The glyphs are compact by design, so the tooltip is
+    /// The panel's title. The glyphs are compact by design, so this is
     /// where the vocabulary is actually spelled out.
-    fn tooltip(self, n: usize) -> String {
+    pub(crate) fn tooltip(self, n: usize) -> String {
         let plural = if n == 1 { "session" } else { "sessions" };
         match self {
             FleetTally::Working => format!(" {n} {plural} working "),
@@ -2714,30 +2715,60 @@ impl FleetTally {
     }
 }
 
-/// Fleet tallies summarizing the session rows, in the order they render
-/// beside the list title.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct FleetStatusCounts {
-    working: usize,
-    needs_you: usize,
-    errored: usize,
+/// What clicking a tally panel row selects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FleetPanelTarget {
+    Session(String),
+    Group(String),
 }
 
-impl FleetStatusCounts {
-    fn entries(self) -> [(FleetTally, usize); 3] {
+/// One listed row inside a tally's hover panel: the list row this tally
+/// counted, and the label that row shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FleetPanelRow {
+    pub(crate) target: FleetPanelTarget,
+    pub(crate) label: String,
+}
+
+/// Fleet tallies summarizing the session rows, in the order they render
+/// beside the list title. Each bucket keeps the rows it counted so the
+/// hover panel can list exactly what the number stands for.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct FleetStatusBuckets {
+    working: Vec<FleetPanelRow>,
+    needs_you: Vec<FleetPanelRow>,
+    errored: Vec<FleetPanelRow>,
+}
+
+impl FleetStatusBuckets {
+    fn entries(&self) -> [(FleetTally, usize); 3] {
         [
-            (FleetTally::Working, self.working),
-            (FleetTally::NeedsYou, self.needs_you),
-            (FleetTally::Errored, self.errored),
+            (FleetTally::Working, self.working.len()),
+            (FleetTally::NeedsYou, self.needs_you.len()),
+            (FleetTally::Errored, self.errored.len()),
         ]
+    }
+
+    pub(crate) fn bucket(&self, kind: FleetTally) -> &[FleetPanelRow] {
+        match kind {
+            FleetTally::Working => &self.working,
+            FleetTally::NeedsYou => &self.needs_you,
+            FleetTally::Errored => &self.errored,
+        }
     }
 }
 
 /// Tally the fleet for the session list's title.
 ///
-/// Counts exactly what the list shows: archived sessions are folded away
-/// behind their own row, and the orchestrator is not a fleet member at all
-/// (it's the minibuffer), so neither belongs in a summary of the rows.
+/// Counts **rendered rows**, not sessions: the input is the very list the
+/// tally sits above, so the summary can never disagree with the rows
+/// beneath it (spec 0169). Rows the list folds away or never renders —
+/// the orchestrator, daemon-internal probes, a collapsed subtree's
+/// children — are absent from the input and so cannot be counted.
+///
+/// Each row is bucketed by the marker it actually paints. A collapsed
+/// parent or group header that shows a rolled-up attention dot counts
+/// once, as itself: it is the row the operator can reach and expand.
 ///
 /// Buckets are disjoint and ranked — errored, then wants-you, then working
 /// — so the numbers read as parts of one whole rather than as overlapping
@@ -2747,24 +2778,103 @@ impl FleetStatusCounts {
 /// Idle sessions are deliberately untallied. `AwaitingInput` is the fleet's
 /// resting state, so counting it would put the largest and least actionable
 /// number in the title (spec 0169).
-fn fleet_status_counts<'a>(
-    sessions: impl IntoIterator<Item = &'a SessionSummary>,
-    orchestrator_id: Option<&str>,
-) -> FleetStatusCounts {
-    let mut counts = FleetStatusCounts::default();
-    for s in sessions {
-        if s.archived || Some(s.id.as_str()) == orchestrator_id {
-            continue;
-        }
-        if s.state == SessionState::Errored {
-            counts.errored += 1;
-        } else if s.needs_attention {
-            counts.needs_you += 1;
-        } else if s.state == SessionState::Running {
-            counts.working += 1;
+pub(crate) fn fleet_status_buckets(items: &[AppListItem]) -> FleetStatusBuckets {
+    let mut buckets = FleetStatusBuckets::default();
+    for item in items {
+        match item {
+            AppListItem::Session {
+                summary,
+                attention_rollup,
+                ..
+            } => {
+                // Archived rows are the one deliberate exclusion: an
+                // expanded archive drawer renders them, but counting them
+                // would make the tally jump on a disclosure toggle.
+                if summary.archived {
+                    continue;
+                }
+                let row = FleetPanelRow {
+                    target: FleetPanelTarget::Session(summary.id.clone()),
+                    label: primary_label(summary),
+                };
+                // Mirrors the row's own `show_attention` so the tally
+                // counts precisely the dots that get painted.
+                if summary.state == SessionState::Errored {
+                    buckets.errored.push(row);
+                } else if summary.needs_attention || *attention_rollup {
+                    buckets.needs_you.push(row);
+                } else if summary.state == SessionState::Running {
+                    buckets.working.push(row);
+                }
+            }
+            AppListItem::GroupHeader {
+                group,
+                attention_rollup,
+                ..
+            } => {
+                // A group header paints a dot only for hidden members; it
+                // has no run state of its own, so it joins no other bucket.
+                if *attention_rollup {
+                    buckets.needs_you.push(FleetPanelRow {
+                        target: FleetPanelTarget::Group(group.id.clone()),
+                        label: group.name.clone(),
+                    });
+                }
+            }
+            AppListItem::ArchivedRow { .. } => {}
         }
     }
-    counts
+    buckets
+}
+
+/// Widest a tally panel's inner content grows before labels are ellipsized.
+const FLEET_PANEL_MAX_INNER_W: u16 = 44;
+/// Most rows a tally panel lists before the rest collapse into "+N more".
+/// The working bucket can hold the whole fleet; a floating index taller
+/// than the pane it summarizes would be worse than the number it replaced.
+pub(crate) const FLEET_PANEL_MAX_ROWS: usize = 12;
+
+/// Size and place a tally panel, returning its rect and how many of
+/// `rows` fit inside it.
+///
+/// Height is clamped against the frame *before* placement:
+/// `harness_hover_tooltip_rect` clamps where a box goes but not how big it
+/// is, so an oversized `h` would drive `y` to zero and run off the bottom
+/// of the buffer. Same guard `render_harness_hover_tooltip` applies.
+pub(crate) fn fleet_tally_panel_geometry(
+    rows: &[crate::ui::FleetPanelRow],
+    title: &str,
+    anchor: &crate::app::FleetTallyHit,
+    frame: Rect,
+) -> (Rect, usize) {
+    // Rows that fit below the anchor, minus the two border rows and the
+    // one row the anchor itself occupies.
+    let room = frame
+        .height
+        .saturating_sub(anchor.row.saturating_sub(frame.y))
+        .saturating_sub(3) as usize;
+    let mut shown = rows.len().min(FLEET_PANEL_MAX_ROWS).min(room.max(1));
+    // A "+N more" tail costs a row of its own, so it can't be added for
+    // free once the panel is already at the cap.
+    let overflow = rows.len().saturating_sub(shown);
+    if overflow > 0 && shown > 1 {
+        shown -= 1;
+    }
+    let body_rows = shown + usize::from(rows.len() > shown);
+    let widest = rows
+        .iter()
+        .take(shown)
+        .map(|r| UnicodeWidthStr::width(r.label.as_str()))
+        .max()
+        .unwrap_or(0)
+        .max(UnicodeWidthStr::width(title));
+    let inner_w = (widest as u16 + 2).min(FLEET_PANEL_MAX_INNER_W);
+    let w = (inner_w + 2).min(frame.width.max(3));
+    let h = (body_rows as u16 + 2).min(frame.height.max(3));
+    (
+        harness_hover_tooltip_rect(anchor.start_col, anchor.row, w, h, frame),
+        shown,
+    )
 }
 
 fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
@@ -2792,6 +2902,9 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
             )));
         f.render_widget(block, area);
         clear_pane_side_borders(f, area, app);
+        // Nothing to scroll into view at 3 cells wide. Dropped rather than
+        // held, so a request can't fire whenever the pane is re-expanded.
+        app.list_scroll_target = None;
         return;
     }
     // Expanded render path: title is ` + sessions ` at the left; at the
@@ -2804,6 +2917,10 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         .fg(app.theme.accent)
         .add_modifier(Modifier::BOLD);
     let mode_range = list_mode_button_range(area, app.list_mode);
+    // The rows the pane is about to paint. Built once here because the
+    // fleet tally is a summary OF these rows, not of the raw session
+    // list — see `fleet_status_buckets`.
+    let app_items = app.list_items();
     // Fleet tallies trail the title: how many sessions are working, how many
     // want the operator, how many broke — answerable without reading the
     // rows, and still true when the list is scrolled or the fleet is longer
@@ -2815,13 +2932,11 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         Span::styled("+", plus_style),
         Span::raw(" sessions "),
     ];
-    app.layout.list_title_tally_hits.clear();
-    let tallies: Vec<(FleetTally, usize)> =
-        fleet_status_counts(&app.sessions, app.orchestrator_id.as_deref())
-            .entries()
-            .into_iter()
-            .filter(|(_, n)| *n > 0)
-            .collect();
+    let tallies: Vec<(FleetTally, usize)> = fleet_status_buckets(&app_items)
+        .entries()
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .collect();
     let tally_texts: Vec<String> = tallies
         .iter()
         .map(|(kind, n)| format!("{n}{} ", kind.glyph()))
@@ -2846,17 +2961,19 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         // The title paints from the first cell inside the left border, so
         // that's where the hover geometry has to start counting from.
         let mut cursor = area.x.saturating_add(1).saturating_add(LIST_TITLE_BASE_W);
-        for ((kind, n), text) in tallies.iter().zip(tally_texts) {
+        for ((kind, _n), text) in tallies.iter().zip(tally_texts) {
             let w = UnicodeWidthStr::width(text.as_str()) as u16;
             // The hit zone covers the count and glyph but not the trailing
-            // separator space, so the tooltip doesn't flicker on between
+            // separator space, so the panel doesn't flicker on between
             // two adjacent tallies.
-            app.layout.list_title_tally_hits.push((
-                cursor,
-                cursor.saturating_add(w.saturating_sub(1)),
-                area.y,
-                kind.tooltip(*n),
-            ));
+            app.layout
+                .list_title_tally_hits
+                .push(crate::app::FleetTallyHit {
+                    kind: *kind,
+                    row: area.y,
+                    start_col: cursor,
+                    end_col: cursor.saturating_add(w.saturating_sub(2)),
+                });
             // Dimmed by attribute rather than shifted toward gray while the
             // sidebar is unfocused: the bucket hue is the only thing telling
             // working apart from wants-you now that they share a glyph, so
@@ -2919,7 +3036,6 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Total cells available inside the bordered pane.
     let row_w = (area.width as usize).saturating_sub(2);
-    let app_items = app.list_items();
     // Full-mode detail lines share one set of column widths across the
     // whole list, so fields align vertically row-to-row.
     let detail_now_ms = chrono::Utc::now().timestamp_millis();
@@ -3151,6 +3267,25 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         lineage_h_scrollbar,
     );
     let max_scroll = app.list_max_scroll(&app_items, list_items_area.height as usize);
+    // A pending scroll request (a fleet-panel row click) is resolved here,
+    // not where it was made: selecting a session changes the lineage
+    // section's height, so `list_items_area` is only authoritative after
+    // the split above. The id is resolved to an index now for the same
+    // reason — indices go stale between frames, ids don't.
+    if let Some(target) = app.list_scroll_target.take() {
+        if let Some(idx) = app_items.iter().position(|item| match item {
+            AppListItem::Session { summary, .. } => summary.id == target,
+            AppListItem::GroupHeader { group, .. } => group.id == target,
+            AppListItem::ArchivedRow { .. } => false,
+        }) {
+            app.list_scroll_offset = app.list_scroll_offset_for_visible(
+                &app_items,
+                idx,
+                list_items_area.height as usize,
+                app.list_scroll_offset,
+            );
+        }
+    }
     app.list_scroll_offset = app.list_scroll_offset.min(max_scroll);
     let visible_start = app.list_scroll_offset;
     // Take items until the next would overflow the viewport, recording the
@@ -7096,6 +7231,73 @@ fn truncate(text: &str, width: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// Paint the fleet-tally panel: the rows one tally counted, listed under
+/// the bucket's name in words, each one clickable.
+///
+/// Painted with the menus after the main-block slide, so `panel.area` and
+/// `app.mouse_pos` are both in screen coordinates and the click handler
+/// hit-tests the very rect that was drawn. Geometry is computed by
+/// `update_fleet_tally_panel`; this only draws.
+fn render_fleet_tally_panel(f: &mut Frame, app: &App) {
+    let Some(panel) = &app.fleet_panel else {
+        return;
+    };
+    let area = panel.area;
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
+    let title = panel.kind.tooltip(panel.rows.len() + panel.overflow);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(panel.kind.color(&app.theme))
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Clear, area);
+    f.render_widget(block, area);
+
+    let last_row = area.y.saturating_add(area.height).saturating_sub(1);
+    for (idx, entry) in panel.rows.iter().enumerate() {
+        let row = area.y.saturating_add(1).saturating_add(idx as u16);
+        if row >= last_row {
+            break;
+        }
+        let hovered = app.mouse_pos.is_some_and(|(mx, my)| {
+            my == row && mx > area.x && mx < area.x.saturating_add(area.width).saturating_sub(1)
+        });
+        let style = if hovered {
+            Style::default()
+                .fg(app.theme.text)
+                .bg(app.theme.inactive_highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        render_session_title_menu_row(f, area, row, &entry.label, None, style);
+    }
+    // Long buckets summarize their tail rather than growing past the pane
+    // they describe. Dim and unclickable — it names what was left out, it
+    // isn't somewhere to go.
+    if panel.overflow > 0 {
+        let row = area.y.saturating_add(1).saturating_add(panel.rows.len() as u16);
+        if row < last_row {
+            render_session_title_menu_row(
+                f,
+                area,
+                row,
+                &format!("+{} more", panel.overflow),
+                None,
+                Style::default()
+                    .fg(app.theme.muted)
+                    .add_modifier(Modifier::ITALIC),
+            );
+        }
+    }
 }
 
 fn render_session_title_menu(f: &mut Frame, app: &App) {
@@ -23330,23 +23532,37 @@ mod tests {
         }
     }
 
+    /// Rows as the list would hand them to the tally. The tally summarizes
+    /// `list_items()` output, so the fixtures are rows, not raw summaries.
+    fn tally_row(summary: SessionSummary) -> AppListItem {
+        AppListItem::Session {
+            summary,
+            indented: false,
+            has_children: false,
+            children_expanded: false,
+            attention_rollup: false,
+        }
+    }
+
     /// The title tallies summarize the rows the operator can actually see,
     /// so anything the list hides must not be counted — otherwise the
-    /// numbers disagree with the list directly beneath them.
+    /// numbers disagree with the list directly beneath them. The orchestrator
+    /// and daemon-internal probes never reach this function at all: they are
+    /// already gone from `list_items()`. Archived rows can reach it, via an
+    /// expanded archive drawer, and are the one deliberate exclusion.
     #[test]
-    fn fleet_counts_skip_archived_and_the_orchestrator() {
+    fn fleet_counts_skip_archived() {
         let mut archived = clip_test_session("archived", None, "claude", SessionState::Running);
         archived.archived = true;
-        let sessions = vec![
-            clip_test_session("a", None, "claude", SessionState::Running),
-            archived,
-            clip_test_session("orch", None, "smith", SessionState::Running),
+        let items = vec![
+            tally_row(clip_test_session("a", None, "claude", SessionState::Running)),
+            tally_row(archived),
         ];
 
-        let counts = fleet_status_counts(&sessions, Some("orch"));
-        assert_eq!(counts.working, 1);
-        assert_eq!(counts.needs_you, 0);
-        assert_eq!(counts.errored, 0);
+        let buckets = fleet_status_buckets(&items);
+        assert_eq!(buckets.bucket(FleetTally::Working).len(), 1);
+        assert_eq!(buckets.bucket(FleetTally::NeedsYou).len(), 0);
+        assert_eq!(buckets.bucket(FleetTally::Errored).len(), 0);
     }
 
     /// "Wants you" is the sticky attention marker, not `AwaitingInput`. An
@@ -23356,16 +23572,26 @@ mod tests {
     fn fleet_counts_read_attention_not_awaiting_input() {
         let mut flagged = clip_test_session("flagged", None, "claude", SessionState::AwaitingInput);
         flagged.needs_attention = true;
-        let sessions = vec![
-            flagged,
+        let items = vec![
+            tally_row(flagged),
             // Same state, already seen — idle, not waiting.
-            clip_test_session("seen", None, "claude", SessionState::AwaitingInput),
-            clip_test_session("seen2", None, "codex", SessionState::AwaitingInput),
+            tally_row(clip_test_session(
+                "seen",
+                None,
+                "claude",
+                SessionState::AwaitingInput,
+            )),
+            tally_row(clip_test_session(
+                "seen2",
+                None,
+                "codex",
+                SessionState::AwaitingInput,
+            )),
         ];
 
-        let counts = fleet_status_counts(&sessions, None);
-        assert_eq!(counts.needs_you, 1);
-        assert_eq!(counts.working, 0);
+        let buckets = fleet_status_buckets(&items);
+        assert_eq!(buckets.bucket(FleetTally::NeedsYou).len(), 1);
+        assert_eq!(buckets.bucket(FleetTally::Working).len(), 0);
     }
 
     /// Buckets are disjoint so the tallies read as parts of one whole. A
@@ -23377,22 +23603,78 @@ mod tests {
         errored.needs_attention = true;
         let mut flagged = clip_test_session("ask", None, "claude", SessionState::AwaitingInput);
         flagged.needs_attention = true;
-        let sessions = vec![
-            clip_test_session("run", None, "claude", SessionState::Running),
-            flagged,
-            errored,
-            clip_test_session("done", None, "codex", SessionState::Done),
-            clip_test_session("idle", None, "smith", SessionState::Paused),
+        let items = vec![
+            tally_row(clip_test_session(
+                "run",
+                None,
+                "claude",
+                SessionState::Running,
+            )),
+            tally_row(flagged),
+            tally_row(errored),
+            tally_row(clip_test_session("done", None, "codex", SessionState::Done)),
+            tally_row(clip_test_session(
+                "idle",
+                None,
+                "smith",
+                SessionState::Paused,
+            )),
         ];
 
-        let counts = fleet_status_counts(&sessions, None);
-        assert_eq!(counts.working, 1);
-        assert_eq!(counts.needs_you, 1);
-        assert_eq!(counts.errored, 1);
+        let buckets = fleet_status_buckets(&items);
+        assert_eq!(buckets.bucket(FleetTally::Working).len(), 1);
+        assert_eq!(buckets.bucket(FleetTally::NeedsYou).len(), 1);
+        assert_eq!(buckets.bucket(FleetTally::Errored).len(), 1);
         // Five sessions in, three tallied: idle and finished sessions are
         // deliberately untallied, so the tally is a scan list, not a census.
-        let shown: usize = counts.entries().iter().map(|(_, n)| n).sum();
+        let shown: usize = buckets.entries().iter().map(|(_, n)| n).sum();
         assert_eq!(shown, 3);
+    }
+
+    /// A collapsed parent paints one rolled-up dot for its hidden flagged
+    /// descendants, so it counts once and the panel lists the parent — the
+    /// row the operator can actually reach and expand.
+    #[test]
+    fn fleet_counts_a_collapsed_subtree_rollup_once() {
+        let mut parent = clip_test_session("parent", Some("Parent"), "claude", SessionState::Paused);
+        parent.needs_attention = false;
+        let items = vec![AppListItem::Session {
+            summary: parent,
+            indented: false,
+            has_children: true,
+            children_expanded: false,
+            attention_rollup: true,
+        }];
+
+        let rows = fleet_status_buckets(&items)
+            .bucket(FleetTally::NeedsYou)
+            .to_vec();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, FleetPanelTarget::Session("parent".into()));
+    }
+
+    /// A collapsed group's header carries the same rolled-up dot, and the
+    /// panel row targets the group so clicking it lands somewhere real.
+    #[test]
+    fn fleet_counts_a_collapsed_group_header_rollup() {
+        let items = vec![AppListItem::GroupHeader {
+            group: construct_protocol::GroupSummary {
+                id: "g1".into(),
+                name: "infra".into(),
+                created_at: chrono::Utc::now(),
+                position: 0,
+                collapsed: true,
+            },
+            member_count: 3,
+            attention_rollup: true,
+        }];
+
+        let rows = fleet_status_buckets(&items)
+            .bucket(FleetTally::NeedsYou)
+            .to_vec();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, FleetPanelTarget::Group("g1".into()));
+        assert_eq!(rows[0].label, "infra");
     }
 
     /// The wants-you tally is a count of the per-row attention dots, so it
@@ -23418,6 +23700,57 @@ mod tests {
         let errored = FleetTally::Errored.glyph();
         assert_ne!(errored, FleetTally::Working.glyph());
         assert_ne!(errored, FleetTally::NeedsYou.glyph());
+    }
+
+    fn panel_rows(n: usize) -> Vec<FleetPanelRow> {
+        (0..n)
+            .map(|i| FleetPanelRow {
+                target: FleetPanelTarget::Session(format!("s{i}")),
+                label: format!("session {i}"),
+            })
+            .collect()
+    }
+
+    /// A bucket longer than the cap loses its tail to a "+N more" row rather
+    /// than growing without bound. The tail costs a row of its own, so the
+    /// arithmetic has to account for it — off by one here and the panel
+    /// silently drops a session it claims to be listing.
+    #[test]
+    fn fleet_panel_caps_a_long_bucket_with_a_more_row() {
+        let rows = panel_rows(27);
+        let anchor = crate::app::FleetTallyHit {
+            kind: FleetTally::Working,
+            row: 0,
+            start_col: 14,
+            end_col: 16,
+        };
+        let frame = Rect::new(0, 0, 120, 30);
+        let (area, shown) = fleet_tally_panel_geometry(&rows, " 27 sessions working ", &anchor, frame);
+
+        assert!(shown < rows.len(), "a 27-row bucket must not list in full");
+        // Body = the shown rows plus the one "+N more" line, inside borders.
+        assert_eq!(area.height as usize, shown + 1 + 2);
+        assert!(area.y + area.height <= frame.height);
+    }
+
+    /// Short terminals are the case that overruns the buffer: the placement
+    /// helper clamps *where* a box goes, not how big it is, so the height has
+    /// to be clamped before it ever gets there.
+    #[test]
+    fn fleet_panel_fits_a_ten_row_terminal() {
+        let rows = panel_rows(9);
+        let anchor = crate::app::FleetTallyHit {
+            kind: FleetTally::NeedsYou,
+            row: 0,
+            start_col: 14,
+            end_col: 16,
+        };
+        let frame = Rect::new(0, 0, 60, 10);
+        let (area, shown) = fleet_tally_panel_geometry(&rows, " 9 sessions need you ", &anchor, frame);
+
+        assert!(area.y + area.height <= frame.height, "panel ran off the bottom");
+        assert!(area.x + area.width <= frame.width);
+        assert!(shown >= 1, "a panel with no rows is not worth opening");
     }
 
     /// Singular attention reads as a sentence, not as a template with a
