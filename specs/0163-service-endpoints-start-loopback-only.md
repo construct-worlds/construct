@@ -11,7 +11,13 @@ Services are daemon-owned definitions. In v1 each service is declared in its
 own `services/<name>.toml` file under the Construct configuration directory and
 expose a generic HTTP webhook only on loopback. A service owns its instruction,
 harness, model, working directory, and routing policy; a channel supplies the
-transport-specific credential and listener configuration.
+transport-specific credential and listener configuration. A service may own
+zero or more named channel instances. Channel ids are stable keys inside the
+service definition, and each HTTP channel owns its own loopback port,
+credential, and enabled state. The HTTP port is therefore channel
+configuration, not service configuration; two HTTP channels on one service
+must use different ports. V1 supports HTTP channel instances only, while the
+resource model leaves room for future channel kinds.
 
 The TUI renders services as top-level rows in the ordinary session list rather
 than in a separate sidebar section. A service row uses the distinct `◈` type
@@ -24,9 +30,10 @@ exposes routed-session activity and keeps create/edit/delete actions in the
 view's normal focus lifecycle.
 
 The service view uses the same top-right title-actions affordance as a session
-view. Its menu is service-specific: edit the definition, rotate the HTTP
-credential, pause or resume ingress, split or close the pane, and delete the
-service. Global `C-x` chords remain available while the service view is
+view. Its menu is service-specific: edit the selected HTTP channel credential,
+pause or resume ingress, split or close the pane, and delete the service. The
+editor lists attached channels and supports adding, editing, enabling or
+disabling, credential rotation, and deletion. Global `C-x` chords remain available while the service view is
 focused; session-only commands such as `C-x .` explain their scope instead of
 being silently swallowed.
 
@@ -49,8 +56,10 @@ name, never an ambiguous URL or display label.
 
 The HTTP channel accepts authenticated JSON deliveries and routes them into
 ordinary headless Construct sessions. `session-key` routing persists the
-key-to-session mapping, `single` uses one shared mapping, and `per-event`
-creates a fresh session. Service ingress acknowledges accepted work
+key-to-session mapping, namespaced by channel id, `single` uses one shared
+mapping per channel, and `per-event` creates a fresh session. Disabled
+channels do not bind listeners after restart; pausing a service disables all
+of its channels. Service ingress acknowledges accepted work
 asynchronously; it does not hold the webhook connection for an agent turn.
 The acknowledgement's session id can be queried through an authenticated
 service-scoped result route. The result reports session status and the latest
@@ -71,6 +80,13 @@ visible and recoverable in the fleet.
   so result reads remain scoped after recovery.
 - Service definitions can be created, edited, and removed atomically without
   rewriting the global Construct configuration.
+- Channel mutations preserve other channels and the service behavior fields;
+  deleting the final channel leaves a valid but inert service definition.
+- Channel summaries never return bearer credentials. Creation and explicit
+  rotation return a generated credential once, and ordinary service edits do
+  not replace it.
+- Channel-scoped routing and request deduplication keep equal caller keys or
+  request ids on different channels from colliding accidentally.
 - Bearer credentials are service-scoped and never logged.
 - A future tunnel route, plugin channel, or synchronous reply mechanism extends
   this boundary; none is implied by enabling a service.

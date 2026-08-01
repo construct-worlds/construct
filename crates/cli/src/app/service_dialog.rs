@@ -3,6 +3,7 @@
 use super::*;
 
 const FIELD_COUNT: usize = 8;
+const CHANNEL_FIELD_COUNT: usize = 4;
 pub const SERVICE_PICKER_VISIBLE_ROWS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +16,12 @@ pub enum ServiceDialogMode {
 pub enum ServiceDialogPickerKind {
     Harness,
     Model,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceChannelDialogMode {
+    Create,
+    Edit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,11 +38,23 @@ pub struct ServiceDialog {
     pub service: ServiceSummary,
     pub selected_field: usize,
     pub note: Option<String>,
-    pub new_token: Option<String>,
     pub confirm_delete: bool,
     pub picker: Option<ServiceDialogPickerKind>,
     pub picker_selected: usize,
     pub picker_scroll: usize,
+    pub selected_channel: usize,
+    pub channel_editor: Option<ServiceChannelDialog>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceChannelDialog {
+    pub mode: ServiceChannelDialogMode,
+    pub service_name: String,
+    pub channel: ServiceChannelSummary,
+    pub selected_field: usize,
+    pub note: Option<String>,
+    pub new_secret: Option<String>,
+    pub confirm_delete: bool,
 }
 
 impl ServiceDialog {
@@ -47,11 +66,7 @@ impl ServiceDialog {
             3 => self.service.model.clone().unwrap_or_default(),
             4 => self.service.cwd.clone(),
             5 => self.service.routing.clone(),
-            6 => self
-                .service
-                .http_port
-                .map(|port| port.to_string())
-                .unwrap_or_default(),
+            6 => format!("{} attached", self.service.channels.len()),
             7 => {
                 if self.service.paused {
                     "paused".to_string()
@@ -172,8 +187,7 @@ fn default_service(app: &App, suggested: String) -> ServiceSummary {
             .unwrap_or_else(|| ".".to_string()),
         routing: "session-key".to_string(),
         paused: false,
-        http_port: Some(8787),
-        has_http_token: false,
+        channels: Vec::new(),
     }
 }
 
@@ -208,11 +222,12 @@ impl App {
             service: default_service(self, suggested),
             selected_field: 0,
             note: Some("Enter saves this service as its own TOML file.".to_string()),
-            new_token: None,
             confirm_delete: false,
             picker: None,
             picker_selected: 0,
             picker_scroll: 0,
+            selected_channel: 0,
+            channel_editor: None,
         });
     }
 
@@ -234,13 +249,243 @@ impl App {
             service,
             selected_field: 1,
             note: Some("Changes apply after the daemon restarts.".to_string()),
-            new_token: None,
             confirm_delete: false,
             picker: None,
             picker_selected: 0,
             picker_scroll: 0,
+            selected_channel: 0,
+            channel_editor: None,
         });
         true
+    }
+
+    fn suggested_channel_id(service: &ServiceSummary) -> String {
+        if !service.channels.iter().any(|channel| channel.id == "http") {
+            return "http".to_string();
+        }
+        (2..=99)
+            .map(|index| format!("http-{index}"))
+            .find(|id| !service.channels.iter().any(|channel| channel.id == *id))
+            .unwrap_or_else(|| format!("http-{}", service.channels.len() + 1))
+    }
+
+    fn suggested_channel_port(service: &ServiceSummary) -> u16 {
+        let used: std::collections::HashSet<u16> = service
+            .channels
+            .iter()
+            .filter_map(|channel| channel.port)
+            .collect();
+        (8787..=u16::MAX)
+            .find(|port| !used.contains(port))
+            .unwrap_or(8787)
+    }
+
+    pub fn open_new_service_channel(&mut self) -> bool {
+        let Some(dialog) = self.service_dialog.as_mut() else {
+            return false;
+        };
+        let id = Self::suggested_channel_id(&dialog.service);
+        let port = Self::suggested_channel_port(&dialog.service);
+        dialog.selected_field = 6;
+        dialog.channel_editor = Some(ServiceChannelDialog {
+            mode: ServiceChannelDialogMode::Create,
+            service_name: dialog.service.name.clone(),
+            channel: ServiceChannelSummary {
+                id,
+                kind: "http".to_string(),
+                enabled: true,
+                port: Some(port),
+                has_credential: false,
+            },
+            selected_field: 0,
+            note: Some("HTTP channels listen on loopback after the daemon restarts.".to_string()),
+            new_secret: None,
+            confirm_delete: false,
+        });
+        true
+    }
+
+    pub fn open_edit_service_channel(&mut self, index: usize) -> bool {
+        let Some(dialog) = self.service_dialog.as_mut() else {
+            return false;
+        };
+        let Some(channel) = dialog.service.channels.get(index).cloned() else {
+            return false;
+        };
+        dialog.selected_field = 6;
+        dialog.selected_channel = index;
+        dialog.channel_editor = Some(ServiceChannelDialog {
+            mode: ServiceChannelDialogMode::Edit,
+            service_name: dialog.service.name.clone(),
+            channel,
+            selected_field: 2,
+            note: Some("Channel changes apply after the daemon restarts.".to_string()),
+            new_secret: None,
+            confirm_delete: false,
+        });
+        true
+    }
+
+    fn edit_service_channel_text(&mut self, mut edit: impl FnMut(&mut String)) {
+        let Some(dialog) = self.service_dialog.as_mut() else {
+            return;
+        };
+        let Some(channel) = dialog.channel_editor.as_mut() else {
+            return;
+        };
+        match channel.selected_field {
+            0 if channel.mode == ServiceChannelDialogMode::Create => edit(&mut channel.channel.id),
+            2 => {
+                let mut value = channel.channel.port.map(|port| port.to_string()).unwrap_or_default();
+                edit(&mut value);
+                channel.channel.port = value.parse::<u16>().ok().filter(|port| *port > 0);
+            }
+            _ => return,
+        }
+        channel.note = None;
+        channel.new_secret = None;
+        channel.confirm_delete = false;
+    }
+
+    async fn save_service_channel(&mut self, rotate_secret: bool) {
+        let Some(parent) = self.service_dialog.as_ref() else {
+            return;
+        };
+        let Some(editor) = parent.channel_editor.as_ref() else {
+            return;
+        };
+        let editor_snapshot = editor.clone();
+        let valid_id = valid_service_name(&editor_snapshot.channel.id);
+        let validation_error = if !valid_id {
+            Some("Channel ID must be 1–32 lowercase letters, digits, or interior hyphens.")
+        } else if editor_snapshot.channel.kind != "http" {
+            Some("V1 supports HTTP channels only.")
+        } else if editor_snapshot.channel.port.is_none() {
+            Some("HTTP port must be between 1 and 65535.")
+        } else {
+            None
+        };
+        if let Some(message) = validation_error {
+            if let Some(parent) = self.service_dialog.as_mut() {
+                if let Some(editor) = parent.channel_editor.as_mut() {
+                    editor.note = Some(message.to_string());
+                }
+            }
+            return;
+        }
+        match self
+            .client
+            .put_service_channel(construct_protocol::ServiceChannelPutParams {
+                service_name: editor_snapshot.service_name.clone(),
+                channel: construct_protocol::ServiceChannelPut {
+                    id: editor_snapshot.channel.id,
+                    kind: editor_snapshot.channel.kind,
+                    enabled: editor_snapshot.channel.enabled,
+                    port: editor_snapshot.channel.port,
+                },
+                rotate_secret,
+            })
+            .await
+        {
+            Ok(result) => {
+                self.refresh_services().await;
+                let refreshed_service = self
+                    .services
+                    .iter()
+                    .find(|service| service.name == editor_snapshot.service_name)
+                    .cloned();
+                let new_secret = result.new_secret;
+                if let Some(parent) = self.service_dialog.as_mut() {
+                    if let Some(service) = refreshed_service {
+                        parent.service = service;
+                    }
+                    if let Some(editor) = parent.channel_editor.as_mut() {
+                        editor.mode = ServiceChannelDialogMode::Edit;
+                        editor.channel = result.channel;
+                        let has_new_secret = new_secret.is_some();
+                        editor.new_secret = new_secret;
+                        editor.confirm_delete = false;
+                        editor.note = Some(if has_new_secret {
+                            "Saved. Copy the credential now; it is shown only once. Restart to apply."
+                                .to_string()
+                        } else {
+                            "Saved. Restart the daemon to apply channel changes.".to_string()
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                if let Some(parent) = self.service_dialog.as_mut() {
+                    if let Some(editor) = parent.channel_editor.as_mut() {
+                        editor.note = Some(format!("Channel save failed: {error}"));
+                    }
+                }
+            }
+        }
+    }
+
+    async fn delete_service_channel(&mut self) {
+        let Some(parent) = self.service_dialog.as_ref() else {
+            return;
+        };
+        let Some(editor) = parent.channel_editor.as_ref() else {
+            return;
+        };
+        let service_name = editor.service_name.clone();
+        let channel_id = editor.channel.id.clone();
+        match self.client.delete_service_channel(&service_name, &channel_id).await {
+            Ok(()) => {
+                self.refresh_services().await;
+                if let Some(parent) = self.service_dialog.as_mut() {
+                    if let Some(service) = self.services.iter().find(|service| service.name == service_name).cloned() {
+                        parent.service = service;
+                    }
+                    parent.channel_editor = None;
+                    parent.note = Some(format!("Channel `{channel_id}` deleted. Restart to apply."));
+                }
+            }
+            Err(error) => {
+                if let Some(parent) = self.service_dialog.as_mut() {
+                    if let Some(editor) = parent.channel_editor.as_mut() {
+                        editor.note = Some(format!("Channel delete failed: {error}"));
+                        editor.confirm_delete = false;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn rotate_service_channel_secret(&mut self) {
+        let Some(parent) = self.service_dialog.as_ref() else {
+            return;
+        };
+        let Some(editor) = parent.channel_editor.as_ref() else {
+            return;
+        };
+        let service_name = editor.service_name.clone();
+        let channel_id = editor.channel.id.clone();
+        match self.client.rotate_service_channel_secret(&service_name, &channel_id).await {
+            Ok(result) => {
+                self.refresh_services().await;
+                if let Some(parent) = self.service_dialog.as_mut() {
+                    if let Some(service) = self.services.iter().find(|service| service.name == service_name).cloned() {
+                        parent.service = service;
+                    }
+                    if let Some(editor) = parent.channel_editor.as_mut() {
+                        editor.channel = result.channel;
+                        editor.new_secret = result.new_secret;
+                        editor.note = Some("Credential rotated. Copy it now; it is shown only once. Restart to apply.".to_string());
+                    }
+                }
+            }
+            Err(error) => {
+                if let Some(parent) = self.service_dialog.as_mut() {
+                    if let Some(editor) = parent.channel_editor.as_mut() {
+                        editor.note = Some(format!("Credential rotation failed: {error}"));
+                    }
+                }
+            }
+        }
     }
 
     fn open_service_picker(&mut self, kind: ServiceDialogPickerKind) {
@@ -316,7 +561,6 @@ impl App {
             dialog.picker_selected = 0;
             dialog.picker_scroll = 0;
             dialog.note = None;
-            dialog.new_token = None;
             dialog.confirm_delete = false;
         }
     }
@@ -337,19 +581,10 @@ impl App {
             // the picker is the only way to change either value.
             2 | 3 => return,
             4 => edit(&mut dialog.service.cwd),
-            6 => {
-                let mut value = dialog
-                    .service
-                    .http_port
-                    .map(|port| port.to_string())
-                    .unwrap_or_default();
-                edit(&mut value);
-                dialog.service.http_port = value.parse::<u16>().ok().filter(|port| *port > 0);
-            }
+            6 => return,
             _ => {}
         }
         dialog.note = None;
-        dialog.new_token = None;
         dialog.confirm_delete = false;
     }
 
@@ -358,7 +593,15 @@ impl App {
             return false;
         }
         let sanitized = text.replace(['\r', '\n'], " ");
-        self.edit_service_dialog_text(|value| value.push_str(&sanitized));
+        if self
+            .service_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.channel_editor.is_some())
+        {
+            self.edit_service_channel_text(|value| value.push_str(&sanitized));
+        } else {
+            self.edit_service_dialog_text(|value| value.push_str(&sanitized));
+        }
         true
     }
 
@@ -387,7 +630,7 @@ impl App {
         dialog.confirm_delete = false;
     }
 
-    async fn save_service_dialog(&mut self, rotate_token: bool) {
+    async fn save_service_dialog(&mut self) {
         let Some(dialog) = self.service_dialog.clone() else {
             return;
         };
@@ -403,8 +646,6 @@ impl App {
             "session-key" | "per-event" | "single"
         ) {
             Some("Routing must be session-key, per-event, or single.")
-        } else if service.http_port.is_none() {
-            Some("HTTP port must be between 1 and 65535.")
         } else {
             None
         };
@@ -417,10 +658,7 @@ impl App {
 
         match self
             .client
-            .put_service(construct_protocol::ServicePutParams {
-                service,
-                rotate_token,
-            })
+            .put_service(construct_protocol::ServicePutParams { service })
             .await
         {
             Ok(result) => {
@@ -428,14 +666,8 @@ impl App {
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     dialog.mode = ServiceDialogMode::Edit;
                     dialog.service = result.service;
-                    dialog.new_token = result.new_token;
                     dialog.confirm_delete = false;
-                    dialog.note = Some(if dialog.new_token.is_some() {
-                        "Saved. Copy the token now; it is shown only once. Restart to apply."
-                            .to_string()
-                    } else {
-                        "Saved. Restart the daemon to apply changes.".to_string()
-                    });
+                    dialog.note = Some("Saved. Restart the daemon to apply changes.".to_string());
                 }
             }
             Err(error) => {
@@ -484,6 +716,9 @@ impl App {
         let Some(snapshot) = self.service_dialog.clone() else {
             return false;
         };
+        if snapshot.channel_editor.is_some() {
+            return self.handle_service_channel_dialog_key(key).await;
+        }
         if snapshot.confirm_delete {
             match key.code {
                 KeyCode::Enter | KeyCode::Char('y') => self.delete_service_dialog().await,
@@ -527,11 +762,7 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('s') => {
-                    self.save_service_dialog(false).await;
-                    return true;
-                }
-                KeyCode::Char('r') if snapshot.mode == ServiceDialogMode::Edit => {
-                    self.save_service_dialog(true).await;
+                    self.save_service_dialog().await;
                     return true;
                 }
                 KeyCode::Char('d') if snapshot.mode == ServiceDialogMode::Edit => {
@@ -550,16 +781,28 @@ impl App {
                 }
                 KeyCode::Char('p') => {
                     if let Some(dialog) = self.service_dialog.as_mut() {
-                        dialog.selected_field = dialog
-                            .selected_field
-                            .checked_sub(1)
-                            .unwrap_or(FIELD_COUNT - 1);
+                        if dialog.selected_field == 6 && !dialog.service.channels.is_empty() {
+                            dialog.selected_channel = dialog
+                                .selected_channel
+                                .checked_sub(1)
+                                .unwrap_or(dialog.service.channels.len() - 1);
+                        } else {
+                            dialog.selected_field = dialog
+                                .selected_field
+                                .checked_sub(1)
+                                .unwrap_or(FIELD_COUNT - 1);
+                        }
                     }
                     return true;
                 }
                 KeyCode::Char('n') => {
                     if let Some(dialog) = self.service_dialog.as_mut() {
-                        dialog.selected_field = (dialog.selected_field + 1) % FIELD_COUNT;
+                        if dialog.selected_field == 6 && !dialog.service.channels.is_empty() {
+                            dialog.selected_channel =
+                                (dialog.selected_channel + 1) % dialog.service.channels.len();
+                        } else {
+                            dialog.selected_field = (dialog.selected_field + 1) % FIELD_COUNT;
+                        }
                     }
                     return true;
                 }
@@ -571,8 +814,52 @@ impl App {
             KeyCode::Enter => match snapshot.selected_field {
                 2 => self.open_service_picker(ServiceDialogPickerKind::Harness),
                 3 => self.open_service_picker(ServiceDialogPickerKind::Model),
-                _ => self.save_service_dialog(false).await,
+                6 => {
+                    if snapshot.service.channels.is_empty() {
+                        self.open_new_service_channel();
+                    } else {
+                        self.open_edit_service_channel(
+                            snapshot
+                                .selected_channel
+                                .min(snapshot.service.channels.len().saturating_sub(1)),
+                        );
+                    }
+                }
+                _ => self.save_service_dialog().await,
             },
+            KeyCode::Char('a') if snapshot.selected_field == 6 => {
+                self.open_new_service_channel();
+            }
+            KeyCode::Char('e') if snapshot.selected_field == 6 && !snapshot.service.channels.is_empty() => {
+                self.open_edit_service_channel(
+                    snapshot
+                        .selected_channel
+                        .min(snapshot.service.channels.len().saturating_sub(1)),
+                );
+            }
+            KeyCode::Char('d') if snapshot.selected_field == 6 && !snapshot.service.channels.is_empty() => {
+                if self.open_edit_service_channel(
+                    snapshot
+                        .selected_channel
+                        .min(snapshot.service.channels.len().saturating_sub(1)),
+                ) {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        if let Some(editor) = dialog.channel_editor.as_mut() {
+                            editor.confirm_delete = true;
+                            editor.note = Some("Delete this channel? Enter/y confirms; Esc/n cancels.".to_string());
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('r') if snapshot.selected_field == 6 && !snapshot.service.channels.is_empty() => {
+                if self.open_edit_service_channel(
+                    snapshot
+                        .selected_channel
+                        .min(snapshot.service.channels.len().saturating_sub(1)),
+                ) {
+                    self.rotate_service_channel_secret().await;
+                }
+            }
             KeyCode::Tab | KeyCode::Down => {
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     dialog.selected_field = (dialog.selected_field + 1) % FIELD_COUNT;
@@ -597,6 +884,114 @@ impl App {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
                 self.edit_service_dialog_text(|value| value.push(ch));
+            }
+            _ => {}
+        }
+        true
+    }
+
+    async fn handle_service_channel_dialog_key(&mut self, key: KeyEvent) -> bool {
+        let Some(snapshot) = self
+            .service_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.channel_editor.clone())
+        else {
+            return false;
+        };
+        if snapshot.confirm_delete {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => self.delete_service_channel().await,
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        if let Some(editor) = dialog.channel_editor.as_mut() {
+                            editor.confirm_delete = false;
+                            editor.note = Some("Delete cancelled.".to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('s') => {
+                    self.save_service_channel(false).await;
+                    return true;
+                }
+                KeyCode::Char('r') if snapshot.mode == ServiceChannelDialogMode::Edit => {
+                    self.rotate_service_channel_secret().await;
+                    return true;
+                }
+                KeyCode::Char('d') if snapshot.mode == ServiceChannelDialogMode::Edit => {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        if let Some(editor) = dialog.channel_editor.as_mut() {
+                            editor.confirm_delete = true;
+                            editor.note = Some("Delete this channel? Enter/y confirms; Esc/n cancels.".to_string());
+                        }
+                    }
+                    return true;
+                }
+                KeyCode::Char('x') => {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        dialog.channel_editor = None;
+                    }
+                    return false;
+                }
+                KeyCode::Char('p') => {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        if let Some(editor) = dialog.channel_editor.as_mut() {
+                            editor.selected_field = editor.selected_field.checked_sub(1).unwrap_or(CHANNEL_FIELD_COUNT - 1);
+                        }
+                    }
+                    return true;
+                }
+                KeyCode::Char('n') => {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        if let Some(editor) = dialog.channel_editor.as_mut() {
+                            editor.selected_field = (editor.selected_field + 1) % CHANNEL_FIELD_COUNT;
+                        }
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    dialog.channel_editor = None;
+                }
+            }
+            KeyCode::Enter => self.save_service_channel(false).await,
+            KeyCode::Tab | KeyCode::Down => {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(editor) = dialog.channel_editor.as_mut() {
+                        editor.selected_field = (editor.selected_field + 1) % CHANNEL_FIELD_COUNT;
+                    }
+                }
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(editor) = dialog.channel_editor.as_mut() {
+                        editor.selected_field = editor.selected_field.checked_sub(1).unwrap_or(CHANNEL_FIELD_COUNT - 1);
+                    }
+                }
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if snapshot.selected_field == 3 => {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(editor) = dialog.channel_editor.as_mut() {
+                        editor.channel.enabled = !editor.channel.enabled;
+                    }
+                }
+            }
+            KeyCode::Backspace => self.edit_service_channel_text(|value| {
+                value.pop();
+            }),
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                self.edit_service_channel_text(|value| value.push(ch));
             }
             _ => {}
         }

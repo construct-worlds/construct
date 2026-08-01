@@ -846,6 +846,25 @@
   .service-session-link { display: flex; gap: 10px; padding: 6px 0; color: var(--fg-dim); cursor: pointer; border-bottom: 1px solid var(--border-faint); }
   .service-session-link:hover { color: var(--fg); }
   .service-session-link .service-session-state { color: var(--ok); }
+  .service-channel-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border-faint); color: var(--fg-dim); }
+  .service-channel-row:last-of-type { border-bottom: 0; }
+  .service-channel-row .channel-id { min-width: 130px; color: var(--fg); font-family: var(--mono); }
+  .service-channel-row .channel-endpoint { flex: 1; min-width: 0; font-family: var(--mono); color: var(--fg-faint); }
+  .service-channel-row .channel-state { color: var(--ok); font: 11px var(--mono); }
+  .service-channel-row .channel-state.disabled { color: var(--fg-faint); }
+  .service-channel-actions { display: inline-flex; gap: 5px; }
+  .service-channel-actions button { border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; background: var(--bg); color: var(--fg-faint); cursor: pointer; font: 11px var(--mono); }
+  .service-channel-actions button:hover { color: var(--fg); border-color: var(--accent); }
+  .service-channel-actions .danger { color: var(--err); }
+  .service-channel-editor { margin: 12px 0 18px; padding: 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
+  .service-channel-editor-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .service-channel-editor label { display: grid; gap: 4px; color: var(--fg-faint); font: 11px var(--mono); }
+  .service-channel-editor input, .service-channel-editor select { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 4px; padding: 5px 6px; background: var(--bg-elev); color: var(--fg); font: inherit; }
+  .service-channel-editor input:focus, .service-channel-editor select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  .service-channel-editor .channel-editor-actions { display: flex; gap: 7px; margin-top: 10px; }
+  .service-channel-editor .channel-editor-actions button { border: 1px solid var(--border); border-radius: 5px; padding: 5px 9px; background: var(--bg-elev); color: var(--fg-dim); cursor: pointer; }
+  .service-channel-editor .channel-editor-actions button:hover { color: var(--fg); border-color: var(--accent); }
+  @media (max-width: 720px) { .service-channel-editor-grid { grid-template-columns: 1fr 1fr; } .service-channel-row { flex-wrap: wrap; } .service-channel-row .channel-endpoint { flex-basis: 100%; order: 3; } }
   .service-view-footer { margin-top: 12px; color: var(--fg-faint); font: 11px var(--mono); white-space: pre-wrap; }
   .service-pane-mirror { flex: 1; padding: 24px; background: var(--bg-elev); color: var(--fg-dim); }
   .service-pane-mirror-kicker { color: var(--accent); font: 10px var(--mono); letter-spacing: .1em; }
@@ -3334,7 +3353,7 @@
           </div>
           <div class="service-view-actions">
             <button type="button" id="serviceEditBtn">Edit</button>
-            <button type="button" id="serviceRotateBtn">Rotate token</button>
+            <button type="button" id="serviceRotateBtn">Rotate credential</button>
             <button type="button" id="serviceDeleteBtn" class="danger">Delete</button>
           </div>
         </div>
@@ -3955,6 +3974,7 @@ const state = {
   serviceEditing: false,
   serviceField: "instruction",
   serviceNewToken: null,
+  serviceChannelDraft: null,
   // Per-session transcript items (the rows we've rendered). Keyed by
   // session_id so switching sessions is just a re-render of cached
   // events. Cleared on explicit `Reset` events from the adapter.
@@ -4669,6 +4689,7 @@ async function refreshSessions(startingLayoutTree = null) {
       state.serviceDraft = null;
       state.serviceEditing = false;
       state.serviceNewToken = null;
+      state.serviceChannelDraft = null;
       serviceViewEl.hidden = true;
       const fallback = orderedSessions().find((session) => session.kind !== "orchestrator") || orderedSessions()[0];
       if (fallback) selectSession(fallback.id, { replaceUrl: true });
@@ -4740,7 +4761,7 @@ function serviceFieldHelp(field, service) {
     model: ["Model", "Optional model override passed to the harness. Blank uses the harness default.", "Applies after daemon restart."],
     cwd: ["Working directory", "Directory where service sessions start and relative paths resolve.", "Applies after daemon restart."],
     routing: ["Routing", route === "per-event" ? "Creates a fresh session for every accepted request." : route === "single" ? "Routes every request into one shared session." : "Reuses one session for each caller-supplied session_key.", "Applies after daemon restart."],
-    http_port: ["HTTP port", "Loopback port for the generic HTTP channel. It must be unique among services.", "Applies after daemon restart."],
+    channels: ["Channels", "Transport endpoints attached to this service. Each HTTP channel has its own loopback port, enabled state, and credential.", "Add, edit, disable, rotate, or delete channels below."],
     paused: ["State", "Paused services refuse new requests while keeping their definition and history.", "Applies after daemon restart."],
   };
   return descriptions[field] || descriptions.instruction;
@@ -4755,9 +4776,128 @@ function serviceDraftFrom(service) {
     cwd: service?.cwd || ".",
     routing: service?.routing || "session-key",
     paused: !!service?.paused,
-    http_port: service?.http_port || 8787,
-    has_http_token: !!service?.has_http_token,
+    channels: Array.isArray(service?.channels) ? service.channels.map((channel) => ({ ...channel })) : [],
   };
+}
+
+function nextServiceChannelId(service) {
+  const channels = service?.channels || [];
+  if (!channels.some((channel) => channel.id === "http")) return "http";
+  let index = 2;
+  while (channels.some((channel) => channel.id === `http-${index}`)) index += 1;
+  return `http-${index}`;
+}
+
+function nextServiceChannelPort(service) {
+  const used = new Set((service?.channels || []).map((channel) => Number(channel.port)).filter(Boolean));
+  let port = 8787;
+  while (used.has(port) && port < 65535) port += 1;
+  return port;
+}
+
+function beginNewServiceChannel() {
+  const service = state.currentServiceName && state.services.find((item) => item.name === state.currentServiceName);
+  if (!service) {
+    serviceViewFooterEl.textContent = "Save the service before adding a channel.";
+    return;
+  }
+  state.serviceChannelDraft = {
+    mode: "create",
+    serviceName: service.name,
+    id: nextServiceChannelId(service),
+    kind: "http",
+    enabled: true,
+    port: nextServiceChannelPort(service),
+  };
+  renderServiceView();
+  const input = serviceActivityEl.querySelector('[data-channel-field="id"]');
+  if (input) input.focus();
+}
+
+function beginEditServiceChannel(id) {
+  const service = state.currentServiceName && state.services.find((item) => item.name === state.currentServiceName);
+  const channel = service?.channels?.find((item) => item.id === id);
+  if (!service || !channel) return;
+  state.serviceChannelDraft = { mode: "edit", serviceName: service.name, ...channel };
+  renderServiceView();
+  const input = serviceActivityEl.querySelector('[data-channel-field="port"]');
+  if (input) input.focus();
+}
+
+function clearServiceChannelDraft() {
+  state.serviceChannelDraft = null;
+  renderServiceView();
+}
+
+function syncServiceDraftChannels(name) {
+  const service = state.services.find((item) => item.name === name);
+  if (service && state.serviceDraft && state.serviceDraft.name === name) {
+    state.serviceDraft = { ...state.serviceDraft, channels: service.channels || [] };
+  }
+}
+
+async function saveServiceChannelDraft() {
+  const draft = state.serviceChannelDraft;
+  if (!draft) return;
+  const port = Number(draft.port) || 0;
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(draft.id || "") || draft.id.length > 32) {
+    serviceViewFooterEl.textContent = "Channel ID must use lowercase letters, digits, and interior hyphens.";
+    return;
+  }
+  if (port < 1 || port > 65535) {
+    serviceViewFooterEl.textContent = "HTTP port must be between 1 and 65535.";
+    return;
+  }
+  try {
+    const result = await rpc("service.channel.put", {
+      service_name: draft.serviceName,
+      channel: { id: draft.id, kind: "http", enabled: !!draft.enabled, port },
+      rotate_secret: false,
+    });
+    state.services = state.services.map((item) => {
+      if (item.name !== draft.serviceName) return item;
+      const channels = (item.channels || []).filter((channel) => channel.id !== result.channel.id).concat(result.channel).sort((a, b) => a.id.localeCompare(b.id));
+      return { ...item, channels };
+    });
+    syncServiceDraftChannels(draft.serviceName);
+    state.serviceNewToken = result.new_secret || null;
+    state.serviceChannelDraft = { mode: "edit", serviceName: draft.serviceName, ...result.channel };
+    renderSessions();
+    renderServiceView();
+  } catch (e) {
+    serviceViewFooterEl.textContent = `Channel save failed: ${e.message}`;
+  }
+}
+
+async function deleteServiceChannel(id) {
+  const name = state.currentServiceName;
+  if (!name || !window.confirm(`Delete channel '${id}'?`)) return;
+  try {
+    await rpc("service.channel.delete", { service_name: name, channel_id: id });
+    state.services = state.services.map((item) => item.name === name ? { ...item, channels: (item.channels || []).filter((channel) => channel.id !== id) } : item);
+    syncServiceDraftChannels(name);
+    state.serviceChannelDraft = null;
+    renderSessions();
+    renderServiceView();
+  } catch (e) {
+    serviceViewFooterEl.textContent = `Channel delete failed: ${e.message}`;
+  }
+}
+
+async function rotateServiceChannel(id) {
+  const name = state.currentServiceName;
+  if (!name || !window.confirm(`Rotate the credential for '${id}'?`)) return;
+  try {
+    const result = await rpc("service.channel.rotate_secret", { service_name: name, channel_id: id });
+    state.services = state.services.map((item) => item.name === name ? { ...item, channels: (item.channels || []).map((channel) => channel.id === id ? result.channel : channel) } : item);
+    syncServiceDraftChannels(name);
+    state.serviceNewToken = result.new_secret || null;
+    state.serviceChannelDraft = { mode: "edit", serviceName: name, ...result.channel };
+    renderSessions();
+    renderServiceView();
+  } catch (e) {
+    serviceViewFooterEl.textContent = `Credential rotation failed: ${e.message}`;
+  }
 }
 
 function renderServiceView() {
@@ -4795,7 +4935,7 @@ function renderServiceView() {
     field("model", "Model", draft.model) +
     field("cwd", "Working dir", draft.cwd) +
     `<div class="service-field"><label class="service-field-label">Routing</label><div class="service-field-value">${route}</div></div>` +
-    field("http_port", "HTTP port", draft.http_port) +
+    `<div class="service-field"><label class="service-field-label">Channels</label><div class="service-field-value">${draft.channels.length} attached</div></div>` +
     `<div class="service-field"><label class="service-field-label">State</label><div class="service-field-value">${paused}</div></div>`;
   const selected = state.serviceField || "instruction";
   const help = serviceFieldHelp(selected, draft);
@@ -4804,12 +4944,22 @@ function renderServiceView() {
     const title = session.title || "";
     return title === `service:${name}` || title.startsWith(`service:${name}:`);
   });
-  serviceActivityEl.innerHTML = `<h3>Activity · ${routed.length} routed session${routed.length === 1 ? "" : "s"}</h3>` +
+  const channels = draft.channels || [];
+  const channelDraft = state.serviceChannelDraft && state.serviceChannelDraft.serviceName === name ? state.serviceChannelDraft : null;
+  const channelRows = channels.length
+    ? channels.map((channel) => {
+      const endpoint = channel.port ? `127.0.0.1:${channel.port}` : "no port";
+      const channelState = channel.enabled ? "enabled" : "disabled";
+      return `<div class="service-channel-row"><span class="channel-id">${escape(channel.id)}</span><span>${escape(channel.kind || "http")}</span><span class="channel-endpoint">${escape(endpoint)}</span><span class="channel-state ${channel.enabled ? "" : "disabled"}">${channelState}</span><span class="service-channel-actions"><button type="button" data-channel-edit="${attr(channel.id)}">edit</button><button type="button" data-channel-rotate="${attr(channel.id)}">rotate</button><button type="button" class="danger" data-channel-delete="${attr(channel.id)}">delete</button></span></div>`;
+    }).join("")
+    : `<div class="service-view-footer">No channels attached.</div>`;
+  const channelEditor = channelDraft ? `<div class="service-channel-editor"><div class="service-channel-editor-grid"><label>Channel ID<input data-channel-field="id" value="${attr(channelDraft.id || "")}" ${channelDraft.mode === "edit" ? "readonly" : ""}></label><label>Kind<select data-channel-field="kind" disabled><option selected>http</option></select></label><label>HTTP port<input data-channel-field="port" type="number" min="1" max="65535" value="${attr(channelDraft.port ?? "")}"></label><label>State<select data-channel-field="enabled"><option value="true" ${channelDraft.enabled ? "selected" : ""}>enabled</option><option value="false" ${channelDraft.enabled ? "" : "selected"}>disabled</option></select></label></div><div class="channel-editor-actions"><button type="button" data-channel-save>Save channel</button><button type="button" data-channel-cancel>Cancel</button></div></div>` : "";
+  serviceActivityEl.innerHTML = `<h3>Channels · ${channels.length} attached</h3>${channelRows}<div class="channel-editor-actions"><button type="button" data-channel-add ${service ? "" : "disabled"}>Add HTTP channel</button></div>${channelEditor}<h3 style="margin-top:18px">Activity · ${routed.length} routed session${routed.length === 1 ? "" : "s"}</h3>` +
     (routed.length ? routed.map((session) => `<div class="service-session-link" data-session-id="${attr(session.id)}"><span class="service-session-state">${escape(session.state || "idle")}</span><span>${escape(session.title || session.id)}</span></div>`).join("") : `<div class="service-view-footer">No requests have created a session yet.</div>`);
   const tokenNote = state.serviceNewToken ? `Token (shown once): ${state.serviceNewToken}` : "";
   serviceViewFooterEl.textContent = editing
     ? `Enter saves · Esc cancels${tokenNote ? `\n${tokenNote}` : ""}`
-    : `HTTP loopback :${draft.http_port} · ${draft.has_http_token ? "token configured" : "token not configured"}${tokenNote ? `\n${tokenNote}` : ""}`;
+    : `Channels are loopback-only · credentials are shown once${tokenNote ? `\n${tokenNote}` : ""}`;
   serviceEditBtn.textContent = editing ? "Save" : "Edit";
   serviceRotateBtn.hidden = !service;
   serviceDeleteBtn.hidden = !service;
@@ -4823,7 +4973,7 @@ function renderServiceView() {
     control.addEventListener("input", () => {
       if (!state.serviceDraft) return;
       const key = control.dataset.serviceField;
-      state.serviceDraft[key] = key === "http_port" ? Number(control.value) || 0 : control.value;
+      state.serviceDraft[key] = control.value;
       if (key === "paused") state.serviceDraft[key] = !!control.checked;
       state.serviceField = key;
       const helpNow = serviceFieldHelp(key, state.serviceDraft);
@@ -4831,6 +4981,22 @@ function renderServiceView() {
     });
     control.addEventListener("change", () => control.dispatchEvent(new Event("input")));
   });
+  serviceActivityEl.querySelectorAll("[data-channel-field]").forEach((control) => {
+    control.addEventListener("input", () => {
+      if (!state.serviceChannelDraft) return;
+      const key = control.dataset.channelField;
+      if (key === "port") state.serviceChannelDraft.port = Number(control.value) || 0;
+      else if (key === "enabled") state.serviceChannelDraft.enabled = control.value === "true";
+      else state.serviceChannelDraft[key] = control.value;
+    });
+    control.addEventListener("change", () => control.dispatchEvent(new Event("input")));
+  });
+  serviceActivityEl.querySelector("[data-channel-add]")?.addEventListener("click", beginNewServiceChannel);
+  serviceActivityEl.querySelectorAll("[data-channel-edit]").forEach((button) => button.addEventListener("click", () => beginEditServiceChannel(button.dataset.channelEdit)));
+  serviceActivityEl.querySelectorAll("[data-channel-delete]").forEach((button) => button.addEventListener("click", () => deleteServiceChannel(button.dataset.channelDelete)));
+  serviceActivityEl.querySelectorAll("[data-channel-rotate]").forEach((button) => button.addEventListener("click", () => rotateServiceChannel(button.dataset.channelRotate)));
+  serviceActivityEl.querySelector("[data-channel-save]")?.addEventListener("click", saveServiceChannelDraft);
+  serviceActivityEl.querySelector("[data-channel-cancel]")?.addEventListener("click", clearServiceChannelDraft);
 }
 
 async function selectService(name, { replaceUrl = false, fromPane = false } = {}) {
@@ -4844,6 +5010,7 @@ async function selectService(name, { replaceUrl = false, fromPane = false } = {}
   state.serviceDraft = null;
   state.serviceEditing = false;
   state.serviceNewToken = null;
+  state.serviceChannelDraft = null;
   state.serviceField = "instruction";
   setLocationServiceName(name, { replace: replaceUrl });
   serviceTitleAndChrome(name);
@@ -4876,9 +5043,9 @@ function enterServiceView() {
 async function saveServiceDraft() {
   if (!state.serviceDraft) return;
   const previousName = state.currentServiceName;
-  const service = { ...state.serviceDraft, model: state.serviceDraft.model || null, http_port: Number(state.serviceDraft.http_port) || null };
+  const service = { ...state.serviceDraft, model: state.serviceDraft.model || null };
   try {
-    const result = await rpc("service.put", { service, rotate_token: false });
+    const result = await rpc("service.put", { service });
     state.services = state.services.filter((item) => item.name !== service.name).concat(result.service).sort((a, b) => a.name.localeCompare(b.name));
     if (previousName && previousName !== result.service.name) {
       renameServiceInLayout(previousName, result.service.name);
@@ -4888,7 +5055,7 @@ async function saveServiceDraft() {
     setLocationServiceName(result.service.name, { replace: true });
     state.serviceDraft = { ...result.service };
     state.serviceEditing = false;
-    state.serviceNewToken = result.new_token || null;
+    state.serviceNewToken = null;
     renderSessions();
     renderServiceView();
   } catch (e) {
@@ -4901,6 +5068,7 @@ function beginNewService() {
   let suffix = 2;
   while (state.services.some((service) => service.name === name)) name = `service-${suffix++}`;
   state.serviceDraft = serviceDraftFrom({ name });
+  state.serviceChannelDraft = null;
   state.serviceEditing = true;
   state.currentServiceName = name;
   state.urlRequestedServiceName = name;
@@ -4932,17 +5100,12 @@ serviceEditBtn.addEventListener("click", () => {
 serviceRotateBtn.addEventListener("click", async () => {
   const name = state.currentServiceName;
   const service = name && state.services.find((item) => item.name === name);
-  if (!service || !window.confirm(`Rotate the HTTP token for '${name}'?`)) return;
-  try {
-    const result = await rpc("service.put", { service, rotate_token: true });
-    state.services = state.services.map((item) => item.name === name ? result.service : item);
-    state.serviceDraft = { ...result.service };
-    state.serviceNewToken = result.new_token || null;
-    renderSessions();
-    renderServiceView();
-  } catch (e) {
-    serviceViewFooterEl.textContent = `Token rotation failed: ${e.message}`;
+  const channel = service?.channels?.find((item) => item.kind === "http");
+  if (!service || !channel) {
+    serviceViewFooterEl.textContent = "This service has no HTTP channel to rotate.";
+    return;
   }
+  rotateServiceChannel(channel.id);
 });
 serviceDeleteBtn.addEventListener("click", async () => {
   const name = state.currentServiceName;
@@ -4956,6 +5119,7 @@ serviceDeleteBtn.addEventListener("click", async () => {
     state.serviceDraft = null;
     state.serviceEditing = false;
     state.serviceNewToken = null;
+    state.serviceChannelDraft = null;
     setLocationServiceName(null, { replace: true });
     serviceViewEl.hidden = true;
     serviceTitleAndChrome(null);

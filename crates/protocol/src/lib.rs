@@ -1227,6 +1227,10 @@ pub mod ipc_method {
     pub const SERVICE_LIST: &str = "service.list";
     pub const SERVICE_PUT: &str = "service.put";
     pub const SERVICE_DELETE: &str = "service.delete";
+    pub const SERVICE_CHANNEL_LIST: &str = "service.channel.list";
+    pub const SERVICE_CHANNEL_PUT: &str = "service.channel.put";
+    pub const SERVICE_CHANNEL_DELETE: &str = "service.channel.delete";
+    pub const SERVICE_CHANNEL_ROTATE_SECRET: &str = "service.channel.rotate_secret";
     pub const SESSION_CREATE: &str = "session.create";
     pub const SESSION_GET: &str = "session.get";
     pub const SESSION_INPUT: &str = "session.input";
@@ -3220,26 +3224,34 @@ pub struct ServiceSummary {
     pub routing: String,
     #[serde(default)]
     pub paused: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub http_port: Option<u16>,
     #[serde(default)]
-    pub has_http_token: bool,
+    pub channels: Vec<ServiceChannelSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelSummary {
+    pub id: String,
+    pub kind: String,
+    #[serde(default = "default_service_channel_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub has_credential: bool,
+}
+
+fn default_service_channel_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServicePutParams {
     pub service: ServiceSummary,
-    /// Generate and replace the HTTP bearer token. The new token is returned
-    /// once and is never included by `service.list`.
-    #[serde(default)]
-    pub rotate_token: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServicePutResult {
     pub service: ServiceSummary,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_token: Option<String>,
     /// V1 persists atomically; the current daemon adopts changes on restart.
     pub restart_required: bool,
 }
@@ -3247,6 +3259,38 @@ pub struct ServicePutResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceNameParams {
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelPutParams {
+    pub service_name: String,
+    pub channel: ServiceChannelPut,
+    #[serde(default)]
+    pub rotate_secret: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelPut {
+    pub id: String,
+    pub kind: String,
+    #[serde(default = "default_service_channel_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelPutResult {
+    pub channel: ServiceChannelSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_secret: Option<String>,
+    pub restart_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelNameParams {
+    pub service_name: String,
+    pub channel_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

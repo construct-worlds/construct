@@ -1254,6 +1254,46 @@ async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
+    dispatch_entry!(ipc_method::SERVICE_CHANNEL_LIST, {
+        let p = params!(req, construct_protocol::ServiceNameParams);
+        match crate::service::list_channel_summaries(
+            &construct_protocol::paths::Paths::discover().services_dir(),
+            &p.name,
+        ) {
+            Ok(channels) => ok!(req, &channels),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::SERVICE_CHANNEL_PUT, {
+        let p = params!(req, construct_protocol::ServiceChannelPutParams);
+        match crate::service::put_channel(
+            &construct_protocol::paths::Paths::discover().services_dir(),
+            p,
+        ) {
+            Ok(result) => ok!(req, &result),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::SERVICE_CHANNEL_DELETE, {
+        let p = params!(req, construct_protocol::ServiceChannelNameParams);
+        match crate::service::delete_channel(
+            &construct_protocol::paths::Paths::discover().services_dir(),
+            p,
+        ) {
+            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::SERVICE_CHANNEL_ROTATE_SECRET, {
+        let p = params!(req, construct_protocol::ServiceChannelNameParams);
+        match crate::service::rotate_channel_secret(
+            &construct_protocol::paths::Paths::discover().services_dir(),
+            p,
+        ) {
+            Ok(result) => ok!(req, &result),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
+        }
+    });
     dispatch_entry!(ipc_method::SESSION_CREATE, {
         let p = params!(req, CreateSessionParams);
         match manager.create(p).await {

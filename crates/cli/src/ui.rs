@@ -584,9 +584,9 @@ fn service_dialog_field_help(
             )
         }
         6 => (
-            "HTTP port",
-            "Loopback port for this service's HTTP webhook. It must be between 1 and 65535 and unique among services.",
-            "Type a port · applies after restart.",
+            "Channels",
+            "Transport endpoints attached to this service. Each channel has its own kind, loopback port, enabled state, and credential.",
+            "Enter edits the selected channel · a adds a channel.",
         ),
         7 => (
             "State",
@@ -8023,11 +8023,12 @@ fn render_service_view(
         service: summary.clone(),
         selected_field: 0,
         note: None,
-        new_token: None,
         confirm_delete: false,
         picker: None,
         picker_selected: 0,
         picker_scroll: 0,
+        selected_channel: 0,
+        channel_editor: None,
     };
     let dialog = app
         .service_dialog
@@ -8058,6 +8059,11 @@ fn render_service_view(
         return;
     }
 
+    if let Some(channel) = dialog.channel_editor.as_ref() {
+        render_service_channel_editor(f, inner, app, channel);
+        return;
+    }
+
     let labels = [
         "Name",
         "Instruction",
@@ -8065,7 +8071,7 @@ fn render_service_view(
         "Model",
         "Working dir",
         "Routing",
-        "HTTP port",
+        "Channels",
         "State",
     ];
     let mut field_lines = Vec::with_capacity(labels.len());
@@ -8156,6 +8162,43 @@ fn render_service_view(
             Style::default().fg(app.theme.text),
         ),
     ])];
+    activity.push(Line::from("") );
+    activity.push(Line::from(vec![
+        Span::styled(
+            "Channels  ",
+            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} attached", summary.channels.len()),
+            Style::default().fg(app.theme.text),
+        ),
+    ]));
+    if summary.channels.is_empty() {
+        activity.push(Line::from(Span::styled(
+            "  No channels. Press a after entering edit mode to add HTTP.",
+            Style::default().fg(app.theme.dim),
+        )));
+    } else {
+        for (index, channel) in summary.channels.iter().enumerate() {
+            let selected = dialog.selected_field == 6 && dialog.selected_channel == index;
+            let marker = if selected { "›" } else { " " };
+            let state = if channel.enabled { "enabled" } else { "disabled" };
+            let endpoint = channel
+                .port
+                .map(|port| format!("127.0.0.1:{port}"))
+                .unwrap_or_else(|| "no port".to_string());
+            let style = if selected {
+                Style::default().fg(app.theme.highlight_fg).bg(app.theme.highlight_bg)
+            } else {
+                Style::default().fg(app.theme.text)
+            };
+            activity.push(Line::from(Span::styled(
+                format!("{marker}   {}  {:<5} {endpoint}  {state}", channel.id, channel.kind),
+                style,
+            )));
+        }
+    }
+    activity.push(Line::from(""));
     if routed.is_empty() {
         activity.push(Line::from(Span::styled(
             "No requests have created a session yet.",
@@ -8171,12 +8214,6 @@ fn render_service_view(
             ]));
         }
     }
-    if let Some(token) = &dialog.new_token {
-        activity.push(Line::from(Span::styled(
-            format!("Token (shown once): {token}"),
-            Style::default().fg(app.theme.warning),
-        )));
-    }
     if let Some(note) = &dialog.note {
         activity.push(Line::from(""));
         activity.push(Line::from(Span::styled(
@@ -8191,9 +8228,9 @@ fn render_service_view(
     let footer = if !editing {
         "Enter/e edit · C-x keeps global commands"
     } else if dialog.mode == crate::app::ServiceDialogMode::Create {
-        "Enter/C-s save · Esc close · C-x keeps global commands"
+        "Enter/C-s save · a add channel · Esc close · C-x keeps global commands"
     } else {
-        "Enter/C-s save · C-r rotate token · C-d delete · Esc close"
+        "Enter/C-s save · a add · Enter channel edit · Esc close"
     };
     activity.push(Line::from(""));
     activity.push(Line::from(Span::styled(footer, Style::default().fg(app.theme.dim))));
@@ -8201,6 +8238,74 @@ fn render_service_view(
         Paragraph::new(activity).wrap(Wrap { trim: false }),
         chunks[2],
     );
+}
+
+fn render_service_channel_editor(
+    f: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    editor: &crate::app::ServiceChannelDialog,
+) {
+    let labels = ["Channel ID", "Kind", "Port", "State"];
+    let values = [
+        editor.channel.id.clone(),
+        editor.channel.kind.clone(),
+        editor.channel.port.map(|port| port.to_string()).unwrap_or_default(),
+        if editor.channel.enabled { "enabled".to_string() } else { "disabled".to_string() },
+    ];
+    let mut fields = vec![Line::from(Span::styled(
+        format!("Channel · {}", editor.service_name),
+        Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+    )), Line::from("")];
+    for (index, (label, value)) in labels.iter().zip(values.iter()).enumerate() {
+        let selected = editor.selected_field == index;
+        let locked = (index == 0 && editor.mode == crate::app::ServiceChannelDialogMode::Edit) || index == 1;
+        let marker = if selected { "›" } else { " " };
+        let style = if selected {
+            Style::default().fg(app.theme.highlight_fg).bg(app.theme.highlight_bg)
+        } else if locked {
+            Style::default().fg(app.theme.dim)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        fields.push(Line::from(Span::styled(
+            format!("{marker} {label:<12} {value}"),
+            style,
+        )));
+    }
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(56), Constraint::Length(3), Constraint::Min(20)])
+        .split(area);
+    f.render_widget(Paragraph::new(fields), columns[0]);
+    let divider_x = columns[1].x.saturating_add(columns[1].width / 2);
+    for y in columns[1].top()..columns[1].bottom() {
+        f.buffer_mut().set_string(divider_x, y, "│", Style::default().fg(app.theme.border));
+    }
+    let (title, body, hint) = match editor.selected_field {
+        0 => ("Channel ID", "Stable name for this channel. It becomes part of the service's local configuration and is locked after creation.", "Type to edit when creating.") ,
+        1 => ("Kind", "The transport implementation. HTTP is the only built-in channel in v1; future channel plugins can add other kinds.", "Fixed to HTTP in v1."),
+        2 => ("HTTP port", "Loopback TCP port for this channel. No two channels on one service may share a port.", "Type a port · applies after restart."),
+        3 => ("State", "Disabled channels remain configured but do not accept requests after the daemon restarts.", "Space or ←/→ toggles."),
+        _ => ("Channel", "", ""),
+    };
+    let mut help = vec![Line::from(Span::styled(title, Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD))), Line::from(""), Line::from(Span::styled(body, Style::default().fg(app.theme.text))), Line::from(""), Line::from(Span::styled(hint, Style::default().fg(app.theme.dim)))];
+    if let Some(secret) = &editor.new_secret {
+        help.push(Line::from(""));
+        help.push(Line::from(Span::styled(format!("Credential (shown once): {secret}"), Style::default().fg(app.theme.warning))));
+    }
+    if let Some(note) = &editor.note {
+        help.push(Line::from(""));
+        help.push(Line::from(Span::styled(note, Style::default().fg(if editor.confirm_delete { app.theme.danger } else { app.theme.dim }))));
+    }
+    f.render_widget(Paragraph::new(help).wrap(Wrap { trim: false }), columns[2]);
+    let footer = if editor.mode == crate::app::ServiceChannelDialogMode::Create {
+        "Enter/C-s save · Esc back"
+    } else {
+        "Enter/C-s save · C-r rotate credential · C-d delete · Esc back"
+    };
+    let footer_y = area.bottom().saturating_sub(1);
+    f.render_widget(Paragraph::new(Line::from(Span::styled(footer, Style::default().fg(app.theme.dim)))), Rect { x: area.x, y: footer_y, width: area.width, height: 1 });
 }
 
 fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {

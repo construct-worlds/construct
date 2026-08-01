@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 const MAX_HTTP_BYTES: usize = 1024 * 1024;
 const REQUEST_DEDUP_CAP: usize = 4096;
@@ -60,8 +61,14 @@ pub enum ServiceRouting {
 pub struct ServiceChannelConfig {
     #[serde(default)]
     pub kind: Option<String>,
+    #[serde(default = "default_channel_enabled")]
+    pub enabled: bool,
     pub port: Option<u16>,
     pub token: Option<String>,
+}
+
+fn default_channel_enabled() -> bool {
+    true
 }
 
 pub fn load_definitions(dir: &std::path::Path) -> Result<BTreeMap<String, ServiceConfig>> {
@@ -105,28 +112,10 @@ pub fn put_definition(
     let existing = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| toml::from_str::<ServiceConfig>(&raw).ok());
-    let mut new_token = None;
-    let token = if params.rotate_token || existing.is_none() {
-        let token = format!("cst_{}", uuid::Uuid::new_v4().simple());
-        new_token = Some(token.clone());
-        Some(token)
-    } else {
-        existing
-            .as_ref()
-            .and_then(|config| config.channels.get("http"))
-            .and_then(|channel| channel.token.clone())
-    };
-    let mut channels = BTreeMap::new();
-    if let Some(port) = params.service.http_port {
-        channels.insert(
-            "http".to_string(),
-            ServiceChannelConfig {
-                kind: None,
-                port: Some(port),
-                token,
-            },
-        );
-    }
+    let channels = existing
+        .as_ref()
+        .map(|config| config.channels.clone())
+        .unwrap_or_default();
     let routing = match params.service.routing.as_str() {
         "per-event" => ServiceRouting::PerEvent,
         "session-key" => ServiceRouting::SessionKey,
@@ -142,14 +131,9 @@ pub fn put_definition(
         paused: params.service.paused,
         channels,
     };
-    let encoded = toml::to_string_pretty(&config)?;
-    let temporary = dir.join(format!(".{}.toml.tmp", params.service.name));
-    std::fs::write(&temporary, encoded)
-        .with_context(|| format!("write {}", temporary.display()))?;
-    std::fs::rename(&temporary, &path).with_context(|| format!("replace {}", path.display()))?;
+    write_definition(dir, &params.service.name, &config)?;
     Ok(construct_protocol::ServicePutResult {
         service: summary(params.service.name, &config),
-        new_token,
         restart_required: true,
     })
 }
@@ -163,8 +147,193 @@ pub fn delete_definition(dir: &std::path::Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn list_channel_summaries(
+    dir: &std::path::Path,
+    service_name: &str,
+) -> Result<Vec<construct_protocol::ServiceChannelSummary>> {
+    validate_service_name(service_name)?;
+    let services = load_definitions(dir)?;
+    let service = services
+        .get(service_name)
+        .ok_or_else(|| anyhow!("service `{service_name}` not found"))?;
+    Ok(service
+        .channels
+        .iter()
+        .map(|(id, channel)| channel_summary(id.clone(), channel))
+        .collect())
+}
+
+pub fn put_channel(
+    dir: &std::path::Path,
+    params: construct_protocol::ServiceChannelPutParams,
+) -> Result<construct_protocol::ServiceChannelPutResult> {
+    validate_service_name(&params.service_name)?;
+    validate_channel_id(&params.channel.id)?;
+    if params.channel.kind != "http" {
+        return Err(anyhow!(
+            "unsupported channel kind `{}`; v1 supports `http`",
+            params.channel.kind
+        ));
+    }
+    let port = params
+        .channel
+        .port
+        .filter(|port| *port > 0)
+        .ok_or_else(|| anyhow!("HTTP channel port must be between 1 and 65535"))?;
+    let mut services = load_definitions(dir)?;
+    let service = services
+        .get_mut(&params.service_name)
+        .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
+    if service.channels.iter().any(|(id, channel)| {
+        id != &params.channel.id && channel.port == Some(port)
+    }) {
+        return Err(anyhow!("HTTP port {port} is already used by this service"));
+    }
+    let existing = service.channels.get(&params.channel.id).cloned();
+    if let Some(existing) = &existing {
+        let existing_kind = channel_kind(&params.channel.id, existing);
+        if existing_kind != params.channel.kind {
+            return Err(anyhow!(
+                "channel `{}` cannot change kind from `{existing_kind}` to `{}`",
+                params.channel.id, params.channel.kind
+            ));
+        }
+    }
+    let new_secret = if params.rotate_secret
+        || existing
+            .as_ref()
+            .and_then(|channel| channel.token.as_deref())
+            .is_none()
+    {
+        Some(generate_channel_secret())
+    } else {
+        None
+    };
+    let token = new_secret.clone().or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|channel| channel.token.clone())
+    });
+    let config = ServiceChannelConfig {
+        kind: Some(params.channel.kind),
+        enabled: params.channel.enabled,
+        port: Some(port),
+        token,
+    };
+    service
+        .channels
+        .insert(params.channel.id.clone(), config.clone());
+    let summary = channel_summary(params.channel.id, &config);
+    write_definition(dir, &params.service_name, service)?;
+    Ok(construct_protocol::ServiceChannelPutResult {
+        channel: summary,
+        new_secret,
+        restart_required: true,
+    })
+}
+
+pub fn delete_channel(
+    dir: &std::path::Path,
+    params: construct_protocol::ServiceChannelNameParams,
+) -> Result<()> {
+    validate_service_name(&params.service_name)?;
+    validate_channel_id(&params.channel_id)?;
+    let mut services = load_definitions(dir)?;
+    let service = services
+        .get_mut(&params.service_name)
+        .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
+    if service.channels.remove(&params.channel_id).is_none() {
+        return Err(anyhow!(
+            "channel `{}` not found on service `{}`",
+            params.channel_id, params.service_name
+        ));
+    }
+    write_definition(dir, &params.service_name, service)
+}
+
+pub fn rotate_channel_secret(
+    dir: &std::path::Path,
+    params: construct_protocol::ServiceChannelNameParams,
+) -> Result<construct_protocol::ServiceChannelPutResult> {
+    validate_service_name(&params.service_name)?;
+    validate_channel_id(&params.channel_id)?;
+    let mut services = load_definitions(dir)?;
+    let service = services
+        .get_mut(&params.service_name)
+        .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
+    let channel = service
+        .channels
+        .get_mut(&params.channel_id)
+        .ok_or_else(|| {
+            anyhow!(
+                "channel `{}` not found on service `{}`",
+                params.channel_id, params.service_name
+            )
+        })?;
+    if channel_kind(&params.channel_id, channel) != "http" {
+        return Err(anyhow!("only HTTP channel credentials can be rotated in v1"));
+    }
+    let secret = generate_channel_secret();
+    channel.token = Some(secret.clone());
+    let summary = channel_summary(params.channel_id, channel);
+    write_definition(dir, &params.service_name, service)?;
+    Ok(construct_protocol::ServiceChannelPutResult {
+        channel: summary,
+        new_secret: Some(secret),
+        restart_required: true,
+    })
+}
+
+fn write_definition(dir: &std::path::Path, name: &str, config: &ServiceConfig) -> Result<()> {
+    let path = dir.join(format!("{name}.toml"));
+    let encoded = toml::to_string_pretty(config)?;
+    let temporary = dir.join(format!(".{name}.toml.tmp"));
+    std::fs::write(&temporary, encoded)
+        .with_context(|| format!("write {}", temporary.display()))?;
+    std::fs::rename(&temporary, &path).with_context(|| format!("replace {}", path.display()))?;
+    Ok(())
+}
+
+fn channel_kind(id: &str, config: &ServiceChannelConfig) -> String {
+    config
+        .kind
+        .clone()
+        .unwrap_or_else(|| if id == "http" { "http" } else { "unknown" }.to_string())
+}
+
+fn validate_channel_id(id: &str) -> Result<()> {
+    let valid = !id.is_empty()
+        && id.len() <= 32
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !id.starts_with('-')
+        && !id.ends_with('-');
+    if valid {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid channel id `{id}`"))
+    }
+}
+
+fn generate_channel_secret() -> String {
+    format!("cst_{}", Uuid::new_v4().simple())
+}
+
+fn channel_summary(
+    id: String,
+    config: &ServiceChannelConfig,
+) -> construct_protocol::ServiceChannelSummary {
+    construct_protocol::ServiceChannelSummary {
+        id: id.clone(),
+        kind: channel_kind(&id, config),
+        enabled: config.enabled,
+        port: config.port,
+        has_credential: config.token.as_ref().is_some_and(|token| !token.is_empty()),
+    }
+}
+
 fn summary(name: String, config: &ServiceConfig) -> construct_protocol::ServiceSummary {
-    let http = config.channels.get("http");
     construct_protocol::ServiceSummary {
         name,
         instruction: config.instruction.clone(),
@@ -178,8 +347,11 @@ fn summary(name: String, config: &ServiceConfig) -> construct_protocol::ServiceS
         }
         .to_string(),
         paused: config.paused,
-        http_port: http.and_then(|channel| channel.port),
-        has_http_token: http.and_then(|channel| channel.token.as_ref()).is_some(),
+        channels: config
+            .channels
+            .iter()
+            .map(|(id, channel)| channel_summary(id.clone(), channel))
+            .collect(),
     }
 }
 
@@ -207,33 +379,35 @@ pub fn spawn_all(
         if service.paused {
             continue;
         }
-        let Some(channel) = service.channels.get("http").cloned() else {
-            continue;
-        };
-        if channel.kind.as_deref().is_some_and(|kind| kind != "http") {
-            tracing::warn!(service = %name, "http channel has a non-http kind; skipping");
-            continue;
-        }
-        let Some(port) = channel.port else {
-            tracing::warn!(service = %name, "http service channel has no port; skipping");
-            continue;
-        };
-        let Some(token) = channel.token.filter(|token| !token.is_empty()) else {
-            tracing::warn!(service = %name, "http service channel has no token; skipping");
-            continue;
-        };
-        let runtime = ServiceRuntime::load(
-            name.clone(),
-            service,
-            token,
-            manager.clone(),
-            data_dir.clone(),
-        );
-        tokio::spawn(async move {
-            if let Err(error) = serve(runtime, port).await {
-                tracing::error!(service = %name, %error, "service endpoint stopped");
+        let shared = ServiceShared::load(name.clone(), service.clone(), manager.clone(), data_dir.clone());
+        for (channel_id, channel) in service.channels {
+            if !channel.enabled {
+                continue;
             }
-        });
+            if channel_kind(&channel_id, &channel) != "http" {
+                tracing::warn!(service = %name, channel = %channel_id, "unsupported service channel kind; skipping");
+                continue;
+            }
+            let Some(port) = channel.port else {
+                tracing::warn!(service = %name, channel = %channel_id, "HTTP channel has no port; skipping");
+                continue;
+            };
+            let Some(token) = channel.token.filter(|token| !token.is_empty()) else {
+                tracing::warn!(service = %name, channel = %channel_id, "HTTP channel has no token; skipping");
+                continue;
+            };
+            let runtime = Arc::new(ServiceRuntime {
+                channel_id: channel_id.clone(),
+                token,
+                shared: shared.clone(),
+            });
+            let service_name = name.clone();
+            tokio::spawn(async move {
+                if let Err(error) = serve(runtime, port).await {
+                    tracing::error!(service = %service_name, channel = %channel_id, %error, "service endpoint stopped");
+                }
+            });
+        }
     }
 }
 
@@ -254,21 +428,19 @@ impl PersistedState {
     }
 }
 
-struct ServiceRuntime {
+struct ServiceShared {
     name: String,
     config: ServiceConfig,
-    token: String,
     manager: Arc<SessionManager>,
     state_path: PathBuf,
     state: Mutex<PersistedState>,
     seen_requests: Mutex<(VecDeque<String>, std::collections::HashSet<String>)>,
 }
 
-impl ServiceRuntime {
+impl ServiceShared {
     fn load(
         name: String,
         config: ServiceConfig,
-        token: String,
         manager: Arc<SessionManager>,
         data_dir: PathBuf,
     ) -> Arc<Self> {
@@ -281,12 +453,23 @@ impl ServiceRuntime {
         Arc::new(Self {
             name,
             config,
-            token,
             manager,
             state_path,
             state: Mutex::new(state),
             seen_requests: Mutex::new(Default::default()),
         })
+    }
+}
+
+struct ServiceRuntime {
+    channel_id: String,
+    token: String,
+    shared: Arc<ServiceShared>,
+}
+
+impl ServiceRuntime {
+    fn name(&self) -> &str {
+        &self.shared.name
     }
 
     async fn route(&self, body: ServiceRequest) -> Result<String> {
@@ -294,19 +477,20 @@ impl ServiceRuntime {
             return Err(anyhow!("message must not be empty"));
         }
         if let Some(request_id) = body.request_id.as_deref() {
-            let mut seen = self.seen_requests.lock().await;
-            if seen.1.contains(request_id) {
+            let mut seen = self.shared.seen_requests.lock().await;
+            let request_key = format!("{}:{request_id}", self.channel_id);
+            if seen.1.contains(&request_key) {
                 return Err(anyhow!("duplicate request_id"));
             }
-            seen.0.push_back(request_id.to_string());
-            seen.1.insert(request_id.to_string());
+            seen.0.push_back(request_key.clone());
+            seen.1.insert(request_key);
             if seen.0.len() > REQUEST_DEDUP_CAP {
                 if let Some(old) = seen.0.pop_front() {
                     seen.1.remove(&old);
                 }
             }
         }
-        let key = match self.config.routing {
+        let key = match self.shared.config.routing {
             ServiceRouting::PerEvent => None,
             ServiceRouting::Single => Some("__single__".to_string()),
             ServiceRouting::SessionKey => Some(
@@ -316,28 +500,36 @@ impl ServiceRuntime {
             ),
         };
         if let Some(key) = key {
+            let lookup_key = format!("{}:{key}", self.channel_id);
             // Keep lookup + creation atomic for this service. Without this,
             // two concurrent first deliveries for the same key would each
             // create a conversation and one would become orphaned.
-            let mut state = self.state.lock().await;
-            let existing = state.sessions.get(&key).cloned();
+            let mut state = self.shared.state.lock().await;
+            let existing = state.sessions.get(&lookup_key).cloned().or_else(|| {
+                // State written by the original single-channel v1 runtime used
+                // the bare session key. Preserve those conversations when the
+                // legacy channel id is still `http`.
+                (self.channel_id == "http")
+                    .then(|| state.sessions.get(&key).cloned())
+                    .flatten()
+            });
             if let Some(id) = existing {
                 drop(state);
-                self.manager.send_input(&id, body.message).await?;
+                self.shared.manager.send_input(&id, body.message).await?;
                 return Ok(id);
             }
             let id = self
-                .create(body.message, Some(format!("service:{}:{key}", self.name)))
+                .create(body.message, Some(format!("service:{}:{}:{key}", self.shared.name, self.channel_id)))
                 .await?;
-            state.sessions.insert(key, id.clone());
+            state.sessions.insert(lookup_key, id.clone());
             state.owned_sessions.insert(id.clone());
             self.persist_state(&state).await?;
             Ok(id)
         } else {
             let id = self
-                .create(body.message, Some(format!("service:{}", self.name)))
+                .create(body.message, Some(format!("service:{}:{}", self.shared.name, self.channel_id)))
                 .await?;
-            let mut state = self.state.lock().await;
+            let mut state = self.shared.state.lock().await;
             state.owned_sessions.insert(id.clone());
             self.persist_state(&state).await?;
             Ok(id)
@@ -346,15 +538,16 @@ impl ServiceRuntime {
 
     async fn persist_state(&self, state: &PersistedState) -> Result<()> {
         let snapshot = serde_json::to_vec_pretty(state)?;
-        if let Some(parent) = self.state_path.parent() {
+        if let Some(parent) = self.shared.state_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        tokio::fs::write(&self.state_path, snapshot).await?;
+        tokio::fs::write(&self.shared.state_path, snapshot).await?;
         Ok(())
     }
 
     async fn session_result(&self, session_id: &str) -> Result<Option<serde_json::Value>> {
         let owned = self
+            .shared
             .state
             .lock()
             .await
@@ -363,7 +556,7 @@ impl ServiceRuntime {
         if !owned {
             return Ok(None);
         }
-        let Ok(detail) = self.manager.detail(session_id).await else {
+        let Ok(detail) = self.shared.manager.detail(session_id).await else {
             return Ok(None);
         };
         let reply = detail.events.iter().rev().find_map(|event| {
@@ -382,7 +575,8 @@ impl ServiceRuntime {
             SessionState::AwaitingInput | SessionState::Done | SessionState::Errored
         );
         Ok(Some(serde_json::json!({
-            "service": self.name,
+            "service": self.shared.name,
+            "channel": self.channel_id,
             "session": session_id,
             "status": detail.summary.state,
             "ready": ready,
@@ -391,17 +585,17 @@ impl ServiceRuntime {
     }
 
     async fn create(&self, message: String, title: Option<String>) -> Result<String> {
-        let prompt = if self.config.instruction.trim().is_empty() {
+        let prompt = if self.shared.config.instruction.trim().is_empty() {
             message
         } else {
-            format!("{}\n\n{}", self.config.instruction.trim(), message)
+            format!("{}\n\n{}", self.shared.config.instruction.trim(), message)
         };
-        self.manager
+        self.shared.manager
             .create(CreateSessionParams {
-                harness: self.config.harness.clone(),
-                cwd: self.config.cwd.clone(),
+                harness: self.shared.config.harness.clone(),
+                cwd: self.shared.config.cwd.clone(),
                 prompt: Some(prompt),
-                model: self.config.model.clone(),
+                model: self.shared.config.model.clone(),
                 title,
                 mode: Some("headless".to_string()),
                 pty_size: None,
@@ -431,7 +625,7 @@ async fn serve(runtime: Arc<ServiceRuntime>, port: u16) -> Result<()> {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
         .await
         .context("bind loopback service endpoint")?;
-    tracing::info!(service = %runtime.name, port, "service http endpoint ready (loopback only)");
+    tracing::info!(service = %runtime.name(), channel = %runtime.channel_id, port, "service http endpoint ready (loopback only)");
     loop {
         let (stream, _) = listener.accept().await?;
         let runtime = runtime.clone();
@@ -471,7 +665,7 @@ async fn handle(mut stream: TcpStream, runtime: Arc<ServiceRuntime>) -> Result<(
     let headers = std::str::from_utf8(&bytes[..end]).map_err(|_| anyhow!("invalid headers"))?;
     let mut lines = headers.split("\r\n");
     let request_line = lines.next().unwrap_or("");
-    let route = match parse_http_route(&runtime.name, request_line) {
+    let route = match parse_http_route(runtime.name(), request_line) {
         Ok(route) => route,
         Err((status, message)) => return respond(&mut stream, status, message).await,
     };
@@ -497,7 +691,8 @@ async fn handle(mut stream: TcpStream, runtime: Arc<ServiceRuntime>) -> Result<(
                         202,
                         &serde_json::json!({
                             "accepted": true,
-                            "service": runtime.name,
+                "service": runtime.name(),
+                "channel": runtime.channel_id,
                             "session": session,
                         }),
                     )
@@ -667,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn put_preserves_token_until_explicit_rotation() {
+    fn service_put_preserves_channels_and_channel_crud_rotates_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let service = construct_protocol::ServiceSummary {
             name: "alerts".into(),
@@ -677,40 +872,115 @@ mod tests {
             cwd: ".".into(),
             routing: "session-key".into(),
             paused: false,
-            http_port: Some(8787),
-            has_http_token: false,
+            channels: Vec::new(),
         };
         let first = put_definition(
             dir.path(),
             construct_protocol::ServicePutParams {
                 service: service.clone(),
-                rotate_token: false,
             },
         )
         .unwrap();
-        let original = first.new_token.unwrap();
+        assert!(first.service.channels.is_empty());
+        let first_channel = put_channel(
+            dir.path(),
+            construct_protocol::ServiceChannelPutParams {
+                service_name: "alerts".into(),
+                channel: construct_protocol::ServiceChannelPut {
+                    id: "http".into(),
+                    kind: "http".into(),
+                    enabled: true,
+                    port: Some(8787),
+                },
+                rotate_secret: false,
+            },
+        )
+        .unwrap();
+        let original = first_channel.new_secret.unwrap();
         let second = put_definition(
             dir.path(),
             construct_protocol::ServicePutParams {
                 service: service.clone(),
-                rotate_token: false,
             },
         )
         .unwrap();
-        assert!(second.new_token.is_none());
+        assert_eq!(second.service.channels.len(), 1);
         let stored = load_definitions(dir.path()).unwrap();
         assert_eq!(
             stored["alerts"].channels["http"].token.as_deref(),
             Some(original.as_str())
         );
-        let rotated = put_definition(
+        let rotated = rotate_channel_secret(
             dir.path(),
-            construct_protocol::ServicePutParams {
-                service,
-                rotate_token: true,
+            construct_protocol::ServiceChannelNameParams {
+                service_name: "alerts".into(),
+                channel_id: "http".into(),
             },
         )
         .unwrap();
-        assert_ne!(rotated.new_token.as_deref(), Some(original.as_str()));
+        assert_ne!(rotated.new_secret.as_deref(), Some(original.as_str()));
+        delete_channel(
+            dir.path(),
+            construct_protocol::ServiceChannelNameParams {
+                service_name: "alerts".into(),
+                channel_id: "http".into(),
+            },
+        )
+        .unwrap();
+        assert!(load_definitions(dir.path())
+            .unwrap()
+            .get("alerts")
+            .unwrap()
+            .channels
+            .is_empty());
+    }
+
+    #[test]
+    fn channel_ports_are_unique_within_a_service() {
+        let dir = tempfile::tempdir().unwrap();
+        put_definition(
+            dir.path(),
+            construct_protocol::ServicePutParams {
+                service: construct_protocol::ServiceSummary {
+                    name: "alerts".into(),
+                    instruction: String::new(),
+                    harness: "smith".into(),
+                    model: None,
+                    cwd: ".".into(),
+                    routing: "session-key".into(),
+                    paused: false,
+                    channels: Vec::new(),
+                },
+            },
+        )
+        .unwrap();
+        put_channel(
+            dir.path(),
+            construct_protocol::ServiceChannelPutParams {
+                service_name: "alerts".into(),
+                channel: construct_protocol::ServiceChannelPut {
+                    id: "http".into(),
+                    kind: "http".into(),
+                    enabled: true,
+                    port: Some(8787),
+                },
+                rotate_secret: false,
+            },
+        )
+        .unwrap();
+        let duplicate = put_channel(
+            dir.path(),
+            construct_protocol::ServiceChannelPutParams {
+                service_name: "alerts".into(),
+                channel: construct_protocol::ServiceChannelPut {
+                    id: "monitoring".into(),
+                    kind: "http".into(),
+                    enabled: true,
+                    port: Some(8787),
+                },
+                rotate_secret: false,
+            },
+        );
+        assert!(duplicate.unwrap_err().to_string().contains("already used"));
     }
 }

@@ -83,41 +83,48 @@ impl App {
         if let Some(paused) = paused {
             service.paused = paused;
         }
+        if rotate_token {
+            let Some(channel_id) = service
+                .channels
+                .iter()
+                .find(|channel| channel.kind == "http")
+                .map(|channel| channel.id.clone())
+            else {
+                self.set_status(format!("service {name} has no HTTP channel"));
+                return;
+            };
+            match self
+                .client
+                .rotate_service_channel_secret(name, &channel_id)
+                .await
+            {
+                Ok(result) => {
+                    self.refresh_services().await;
+                    self.set_status(format!(
+                        "new credential for {name} / {}: {} (shown once; restart to apply)",
+                        result.channel.id,
+                        result.new_secret.unwrap_or_default()
+                    ));
+                }
+                Err(error) => self.set_status(format!("credential rotation failed: {error}")),
+            }
+            return;
+        }
         match self
             .client
-            .put_service(construct_protocol::ServicePutParams {
-                service,
-                rotate_token,
-            })
+            .put_service(construct_protocol::ServicePutParams { service })
             .await
         {
             Ok(result) => {
                 self.refresh_services().await;
-                if rotate_token {
-                    self.set_status(format!(
-                        "new token for {}: {} (shown once; restart to apply)",
-                        result.service.name,
-                        result.new_token.unwrap_or_default()
-                    ));
-                } else {
-                    self.set_status(format!(
-                        "{} {}; restart daemon to apply",
-                        result.service.name,
-                        if result.service.paused {
-                            "paused"
-                        } else {
-                            "resumed"
-                        }
-                    ));
-                }
+                self.set_status(format!(
+                    "{} {}; restart daemon to apply",
+                    result.service.name,
+                    if result.service.paused { "paused" } else { "resumed" }
+                ));
             }
             Err(error) => {
-                let message = if rotate_token {
-                    format!("token rotation failed: {error}")
-                } else {
-                    format!("service update failed: {error}")
-                };
-                self.set_status(message);
+                self.set_status(format!("service update failed: {error}"));
             }
         }
     }

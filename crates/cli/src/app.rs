@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 use construct_client::Client;
 use construct_protocol::{
     EventNotificationPayload, GroupSummary, HarnessInfo, MessageRole, Notification, Request,
-    ServiceSummary, SessionEvent, SessionSummary, StateNotificationPayload, TimestampedEvent,
+    ServiceChannelSummary, ServiceSummary, SessionEvent, SessionSummary, StateNotificationPayload,
+    TimestampedEvent,
 };
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -53,7 +54,8 @@ pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
 };
 pub use service_dialog::{
-    ServiceDialog, ServiceDialogMode, ServiceDialogPickerKind, SERVICE_PICKER_VISIBLE_ROWS,
+    ServiceChannelDialog, ServiceChannelDialogMode, ServiceDialog, ServiceDialogMode,
+    ServiceDialogPickerKind, SERVICE_PICKER_VISIBLE_ROWS,
 };
 #[cfg(test)]
 pub use tutorial::Step1Phase;
@@ -11447,6 +11449,23 @@ impl App {
                         return;
                     }
                 }
+                if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                    if self.service_dialog.is_some() {
+                        let channel_start = view.y.saturating_add(15);
+                        if row >= channel_start {
+                            let index = row.saturating_sub(channel_start) as usize;
+                            let channel_count = self
+                                .services
+                                .iter()
+                                .find(|service| service.name == name)
+                                .map(|service| service.channels.len())
+                                .unwrap_or(0);
+                            if index < channel_count && self.open_edit_service_channel(index) {
+                                return;
+                            }
+                        }
+                    }
+                }
                 if self.handle_dynamic_ui_overlay_click(col, row).await {
                     return;
                 }
@@ -12022,6 +12041,14 @@ impl App {
                 KeyCode::Char('e') | KeyCode::Enter => {
                     if let Some(name) = self.selection.service_name().map(str::to_owned) {
                         self.open_edit_service_view(&name);
+                    }
+                    return;
+                }
+                KeyCode::Char('a') => {
+                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                        if self.open_edit_service_view(&name) {
+                            self.open_new_service_channel();
+                        }
                     }
                     return;
                 }
@@ -13701,7 +13728,6 @@ impl App {
                             .client
                             .put_service(construct_protocol::ServicePutParams {
                                 service,
-                                rotate_token: false,
                             })
                             .await
                         {
@@ -13715,24 +13741,33 @@ impl App {
                             Err(error) => self.set_status(format!("service update failed: {error}")),
                         }
                     }
-                    ("rotate-token", Some(service)) => match self
-                        .client
-                        .put_service(construct_protocol::ServicePutParams {
-                            service,
-                            rotate_token: true,
-                        })
-                        .await
-                    {
+                    ("rotate-token", Some(service)) => {
+                        let channel_id = service
+                            .channels
+                            .iter()
+                            .find(|channel| channel.kind == "http")
+                            .map(|channel| channel.id.clone());
+                        let Some(channel_id) = channel_id else {
+                            self.set_status(format!("service {} has no HTTP channel", service.name));
+                            return;
+                        };
+                        match self
+                            .client
+                            .rotate_service_channel_secret(&service.name, &channel_id)
+                            .await
+                        {
                         Ok(result) => {
                             self.refresh_services().await;
                             self.set_status(format!(
-                                "new token for {}: {} (shown once; restart to apply)",
-                                result.service.name,
-                                result.new_token.unwrap_or_default()
+                                "new credential for {} / {}: {} (shown once; restart to apply)",
+                                service.name,
+                                result.channel.id,
+                                result.new_secret.unwrap_or_default()
                             ));
                         }
-                        Err(error) => self.set_status(format!("token rotation failed: {error}")),
-                    },
+                        Err(error) => self.set_status(format!("credential rotation failed: {error}")),
+                        }
+                    }
                     ("delete", Some(service)) => {
                         self.minibuffer = Some(Minibuffer {
                             prompt: format!("Delete service {}? [y/N] ", service.name),
@@ -40273,8 +40308,13 @@ mod tests {
             cwd: "/tmp".to_string(),
             routing: "session-key".to_string(),
             paused: false,
-            http_port: Some(8787),
-            has_http_token: true,
+            channels: vec![construct_protocol::ServiceChannelSummary {
+                id: "http".to_string(),
+                kind: "http".to_string(),
+                enabled: true,
+                port: Some(8787),
+                has_credential: true,
+            }],
         }
     }
 
@@ -40594,6 +40634,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_channel_editor_supports_multiple_http_channels() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.open_edit_service_view("assistant");
+        app.service_dialog.as_mut().unwrap().selected_field = 6;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        let editor = app
+            .service_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.channel_editor.as_ref())
+            .expect("channel editor opens from the Channels field");
+        assert_eq!(editor.mode, ServiceChannelDialogMode::Edit);
+        assert_eq!(editor.channel.id, "http");
+        assert_eq!(editor.channel.port, Some(8787));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .channel_editor
+                .as_ref()
+                .unwrap()
+                .selected_field,
+            3
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .channel_editor
+                .as_ref()
+                .unwrap()
+                .selected_field,
+            2
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert!(app
+            .service_dialog
+            .as_ref()
+            .unwrap()
+            .channel_editor
+            .is_none());
+
+        app.open_new_service_channel();
+        let editor = app
+            .service_dialog
+            .as_ref()
+            .unwrap()
+            .channel_editor
+            .as_ref()
+            .unwrap();
+        assert_eq!(editor.mode, ServiceChannelDialogMode::Create);
+        assert_eq!(editor.channel.id, "http-2");
+        assert_eq!(editor.channel.port, Some(8788));
+
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn service_model_picker_uses_the_pin_router_catalog() {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
@@ -40811,8 +40916,8 @@ mod tests {
             .take(view.height as usize)
             .flat_map(|row| row.iter().map(|cell| cell.symbol()))
             .collect::<String>();
-        assert!(view_text.contains("Loopback port"));
-        assert!(view_text.contains("unique among services"));
+        assert!(view_text.contains("Channels"));
+        assert!(view_text.contains("Transport endpoints"));
         let view_rows = buffer
             .content()
             .chunks(buffer.area.width as usize)
@@ -40835,7 +40940,7 @@ mod tests {
         );
         let footer_row = view_rows
             .iter()
-            .position(|row| row.contains("Enter/C-s save · C-r rotate token"))
+            .position(|row| row.contains("Enter/C-s save · a add"))
             .expect("service editor footer is visible");
         assert!(
             footer_row > 0 && view_rows[footer_row - 1].trim().is_empty(),
