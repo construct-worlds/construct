@@ -1024,9 +1024,15 @@ pub enum ZoomMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatrixPanelMode {
-    #[default]
     Rain,
     /// Fleet-wide realtime token-usage history, grouped by model.
+    ///
+    /// The default. A first-run user has expressed no preference, and so has
+    /// an upgrading one — the panel had no modes to choose between before
+    /// the meter existed, so an absent setting means "never asked", not
+    /// "chose the rain". Anyone who has actually picked a mode keeps it,
+    /// since that choice is persisted.
+    #[default]
     Tokens,
 }
 
@@ -40044,6 +40050,11 @@ mod tests {
         s1.id = "s1".into();
         let mut app = test_app(client, vec![s1]);
         app.matrix_rain_hidden = false;
+        // This exercises the rain body specifically: it counts cells with an
+        // Rgb *background*, which the rain never sets but the token meter
+        // does for its stacked-series boundaries. Pin the mode so the
+        // default can move without silently changing what is measured.
+        app.matrix_panel_mode = MatrixPanelMode::Rain;
 
         let count_wallpaper_cells = |app: &mut App| -> usize {
             let backend = ratatui::backend::TestBackend::new(140, 44);

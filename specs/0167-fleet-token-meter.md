@@ -62,9 +62,11 @@ as history grows around it. A sliding window must also be finer-grained than
 the columns: one that reset when a column did would flick every rate to zero
 at each column boundary.
 
-A model with no compute time in the window has no throughput, and must be
-reported as such rather than as zero — "did no work" and "worked slowly" are
-different claims. A fleet where nothing computed likewise has no rate.
+Three states must stay distinguishable, because collapsing any two of them
+makes a false claim: a model that did not compute at all has no throughput
+to report; one that computed and produced nothing is at zero; one that
+produced less than a token per second is neither of those. A fleet where
+nothing computed likewise has no rate.
 
 The aggregate figure is the **sum** of the per-model rates, not the pooled
 ratio of total tokens to total compute. Pooling yields a weighted average,
@@ -174,6 +176,14 @@ inspecting the rest.
   throughput it represents. A colored band with no name is unreadable, so a
   legend that cannot fit on one row wraps rather than showing only what fits;
   what still cannot fit is counted, not silently dropped.
+- Naming series takes priority over graph height, down to a floor that still
+  reads as a graph. A legend capped well above that floor strands series
+  behind a "+N" while rows sit unused — the cap belongs at the floor, not at
+  some fraction of the panel.
+- The number of distinguishable series colors is the real limit on how many
+  models a legend can name, and it is the only reason to collapse any of
+  them. Listing more names than there are colors produces rows that cannot be
+  matched to a band, which is worse than an honest collapsed row.
 - The span a column covers is a tuning choice, not a fixed part of the
   design. Anything stating an absolute count for one column must name that
   span, so the count is never mistaken for a rate.

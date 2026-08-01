@@ -23,8 +23,13 @@ pub struct WidgetState {
     pub visible: Vec<String>,
 }
 
+/// Whether the ambient panel starts collapsed for a client that has never
+/// recorded a preference. It doesn't: the panel opens on the token meter
+/// (spec 0019), and a meter nobody has been shown answers no question. Same
+/// "absent means never asked" reading as the mode itself — a client that has
+/// collapsed the panel has that recorded and keeps it.
 fn default_matrix_rain_hidden() -> bool {
-    true
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,7 +117,7 @@ impl Default for TuiState {
             orchestrator_panel_h: None,
             matrix_rain_h: None,
             list_collapsed: false,
-            matrix_rain_hidden: true,
+            matrix_rain_hidden: default_matrix_rain_hidden(),
             matrix_panel_mode: crate::app::MatrixPanelMode::default(),
             hide_pane_side_borders: default_hide_pane_side_borders(),
             main_windows: None,
