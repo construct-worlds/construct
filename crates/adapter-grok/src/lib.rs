@@ -41,6 +41,9 @@ pub async fn run() -> anyhow::Result<()> {
             supports_input: true,
             supports_interrupt: true,
             supports_pty: true,
+            // Real per-turn usage, read from the session's `updates.jsonl`
+            // `turn_completed` records (see `grok_usage_events`).
+            supports_cost: true,
             ..Default::default()
         },
     };
@@ -296,10 +299,11 @@ fn grok_updates_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
 }
 
 /// Context gauge from a session dir's `signals.json` (spec 0104): grok
-/// maintains `contextTokensUsed` / `contextWindowTokens` there — the only
-/// per-session token figures its files expose (its chat/updates streams
-/// carry no billing usage split). Returns `(used, window)` when the file
-/// parses and reports non-zero usage.
+/// maintains `contextTokensUsed` / `contextWindowTokens` there. Returns
+/// `(used, window)` when the file parses and reports non-zero usage.
+///
+/// This is the *gauge* only. Per-call consumption comes from `updates.jsonl`
+/// instead — see `grok_usage_events`.
 fn grok_context_usage(cwd: &Path, session_id: &str) -> Option<(u64, Option<u64>)> {
     let path = grok_session_dir(cwd, session_id)?.join("signals.json");
     let text = std::fs::read_to_string(path).ok()?;
@@ -481,6 +485,76 @@ fn emit_new_grok_transcript_lines(
 /// diff-against-`last_model` logic can work around: there's nothing on disk
 /// to observe when grok itself never persists the change. Initial-model
 /// capture is unaffected and works reliably.
+/// Per-turn token usage from an `updates.jsonl` `turn_completed` record
+/// (spec 0103), split per model (spec 0167).
+///
+/// grok closes every prompt with one such record carrying a real usage
+/// object — `inputTokens` is the whole prompt side (`totalTokens` is exactly
+/// input + output), `cachedReadTokens` the subset of it served from cache,
+/// which is the split `Cost` wants. Its `modelUsage` map keys are spelled
+/// exactly as `chat_history.jsonl`'s `model_id`, which is what
+/// `grok_model_change` reports, so per-model attribution here cannot
+/// disagree with this session's `ModelChanged`.
+///
+/// One record per prompt, and the caller's line cursor only ever hands each
+/// line over once, so no dedupe is needed. Records belonging to a subagent
+/// carry that agent's own `sessionId` and are skipped: the root's tally must
+/// not absorb a child's.
+///
+/// `costUsdTicks` is deliberately ignored. The figure is plainly a scaled
+/// integer, but nothing states the scale, and a dollar amount that is wrong
+/// by a factor of ten is worse than none — so this reports volume only, as
+/// every other wrapper adapter does.
+fn grok_usage_events(v: &Value, root_id: &str, fallback_model: Option<&str>) -> Vec<SessionEvent> {
+    let params = match v.get("params") {
+        Some(params) => params,
+        None => return Vec::new(),
+    };
+    if params.get("sessionId").and_then(Value::as_str) != Some(root_id) {
+        return Vec::new();
+    }
+    let update = match params.get("update") {
+        Some(update) => update,
+        None => return Vec::new(),
+    };
+    if update.get("sessionUpdate").and_then(Value::as_str) != Some("turn_completed") {
+        return Vec::new();
+    }
+    let usage = match update.get("usage") {
+        Some(usage) => usage,
+        None => return Vec::new(),
+    };
+
+    let cost_from = |split: &Value, model: Option<String>| -> Option<SessionEvent> {
+        let field = |key: &str| split.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let input = field("inputTokens");
+        let output = field("outputTokens");
+        let cached = field("cachedReadTokens");
+        (input > 0 || output > 0).then_some(SessionEvent::Cost {
+            usd: 0.0,
+            tokens_in: input,
+            tokens_out: output,
+            tokens_cached: cached,
+            model,
+        })
+    };
+
+    // Prefer the per-model split; it is the same figure broken out, so using
+    // both would double-count.
+    if let Some(per_model) = usage.get("modelUsage").and_then(Value::as_object) {
+        let events: Vec<SessionEvent> = per_model
+            .iter()
+            .filter_map(|(model, split)| cost_from(split, Some(model.clone())))
+            .collect();
+        if !events.is_empty() {
+            return events;
+        }
+    }
+    cost_from(usage, fallback_model.map(str::to_string))
+        .into_iter()
+        .collect()
+}
+
 fn grok_model_change(v: &Value, last_model: &Option<String>) -> Option<String> {
     if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
         return None;
@@ -845,6 +919,9 @@ fn spawn_interactive_transcript_watcher(
                 (current_id.as_deref(), updates_path.as_deref())
             {
                 for value in read_new_grok_jsonl_lines(updates_path, &mut next_update_line, &emit) {
+                    for event in grok_usage_events(&value, root_id, last_model.as_deref()) {
+                        emit.emit(event);
+                    }
                     if let Some(update) = grok_native_subagent_update(&value, root_id) {
                         apply_grok_native_update(update, &mut children, Some(&emit));
                     }
@@ -1959,5 +2036,152 @@ mod tests {
             grok_effort_change(&v, &Some("high".to_string())).as_deref(),
             Some("low")
         );
+    }
+
+    /// A real `turn_completed` record, verbatim from a live session's
+    /// `updates.jsonl` (values only; nothing about the shape is invented).
+    fn turn_completed(session_id: &str) -> Value {
+        serde_json::json!({
+            "timestamp": 1785549199,
+            "method": "_x.ai/session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "turn_completed",
+                    "prompt_id": "f9839542-1988-4880-9616-37aa4212d460",
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "inputTokens": 98232,
+                        "outputTokens": 2785,
+                        "totalTokens": 101017,
+                        "cachedReadTokens": 65792,
+                        "cacheCreationTokens": 0,
+                        "reasoningTokens": 924,
+                        "modelCalls": 3,
+                        "apiDurationMs": 46219,
+                        "costUsdTicks": 1013276000,
+                        "modelUsage": {
+                            "grok-4.5-build": {
+                                "inputTokens": 98232,
+                                "outputTokens": 2785,
+                                "totalTokens": 101017,
+                                "cachedReadTokens": 65792,
+                                "cacheCreationTokens": 0,
+                                "reasoningTokens": 924,
+                                "modelCalls": 3
+                            }
+                        },
+                        "numTurns": 3
+                    }
+                }
+            }
+        })
+    }
+
+    /// The prompt side is `inputTokens` and the cached subset is
+    /// `cachedReadTokens` — `totalTokens` is exactly input + output, which is
+    /// what establishes that input already covers the cache reads.
+    #[test]
+    fn turn_completed_reports_the_real_usage_split() {
+        let v = turn_completed("root");
+        match grok_usage_events(&v, "root", None).as_slice() {
+            [SessionEvent::Cost {
+                usd,
+                tokens_in,
+                tokens_out,
+                tokens_cached,
+                model,
+            }] => {
+                assert_eq!(*tokens_in, 98232);
+                assert_eq!(*tokens_out, 2785);
+                assert_eq!(*tokens_cached, 65792);
+                assert!(tokens_cached < tokens_in, "cached must be a subset");
+                // costUsdTicks has no documented scale; volume only.
+                assert_eq!(*usd, 0.0);
+                // Spelled as `chat_history.jsonl`'s `model_id`, which is what
+                // `ModelChanged` carries — see `grok_model_change`.
+                assert_eq!(model.as_deref(), Some("grok-4.5-build"));
+            }
+            other => panic!("expected one Cost, got {other:?}"),
+        }
+    }
+
+    /// A subagent's own `turn_completed` must not land on the root's tally.
+    #[test]
+    fn another_sessions_usage_is_not_absorbed() {
+        let v = turn_completed("some-subagent");
+        assert!(grok_usage_events(&v, "root", None).is_empty());
+    }
+
+    /// Without a per-model split, the adapter's tracked model stands in
+    /// rather than the sample going unattributed.
+    #[test]
+    fn falls_back_to_the_tracked_model_without_a_split() {
+        let mut v = turn_completed("root");
+        v["params"]["update"]["usage"]
+            .as_object_mut()
+            .expect("usage object")
+            .remove("modelUsage");
+        match grok_usage_events(&v, "root", Some("grok-4.5-build")).as_slice() {
+            [SessionEvent::Cost {
+                tokens_in, model, ..
+            }] => {
+                assert_eq!(*tokens_in, 98232);
+                assert_eq!(model.as_deref(), Some("grok-4.5-build"));
+            }
+            other => panic!("expected one Cost, got {other:?}"),
+        }
+    }
+
+    /// Every other update on the stream is chatter — only turn completions
+    /// carry usage, and a chunk's running `totalTokens` must not be mistaken
+    /// for one.
+    #[test]
+    fn ordinary_updates_carry_no_usage() {
+        let chunk = serde_json::json!({
+            "method": "session/update",
+            "params": {
+                "sessionId": "root",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "hi"}
+                },
+                "_meta": {"totalTokens": 5731}
+            }
+        });
+        assert!(grok_usage_events(&chunk, "root", None).is_empty());
+        assert!(grok_usage_events(&Value::Null, "root", None).is_empty());
+    }
+
+    /// A turn that consumed nothing produces no event, so an empty tail
+    /// record can't stamp a zero sample onto the meter.
+    #[test]
+    fn a_zero_usage_turn_reports_nothing() {
+        let mut v = turn_completed("root");
+        v["params"]["update"]["usage"] = serde_json::json!({
+            "inputTokens": 0, "outputTokens": 0, "cachedReadTokens": 0
+        });
+        assert!(grok_usage_events(&v, "root", None).is_empty());
+    }
+
+    /// Several models inside one turn each get their own sample, so a turn
+    /// that switched models is not credited entirely to one of them.
+    #[test]
+    fn each_model_in_a_turn_gets_its_own_sample() {
+        let mut v = turn_completed("root");
+        v["params"]["update"]["usage"]["modelUsage"] = serde_json::json!({
+            "grok-4.5-build": {"inputTokens": 100, "outputTokens": 10, "cachedReadTokens": 0},
+            "grok-4.5-fast": {"inputTokens": 200, "outputTokens": 20, "cachedReadTokens": 5}
+        });
+        let events = grok_usage_events(&v, "root", None);
+        assert_eq!(events.len(), 2);
+        let total: u64 = events
+            .iter()
+            .map(|e| match e {
+                SessionEvent::Cost { tokens_in, .. } => *tokens_in,
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(total, 300, "the split is used instead of the aggregate");
     }
 }
