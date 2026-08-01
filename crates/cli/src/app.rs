@@ -17514,8 +17514,8 @@ mod tests {
         );
         assert!(out.contains("4.0k/s"), "{out}");
         assert!(
-            out.contains('▀'),
-            "legend missing split-tone swatch:\n{out}"
+            out.contains('●'),
+            "legend missing model dot:\n{out}"
         );
         assert!(
             out.contains('█') || out.chars().any(|c| "▁▂▃▄▅▆▇".contains(c)),

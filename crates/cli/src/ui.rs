@@ -4461,15 +4461,14 @@ fn legend_max_rows(panel_h: u16) -> usize {
     usize::from(panel_h.saturating_sub(GRAPH_MIN_ROWS))
 }
 
-/// One legend entry's rendered text: a split-tone swatch, the model, and how
-/// fast it ran. The swatch's upper half is fresh and its lower half cached,
-/// matching the order of those parts in every graph band.
+/// One legend entry's rendered text: the model's original single-color dot,
+/// its name, and how fast it ran.
 fn legend_entry_text(entry: &crate::token_meter::LegendEntry) -> String {
-    format!("▀ {} {}", entry.label, legend_rate(entry.rate))
+    format!("● {} {}", entry.label, legend_rate(entry.rate))
 }
 
 /// Blank columns between one legend cell and the next. A rate sits against
-/// its cell's right edge and the following cell opens with a swatch, so a single
+/// its cell's right edge and the following cell opens with a dot, so a single
 /// space of separation reads as one run of text; this is the margin that
 /// makes the columns look like columns.
 const LEGEND_COL_GAP: usize = 3;
@@ -4506,10 +4505,12 @@ fn legend_rate_style(color: Color, rate: Option<f64>) -> Style {
     style.add_modifier(Modifier::DIM)
 }
 
-/// Two-tone legend key: `▀` uses foreground for its upper half and background
-/// for its lower half, mirroring fresh-over-cached in the graph.
-fn legend_swatch_style(entry: &crate::token_meter::LegendEntry) -> Style {
-    Style::default().fg(entry.color).bg(entry.cached_color)
+fn legend_dot_style(entry: &crate::token_meter::LegendEntry) -> Style {
+    Style::default().fg(entry.dot_color)
+}
+
+fn legend_text_style(entry: &crate::token_meter::LegendEntry) -> Style {
+    Style::default().fg(entry.color)
 }
 
 /// The legend's column grid: which entries sit on each row, and how wide a
@@ -4525,9 +4526,9 @@ struct LegendGrid {
 /// Lay the legend out as a grid of equal-width cells.
 ///
 /// Flowing entries end-to-end packs more onto a row, but every row then
-/// starts its names at different offsets, and with several models the swatches
+/// starts its names at different offsets, and with several models the dots
 /// scatter into a wall of text with no line to read down. A fixed cell width
-/// puts every column's swatch and name at the same x on every row, so the legend
+/// puts every column's dot and name at the same x on every row, so the legend
 /// scans vertically — which is how you read a list of models — at the cost of
 /// some trailing space in each cell.
 ///
@@ -4592,7 +4593,7 @@ fn legend_cell(
 ) -> Option<(String, usize, String)> {
     let rate = legend_rate(entry.rate);
     let rate_w = UnicodeWidthStr::width(rate.as_str());
-    let with_rate = UnicodeWidthStr::width("▀  ") + rate_w + LEGEND_COL_GAP;
+    let with_rate = UnicodeWidthStr::width("●  ") + rate_w + LEGEND_COL_GAP;
     let (budget, rate) = if room > with_rate + 3 {
         (room - with_rate, rate)
     } else {
@@ -4601,11 +4602,11 @@ fn legend_cell(
     if budget < 2 {
         return None;
     }
-    let head = format!("▀ {}", truncate_label(&entry.label, budget));
+    let head = format!("● {}", truncate_label(&entry.label, budget));
     if rate.is_empty() {
         return Some((head, 0, rate));
     }
-    // The cell's right-hand margin keeps a rate clear of the next cell's swatch;
+    // The cell's right-hand margin keeps a rate clear of the next cell's dot;
     // the rest of the slack goes between the name and the rate.
     let head_w = UnicodeWidthStr::width(head.as_str());
     let gap = room
@@ -4647,14 +4648,16 @@ fn render_token_meter_legend(
             let Some((head, gap, rate)) = legend_cell(entry, room) else {
                 break;
             };
-            let style = Style::default().fg(entry.color);
-            f.buffer_mut().set_string(cell_x, y, head.as_str(), style);
-            // `▀` paints its upper half in the fresh foreground tone and its
-            // lower half in the cached background tone. Showing the pair
-            // together teaches that lightness is a part marker, not another
-            // model, before the reader has to infer it from a bar.
             f.buffer_mut()
-                .set_string(cell_x, y, "▀", legend_swatch_style(entry));
+                .set_string(cell_x, y, head.as_str(), legend_text_style(entry));
+            // Keep the familiar single-dot legend, but use the cached tone
+            // for the dot while the model name and rate stay full-strength.
+            f.buffer_mut().set_string(
+                cell_x,
+                y,
+                "●",
+                legend_dot_style(entry),
+            );
             x = cell_x + UnicodeWidthStr::width(head.as_str()) as u16;
             if !rate.is_empty() {
                 let rate_x = x + gap as u16;
@@ -23855,16 +23858,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn legend_swatch_pairs_fresh_above_cached() {
-        let mut entry = legend_entries(&["opus"]).remove(0);
-        entry.color = Color::Rgb(250, 179, 135);
-        entry.cached_color = Color::Rgb(195, 134, 96);
-        let style = legend_swatch_style(&entry);
-        assert_eq!(style.fg, Some(entry.color), "▀ upper half is fresh");
-        assert_eq!(style.bg, Some(entry.cached_color), "lower half is cached");
-    }
-
     fn legend_entries(labels: &[&str]) -> Vec<crate::token_meter::LegendEntry> {
         labels
             .iter()
@@ -23872,10 +23865,19 @@ mod tests {
                 label: (*label).to_string(),
                 tokens: 1_000,
                 color: ratatui::style::Color::Reset,
-                cached_color: ratatui::style::Color::Black,
+                dot_color: ratatui::style::Color::Black,
                 rate: Some(100.0),
             })
             .collect()
+    }
+
+    #[test]
+    fn legend_dot_uses_dark_tone_while_text_uses_bright_tone() {
+        let mut entry = legend_entries(&["opus"]).remove(0);
+        entry.color = Color::Rgb(250, 179, 135);
+        entry.dot_color = Color::Rgb(195, 134, 96);
+        assert_eq!(legend_dot_style(&entry).fg, Some(entry.dot_color));
+        assert_eq!(legend_text_style(&entry).fg, Some(entry.color));
     }
 
     /// Rates hang off the cell's right edge, so whatever the names do the
@@ -23904,7 +23906,7 @@ mod tests {
         let (head, gap, rate) = legend_cell(&entry, 12).expect("a name still fits");
         assert!(rate.is_empty(), "the rate goes first: {rate:?}");
         assert_eq!(gap, 0);
-        assert!(head.starts_with("▀ claude"), "{head:?}");
+        assert!(head.starts_with("● claude"), "{head:?}");
         assert!(legend_cell(&entry, 4).is_none(), "nothing readable fits");
     }
 
@@ -23920,7 +23922,7 @@ mod tests {
     }
 
     /// The point of the grid: entry `n` of every row starts at the same x, so
-    /// the swatches and names line up in columns you can read down. A short name
+    /// the dots and names line up in columns you can read down. A short name
     /// must not pull its neighbour left.
     #[test]
     fn layout_legend_puts_a_columns_entries_at_one_offset() {
@@ -23956,7 +23958,7 @@ mod tests {
                 label: format!("model-number-{i}"),
                 tokens: 1_000,
                 color: ratatui::style::Color::Reset,
-                cached_color: ratatui::style::Color::Black,
+                dot_color: ratatui::style::Color::Black,
                 rate: Some(100.0),
             })
             .collect();
@@ -23996,7 +23998,7 @@ mod tests {
                 label: format!("model-{i}"),
                 tokens: 1_000,
                 color: ratatui::style::Color::Reset,
-                cached_color: ratatui::style::Color::Black,
+                dot_color: ratatui::style::Color::Black,
                 rate: Some(100.0),
             })
             .collect();

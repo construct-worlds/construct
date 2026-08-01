@@ -240,8 +240,8 @@ pub struct LegendEntry {
     pub tokens: u64,
     /// Full-strength tone used for fresh work, labels, and rates.
     pub color: Color,
-    /// Same model hue at lower perceptual lightness, used for cache reads.
-    pub cached_color: Color,
+    /// Darker companion tone used for the legend dot and cache reads.
+    pub dot_color: Color,
     /// Tokens per second of compute over the last minute, or `None` when
     /// this model did no work in that window. Fractional so a formatter can
     /// tell "computed and produced nothing" from "produced less than a token
@@ -580,7 +580,7 @@ impl TokenMeter {
                 label: self.models[idx].clone(),
                 tokens: *tokens,
                 color: SERIES_PALETTE[idx],
-                cached_color: CACHED_SERIES_PALETTE[idx],
+                dot_color: CACHED_SERIES_PALETTE[idx],
                 rate: self.recent_rate(idx as u16),
             })
             .collect();
@@ -611,7 +611,7 @@ impl TokenMeter {
                 label: format!("other ({count})"),
                 tokens: other,
                 color: OTHER_COLOR,
-                cached_color: CACHED_OTHER_COLOR,
+                dot_color: CACHED_OTHER_COLOR,
                 rate: other_any.then_some(other_rate),
             });
         }
@@ -797,17 +797,17 @@ mod tests {
         assert_eq!(m.model_label(0), "first");
     }
 
-    /// The legend teaches the same fresh/cached pair the bars use, so a
-    /// darker solid band reads as one model's cache rather than a new series.
+    /// The legend keeps the original one-dot-per-model treatment, using the
+    /// darker member for the dot and the brighter member for its text.
     #[test]
-    fn legend_exposes_both_tones_for_each_model() {
+    fn legend_exposes_dark_dot_and_bright_text_tones() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
         m.observe(Some("opus"), 1_000, 700, t0);
         let entry = &m.legend(1)[0];
         assert_eq!(entry.color, m.band_color((0, Part::New)));
-        assert_eq!(entry.cached_color, m.band_color((0, Part::Cached)));
-        assert_ne!(entry.color, entry.cached_color);
+        assert_eq!(entry.dot_color, m.band_color((0, Part::Cached)));
+        assert_ne!(entry.color, entry.dot_color);
     }
 
     #[test]

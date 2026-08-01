@@ -112,11 +112,11 @@ retaining hue and most chroma. It is not a generic terminal `dim` attribute or
 an alpha blend toward the panel background; either can wash a cyan into gray
 teal or a peach into brown, making one model look like two.
 
-The legend swatch shows both tones together, fresh above cached, and the graph
-uses that same order within every model's run. Lightness is therefore taught
-as a part marker before a reader has to infer it from the bars. On reduced
-terminal palettes each pair is contrast-repaired as a pair, rather than
-allowed to quantize onto one indistinguishable entry.
+The legend keeps its original single dot for each model. The dot uses the
+darker cached tone while its model name and rate use the brighter fresh tone,
+so both still read as one hue family without changing the legend's shape. On
+reduced terminal palettes each pair is contrast-repaired as a pair, rather
+than allowed to quantize onto one indistinguishable entry.
 
 Ordering the cache-served part at the base remains a reading requirement: the
 foundation of re-sent context sits under the work actually done on it. Since
@@ -163,9 +163,9 @@ can't hold them all, the remainder is counted, not silently dropped.
 
 Those rows are a grid of equal-width cells, not a flow. Packing entries
 end-to-end fits marginally more on a row, but every row then begins its names
-at a different offset, and past a handful of models the swatches and names
+at a different offset, and past a handful of models the dots and names
 scatter into a block of text with no line to read down. A cell wide enough
-for the widest entry puts each column's swatch and name at the same offset on
+for the widest entry puts each column's dot and name at the same offset on
 every row, so the legend is read vertically — the way a list of models is
 read — and a name is found by position rather than by scanning. The trailing
 space this costs inside narrower cells is worth that; a cell never spills
@@ -174,7 +174,7 @@ the alignment the grid exists for.
 
 Each cell carries a margin past its widest entry, so adjacent columns are
 separated by blank space rather than by a single column. A rate ends one cell
-and a swatch opens the next; with nothing between them the row reads as one run
+and a dot opens the next; with nothing between them the row reads as one run
 of text and the grid stops looking like columns at all.
 
 Within a cell the name starts it and the rate ends it, against the cell's
@@ -267,9 +267,9 @@ inspecting the rest.
   them. Listing more names than there are colors produces rows that cannot be
   matched to a band, which is worse than an honest collapsed row.
 - Cached/fresh tones are an authored pair, not two independently chosen
-  colors. Their perceptual hue must stay aligned, the split swatch must show
-  both, and reduced-color clients must keep the pair distinguishable after
-  quantization.
+  colors. Their perceptual hue must stay aligned, the legend dot must use the
+  darker member while its text uses the brighter member, and reduced-color
+  clients must keep the pair distinguishable after quantization.
 - The span a column covers is a tuning choice, not a fixed part of the
   design. Anything stating an absolute count for one column must name that
   span, so the count is never mistaken for a rate.
