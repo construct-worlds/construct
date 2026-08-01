@@ -184,7 +184,7 @@ impl SessionManager {
             construct_protocol::adapter::policy::ENV_AUTO_APPROVE_PATHS.to_string(),
             widgets_dir.to_string_lossy().to_string(),
         );
-        self.install_program_run_context_env(&mut env_with_meta, &id);
+        self.install_playbook_run_context_env(&mut env_with_meta, &id);
         env_with_meta.insert(
             "CONSTRUCT_SESSION_KIND".to_string(),
             match params.kind {
@@ -545,7 +545,7 @@ impl SessionManager {
             construct_protocol::adapter::policy::ENV_AUTO_APPROVE_PATHS.to_string(),
             widgets_dir.to_string_lossy().to_string(),
         );
-        self.install_program_run_context_env(&mut start_params.env, id);
+        self.install_playbook_run_context_env(&mut start_params.env, id);
         // Use the last-known PTY size so the resumed adapter (which
         // sizes its PTY off start_params on session.start) doesn't draw
         // its banner / resume content at the stale creation default.
@@ -858,8 +858,8 @@ pub(super) fn native_fork_spec(harness: &str) -> Option<(&'static str, &'static 
 // `params.prompt`: headless adapters push it onto their run queue and run it
 // immediately, while interactive PTY harnesses receive it as a native launch
 // argument or a queued submit. There is no separate daemon-side PTY write of
-// the seed prompt — so unlike the program `Run` path (see
-// `program_pty_submit_bytes`), there is no CR/LF terminator to get right here.
+// the seed prompt — so unlike the playbook `Run` path (see
+// `playbook_pty_submit_bytes`), there is no CR/LF terminator to get right here.
 // If this forward is dropped, a created session sits idle in `AwaitingInput`
 // with no way to start its turn except a manual follow-up `send_input`. See
 // `specs/0046-session-create-initial-prompt-submits.md`.

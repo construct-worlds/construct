@@ -23,8 +23,8 @@ Two concrete implementations satisfy this, depending on the theme:
   light backdrop). Being achromatic, this border can never carry a hue that
   might be confused with anything else on screen.
 
-This is a separate rule from [[0083-program-border-fixed-across-themes]],
-which fixes the Program pane's frame to one hue (cyan) across every theme and
+This is a separate rule from [[0083-playbook-border-fixed-across-themes]],
+which fixes the Playbook pane's frame to one hue (cyan) across every theme and
 signals focus with a Bold/Dim modifier instead of a color change.
 
 ## Reason
@@ -35,11 +35,11 @@ originally used a blue accent for the border, at low saturation when
 unfocused and high saturation when focused. Two problems with that: the
 unfocused state was desaturated enough to read as plain gray, so the jump to
 a vivid focused blue looked like a color swap rather than a brightness
-change; and blue sits close enough to the Program pane's fixed cyan frame
-(spec 0083) that a session border and the Program border could be
+change; and blue sits close enough to the Playbook pane's fixed cyan frame
+(spec 0083) that a session border and the Playbook border could be
 misidentified for one another at a glance. Making the session border fully
 achromatic for these three themes fixes both: there is no hue left to drift
-on focus, and zero saturation can never collide with the Program pane's
+on focus, and zero saturation can never collide with the Playbook pane's
 chromatic cyan.
 
 ## Consequences
@@ -47,11 +47,11 @@ chromatic cyan.
 Adding or editing a named theme's `border`/`border_focused` pair must either
 (a) keep both at the same hue if the theme wants a colored border (Matrix's
 approach), or (b) make both fully achromatic (zero saturation) if the theme
-wants a neutral border distinct from the Program frame's accent (Basic/Dark
+wants a neutral border distinct from the Playbook frame's accent (Basic/Dark
 UI/Light UI's approach). A regression test asserts hue continuity for Matrix
-and zero saturation (plus a chromatic `program_border` for contrast) for the
+and zero saturation (plus a chromatic `playbook_border` for contrast) for the
 other three, so a future edit can't silently reintroduce a colored-but-wrong
-border or a hue collision with the Program frame.
+border or a hue collision with the Playbook frame.
 
 The `[colors]` `theme.toml` escape hatch can still override `border` and
 `border_focused` independently per spec [[0134-client-ui-themes]] — this
@@ -60,7 +60,7 @@ what a user's custom override is allowed to do.
 
 ## Non-Goals
 
-This does not change `program_border` (spec 0083, a distinct fixed-hue
+This does not change `playbook_border` (spec 0083, a distinct fixed-hue
 design) or any other theme slot (`accent`, `accent_alt`, `highlight_bg`,
 etc.) — those keep following the active theme's own palette. It does not
 mandate specific lightness values, only that unfocused/focused pairs differ

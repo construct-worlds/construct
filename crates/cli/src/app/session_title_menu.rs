@@ -42,8 +42,8 @@ impl App {
             SessionTitleMenuAction::Fork => {
                 self.run_action(crate::keymap::KeyAction::OpenFork).await
             }
-            SessionTitleMenuAction::ProgramTerminalMode => {
-                self.run_action(crate::keymap::KeyAction::OpenProgram).await;
+            SessionTitleMenuAction::PlaybookTerminalMode => {
+                self.run_action(crate::keymap::KeyAction::OpenPlaybook).await;
             }
             SessionTitleMenuAction::Merge => {
                 self.run_action(crate::keymap::KeyAction::OpenMerge).await;

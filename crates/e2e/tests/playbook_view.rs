@@ -1,7 +1,7 @@
-//! End-to-end: drive the web client's **Program view** in a real headless
+//! End-to-end: drive the web client's **Playbook view** in a real headless
 //! Chromium (spec 0059). Exercises the full surface — enter/render, templates,
 //! edit + save, optimistic-version 3-way merge on conflict, run + run-selection
-//! shimmer, smart-clip (@) autocomplete, find, and live `program/state` adopt
+//! shimmer, smart-clip (@) autocomplete, find, and live `playbook/state` adopt
 //! vs. keep-dirty — plus a real daemon round-trip that proves the JS block-id
 //! parser agrees with the daemon byte-for-byte.
 //!
@@ -16,7 +16,7 @@ use chromiumoxide::page::{Page, ScreenshotParams};
 use futures::StreamExt;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn web_program_view_full_parity() {
+async fn web_playbook_view_full_parity() {
     let d = Daemon::spawn().await.expect("daemon");
     let r = d
         .client
@@ -34,7 +34,7 @@ async fn web_program_view_full_parity() {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!(
-                "skipping program_view: could not launch Chromium ({e}). \
+                "skipping playbook_view: could not launch Chromium ({e}). \
                  Install Google Chrome to run this test locally."
             );
             return;
@@ -51,7 +51,7 @@ async fn web_program_view_full_parity() {
     page.evaluate(SETUP_JS).await.expect("inject test helpers");
 
     // --- 1. Real daemon round-trip: JS block ids must equal the daemon's
-    //        legacy content ids, and program.get/update over the web WS must
+    //        legacy content ids, and playbook.get/update over the web WS must
     //        actually work. Stable daemon refs travel in block.id. ------------
     let parity: serde_json::Value = page
         .evaluate(
@@ -60,13 +60,13 @@ async fn web_program_view_full_parity() {
               const md = "# Plan\n- step one @{session:s1 clip_id=clip_3}\n- step two\n\nA paragraph\nwrapped across lines\n";
               const created = await rpc("session.create", { harness: "shell", cwd: "/tmp", prompt: "" });
               const sid = created.session_id;
-              await rpc("program.update", { session_id: sid, markdown: md });
-              const got = await rpc("program.get", { session_id: sid });
+              await rpc("playbook.update", { session_id: sid, markdown: md });
+              const got = await rpc("playbook.get", { session_id: sid });
               return {
                 daemonIds: (got.blocks || []).map((b) => b.id),
                 daemonContentIds: (got.blocks || []).map((b) => b.content_id),
-                jsIds: programBlockSpans(got.program.markdown).map((b) => b.id),
-                markdownRoundTripped: got.program.markdown === md,
+                jsIds: playbookBlockSpans(got.playbook.markdown).map((b) => b.id),
+                markdownRoundTripped: got.playbook.markdown === md,
               };
             })()
             "###,
@@ -85,63 +85,63 @@ async fn web_program_view_full_parity() {
     );
     assert_eq!(parity["markdownRoundTripped"], true, "{parity:?}");
 
-    // --- 2. Enter Program mode renders the document + toggle state. ----------
+    // --- 2. Enter Playbook mode renders the document + toggle state. ----------
     let enter: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-prog", markdown: "# Title\n- task a\n- task b\n", version: 7, template_id: null }, active_run: null, blocks: [], revisions: [] }),
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-prog", markdown: "# Title\n- task a\n- task b\n", version: 7, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               setSession("s-prog", "shell");
-              await switchCurrentViewMode("program");
+              await switchCurrentViewMode("playbook");
               return {
-                wrapVisible: !programWrapEl.hidden,
+                wrapVisible: !playbookWrapEl.hidden,
                 transcriptHidden: transcriptEl.hidden,
-                value: programSerialize(),
-                version: programVersionEl.textContent,
-                programPressed: viewModeProgramBtn.getAttribute("aria-pressed"),
+                value: playbookSerialize(),
+                version: playbookVersionEl.textContent,
+                playbookPressed: viewModePlaybookBtn.getAttribute("aria-pressed"),
                 mode: state.mode,
-                mounted: state.program.mountedId,
+                mounted: state.playbook.mountedId,
               };
             })
             "###,
         )
         .await
-        .expect("evaluate enter program")
+        .expect("evaluate enter playbook")
         .into_value()
         .expect("json");
     assert_eq!(enter["wrapVisible"], true, "{enter:?}");
     assert_eq!(enter["transcriptHidden"], true, "{enter:?}");
     assert_eq!(enter["value"], "# Title\n- task a\n- task b\n", "{enter:?}");
     assert_eq!(enter["version"], "v7", "{enter:?}");
-    assert_eq!(enter["programPressed"], "true", "{enter:?}");
-    assert_eq!(enter["mode"], "program", "{enter:?}");
+    assert_eq!(enter["playbookPressed"], "true", "{enter:?}");
+    assert_eq!(enter["mode"], "playbook", "{enter:?}");
     assert_eq!(enter["mounted"], "s-prog", "{enter:?}");
 
-    // --- 3. Empty program shows templates; clicking one seeds the doc. -------
+    // --- 3. Empty playbook shows templates; clicking one seeds the doc. -------
     let templates: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-empty", markdown: "", version: 0, template_id: null }, active_run: null, blocks: [], revisions: [] }),
-              "program.list_templates": () => ({ templates: [
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-empty", markdown: "", version: 0, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [
                 { id: "blank", name: "Blank", markdown: "", built_in: true },
                 { id: "tasks", name: "Tasks", description: "A todo board", markdown: "## Todo\n- first\n", built_in: true },
               ] }),
-              "program.update": (p) => ({ program: { session_id: "s-empty", markdown: p.markdown, version: 1, template_id: p.template_id || null }, blocks: [], active_run: null }),
+              "playbook.update": (p) => ({ playbook: { session_id: "s-empty", markdown: p.markdown, version: 1, template_id: p.template_id || null }, blocks: [], active_run: null }),
             }, async () => {
               window.__updates = [];
               const realSend = state.ws.send.bind(state.ws);
-              state.ws.send = (raw) => { const m = JSON.parse(raw); if (m.method === "program.update") window.__updates.push(m.params); realSend(raw); };
+              state.ws.send = (raw) => { const m = JSON.parse(raw); if (m.method === "playbook.update") window.__updates.push(m.params); realSend(raw); };
               setSession("s-empty", "shell");
-              await switchCurrentViewMode("program");
+              await switchCurrentViewMode("playbook");
               await new Promise((r) => setTimeout(r, 40));
-              const emptyVisible = !programEmptyEl.hidden;
-              const tmplButtons = Array.from(programEmptyEl.querySelectorAll("[data-tmpl]")).map((b) => b.dataset.tmpl);
-              programEmptyEl.querySelector('[data-tmpl="tasks"]').click();
+              const emptyVisible = !playbookEmptyEl.hidden;
+              const tmplButtons = Array.from(playbookEmptyEl.querySelectorAll("[data-tmpl]")).map((b) => b.dataset.tmpl);
+              playbookEmptyEl.querySelector('[data-tmpl="tasks"]').click();
               await new Promise((r) => setTimeout(r, 40));
-              return { emptyVisible, tmplButtons, updates: window.__updates, valueAfter: programSerialize(), emptyHiddenAfter: programEmptyEl.hidden };
+              return { emptyVisible, tmplButtons, updates: window.__updates, valueAfter: playbookSerialize(), emptyHiddenAfter: playbookEmptyEl.hidden };
             })
             "###,
         )
@@ -169,22 +169,22 @@ async fn web_program_view_full_parity() {
     );
     assert_eq!(templates["emptyHiddenAfter"], true, "{templates:?}");
 
-    // --- 4. Edit + clean save sends program.update with the base version. ----
+    // --- 4. Edit + clean save sends playbook.update with the base version. ----
     let save: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-save", markdown: "old\n", version: 3, template_id: null }, active_run: null, blocks: [], revisions: [] }),
-              "program.list_templates": () => ({ templates: [] }),
-              "program.update": (p) => { window.__updates.push(p); return { program: { session_id: "s-save", markdown: p.markdown, version: 4, template_id: null }, blocks: [], active_run: null }; },
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-save", markdown: "old\n", version: 3, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
+              "playbook.update": (p) => { window.__updates.push(p); return { playbook: { session_id: "s-save", markdown: p.markdown, version: 4, template_id: null }, blocks: [], active_run: null }; },
             }, async () => {
               window.__updates = [];
               setSession("s-save", "shell");
-              await switchCurrentViewMode("program");
-              programTestSet("old\nnew line\n");
-              const dirtyBefore = programSaveBtn.getAttribute("data-dirty");
-              await programSave();
-              return { dirtyBefore, dirtyAfter: programSaveBtn.getAttribute("data-dirty"), updates: window.__updates, versionAfter: programVersionEl.textContent, msg: programMsgEl.textContent };
+              await switchCurrentViewMode("playbook");
+              playbookTestSet("old\nnew line\n");
+              const dirtyBefore = playbookSaveBtn.getAttribute("data-dirty");
+              await playbookSave();
+              return { dirtyBefore, dirtyAfter: playbookSaveBtn.getAttribute("data-dirty"), updates: window.__updates, versionAfter: playbookVersionEl.textContent, msg: playbookMsgEl.textContent };
             })
             "###,
         )
@@ -212,24 +212,24 @@ async fn web_program_view_full_parity() {
     let merge: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               window.__updates = [];
               let firstUpdate = true;
-              window.__mockProgramHandlers["program.get"] = () => ({ program: { session_id: "s-merge", markdown: "L1\nL2\nL3\n", version: 5, template_id: null }, active_run: null, blocks: [], revisions: [] });
-              window.__mockProgramHandlers["program.update"] = (p) => {
+              window.__mockPlaybookHandlers["playbook.get"] = () => ({ playbook: { session_id: "s-merge", markdown: "L1\nL2\nL3\n", version: 5, template_id: null }, active_run: null, blocks: [], revisions: [] });
+              window.__mockPlaybookHandlers["playbook.update"] = (p) => {
                 window.__updates.push(p);
-                if (firstUpdate) { firstUpdate = false; throw new Error("program conflict: current version is 6, attempted base version is 5"); }
-                return { program: { session_id: "s-merge", markdown: p.markdown, version: 7, template_id: null }, blocks: [], active_run: null };
+                if (firstUpdate) { firstUpdate = false; throw new Error("playbook conflict: current version is 6, attempted base version is 5"); }
+                return { playbook: { session_id: "s-merge", markdown: p.markdown, version: 7, template_id: null }, blocks: [], active_run: null };
               };
               setSession("s-merge", "shell");
-              await switchCurrentViewMode("program");
+              await switchCurrentViewMode("playbook");
               // local change to line 1; concurrent agent change to line 3.
-              programTestSet("OURS\nL2\nL3\n");
-              window.__mockProgramHandlers["program.get"] = () => ({ program: { session_id: "s-merge", markdown: "L1\nL2\nTHEIRS\n", version: 6, template_id: null }, active_run: null, blocks: [], revisions: [] });
-              await programSave();
-              return { updates: window.__updates, finalValue: programSerialize(), msg: programMsgEl.textContent };
+              playbookTestSet("OURS\nL2\nL3\n");
+              window.__mockPlaybookHandlers["playbook.get"] = () => ({ playbook: { session_id: "s-merge", markdown: "L1\nL2\nTHEIRS\n", version: 6, template_id: null }, active_run: null, blocks: [], revisions: [] });
+              await playbookSave();
+              return { updates: window.__updates, finalValue: playbookSerialize(), msg: playbookMsgEl.textContent };
             })
             "###,
         )
@@ -248,28 +248,28 @@ async fn web_program_view_full_parity() {
         "{merge:?}"
     );
 
-    // --- 6. Run dispatches execute and shimmers the program's blocks. --------
+    // --- 6. Run dispatches execute and shimmers the playbook's blocks. --------
     let run: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               const md = "# Heading\n- alpha\n- beta\n";
               window.__execs = [];
-              window.__mockProgramHandlers["program.get"] = () => ({ program: { session_id: "s-run", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [], revisions: [] });
-              window.__mockProgramHandlers["program.execute"] = (p) => {
+              window.__mockPlaybookHandlers["playbook.get"] = () => ({ playbook: { session_id: "s-run", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [], revisions: [] });
+              window.__mockPlaybookHandlers["playbook.execute"] = (p) => {
                 window.__execs.push(p);
-                const ids = programBlockSpans(md).map((b) => b.id);
+                const ids = playbookBlockSpans(md).map((b) => b.id);
                 const now = Date.now();
-                return { program: { session_id: "s-run", markdown: md, version: 2, template_id: null }, blocks: [], active_run: { run_id: "r1", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: ids, pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } };
+                return { playbook: { session_id: "s-run", markdown: md, version: 2, template_id: null }, blocks: [], active_run: { run_id: "r1", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: ids, pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } };
               };
               setSession("s-run", "shell");
-              await switchCurrentViewMode("program");
-              programTestClearSel();
-              await programRun();
-              const r = state.program.runById.get("s-run");
-              return { execs: window.__execs, runPending: r ? r.pendingIds.size : 0, shimmerActive: !!programInputEl.querySelector(".program-line.is-running"), stage: programRunStageEl.textContent, msg: programMsgEl.textContent };
+              await switchCurrentViewMode("playbook");
+              playbookTestClearSel();
+              await playbookRun();
+              const r = state.playbook.runById.get("s-run");
+              return { execs: window.__execs, runPending: r ? r.pendingIds.size : 0, shimmerActive: !!playbookInputEl.querySelector(".playbook-line.is-running"), stage: playbookRunStageEl.textContent, msg: playbookMsgEl.textContent };
             })
             "###,
         )
@@ -280,7 +280,7 @@ async fn web_program_view_full_parity() {
     assert_eq!(
         run["execs"][0]["selection"],
         serde_json::Value::Null,
-        "whole-program run sends no selection: {run:?}"
+        "whole-playbook run sends no selection: {run:?}"
     );
     assert!(run["runPending"].as_u64().unwrap_or(0) >= 3, "{run:?}");
     assert_eq!(
@@ -292,7 +292,7 @@ async fn web_program_view_full_parity() {
         run["msg"]
             .as_str()
             .unwrap_or_default()
-            .contains("run sent (program"),
+            .contains("run sent (playbook"),
         "{run:?}"
     );
 
@@ -300,44 +300,44 @@ async fn web_program_view_full_parity() {
     let immediate_run: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               const md = "# Heading\n- alpha\n- beta\n";
               window.__execs = [];
               let resolveExecute;
-              window.__mockProgramHandlers["program.get"] = () => ({ program: { session_id: "s-run-immediate", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [], revisions: [] });
-              window.__mockProgramHandlers["program.execute"] = (p) => {
+              window.__mockPlaybookHandlers["playbook.get"] = () => ({ playbook: { session_id: "s-run-immediate", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [], revisions: [] });
+              window.__mockPlaybookHandlers["playbook.execute"] = (p) => {
                 window.__execs.push(p);
                 return new Promise((resolve) => {
                   resolveExecute = () => {
-                    const ids = programBlockSpans(md).map((b) => b.id);
+                    const ids = playbookBlockSpans(md).map((b) => b.id);
                     const now = Date.now();
-                    resolve({ program: { session_id: "s-run-immediate", markdown: md, version: 2, template_id: null }, blocks: [], active_run: { run_id: "r-immediate", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: ids, pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } });
+                    resolve({ playbook: { session_id: "s-run-immediate", markdown: md, version: 2, template_id: null }, blocks: [], active_run: { run_id: "r-immediate", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: ids, pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } });
                   };
                 });
               };
               setSession("s-run-immediate", "shell");
-              await switchCurrentViewMode("program");
-              programTestClearSel();
-              const runPromise = programRun();
+              await switchCurrentViewMode("playbook");
+              playbookTestClearSel();
+              const runPromise = playbookRun();
               await new Promise((resolve) => requestAnimationFrame(resolve));
               const before = {
                 execCount: window.__execs.length,
-                runPending: state.program.runById.get("s-run-immediate")?.pendingIds.size || 0,
-                shimmerActive: !!programInputEl.querySelector(".program-line.is-running"),
-                button: programRunBtn.dataset.running,
-                stage: programRunStageEl.textContent,
-                msg: programMsgEl.textContent,
+                runPending: state.playbook.runById.get("s-run-immediate")?.pendingIds.size || 0,
+                shimmerActive: !!playbookInputEl.querySelector(".playbook-line.is-running"),
+                button: playbookRunBtn.dataset.running,
+                stage: playbookRunStageEl.textContent,
+                msg: playbookMsgEl.textContent,
               };
               resolveExecute();
               await runPromise;
               const after = {
-                runPending: state.program.runById.get("s-run-immediate")?.pendingIds.size || 0,
-                shimmerActive: !!programInputEl.querySelector(".program-line.is-running"),
-                button: programRunBtn.dataset.running,
-                stage: programRunStageEl.textContent,
-                msg: programMsgEl.textContent,
+                runPending: state.playbook.runById.get("s-run-immediate")?.pendingIds.size || 0,
+                shimmerActive: !!playbookInputEl.querySelector(".playbook-line.is-running"),
+                button: playbookRunBtn.dataset.running,
+                stage: playbookRunStageEl.textContent,
+                msg: playbookMsgEl.textContent,
               };
               return { before, after };
             })
@@ -372,14 +372,14 @@ async fn web_program_view_full_parity() {
         immediate_run["before"]["msg"]
             .as_str()
             .unwrap_or_default()
-            .contains("running program"),
+            .contains("running playbook"),
         "{immediate_run:?}"
     );
     assert!(
         immediate_run["after"]["msg"]
             .as_str()
             .unwrap_or_default()
-            .contains("run sent (program"),
+            .contains("run sent (playbook"),
         "{immediate_run:?}"
     );
 
@@ -387,44 +387,44 @@ async fn web_program_view_full_parity() {
     let rerun: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               const oldMd = "# Heading\n- settled\n- pending\n";
               const newMd = "# Heading\n- changed settled\n- pending\n";
-              const pendingId = programBlockSpans(oldMd).find((b) => oldMd.split("\n").slice(b.start_line, b.end_line).join("\n").includes("pending")).id;
+              const pendingId = playbookBlockSpans(oldMd).find((b) => oldMd.split("\n").slice(b.start_line, b.end_line).join("\n").includes("pending")).id;
               const now = Date.now();
               const priorRun = { run_id: "r-old", started_at_ms: now - 2000, expires_at_ms: now + 60000, pending_block_ids: [pendingId], pending_block_tooltips: {}, seen_running: true, first_output_seen: true, agent_managed: true };
               window.__execs = [];
               window.__updates = [];
-              window.__mockProgramHandlers["program.get"] = () => ({ program: { session_id: "s-rerun", markdown: oldMd, version: 2, template_id: null }, active_run: priorRun, blocks: [], revisions: [] });
-              window.__mockProgramHandlers["program.update"] = (p) => {
+              window.__mockPlaybookHandlers["playbook.get"] = () => ({ playbook: { session_id: "s-rerun", markdown: oldMd, version: 2, template_id: null }, active_run: priorRun, blocks: [], revisions: [] });
+              window.__mockPlaybookHandlers["playbook.update"] = (p) => {
                 window.__updates.push(p);
-                return { program: { session_id: "s-rerun", markdown: p.markdown, version: 3, template_id: null }, blocks: [], active_run: priorRun };
+                return { playbook: { session_id: "s-rerun", markdown: p.markdown, version: 3, template_id: null }, blocks: [], active_run: priorRun };
               };
-              window.__mockProgramHandlers["program.execute"] = (p) => {
+              window.__mockPlaybookHandlers["playbook.execute"] = (p) => {
                 window.__execs.push(p);
-                const ids = programBlockSpans(newMd).map((b) => b.id).filter((_, i) => p.shimmer && p.shimmer[i]);
+                const ids = playbookBlockSpans(newMd).map((b) => b.id).filter((_, i) => p.shimmer && p.shimmer[i]);
                 const t = Date.now();
-                return { program: { session_id: "s-rerun", markdown: newMd, version: 3, template_id: null }, blocks: [], active_run: { run_id: "r-new", started_at_ms: t, expires_at_ms: t + 60000, pending_block_ids: ids, pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } };
+                return { playbook: { session_id: "s-rerun", markdown: newMd, version: 3, template_id: null }, blocks: [], active_run: { run_id: "r-new", started_at_ms: t, expires_at_ms: t + 60000, pending_block_ids: ids, pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } };
               };
               setSession("s-rerun", "shell");
-              await switchCurrentViewMode("program");
-              programTestClearSel();
-              programTestSet(newMd);
-              await programRun();
-              const run = state.program.runById.get("s-rerun");
-              const pendingTexts = programBlockSpans(newMd)
+              await switchCurrentViewMode("playbook");
+              playbookTestClearSel();
+              playbookTestSet(newMd);
+              await playbookRun();
+              const run = state.playbook.runById.get("s-rerun");
+              const pendingTexts = playbookBlockSpans(newMd)
                 .filter((b) => run && run.pendingIds.has(b.id))
                 .map((b) => newMd.split("\n").slice(b.start_line, b.end_line).join("\n"));
-              const beforeTool = programRunBtn.dataset.running;
+              const beforeTool = playbookRunBtn.dataset.running;
               handleNotification("session/event", { session_id: "s-rerun", event: { type: "tool_use", tool: "shell", args: {} } });
               return {
                 updates: window.__updates,
                 execs: window.__execs,
                 pendingTexts,
                 beforeTool,
-                afterTool: programRunBtn.dataset.running,
+                afterTool: playbookRunBtn.dataset.running,
               };
             })
             "###,
@@ -452,30 +452,30 @@ async fn web_program_view_full_parity() {
         "tool_use should clear Run button pulse: {rerun:?}"
     );
 
-    // --- 6c. A double programRun() (double-click / Run button + Ctrl+Enter)
+    // --- 6c. A double playbookRun() (double-click / Run button + Ctrl+Enter)
     //         must dispatch exactly one execute turn (spec 0042 consequence:
     //         Run overlap/idempotency guard). ------------------------------
     let double_run: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               const md = "# Heading\n- alpha\n- beta\n";
               window.__execs = [];
-              window.__mockProgramHandlers["program.get"] = () => ({ program: { session_id: "s-double-run", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [], revisions: [] });
-              window.__mockProgramHandlers["program.execute"] = (p) => {
+              window.__mockPlaybookHandlers["playbook.get"] = () => ({ playbook: { session_id: "s-double-run", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [], revisions: [] });
+              window.__mockPlaybookHandlers["playbook.execute"] = (p) => {
                 window.__execs.push(p);
-                const ids = programBlockSpans(md).map((b) => b.id);
+                const ids = playbookBlockSpans(md).map((b) => b.id);
                 const now = Date.now();
-                return { program: { session_id: "s-double-run", markdown: md, version: 2, template_id: null }, blocks: [], active_run: { run_id: "r-double", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: ids, pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } };
+                return { playbook: { session_id: "s-double-run", markdown: md, version: 2, template_id: null }, blocks: [], active_run: { run_id: "r-double", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: ids, pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } };
               };
               setSession("s-double-run", "shell");
-              await switchCurrentViewMode("program");
-              programTestClearSel();
-              await programRun();
-              await programRun();
-              return { execs: window.__execs, msg: programMsgEl.textContent };
+              await switchCurrentViewMode("playbook");
+              playbookTestClearSel();
+              await playbookRun();
+              await playbookRun();
+              return { execs: window.__execs, msg: playbookMsgEl.textContent };
             })
             "###,
         )
@@ -486,7 +486,7 @@ async fn web_program_view_full_parity() {
     assert_eq!(
         double_run["execs"].as_array().map(|a| a.len()),
         Some(1),
-        "a double programRun() must send exactly one program.execute: {double_run:?}"
+        "a double playbookRun() must send exactly one playbook.execute: {double_run:?}"
     );
     assert!(
         double_run["msg"]
@@ -500,18 +500,18 @@ async fn web_program_view_full_parity() {
     let run_sel: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               const md = "# Heading\n- alpha\n- beta\n- gamma\n";
               window.__execs = [];
-              window.__mockProgramHandlers["program.get"] = () => ({ program: { session_id: "s-runsel", markdown: md, version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] });
-              window.__mockProgramHandlers["program.execute"] = (p) => { window.__execs.push(p); const now = Date.now(); return { program: { session_id: "s-runsel", markdown: md, version: 1, template_id: null }, blocks: [], active_run: { run_id: "r2", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: [], pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } }; };
+              window.__mockPlaybookHandlers["playbook.get"] = () => ({ playbook: { session_id: "s-runsel", markdown: md, version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] });
+              window.__mockPlaybookHandlers["playbook.execute"] = (p) => { window.__execs.push(p); const now = Date.now(); return { playbook: { session_id: "s-runsel", markdown: md, version: 1, template_id: null }, blocks: [], active_run: { run_id: "r2", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: [], pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } }; };
               setSession("s-runsel", "shell");
-              await switchCurrentViewMode("program");
-              programTestSelectLines(1, 2); // "- alpha" + "- beta"
-              await programRun();
-              return { execs: window.__execs, msg: programMsgEl.textContent };
+              await switchCurrentViewMode("playbook");
+              playbookTestSelectLines(1, 2); // "- alpha" + "- beta"
+              await playbookRun();
+              return { execs: window.__execs, msg: playbookMsgEl.textContent };
             })
             "###,
         )
@@ -535,29 +535,29 @@ async fn web_program_view_full_parity() {
     let run_menu: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               const md = "# Heading\n- alpha\n- beta\n- gamma\n";
               window.__execs = [];
-              window.__mockProgramHandlers["program.get"] = () => ({ program: { session_id: "s-runmenu", markdown: md, version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] });
-              window.__mockProgramHandlers["program.execute"] = (p) => { window.__execs.push(p); const now = Date.now(); return { program: { session_id: "s-runmenu", markdown: md, version: 1, template_id: null }, blocks: [], active_run: { run_id: "r-menu", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: [], pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } }; };
+              window.__mockPlaybookHandlers["playbook.get"] = () => ({ playbook: { session_id: "s-runmenu", markdown: md, version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] });
+              window.__mockPlaybookHandlers["playbook.execute"] = (p) => { window.__execs.push(p); const now = Date.now(); return { playbook: { session_id: "s-runmenu", markdown: md, version: 1, template_id: null }, blocks: [], active_run: { run_id: "r-menu", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: [], pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false } }; };
               setSession("s-runmenu", "shell");
-              await switchCurrentViewMode("program");
-              programInputEl.focus();
-              programTestSelectLines(1, 2); // "- alpha" + "- beta"
-              const line = programInputEl.querySelectorAll(":scope > div")[2];
+              await switchCurrentViewMode("playbook");
+              playbookInputEl.focus();
+              playbookTestSelectLines(1, 2); // "- alpha" + "- beta"
+              const line = playbookInputEl.querySelectorAll(":scope > div")[2];
               const rect = line.getBoundingClientRect();
-              programInputEl.dispatchEvent(new PointerEvent("pointerup", {
+              playbookInputEl.dispatchEvent(new PointerEvent("pointerup", {
                 bubbles: true,
                 pointerType: "mouse",
                 clientX: rect.right,
                 clientY: rect.bottom,
               }));
               await new Promise((resolve) => requestAnimationFrame(resolve));
-              const shown = !programSelectionMenuEl.hidden;
-              const label = programSelectionRunBtn.textContent.trim();
-              programSelectionRunBtn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+              const shown = !playbookSelectionMenuEl.hidden;
+              const label = playbookSelectionRunBtn.textContent.trim();
+              playbookSelectionRunBtn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
               for (let i = 0; i < 20 && window.__execs.length === 0; i++) {
                 await new Promise((resolve) => requestAnimationFrame(resolve));
               }
@@ -566,7 +566,7 @@ async fn web_program_view_full_parity() {
                 shown,
                 label,
                 execs: window.__execs,
-                hiddenAfter: programSelectionMenuEl.hidden,
+                hiddenAfter: playbookSelectionMenuEl.hidden,
                 selectionCollapsed: !sel || sel.rangeCount === 0 || sel.isCollapsed,
               };
             })
@@ -595,37 +595,37 @@ async fn web_program_view_full_parity() {
     // not the whole line) sends the real enclosing block's id as
     // `selection_block_ids`, not a phantom hash of the substring alone (the
     // bug this fix addresses: such a phantom matches nothing in the document
-    // and the block never shimmers). The mock `program.execute` handler below
+    // and the block never shimmers). The mock `playbook.execute` handler below
     // stands in for the fixed daemon by echoing that id back as pending.
     let partial: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               const md = "Some long text here\n";
               window.__execs = [];
-              window.__mockProgramHandlers["program.get"] = () => ({ program: { session_id: "s-partial", markdown: md, version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] });
-              window.__mockProgramHandlers["program.execute"] = (p) => {
+              window.__mockPlaybookHandlers["playbook.get"] = () => ({ playbook: { session_id: "s-partial", markdown: md, version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] });
+              window.__mockPlaybookHandlers["playbook.execute"] = (p) => {
                 window.__execs.push(p);
                 const now = Date.now();
                 const realId = (p.selection_block_ids && p.selection_block_ids[0]) || "phantom-no-ids-sent";
                 return {
-                  program: { session_id: "s-partial", markdown: md, version: 1, template_id: null },
+                  playbook: { session_id: "s-partial", markdown: md, version: 1, template_id: null },
                   blocks: [],
                   active_run: { run_id: "r-partial", started_at_ms: now, expires_at_ms: now + 60000, pending_block_ids: [], pending_block_refs: [realId], pending_block_tooltips: {}, seen_running: false, first_output_seen: false, agent_managed: false },
                 };
               };
               setSession("s-partial", "shell");
-              await switchCurrentViewMode("program");
+              await switchCurrentViewMode("playbook");
               // Select "long text" out of "Some long text here" — a strict
               // substring of the single line/block, not the whole line.
-              programTestSelectRange(0, 5, 14);
-              await programRun();
-              const line = programInputEl.querySelectorAll(":scope > div")[0];
+              playbookTestSelectRange(0, 5, 14);
+              await playbookRun();
+              const line = playbookInputEl.querySelectorAll(":scope > div")[0];
               return {
                 execs: window.__execs,
-                realBlockId: programBlockSpans(md)[0].id,
+                realBlockId: playbookBlockSpans(md)[0].id,
                 shimmering: line.classList.contains("is-running"),
               };
             })
@@ -649,34 +649,34 @@ async fn web_program_view_full_parity() {
     let clip: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-clip", markdown: "ping ", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-clip", markdown: "ping ", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               state.sessions = [{ id: "sAAA111", title: "Builder", harness: "claude", state: "running", kind: "user" }, { id: "s-clip", harness: "shell", kind: "user" }];
               state.harnesses = [{ name: "codex", available: true }, { name: "claude", available: true }];
               state.currentId = "s-clip";
-              await switchCurrentViewMode("program");
-              programTestSet("ping @");
-              programTestCaretEnd();
-              programUpdateClipMenu();
-              const menuOpen = !programClipMenuEl.hidden;
-              const itemCount = programClipMenuEl.querySelectorAll("[data-sel]").length;
+              await switchCurrentViewMode("playbook");
+              playbookTestSet("ping @");
+              playbookTestCaretEnd();
+              playbookUpdateClipMenu();
+              const menuOpen = !playbookClipMenuEl.hidden;
+              const itemCount = playbookClipMenuEl.querySelectorAll("[data-sel]").length;
               // Arrow-down selects the 2nd item; the keyup must NOT reset it to 0.
-              const sel0 = state.program.clip.selected;
-              programInputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-              const selAfterDown = state.program.clip.selected;
-              programInputEl.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowDown", bubbles: true }));
-              const selAfterKeyup = state.program.clip.selected;
-              programAcceptClip(0);
+              const sel0 = state.playbook.clip.selected;
+              playbookInputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+              const selAfterDown = state.playbook.clip.selected;
+              playbookInputEl.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowDown", bubbles: true }));
+              const selAfterKeyup = state.playbook.clip.selected;
+              playbookAcceptClip(0);
               return {
-                menuOpen, itemCount, value: programSerialize(), menuClosedAfter: programClipMenuEl.hidden,
+                menuOpen, itemCount, value: playbookSerialize(), menuClosedAfter: playbookClipMenuEl.hidden,
                 sel0, selAfterDown, selAfterKeyup,
                 // The chip is an atomic widget: its visible text is the friendly
                 // label; the raw @{…} lives only in data-raw, never as text.
-                chipHasLabel: programInputEl.textContent.includes("Builder"),
-                chipShowsRaw: programInputEl.textContent.includes("@{session:sAAA111"),
-                chipIsAtomic: !!programInputEl.querySelector('.program-clip[contenteditable="false"]'),
+                chipHasLabel: playbookInputEl.textContent.includes("Builder"),
+                chipShowsRaw: playbookInputEl.textContent.includes("@{session:sAAA111"),
+                chipIsAtomic: !!playbookInputEl.querySelector('.playbook-clip[contenteditable="false"]'),
               };
             })
             "###,
@@ -718,18 +718,18 @@ async fn web_program_view_full_parity() {
     let find: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-find", markdown: "todo one\ntodo two\ndone three\ntodo four\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-find", markdown: "todo one\ntodo two\ndone three\ntodo four\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               setSession("s-find", "shell");
-              await switchCurrentViewMode("program");
-              programOpenFind();
-              programFindInputEl.value = "todo";
-              programRecomputeFind();
-              const count = programFindCountEl.textContent;
-              programFindMove(1);
-              return { findVisible: !programFindEl.hidden, count, countAfterNext: programFindCountEl.textContent, matchCount: state.program.find.matches.length };
+              await switchCurrentViewMode("playbook");
+              playbookOpenFind();
+              playbookFindInputEl.value = "todo";
+              playbookRecomputeFind();
+              const count = playbookFindCountEl.textContent;
+              playbookFindMove(1);
+              return { findVisible: !playbookFindEl.hidden, count, countAfterNext: playbookFindCountEl.textContent, matchCount: state.playbook.find.matches.length };
             })
             "###,
         )
@@ -746,23 +746,23 @@ async fn web_program_view_full_parity() {
     let ctrl_f: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-ctrlf", markdown: "abcdef\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-ctrlf", markdown: "abcdef\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               setSession("s-ctrlf", "shell");
-              await switchCurrentViewMode("program");
-              const before = programRangeForOffset(2);
+              await switchCurrentViewMode("playbook");
+              const before = playbookRangeForOffset(2);
               const sel = window.getSelection();
               sel.removeAllRanges();
               sel.addRange(before);
               const ev = new KeyboardEvent("keydown", { key: "f", ctrlKey: true, bubbles: true, cancelable: true });
-              const defaultPrevented = !programInputEl.dispatchEvent(ev);
-              const offsets = programSelectionOffsets();
+              const defaultPrevented = !playbookInputEl.dispatchEvent(ev);
+              const offsets = playbookSelectionOffsets();
               return {
                 defaultPrevented,
                 head: offsets ? offsets.head : null,
-                findVisible: !programFindEl.hidden,
+                findVisible: !playbookFindEl.hidden,
               };
             })
             "###,
@@ -781,25 +781,25 @@ async fn web_program_view_full_parity() {
     );
     assert_eq!(
         ctrl_f["findVisible"], false,
-        "Ctrl+F must not open the Program Find bar either: {ctrl_f:?}"
+        "Ctrl+F must not open the Playbook Find bar either: {ctrl_f:?}"
     );
 
-    // --- 10. Live program/state: adopt when clean, keep when dirty. ----------
+    // --- 10. Live playbook/state: adopt when clean, keep when dirty. ----------
     let live: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-live", markdown: "v1 body\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-live", markdown: "v1 body\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               setSession("s-live", "shell");
-              await switchCurrentViewMode("program");
-              handleProgramState({ program: { session_id: "s-live", markdown: "agent edit v2\n", version: 2, template_id: null }, active_run: null });
-              const adopted = programSerialize();
-              const adoptedVersion = programVersionEl.textContent;
-              programTestSet("agent edit v2\nmy unsaved line\n");
-              handleProgramState({ program: { session_id: "s-live", markdown: "agent edit v3 different\n", version: 3, template_id: null }, active_run: null });
-              return { adopted, adoptedVersion, keptDirty: programSerialize(), dirty: programSaveBtn.getAttribute("data-dirty") };
+              await switchCurrentViewMode("playbook");
+              handlePlaybookState({ playbook: { session_id: "s-live", markdown: "agent edit v2\n", version: 2, template_id: null }, active_run: null });
+              const adopted = playbookSerialize();
+              const adoptedVersion = playbookVersionEl.textContent;
+              playbookTestSet("agent edit v2\nmy unsaved line\n");
+              handlePlaybookState({ playbook: { session_id: "s-live", markdown: "agent edit v3 different\n", version: 3, template_id: null }, active_run: null });
+              return { adopted, adoptedVersion, keptDirty: playbookSerialize(), dirty: playbookSaveBtn.getAttribute("data-dirty") };
             })
             "###,
         )
@@ -821,43 +821,43 @@ async fn web_program_view_full_parity() {
     let run_state: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-run-state", markdown: "- pending\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-run-state", markdown: "- pending\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               const md = "- pending\n";
               setSession("s-run-state", "shell");
-              await switchCurrentViewMode("program");
-              const id = programBlockSpans(md)[0].id;
-              programStartOptimisticRun("s-run-state", md, false, null, "");
-              handleProgramState({ program: { session_id: "s-run-state", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [] });
-              const kept = state.program.runById.get("s-run-state");
-              const settleAfterKept = state.program.settleById.get("s-run-state")?.size || 0;
+              await switchCurrentViewMode("playbook");
+              const id = playbookBlockSpans(md)[0].id;
+              playbookStartOptimisticRun("s-run-state", md, false, null, "");
+              handlePlaybookState({ playbook: { session_id: "s-run-state", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [] });
+              const kept = state.playbook.runById.get("s-run-state");
+              const settleAfterKept = state.playbook.settleById.get("s-run-state")?.size || 0;
               const now = Date.now();
-              handleProgramState({
-                program: { session_id: "s-run-state", markdown: md, version: 2, template_id: null },
+              handlePlaybookState({
+                playbook: { session_id: "s-run-state", markdown: md, version: 2, template_id: null },
                 active_run: { run_id: "r1", started_at_ms: now - 1000, expires_at_ms: now + 60000, pending_block_ids: [id], pending_block_tooltips: {}, seen_running: true, first_output_seen: false, agent_managed: false },
                 blocks: [],
               });
-              const confirmed = state.program.runById.get("s-run-state");
-              handleProgramState({ program: { session_id: "s-run-state", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [] });
-              const survivedStaleClear = state.program.runById.has("s-run-state");
-              const grace = typeof PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS === "number" ? PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS : 1500;
-              const adopted = state.program.runById.get("s-run-state");
+              const confirmed = state.playbook.runById.get("s-run-state");
+              handlePlaybookState({ playbook: { session_id: "s-run-state", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [] });
+              const survivedStaleClear = state.playbook.runById.has("s-run-state");
+              const grace = typeof PLAYBOOK_RUN_ADOPT_CLEAR_GRACE_MS === "number" ? PLAYBOOK_RUN_ADOPT_CLEAR_GRACE_MS : 1500;
+              const adopted = state.playbook.runById.get("s-run-state");
               if (adopted) adopted.daemonAdoptedPerf = performance.now() - grace - 1;
-              handleProgramState({ program: { session_id: "s-run-state", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [] });
+              handlePlaybookState({ playbook: { session_id: "s-run-state", markdown: md, version: 2, template_id: null }, active_run: null, blocks: [] });
               return {
                 keptPending: kept ? kept.pendingIds.size : 0,
                 settleAfterKept,
                 confirmedPending: confirmed ? confirmed.pendingIds.size : 0,
                 survivedStaleClear,
-                cleared: !state.program.runById.has("s-run-state"),
+                cleared: !state.playbook.runById.has("s-run-state"),
               };
             })
             "###,
         )
         .await
-        .expect("evaluate program run state")
+        .expect("evaluate playbook run state")
         .into_value()
         .expect("json");
     assert_eq!(
@@ -885,37 +885,37 @@ async fn web_program_view_full_parity() {
     let collab: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-collab", markdown: "abc\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [], collaborators: [] }),
-              "program.list_templates": () => ({ templates: [] }),
-              "program.edit": (p) => {
-                window.__programEdits.push(p);
-                return { program: { session_id: "s-collab", markdown: "abcX\n", version: 2, template_id: null }, active_run: null, blocks: [] };
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-collab", markdown: "abc\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [], collaborators: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
+              "playbook.edit": (p) => {
+                window.__playbookEdits.push(p);
+                return { playbook: { session_id: "s-collab", markdown: "abcX\n", version: 2, template_id: null }, active_run: null, blocks: [] };
               },
-              "program.cursor": (p) => {
-                window.__programCursors.push(p);
+              "playbook.cursor": (p) => {
+                window.__playbookCursors.push(p);
                 return { cursor: { session_id: p.session_id, client_id: "web-self", label: "Web", kind: "web", cursor: p.cursor, color_index: 1, updated_at_ms: Date.now(), active: !p.clear } };
               },
             }, async () => {
-              window.__programEdits = [];
-              window.__programCursors = [];
+              window.__playbookEdits = [];
+              window.__playbookCursors = [];
               setSession("s-collab", "shell");
-              await switchCurrentViewMode("program");
-              programTestCaretEnd();
+              await switchCurrentViewMode("playbook");
+              playbookTestCaretEnd();
               document.execCommand("insertText", false, "X");
               await new Promise((r) => setTimeout(r, 120));
-              handleProgramCursor({ cursor: { session_id: "s-collab", client_id: "peer-1", label: "TUI", kind: "tui", cursor: 1, color_index: 2, updated_at_ms: Date.now(), active: true } });
+              handlePlaybookCursor({ cursor: { session_id: "s-collab", client_id: "peer-1", label: "TUI", kind: "tui", cursor: 1, color_index: 2, updated_at_ms: Date.now(), active: true } });
               // A peer that stopped publishing over a minute ago must not
               // render, even though the daemon never sent an explicit
               // tombstone for it (e.g. the peer's connection is just idle).
-              handleProgramCursor({ cursor: { session_id: "s-collab", client_id: "peer-2", label: "Stale", kind: "tui", cursor: 2, color_index: 3, updated_at_ms: Date.now() - 61000, active: true } });
+              handlePlaybookCursor({ cursor: { session_id: "s-collab", client_id: "peer-2", label: "Stale", kind: "tui", cursor: 2, color_index: 3, updated_at_ms: Date.now() - 61000, active: true } });
               return {
-                text: programSerialize(),
-                editCount: window.__programEdits.length,
-                firstEdit: window.__programEdits[0] || null,
-                cursorCount: window.__programCursors.length,
-                remoteCursorCount: programCursorLayerEl.querySelectorAll(".program-remote-cursor").length,
-                remoteLabel: programCursorLayerEl.querySelector(".program-remote-cursor")?.dataset.label || "",
+                text: playbookSerialize(),
+                editCount: window.__playbookEdits.length,
+                firstEdit: window.__playbookEdits[0] || null,
+                cursorCount: window.__playbookCursors.length,
+                remoteCursorCount: playbookCursorLayerEl.querySelectorAll(".playbook-remote-cursor").length,
+                remoteLabel: playbookCursorLayerEl.querySelector(".playbook-remote-cursor")?.dataset.label || "",
               };
             })
             "###,
@@ -930,7 +930,7 @@ async fn web_program_view_full_parity() {
     );
     assert_eq!(
         collab["editCount"], 1,
-        "one live program.edit should be sent: {collab:?}"
+        "one live playbook.edit should be sent: {collab:?}"
     );
     assert_eq!(collab["firstEdit"]["session_id"], "s-collab", "{collab:?}");
     assert_eq!(
@@ -948,27 +948,27 @@ async fn web_program_view_full_parity() {
     let own_cursor: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-own-cursor", markdown: "123456789\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [], collaborators: [] }),
-              "program.list_templates": () => ({ templates: [] }),
-              "program.cursor": (p) => {
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-own-cursor", markdown: "123456789\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [], collaborators: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
+              "playbook.cursor": (p) => {
                 return { cursor: { session_id: p.session_id, client_id: "web-self", label: "Web", kind: "web", cursor: p.cursor, color_index: 1, updated_at_ms: Date.now(), active: !p.clear } };
               },
             }, async () => {
               setSession("s-own-cursor", "shell");
-              await switchCurrentViewMode("program");
-              state.program.ownClientId = "web-self";
-              const before = programRangeForOffset(6);
+              await switchCurrentViewMode("playbook");
+              state.playbook.ownClientId = "web-self";
+              const before = playbookRangeForOffset(6);
               const sel = window.getSelection();
               sel.removeAllRanges();
               sel.addRange(before);
-              handleProgramState({ program: { session_id: "s-own-cursor", markdown: "12356789\n", version: 2, template_id: null }, active_run: null, blocks: [] });
-              handleProgramCursor({ cursor: { session_id: "s-own-cursor", client_id: "web-self", label: "Web 1", kind: "web", cursor: 5, color_index: 1, updated_at_ms: Date.now(), active: true } });
-              const offsets = programSelectionOffsets();
+              handlePlaybookState({ playbook: { session_id: "s-own-cursor", markdown: "12356789\n", version: 2, template_id: null }, active_run: null, blocks: [] });
+              handlePlaybookCursor({ cursor: { session_id: "s-own-cursor", client_id: "web-self", label: "Web 1", kind: "web", cursor: 5, color_index: 1, updated_at_ms: Date.now(), active: true } });
+              const offsets = playbookSelectionOffsets();
               return {
-                text: programSerialize(),
+                text: playbookSerialize(),
                 head: offsets ? offsets.head : null,
-                remoteCursorCount: programCursorLayerEl.querySelectorAll(".program-remote-cursor").length,
+                remoteCursorCount: playbookCursorLayerEl.querySelectorAll(".playbook-remote-cursor").length,
               };
             })
             "###,
@@ -987,26 +987,26 @@ async fn web_program_view_full_parity() {
         "own cursor should not render as a remote overlay: {own_cursor:?}"
     );
 
-    // --- 12b. Live program/state adopt rebases the caret through the content
+    // --- 12b. Live playbook/state adopt rebases the caret through the content
     //          diff instead of merely clamping it (spec 0065). An insertion
     //          lands before the caret, with no own-cursor echo to correct it
     //          afterward — the adopt path itself must shift the caret.
     let adopt_caret: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-adopt-caret", markdown: "alpha beta\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-adopt-caret", markdown: "alpha beta\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               setSession("s-adopt-caret", "shell");
-              await switchCurrentViewMode("program");
-              const before = programRangeForOffset(10);
+              await switchCurrentViewMode("playbook");
+              const before = playbookRangeForOffset(10);
               const sel = window.getSelection();
               sel.removeAllRanges();
               sel.addRange(before);
-              handleProgramState({ program: { session_id: "s-adopt-caret", markdown: "alpha INSERTED beta\n", version: 2, template_id: null }, active_run: null, blocks: [] });
-              const offsets = programSelectionOffsets();
-              return { text: programSerialize(), head: offsets ? offsets.head : null };
+              handlePlaybookState({ playbook: { session_id: "s-adopt-caret", markdown: "alpha INSERTED beta\n", version: 2, template_id: null }, active_run: null, blocks: [] });
+              const offsets = playbookSelectionOffsets();
+              return { text: playbookSerialize(), head: offsets ? offsets.head : null };
             })
             "###,
         )
@@ -1031,17 +1031,17 @@ async fn web_program_view_full_parity() {
     let badges: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-badges", markdown: "@{session:sBadge1} @{session:sGone}\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
-              "program.list_templates": () => ({ templates: [] }),
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-badges", markdown: "@{session:sBadge1} @{session:sGone}\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
             }, async () => {
               state.sessions = [
                 { id: "s-badges", harness: "shell", kind: "user" },
                 { id: "sBadge1", title: "Worker", harness: "claude", state: "running", last_pty_at_ms: Date.now(), kind: "user" },
               ];
               state.currentId = "s-badges";
-              await switchCurrentViewMode("program");
-              const chipInfo = () => Array.from(programInputEl.querySelectorAll(".program-clip[data-raw]"))
+              await switchCurrentViewMode("playbook");
+              const chipInfo = () => Array.from(playbookInputEl.querySelectorAll(".playbook-clip[data-raw]"))
                 .map((c) => ({ status: c.dataset.status, title: c.title, active: c.classList.contains("is-active") }));
               const before = chipInfo();
               handleNotification("session/state", { session: { id: "sBadge1", title: "Worker", harness: "claude", state: "errored", kind: "user" } });
@@ -1102,21 +1102,21 @@ async fn web_program_view_full_parity() {
     let agent_presence: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({ program: { session_id: "s-agent-presence", markdown: "123456789\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [], collaborators: [] }),
-              "program.list_templates": () => ({ templates: [] }),
-              "program.cursor": (p) => {
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-agent-presence", markdown: "123456789\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [], collaborators: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
+              "playbook.cursor": (p) => {
                 return { cursor: { session_id: p.session_id, client_id: "web-self", label: "Web", kind: "web", cursor: p.cursor, color_index: 1, updated_at_ms: Date.now(), active: !p.clear } };
               },
             }, async () => {
               setSession("s-agent-presence", "shell");
-              await switchCurrentViewMode("program");
-              handleProgramCursor({ cursor: { session_id: "s-agent-presence", client_id: "agent-1", label: "claude", kind: "agent", cursor: 6, selection_anchor: 3, selection_head: 6, color_index: 2, updated_at_ms: Date.now(), active: true } });
-              const agentEl = programCursorLayerEl.querySelector('.program-remote-cursor[data-kind="agent"]');
+              await switchCurrentViewMode("playbook");
+              handlePlaybookCursor({ cursor: { session_id: "s-agent-presence", client_id: "agent-1", label: "claude", kind: "agent", cursor: 6, selection_anchor: 3, selection_head: 6, color_index: 2, updated_at_ms: Date.now(), active: true } });
+              const agentEl = playbookCursorLayerEl.querySelector('.playbook-remote-cursor[data-kind="agent"]');
               return {
-                agentCursorCount: programCursorLayerEl.querySelectorAll('.program-remote-cursor[data-kind="agent"]').length,
+                agentCursorCount: playbookCursorLayerEl.querySelectorAll('.playbook-remote-cursor[data-kind="agent"]').length,
                 agentLabel: agentEl ? agentEl.dataset.label : "",
-                revealCount: programCursorLayerEl.querySelectorAll(".program-agent-reveal").length,
+                revealCount: playbookCursorLayerEl.querySelectorAll(".playbook-agent-reveal").length,
               };
             })
             "###,
@@ -1135,7 +1135,7 @@ async fn web_program_view_full_parity() {
         "the edited span should get a brief reveal highlight: {agent_presence:?}"
     );
 
-    // --- 14b. Same reveal, but for a cursor arriving in the `program.get`
+    // --- 14b. Same reveal, but for a cursor arriving in the `playbook.get`
     //     mount snapshot rather than a live push. There is no local receipt
     //     for a cursor this client never watched arrive, so this path must
     //     keep gating on the daemon's own `updated_at_ms`: a cursor from
@@ -1145,24 +1145,24 @@ async fn web_program_view_full_parity() {
     let agent_presence_snapshot: serde_json::Value = page
         .evaluate(
             r###"
-            withMockProgram({
-              "program.get": () => ({
-                program: { session_id: "s-agent-presence-snapshot", markdown: "123456789\n", version: 1, template_id: null },
+            withMockPlaybook({
+              "playbook.get": () => ({
+                playbook: { session_id: "s-agent-presence-snapshot", markdown: "123456789\n", version: 1, template_id: null },
                 active_run: null, blocks: [], revisions: [],
                 collaborators: [
                   { session_id: "s-agent-presence-snapshot", client_id: "agent-fresh", label: "claude", kind: "agent", cursor: 6, selection_anchor: 3, selection_head: 6, color_index: 2, updated_at_ms: Date.now(), active: true },
                   { session_id: "s-agent-presence-snapshot", client_id: "agent-stale", label: "claude", kind: "agent", cursor: 6, selection_anchor: 3, selection_head: 6, color_index: 3, updated_at_ms: Date.now() - 30000, active: true },
                 ],
               }),
-              "program.list_templates": () => ({ templates: [] }),
-              "program.cursor": (p) => {
+              "playbook.list_templates": () => ({ templates: [] }),
+              "playbook.cursor": (p) => {
                 return { cursor: { session_id: p.session_id, client_id: "web-self", label: "Web", kind: "web", cursor: p.cursor, color_index: 1, updated_at_ms: Date.now(), active: !p.clear } };
               },
             }, async () => {
               setSession("s-agent-presence-snapshot", "shell");
-              await switchCurrentViewMode("program");
+              await switchCurrentViewMode("playbook");
               return {
-                revealCount: programCursorLayerEl.querySelectorAll(".program-agent-reveal").length,
+                revealCount: playbookCursorLayerEl.querySelectorAll(".playbook-agent-reveal").length,
               };
             })
             "###,
@@ -1177,7 +1177,7 @@ async fn web_program_view_full_parity() {
          {agent_presence_snapshot:?}"
     );
 
-    // --- Visual artifacts: drive the REAL session's program (it has a smart
+    // --- Visual artifacts: drive the REAL session's playbook (it has a smart
     //     clip from step 1) and leave it mounted so the screenshots show the
     //     genuine rendered surface, chip, and run shimmer. ------------------
     page.evaluate(
@@ -1187,43 +1187,43 @@ async fn web_program_view_full_parity() {
           const sid = (list.find((s) => s.harness === "shell") || list[0]).id;
           state.sessions = list;
           state.currentId = sid;
-          await switchCurrentViewMode("program");
+          await switchCurrentViewMode("playbook");
           return true;
         })()
         "###,
     )
     .await
     .ok();
-    screenshot(&page, "program_view_rendered.png").await;
+    screenshot(&page, "playbook_view_rendered.png").await;
     page.evaluate(
         r###"
         (() => {
-          const sid = state.program.mountedId;
-          programStartOptimisticRun(sid, programSerialize(), false, null);
-          programApplyShimmer();
+          const sid = state.playbook.mountedId;
+          playbookStartOptimisticRun(sid, playbookSerialize(), false, null);
+          playbookApplyShimmer();
           return true;
         })()
         "###,
     )
     .await
     .ok();
-    screenshot(&page, "program_view_shimmer.png").await;
+    screenshot(&page, "playbook_view_shimmer.png").await;
     page.evaluate(
         r###"
         (() => {
-          programStopShimmer();
-          state.program.runById.clear();
-          programTestSet(programSerialize() + "\nrun @");
-          programTestCaretEnd();
-          programInputEl.focus();
-          programUpdateClipMenu();
+          playbookStopShimmer();
+          state.playbook.runById.clear();
+          playbookTestSet(playbookSerialize() + "\nrun @");
+          playbookTestCaretEnd();
+          playbookInputEl.focus();
+          playbookUpdateClipMenu();
           return true;
         })()
         "###,
     )
     .await
     .ok();
-    screenshot(&page, "program_view_clip_menu.png").await;
+    screenshot(&page, "playbook_view_clip_menu.png").await;
 
     page.evaluate("enterChatMode(); true").await.ok();
 }
@@ -1233,7 +1233,7 @@ async fn web_program_view_full_parity() {
 /// mechanically — no browser needed, this drives the real daemon IPC surface
 /// directly like the other e2e helpers in this crate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn program_instant_dispatch_fast_path() {
+async fn playbook_instant_dispatch_fast_path() {
     let d = Daemon::spawn().await.expect("daemon");
     let cwd = d.dir.path().to_string_lossy().to_string();
 
@@ -1246,33 +1246,33 @@ async fn program_instant_dispatch_fast_path() {
     let md = "# Todo\n\n- Print hello @{harness:shell}\n";
     let updated = d
         .client
-        .program_update(construct_protocol::ProgramUpdateParams {
+        .playbook_update(construct_protocol::PlaybookUpdateParams {
             session_id: owner.clone(),
             markdown: md.to_string(),
             base_version: None,
-            actor: construct_protocol::ProgramUpdateActor::Human,
+            actor: construct_protocol::PlaybookUpdateActor::Human,
             template_id: None,
             note: None,
             shimmer: None,
             shimmer_tooltips: None,
         })
         .await
-        .expect("program.update");
+        .expect("playbook.update");
 
     let item_text = "- Print hello @{harness:shell}";
     let result = d
         .client
-        .program_execute(construct_protocol::ProgramExecuteParams {
+        .playbook_execute(construct_protocol::PlaybookExecuteParams {
             session_id: owner.clone(),
             selection: Some(item_text.to_string()),
-            base_version: Some(updated.program.version),
+            base_version: Some(updated.playbook.version),
             shimmer: None,
             selection_block_ids: None,
             comment: None,
             fork: false,
         })
         .await
-        .expect("program.execute");
+        .expect("playbook.execute");
 
     // No LLM round trip: the fast path never delivers a prompt to the owner.
     assert_eq!(result.prompt, "", "fast path must not deliver a prompt");
@@ -1295,18 +1295,18 @@ async fn program_instant_dispatch_fast_path() {
     let subagent = subagents[0];
     assert_eq!(subagent.harness, "shell");
 
-    // The program was annotated with the new subagent's session clip,
+    // The playbook was annotated with the new subagent's session clip,
     // alongside (not replacing) the original harness clip.
     let expected_clip = format!("@{{session:{}}}", subagent.id);
     assert!(
-        result.program.markdown.contains(&expected_clip),
-        "program should carry the new subagent's session clip: {}",
-        result.program.markdown
+        result.playbook.markdown.contains(&expected_clip),
+        "playbook should carry the new subagent's session clip: {}",
+        result.playbook.markdown
     );
     assert!(
-        result.program.markdown.contains("@{harness:shell}"),
+        result.playbook.markdown.contains("@{harness:shell}"),
         "the original harness clip should stay: {}",
-        result.program.markdown
+        result.playbook.markdown
     );
 
     // The dispatched item shimmers with the "Dispatched" tooltip, and the
@@ -1328,10 +1328,10 @@ async fn program_instant_dispatch_fast_path() {
         "a fast-pathed run is actively managed via its shimmer declaration"
     );
 
-    // Re-reading the program from a clean call agrees with the execute
+    // Re-reading the playbook from a clean call agrees with the execute
     // response — the run state is daemon-owned shared state, not a
     // client-local optimistic artifact.
-    let refetched = d.client.program_get(&owner).await.expect("program.get");
+    let refetched = d.client.playbook_get(&owner).await.expect("playbook.get");
     assert!(refetched
         .active_run
         .is_some_and(|run| run.agent_managed && !run.pending_block_refs.is_empty()));
@@ -1342,7 +1342,7 @@ async fn program_instant_dispatch_fast_path() {
 /// created for the matching item either (spec 0066: mixed selections are
 /// all-or-nothing, never partially fast-pathed).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn program_instant_dispatch_mixed_selection_falls_through() {
+async fn playbook_instant_dispatch_mixed_selection_falls_through() {
     let d = Daemon::spawn().await.expect("daemon");
     let cwd = d.dir.path().to_string_lossy().to_string();
 
@@ -1354,23 +1354,23 @@ async fn program_instant_dispatch_mixed_selection_falls_through() {
 
     let md = "- Fix the bug @{harness:shell}\n- Investigate the timeout\n";
     d.client
-        .program_update(construct_protocol::ProgramUpdateParams {
+        .playbook_update(construct_protocol::PlaybookUpdateParams {
             session_id: owner.clone(),
             markdown: md.to_string(),
             base_version: None,
-            actor: construct_protocol::ProgramUpdateActor::Human,
+            actor: construct_protocol::PlaybookUpdateActor::Human,
             template_id: None,
             note: None,
             shimmer: None,
             shimmer_tooltips: None,
         })
         .await
-        .expect("program.update");
+        .expect("playbook.update");
 
     let selection = "- Fix the bug @{harness:shell}\n- Investigate the timeout";
     let result = d
         .client
-        .program_execute(construct_protocol::ProgramExecuteParams {
+        .playbook_execute(construct_protocol::PlaybookExecuteParams {
             session_id: owner.clone(),
             selection: Some(selection.to_string()),
             base_version: None,
@@ -1380,12 +1380,12 @@ async fn program_instant_dispatch_mixed_selection_falls_through() {
             fork: false,
         })
         .await
-        .expect("program.execute");
+        .expect("playbook.execute");
 
     // Normal path: a real prompt is delivered, and the document is untouched
     // by the execute call itself (the agent would edit it in its own turn).
     assert!(!result.prompt.is_empty(), "normal path delivers a prompt");
-    assert_eq!(result.program.markdown, md);
+    assert_eq!(result.playbook.markdown, md);
 
     // No subagent was spawned even though one item named a harness clip.
     let sessions = d.client.list().await.expect("list");
@@ -1405,7 +1405,7 @@ async fn program_instant_dispatch_mixed_selection_falls_through() {
 /// indentation from the first line and the anchor would never match the
 /// stored document.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn program_instant_dispatch_preserves_nested_indentation() {
+async fn playbook_instant_dispatch_preserves_nested_indentation() {
     let d = Daemon::spawn().await.expect("daemon");
     let cwd = d.dir.path().to_string_lossy().to_string();
 
@@ -1417,24 +1417,24 @@ async fn program_instant_dispatch_preserves_nested_indentation() {
 
     let md = "- Parent\n  - Fix nested bug @{harness:shell}\n";
     d.client
-        .program_update(construct_protocol::ProgramUpdateParams {
+        .playbook_update(construct_protocol::PlaybookUpdateParams {
             session_id: owner.clone(),
             markdown: md.to_string(),
             base_version: None,
-            actor: construct_protocol::ProgramUpdateActor::Human,
+            actor: construct_protocol::PlaybookUpdateActor::Human,
             template_id: None,
             note: None,
             shimmer: None,
             shimmer_tooltips: None,
         })
         .await
-        .expect("program.update");
+        .expect("playbook.update");
 
     // Selected exactly as it appears in the document, indentation included.
     let selection = "  - Fix nested bug @{harness:shell}";
     let result = d
         .client
-        .program_execute(construct_protocol::ProgramExecuteParams {
+        .playbook_execute(construct_protocol::PlaybookExecuteParams {
             session_id: owner.clone(),
             selection: Some(selection.to_string()),
             base_version: None,
@@ -1444,16 +1444,16 @@ async fn program_instant_dispatch_preserves_nested_indentation() {
             fork: false,
         })
         .await
-        .expect("program.execute");
+        .expect("playbook.execute");
 
     assert_eq!(result.prompt, "", "fast path must not deliver a prompt");
     assert!(
         result
-            .program
+            .playbook
             .markdown
             .contains("  - Fix nested bug @{harness:shell} @{session:"),
         "the nested item's original indentation must be preserved: {}",
-        result.program.markdown
+        result.playbook.markdown
     );
 }
 
@@ -1467,7 +1467,7 @@ async fn program_instant_dispatch_preserves_nested_indentation() {
 /// either vanished or sat unsubmitted in the input box — the fork just
 /// idled forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn program_selection_fork_run_delivers_and_submits_prompt() {
+async fn playbook_selection_fork_run_delivers_and_submits_prompt() {
     use base64::Engine as _;
 
     let d = Daemon::spawn().await.expect("daemon");
@@ -1482,32 +1482,32 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
     let md = "# Todo\n\n- say hello\n";
     let updated = d
         .client
-        .program_update(construct_protocol::ProgramUpdateParams {
+        .playbook_update(construct_protocol::PlaybookUpdateParams {
             session_id: owner.clone(),
             markdown: md.to_string(),
             base_version: None,
-            actor: construct_protocol::ProgramUpdateActor::Human,
+            actor: construct_protocol::PlaybookUpdateActor::Human,
             template_id: None,
             note: None,
             shimmer: None,
             shimmer_tooltips: None,
         })
         .await
-        .expect("program.update");
+        .expect("playbook.update");
 
     let result = d
         .client
-        .program_execute(construct_protocol::ProgramExecuteParams {
+        .playbook_execute(construct_protocol::PlaybookExecuteParams {
             session_id: owner.clone(),
             selection: Some("- say hello".to_string()),
-            base_version: Some(updated.program.version),
+            base_version: Some(updated.playbook.version),
             shimmer: None,
             selection_block_ids: None,
             comment: None,
             fork: true,
         })
         .await
-        .expect("program.execute");
+        .expect("playbook.execute");
 
     // The execute response names the fork, which exists, is interactive,
     // and records its lineage back to the owner.
@@ -1532,9 +1532,9 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
     // shimmers with a "Running" tooltip.
     let expected_clip = format!("- say hello @{{session:{fork_id}}}");
     assert!(
-        result.program.markdown.contains(&expected_clip),
+        result.playbook.markdown.contains(&expected_clip),
         "fork run should annotate the selection with the fork's session clip: {}",
-        result.program.markdown
+        result.playbook.markdown
     );
     let annotated_block = result
         .blocks
@@ -1547,9 +1547,9 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
         Some("Running"),
         "annotated block should carry the 'Running' tooltip"
     );
-    let refetched = d.client.program_get(&owner).await.expect("program.get");
+    let refetched = d.client.playbook_get(&owner).await.expect("playbook.get");
     assert!(
-        refetched.program.markdown.contains(&expected_clip),
+        refetched.playbook.markdown.contains(&expected_clip),
         "the clip annotation is persisted daemon-side, not response-local"
     );
 
@@ -1557,7 +1557,7 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
     // typed input, so a distinctive token from the prompt appearing in the
     // fork's PTY log proves the paste landed after the harness was ready
     // (delivery is gated on the fork's startup draw settling first).
-    let needle = "construct program autonomously";
+    let needle = "construct playbook autonomously";
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let replay = d.client.pty_replay(&fork_id).await.expect("pty_replay");
@@ -1569,7 +1569,7 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
             break;
         }
         if Instant::now() > deadline {
-            panic!("fork PTY never showed the program prompt; log so far:\n{text}");
+            panic!("fork PTY never showed the playbook prompt; log so far:\n{text}");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -1580,7 +1580,7 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
     // after the fork archives. The settle runs inside archive itself, so
     // a single read after the call must already observe it.
     d.client.archive(&fork_id).await.expect("archive fork");
-    let refetched = d.client.program_get(&owner).await.expect("program.get");
+    let refetched = d.client.playbook_get(&owner).await.expect("playbook.get");
     let still_pending = refetched
         .active_run
         .as_ref()
@@ -1604,7 +1604,7 @@ async fn program_selection_fork_run_delivers_and_submits_prompt() {
 /// The stand-in harness here reproduces that boot shape and reports any input
 /// that reached it before it was ready.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn program_fork_run_waits_for_harness_readiness_before_pasting() {
+async fn playbook_fork_run_waits_for_harness_readiness_before_pasting() {
     use base64::Engine as _;
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -1673,32 +1673,32 @@ async fn program_fork_run_waits_for_harness_readiness_before_pasting() {
 
     let updated = d
         .client
-        .program_update(construct_protocol::ProgramUpdateParams {
+        .playbook_update(construct_protocol::PlaybookUpdateParams {
             session_id: owner.clone(),
             markdown: "# Todo\n\n- say hello\n".to_string(),
             base_version: None,
-            actor: construct_protocol::ProgramUpdateActor::Human,
+            actor: construct_protocol::PlaybookUpdateActor::Human,
             template_id: None,
             note: None,
             shimmer: None,
             shimmer_tooltips: None,
         })
         .await
-        .expect("program.update");
+        .expect("playbook.update");
 
     let result = d
         .client
-        .program_execute(construct_protocol::ProgramExecuteParams {
+        .playbook_execute(construct_protocol::PlaybookExecuteParams {
             session_id: owner.clone(),
             selection: Some("- say hello".to_string()),
-            base_version: Some(updated.program.version),
+            base_version: Some(updated.playbook.version),
             shimmer: None,
             selection_block_ids: None,
             comment: None,
             fork: true,
         })
         .await
-        .expect("program.execute");
+        .expect("playbook.execute");
     let fork_id = result
         .execution_session_id
         .clone()
@@ -1707,7 +1707,7 @@ async fn program_fork_run_waits_for_harness_readiness_before_pasting() {
     // The prompt still gets delivered — the fix is about *when*, not whether.
     // Wait for the boot phase to finish too, so the early-input verdict below
     // is actually decided rather than raced past.
-    let needle = "construct program autonomously";
+    let needle = "construct playbook autonomously";
     let deadline = Instant::now() + Duration::from_secs(30);
     let text = loop {
         let replay = d.client.pty_replay(&fork_id).await.expect("pty_replay");
@@ -1720,7 +1720,7 @@ async fn program_fork_run_waits_for_harness_readiness_before_pasting() {
         }
         if Instant::now() > deadline {
             panic!(
-                "fork PTY never showed both the program prompt and a completed \
+                "fork PTY never showed both the playbook prompt and a completed \
                  boot phase; log so far:\n{text}"
             );
         }
@@ -1737,10 +1737,10 @@ async fn program_fork_run_waits_for_harness_readiness_before_pasting() {
 }
 
 /// The owner-targeted counterpart (Shift+Run / non-fork callers): the work
-/// stays in the Program-owning session the user is already looking at, so
+/// stays in the Playbook-owning session the user is already looking at, so
 /// no session clip is added to the selection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn program_selection_owner_run_adds_no_session_clip() {
+async fn playbook_selection_owner_run_adds_no_session_clip() {
     let d = Daemon::spawn().await.expect("daemon");
     let cwd = d.dir.path().to_string_lossy().to_string();
 
@@ -1753,32 +1753,32 @@ async fn program_selection_owner_run_adds_no_session_clip() {
     let md = "# Todo\n\n- say hello\n";
     let updated = d
         .client
-        .program_update(construct_protocol::ProgramUpdateParams {
+        .playbook_update(construct_protocol::PlaybookUpdateParams {
             session_id: owner.clone(),
             markdown: md.to_string(),
             base_version: None,
-            actor: construct_protocol::ProgramUpdateActor::Human,
+            actor: construct_protocol::PlaybookUpdateActor::Human,
             template_id: None,
             note: None,
             shimmer: None,
             shimmer_tooltips: None,
         })
         .await
-        .expect("program.update");
+        .expect("playbook.update");
 
     let result = d
         .client
-        .program_execute(construct_protocol::ProgramExecuteParams {
+        .playbook_execute(construct_protocol::PlaybookExecuteParams {
             session_id: owner.clone(),
             selection: Some("- say hello".to_string()),
-            base_version: Some(updated.program.version),
+            base_version: Some(updated.playbook.version),
             shimmer: None,
             selection_block_ids: None,
             comment: None,
             fork: false,
         })
         .await
-        .expect("program.execute");
+        .expect("playbook.execute");
 
     assert_eq!(
         result.execution_session_id.as_deref(),
@@ -1786,22 +1786,22 @@ async fn program_selection_owner_run_adds_no_session_clip() {
         "owner run executes on the owning session"
     );
     assert!(
-        !result.program.markdown.contains("@{session:"),
+        !result.playbook.markdown.contains("@{session:"),
         "owner run must not annotate the selection with a session clip: {}",
-        result.program.markdown
+        result.playbook.markdown
     );
-    let refetched = d.client.program_get(&owner).await.expect("program.get");
+    let refetched = d.client.playbook_get(&owner).await.expect("playbook.get");
     assert!(
-        !refetched.program.markdown.contains("@{session:"),
+        !refetched.playbook.markdown.contains("@{session:"),
         "no clip annotation daemon-side either"
     );
 }
 
-/// spec 0089/0137: a verb asked to run on the Program owner is delivered to
+/// spec 0089/0137: a verb asked to run on the Playbook owner is delivered to
 /// that session, never silently forked — and owner delivery implies the direct
 /// anchored edit, so it holds even when the caller left `direct_edit` unset.
 #[tokio::test]
-async fn program_verb_run_on_owner_never_forks() {
+async fn playbook_verb_run_on_owner_never_forks() {
     let d = Daemon::spawn().await.expect("daemon");
     let cwd = d.dir.path().to_string_lossy().to_string();
 
@@ -1822,42 +1822,42 @@ async fn program_verb_run_on_owner_never_forks() {
     let md = "# Todo\n\n- say hello\n";
     let updated = d
         .client
-        .program_update(construct_protocol::ProgramUpdateParams {
+        .playbook_update(construct_protocol::PlaybookUpdateParams {
             session_id: owner.clone(),
             markdown: md.to_string(),
             base_version: None,
-            actor: construct_protocol::ProgramUpdateActor::Human,
+            actor: construct_protocol::PlaybookUpdateActor::Human,
             template_id: None,
             note: None,
             shimmer: None,
             shimmer_tooltips: None,
         })
         .await
-        .expect("program.update");
+        .expect("playbook.update");
 
     let result = d
         .client
-        .program_verb_execute(construct_protocol::ProgramVerbExecuteParams {
+        .playbook_verb_execute(construct_protocol::PlaybookVerbExecuteParams {
             session_id: owner.clone(),
             verb: "simplify".to_string(),
             selection: "- say hello".to_string(),
-            base_version: Some(updated.program.version),
+            base_version: Some(updated.playbook.version),
             comment: None,
             selection_block_ids: None,
             run_on_owner: true,
             direct_edit: false,
         })
         .await
-        .expect("program.verb_execute");
+        .expect("playbook.verb_execute");
 
     assert_eq!(
         result.subagent_session_id, owner,
         "an owner-targeted verb runs on the owning session"
     );
     assert!(
-        !result.program.markdown.contains("@{session:"),
+        !result.playbook.markdown.contains("@{session:"),
         "owner verb must not annotate the selection with a session clip: {}",
-        result.program.markdown
+        result.playbook.markdown
     );
     let after: Vec<String> = d
         .client
@@ -1938,7 +1938,7 @@ async fn screenshot(page: &Page, name: &str) {
         .await
         .is_ok()
     {
-        eprintln!("program_view screenshot: {}", path.display());
+        eprintln!("playbook_view screenshot: {}", path.display());
     }
 }
 
@@ -1952,9 +1952,9 @@ fn inject_userinfo(url: &str, user: &str, pw: &str) -> String {
     }
 }
 
-/// Installs `window.setSession(id, harness)` and `window.withMockProgram(handlers, fn)`:
-/// the latter swaps in a fake `state.ws` answering the given program.* RPCs from
-/// `window.__mockProgramHandlers` (tests may mutate it mid-run), runs `fn`, then
+/// Installs `window.setSession(id, harness)` and `window.withMockPlaybook(handlers, fn)`:
+/// the latter swaps in a fake `state.ws` answering the given playbook.* RPCs from
+/// `window.__mockPlaybookHandlers` (tests may mutate it mid-run), runs `fn`, then
 /// restores every touched global.
 const SETUP_JS: &str = r###"
     window.setSession = function (id, harness) {
@@ -1962,22 +1962,22 @@ const SETUP_JS: &str = r###"
       state.currentId = id;
     };
     // contenteditable test helpers (the editor is no longer a <textarea>).
-    window.programTestSet = function (md) {
-      state.program.applyingRemote = true;
-      try { programRenderDoc(md); programOnInput(); }
-      finally { state.program.applyingRemote = false; }
+    window.playbookTestSet = function (md) {
+      state.playbook.applyingRemote = true;
+      try { playbookRenderDoc(md); playbookOnInput(); }
+      finally { state.playbook.applyingRemote = false; }
     };
-    window.programTestClearSel = function () { const s = window.getSelection(); if (s) s.removeAllRanges(); };
-    window.programTestCaretEnd = function () {
-      const walker = document.createTreeWalker(programInputEl, NodeFilter.SHOW_TEXT);
+    window.playbookTestClearSel = function () { const s = window.getSelection(); if (s) s.removeAllRanges(); };
+    window.playbookTestCaretEnd = function () {
+      const walker = document.createTreeWalker(playbookInputEl, NodeFilter.SHOW_TEXT);
       let last = null, n; while ((n = walker.nextNode())) last = n;
       const sel = window.getSelection(); sel.removeAllRanges();
       const r = document.createRange();
-      if (last) r.setStart(last, last.data.length); else r.setStart(programInputEl, 0);
+      if (last) r.setStart(last, last.data.length); else r.setStart(playbookInputEl, 0);
       r.collapse(true); sel.addRange(r);
     };
-    window.programTestSelectLines = function (a, b) {
-      const lines = programInputEl.querySelectorAll(":scope > div");
+    window.playbookTestSelectLines = function (a, b) {
+      const lines = playbookInputEl.querySelectorAll(":scope > div");
       const sel = window.getSelection(); sel.removeAllRanges();
       const r = document.createRange();
       r.setStart(lines[a], 0);
@@ -1987,8 +1987,8 @@ const SETUP_JS: &str = r###"
     // Selects characters [startCol, endCol) of a single line's first text
     // node — a strict SUBSTRING of the line, not the whole line, for testing
     // the partial-line selection Run fix.
-    window.programTestSelectRange = function (lineIndex, startCol, endCol) {
-      const line = programInputEl.querySelectorAll(":scope > div")[lineIndex];
+    window.playbookTestSelectRange = function (lineIndex, startCol, endCol) {
+      const line = playbookInputEl.querySelectorAll(":scope > div")[lineIndex];
       const textNode = line.firstChild;
       const sel = window.getSelection(); sel.removeAllRanges();
       const r = document.createRange();
@@ -1996,26 +1996,26 @@ const SETUP_JS: &str = r###"
       r.setEnd(textNode, endCol);
       sel.addRange(r);
     };
-    window.withMockProgram = async function (handlers, fn) {
+    window.withMockPlaybook = async function (handlers, fn) {
       const saved = {
         ws: state.ws, sessions: state.sessions, currentId: state.currentId,
         mode: state.mode, harnesses: state.harnesses,
-        docById: state.program.docById, runById: state.program.runById,
-        runButtonById: state.program.runButtonById,
-        templates: state.program.templates, mountedId: state.program.mountedId,
+        docById: state.playbook.docById, runById: state.playbook.runById,
+        runButtonById: state.playbook.runButtonById,
+        templates: state.playbook.templates, mountedId: state.playbook.mountedId,
       };
-      state.program.docById = new Map();
-      state.program.runById = new Map();
-      state.program.runButtonById = new Map();
-      state.program.templates = null;
-      window.__mockProgramHandlers = handlers;
+      state.playbook.docById = new Map();
+      state.playbook.runById = new Map();
+      state.playbook.runButtonById = new Map();
+      state.playbook.templates = null;
+      window.__mockPlaybookHandlers = handlers;
       state.ws = {
         readyState: 1,
         send(raw) {
           const msg = JSON.parse(raw);
           const pending = state.pending.get(msg.id);
           state.pending.delete(msg.id);
-          const h = window.__mockProgramHandlers[msg.method];
+          const h = window.__mockPlaybookHandlers[msg.method];
           queueMicrotask(() => {
             if (!h) { pending.resolve({}); return; }
             try { pending.resolve(h(msg.params)); } catch (e) { pending.reject(e); }
@@ -2024,12 +2024,12 @@ const SETUP_JS: &str = r###"
       };
       try { return await fn(); }
       finally {
-        try { leaveProgramView(); } catch (e) {}
+        try { leavePlaybookView(); } catch (e) {}
         state.ws = saved.ws; state.sessions = saved.sessions; state.currentId = saved.currentId;
         state.mode = saved.mode; state.harnesses = saved.harnesses;
-        state.program.docById = saved.docById; state.program.runById = saved.runById;
-        state.program.runButtonById = saved.runButtonById;
-        state.program.templates = saved.templates; state.program.mountedId = saved.mountedId;
+        state.playbook.docById = saved.docById; state.playbook.runById = saved.runById;
+        state.playbook.runButtonById = saved.runButtonById;
+        state.playbook.templates = saved.templates; state.playbook.mountedId = saved.mountedId;
       }
     };
     true

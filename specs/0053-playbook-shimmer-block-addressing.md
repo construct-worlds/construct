@@ -1,25 +1,25 @@
-# 0053-program-shimmer-block-addressing
+# 0053-playbook-shimmer-block-addressing
 
 Status: accepted
 Date: 2026-06-30
 Area: protocol
-Scope: How a program block's shimmer state is addressed and declared across program read, edit, update, and execute.
+Scope: How a playbook block's shimmer state is addressed and declared across playbook read, edit, update, and execute.
 
 ## Decision
 
-Program-block shimmer is a declared per-block state addressed by a daemon-owned stable block reference, not by position and not by inferred text changes.
+Playbook-block shimmer is a declared per-block state addressed by a daemon-owned stable block reference, not by position and not by inferred text changes.
 
 Definitions:
 
 - A **block** is a run of non-blank Markdown lines split at heading and list-item boundaries: each heading line, each list item (with its wrapped continuation lines), and each plain paragraph is its own block.
-- A **block id** identifies one block instance across moves and concurrent edits. It is a compact program-scoped hexadecimal ordinal (`b0`, `b1`, …), without fixed-width padding.
+- A **block id** identifies one block instance across moves and concurrent edits. It is a compact playbook-scoped hexadecimal ordinal (`b0`, `b1`, …), without fixed-width padding.
 - A **content epoch** increments when that block instance's semantic content changes.
-- A **block ref** is `block_id:content_epoch`. It is the authoritative shimmer address returned as each block's `id`/`block_ref` in program projections.
+- A **block ref** is `block_id:content_epoch`. It is the authoritative shimmer address returned as each block's `id`/`block_ref` in playbook projections.
 - A **content id** is the legacy normalized-content hash. It ignores smart-clip `clip_id` metadata and remains available as `content_id` for compatibility, but it is ambiguous for duplicate text and must not be preferred when block refs are available.
 
-The daemon stores block identity in program metadata and reconciles it whenever the Markdown changes. Unchanged content keeps its ref across moves. Metadata-only smart-clip instance-id changes keep the same ref. Semantic edits keep the block id but advance the epoch, producing a new ref so stale shimmer declarations do not attach to changed meaning. New blocks receive new block ids.
+The daemon stores block identity in playbook metadata and reconciles it whenever the Markdown changes. Unchanged content keeps its ref across moves. Metadata-only smart-clip instance-id changes keep the same ref. Semantic edits keep the block id but advance the epoch, producing a new ref so stale shimmer declarations do not attach to changed meaning. New blocks receive new block ids.
 
-Shimmer is carried across the program surfaces as follows:
+Shimmer is carried across the playbook surfaces as follows:
 
 - **Read** returns an ordered projection of the document: each block with its stable ref (`id`/`block_ref`), legacy `content_id`, text or source line range, and current `shimmer` boolean.
 - **Edit** accepts partial pending and settled declarations. The MCP surface encodes pending declarations as a `{block_ref: tooltip}` map and settled declarations as a block-ref array. Its `settle_others` planning-pass flag settles every current block omitted from the pending map. Declarations resolve against the document the call produces; a declaration whose id matches no block is dropped.
@@ -32,16 +32,16 @@ Daemon IPC writes return the fresh per-block projection for interactive clients.
 
 ## Reason
 
-Users can edit Program at any time and run again while an older run is still active. A robust shimmer model must therefore provide both immediate affordance and precise visibility without trusting positions or stale text.
+Users can edit Playbook at any time and run again while an older run is still active. A robust shimmer model must therefore provide both immediate affordance and precise visibility without trusting positions or stale text.
 
 Content-derived ids were better than indexes because they failed closed under many races, but they had two serious gaps: identical blocks shared one shimmer state, and semantic edits had no stable object to attach an explicit "same task, new text" transition to. A daemon-owned block id plus epoch solves both. Duplicate blocks get distinct refs. Moves preserve refs. Semantic edits intentionally advance the ref, so old shimmer cannot accidentally stick to new meaning. Smart-clip `clip_id` repair is treated as metadata and does not advance the epoch, so UI normalization does not settle real work.
 
-The model remains plain-Markdown friendly: identity lives in program metadata, not hidden Markdown markers, and content ids remain as a compatibility fallback for older clients and transient dirty-buffer projections.
+The model remains plain-Markdown friendly: identity lives in playbook metadata, not hidden Markdown markers, and content ids remain as a compatibility fallback for older clients and transient dirty-buffer projections.
 
 ## Consequences
 
-- Program get, edit, update, execute, and state payloads publish the per-block projection so clients do not independently invent block identity.
-- Program-scoped ordinal ids are compact because they occur repeatedly in model-visible requests and responses; fixed-width or globally unique spellings add context cost without adding safety.
+- Playbook get, edit, update, execute, and state payloads publish the per-block projection so clients do not independently invent block identity.
+- Playbook-scoped ordinal ids are compact because they occur repeatedly in model-visible requests and responses; fixed-width or globally unique spellings add context cost without adding safety.
 - An MCP status-only edit may omit text edits entirely. This must not create a document revision or require a no-op text replacement.
 - Clients should use stable refs whenever the local buffer matches the saved daemon document. They may fall back to content ids only for legacy payloads or dirty optimistic buffers.
 - A stale stable-ref declaration fails closed: it matches no block if the target's semantic content changed and the caller did not use `keep_pending`.

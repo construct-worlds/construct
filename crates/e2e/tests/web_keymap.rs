@@ -213,7 +213,7 @@ async fn web_ui_answers_the_tui_chord_keymap() {
 /// binding fires, so a "is it bound?" assertion passes — what's wrong is where
 /// it leaves the user.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn web_keymap_escapes_dialogs_toggles_program_and_drives_the_list() {
+async fn web_keymap_escapes_dialogs_toggles_playbook_and_drives_the_list() {
     let d = Daemon::spawn().await.expect("daemon");
     let r = d
         .client
@@ -273,7 +273,7 @@ async fn web_keymap_escapes_dialogs_toggles_program_and_drives_the_list() {
         "Escape must close the settings sheet too"
     );
 
-    // --- C-x Space toggles Program, rather than only entering it ----------
+    // --- C-x Space toggles Playbook, rather than only entering it ----------
     let before: String = page
         .evaluate("state.mode")
         .await
@@ -282,14 +282,14 @@ async fn web_keymap_escapes_dialogs_toggles_program_and_drives_the_list() {
         .unwrap_or_default();
     chord(&page, " ").await;
     assert!(
-        wait_for_bool(&page, "state.mode === 'program'").await,
-        "C-x Space should open Program"
+        wait_for_bool(&page, "state.mode === 'playbook'").await,
+        "C-x Space should open Playbook"
     );
     chord(&page, " ").await;
     let js = format!("state.mode === {before:?}");
     assert!(
         wait_for_bool(&page, js.as_str()).await,
-        "C-x Space again must return to {before:?} — the TUI's OpenProgram toggles"
+        "C-x Space again must return to {before:?} — the TUI's OpenPlaybook toggles"
     );
 
     // --- C-x o reaches the session list, not just the other pane ----------

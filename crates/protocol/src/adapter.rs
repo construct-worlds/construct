@@ -1297,8 +1297,8 @@ mod tests {
         let got = mcp_env_toml_from("s123", |name| match name {
             agent_context::ENV_GLOBAL_MEMORY_FILE => Some("/tmp/global.md".to_string()),
             agent_context::ENV_PROJECT_MEMORY_FILE => Some("/tmp/project.md".to_string()),
-            agent_context::ENV_PROGRAM_RUN_CONTEXT_FILE => {
-                Some("/tmp/program-run-context.json".to_string())
+            agent_context::ENV_PLAYBOOK_RUN_CONTEXT_FILE => {
+                Some("/tmp/playbook-run-context.json".to_string())
             }
             agent_context::ENV_PROJECT_ID => Some("g123".to_string()),
             _ => None,
@@ -1308,7 +1308,7 @@ mod tests {
         assert!(got.contains("CONSTRUCT_GLOBAL_MEMORY_FILE = \"/tmp/global.md\""));
         assert!(got.contains("CONSTRUCT_PROJECT_MEMORY_FILE = \"/tmp/project.md\""));
         assert!(
-            got.contains("CONSTRUCT_PROGRAM_RUN_CONTEXT_FILE = \"/tmp/program-run-context.json\"")
+            got.contains("CONSTRUCT_PLAYBOOK_RUN_CONTEXT_FILE = \"/tmp/playbook-run-context.json\"")
         );
         assert!(got.contains("CONSTRUCT_PROJECT_ID = \"g123\""));
     }

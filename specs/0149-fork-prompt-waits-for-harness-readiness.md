@@ -8,7 +8,7 @@ Scope: Machine-delivered input to a cold-started session waits for the harness's
 ## Decision
 
 When the daemon delivers input to a session whose harness it just cold-started
-— a Program Run or verb fork above all — it must wait for the harness to
+— a Playbook Run or verb fork above all — it must wait for the harness to
 report that it is ready for input. The session state machine already carries
 that signal; delivery consumes it rather than re-deriving readiness from the
 shape of the harness's output.
@@ -57,7 +57,7 @@ nothing. Input sent after the same fork reported ready landed every time.
 
 ## Non-Goals
 
-Does not change what is delivered, where a fork gets its Program context, or
+Does not change what is delivered, where a fork gets its Playbook context, or
 how a fork settles the blocks it was dispatched for. Does not require that
 every harness report readiness — only that the daemon prefers that signal
 whenever it exists.

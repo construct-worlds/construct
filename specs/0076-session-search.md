@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-07-08
 Area: protocol
-Scope: full-text search across session name/metadata, program contents, and transcript history, exposed uniformly to daemon clients, MCP, CLI, and the TUI picker.
+Scope: full-text search across session name/metadata, playbook contents, and transcript history, exposed uniformly to daemon clients, MCP, CLI, and the TUI picker.
 
 ## Decision
 
@@ -13,16 +13,16 @@ independent scopes for a case-insensitive substring query:
 - **Name** — the same fields the TUI's instant session-switcher match already
   covers (title/label, full id, short id, harness). At most one hit per
   session for this scope.
-- **Program** — the session's stored program document, matched line by line.
+- **Playbook** — the session's stored playbook document, matched line by line.
 - **Transcript** — the session's persisted event log, matched against the
   human/model-relevant text of message, reasoning, and tool-call events.
 
 The engine is a **scan, not an index**: every call walks the relevant files
 fresh. There is no persistent search index, no background indexing job, and
-no on-disk artifact besides what already exists for playback (`program.md`,
+no on-disk artifact besides what already exists for playback (`playbook.md`,
 `transcript.jsonl`). Sessions are visited most-recent-activity first; within a
-session, name hits precede program hits, which precede transcript hits, and
-transcript/program hits are newest-first.
+session, name hits precede playbook hits, which precede transcript hits, and
+transcript/playbook hits are newest-first.
 
 A transcript hit's cursor is the event's `seq` — the same sequence number
 `session.transcript`'s `from` parameter already accepts. This is the sole
@@ -37,7 +37,7 @@ is deterministic and testable:
   call.
 - A global cap on the number of hits returned across every scope and
   session.
-- A per-session, per-scope cap on hits contributed by program and transcript
+- A per-session, per-scope cap on hits contributed by playbook and transcript
   scopes.
 
 Whenever any of these budgets or caps stops the scan before it would
@@ -52,14 +52,14 @@ surface built on top of the daemon: the IPC method itself, an MCP tool, a
 CLI subcommand, and an async second tier layered onto the existing
 in-memory session-switcher (`C-x b`) picker in the TUI. The picker's
 existing instant, in-memory name/id/harness matching (tier 1) is unchanged;
-the new tier only adds debounced program/transcript results underneath it,
+the new tier only adds debounced playbook/transcript results underneath it,
 guarded by a query-generation counter so a stale in-flight or completed
 search response can never clobber the results of a query the user has since
 edited away from.
 
 ## Reason
 
-Session history and program documents already accumulate real, searchable
+Session history and playbook documents already accumulate real, searchable
 content the moment a session exists — there is no reason a user or an agent
 should have to remember which of dozens of sessions contains a fact it once
 saw. A scan-first engine gets full coverage (every session, whatever its
@@ -99,7 +99,7 @@ read per session.
 - No regex, whole-word, or other advanced query modes — substring only,
   case-insensitive.
 - No persistent search index of any kind.
-- No jump-to-match positioning inside the transcript or program view. A
+- No jump-to-match positioning inside the transcript or playbook view. A
   transcript hit's `seq` is a cursor a caller can feed back into
   `session.transcript`; the TUI picker's "select a content-match row"
   action switches to that hit's session and stops there — it does not

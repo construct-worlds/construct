@@ -38,25 +38,25 @@ pub enum KeyAction {
     /// default layout. Bound to `C-x z` (emacs) / `z` (vim), matching
     /// tmux's `prefix z` (zoom-pane).
     ToggleZoom,
-    /// Open the selected session's in-TUI program surface. Bound to
+    /// Open the selected session's in-TUI playbook surface. Bound to
     /// `C-x Space` in both profiles because bare modifier double-taps are not
     /// delivered reliably by terminal emulators.
-    OpenProgram,
-    /// Save the selected session's in-TUI program surface. Bound to
+    OpenPlaybook,
+    /// Save the selected session's in-TUI playbook surface. Bound to
     /// `C-x C-s`, matching the editor-style save chord.
-    SaveProgram,
-    /// Undo the selected program edit. Bound to `C-x u` for consistency with
+    SavePlaybook,
+    /// Undo the selected playbook edit. Bound to `C-x u` for consistency with
     /// emacs-style history commands.
-    UndoProgram,
-    /// Run the selected session's program (or just the highlighted selection,
+    UndoPlaybook,
+    /// Run the selected session's playbook (or just the highlighted selection,
     /// when text is selected). Bound to `C-x C-r` — the keyboard equivalent of
     /// the title-bar ▶ button and the selection ▶ Run button.
-    RunProgram,
-    /// Toggle keyboard focus between an open Program surface and the
+    RunPlaybook,
+    /// Toggle keyboard focus between an open Playbook surface and the
     /// underlying session terminal in the same split. Bound to `C-x C-o`:
-    /// Program focus slides the Program right to expose the terminal; terminal
-    /// focus slides it back and resumes Program editing.
-    ToggleProgramTerminalFocus,
+    /// Playbook focus slides the Playbook right to expose the terminal; terminal
+    /// focus slides it back and resumes Playbook editing.
+    TogglePlaybookTerminalFocus,
     OpenDiff,
     Interrupt,
     OpenCommandPalette,
@@ -167,7 +167,7 @@ pub enum KeyAction {
     TutorialNextStep,
     /// Tutorial footer: go back one step. Purely navigational — re-arms the
     /// previous step's transient progress flags so it can be demonstrated
-    /// again, but never undoes real-world effects (sessions, program
+    /// again, but never undoes real-world effects (sessions, playbook
     /// contents). Click-only; hidden on step 1.
     TutorialPrevStep,
     /// Tutorial footer: close the tour immediately. Click-only. Writes the
@@ -336,15 +336,15 @@ fn emacs() -> Keymap {
         (Chord(vec![ctrl('x'), ctrl('f')]), OpenNewSession),
         (Chord(vec![ctrl('x'), ch('b')]), OpenSwitchSession),
         (Chord(vec![ctrl('x'), ch('k')]), OpenDeleteConfirm),
-        (Chord(vec![ctrl('x'), ch(' ')]), OpenProgram),
-        (Chord(vec![ctrl('x'), ctrl('s')]), SaveProgram),
+        (Chord(vec![ctrl('x'), ch(' ')]), OpenPlaybook),
+        (Chord(vec![ctrl('x'), ctrl('s')]), SavePlaybook),
         // Suggestion deck (specs 0109/0155): request + open the popup.
         (Chord(vec![ctrl('x'), ch('.')]), OpenSuggestions),
-        (Chord(vec![ctrl('x'), ch('u')]), UndoProgram),
-        (Chord(vec![ctrl('x'), ctrl('r')]), RunProgram),
+        (Chord(vec![ctrl('x'), ch('u')]), UndoPlaybook),
+        (Chord(vec![ctrl('x'), ctrl('r')]), RunPlaybook),
         (
             Chord(vec![ctrl('x'), ctrl('o')]),
-            ToggleProgramTerminalFocus,
+            TogglePlaybookTerminalFocus,
         ),
         (Chord(vec![ctrl('x'), ch('d')]), OpenDiff),
         (Chord(vec![ctrl('x'), ch('i')]), OpenSendInput),
@@ -416,15 +416,15 @@ fn vim() -> Keymap {
         (Chord(vec![ch('/')]), OpenSwitchSession),
         (Chord(vec![ctrl('x'), ch('b')]), OpenSwitchSession),
         (Chord(vec![ch('d'), ch('d')]), OpenDeleteConfirm),
-        (Chord(vec![ctrl('x'), ch(' ')]), OpenProgram),
-        (Chord(vec![ctrl('x'), ctrl('s')]), SaveProgram),
+        (Chord(vec![ctrl('x'), ch(' ')]), OpenPlaybook),
+        (Chord(vec![ctrl('x'), ctrl('s')]), SavePlaybook),
         // Suggestion deck (specs 0109/0155): request + open the popup.
         (Chord(vec![ctrl('x'), ch('.')]), OpenSuggestions),
-        (Chord(vec![ctrl('x'), ch('u')]), UndoProgram),
-        (Chord(vec![ctrl('x'), ctrl('r')]), RunProgram),
+        (Chord(vec![ctrl('x'), ch('u')]), UndoPlaybook),
+        (Chord(vec![ctrl('x'), ctrl('r')]), RunPlaybook),
         (
             Chord(vec![ctrl('x'), ctrl('o')]),
-            ToggleProgramTerminalFocus,
+            TogglePlaybookTerminalFocus,
         ),
         (Chord(vec![ch('g'), ch('d')]), OpenDiff),
         (Chord(vec![ctrl('c')]), Interrupt),
@@ -646,7 +646,7 @@ mod tests {
         for profile in [Profile::Emacs, Profile::Vim] {
             let km = default_for(profile);
             assert_action(&km, vec![ctrl('x'), ch('.')], KeyAction::OpenSuggestions);
-            assert_action(&km, vec![ctrl('x'), ctrl('s')], KeyAction::SaveProgram);
+            assert_action(&km, vec![ctrl('x'), ctrl('s')], KeyAction::SavePlaybook);
         }
     }
 
@@ -732,15 +732,15 @@ mod tests {
     }
 
     #[test]
-    fn c_x_space_opens_program_without_shadowing_c_x_ctrl_c_quit() {
+    fn c_x_space_opens_playbook_without_shadowing_c_x_ctrl_c_quit() {
         for profile in [Profile::Emacs, Profile::Vim] {
             let km = default_for(profile);
             assert!(
                 matches!(
                     resolve(&km, vec![ctrl('x'), ch(' ')]),
-                    KeymapResult::Action(KeyAction::OpenProgram)
+                    KeymapResult::Action(KeyAction::OpenPlaybook)
                 ),
-                "C-x Space should open program in {profile:?}"
+                "C-x Space should open playbook in {profile:?}"
             );
             assert!(
                 matches!(
@@ -753,57 +753,57 @@ mod tests {
     }
 
     #[test]
-    fn c_x_ctrl_s_saves_program() {
+    fn c_x_ctrl_s_saves_playbook() {
         for profile in [Profile::Emacs, Profile::Vim] {
             let km = default_for(profile);
             assert!(
                 matches!(
                     resolve(&km, vec![ctrl('x'), ctrl('s')]),
-                    KeymapResult::Action(KeyAction::SaveProgram)
+                    KeymapResult::Action(KeyAction::SavePlaybook)
                 ),
-                "C-x C-s should save program in {profile:?}"
+                "C-x C-s should save playbook in {profile:?}"
             );
         }
     }
 
     #[test]
-    fn c_x_u_undo_program() {
+    fn c_x_u_undo_playbook() {
         for profile in [Profile::Emacs, Profile::Vim] {
             let km = default_for(profile);
             assert!(
                 matches!(
                     resolve(&km, vec![ctrl('x'), ch('u')]),
-                    KeymapResult::Action(KeyAction::UndoProgram)
+                    KeymapResult::Action(KeyAction::UndoPlaybook)
                 ),
-                "C-x u should trigger UndoProgram in {profile:?}"
+                "C-x u should trigger UndoPlaybook in {profile:?}"
             );
         }
     }
 
     #[test]
-    fn c_x_ctrl_r_runs_program() {
+    fn c_x_ctrl_r_runs_playbook() {
         for profile in [Profile::Emacs, Profile::Vim] {
             let km = default_for(profile);
             assert!(
                 matches!(
                     resolve(&km, vec![ctrl('x'), ctrl('r')]),
-                    KeymapResult::Action(KeyAction::RunProgram)
+                    KeymapResult::Action(KeyAction::RunPlaybook)
                 ),
-                "C-x C-r should trigger RunProgram in {profile:?}"
+                "C-x C-r should trigger RunPlaybook in {profile:?}"
             );
         }
     }
 
     #[test]
-    fn c_x_ctrl_o_toggles_program_terminal_focus() {
+    fn c_x_ctrl_o_toggles_playbook_terminal_focus() {
         for profile in [Profile::Emacs, Profile::Vim] {
             let km = default_for(profile);
             assert!(
                 matches!(
                     resolve(&km, vec![ctrl('x'), ctrl('o')]),
-                    KeymapResult::Action(KeyAction::ToggleProgramTerminalFocus)
+                    KeymapResult::Action(KeyAction::TogglePlaybookTerminalFocus)
                 ),
-                "C-x C-o should toggle Program/session focus in {profile:?}"
+                "C-x C-o should toggle Playbook/session focus in {profile:?}"
             );
         }
     }

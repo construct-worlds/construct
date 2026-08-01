@@ -19,7 +19,7 @@ Clients learn the live geometry from the daemon whenever it changes — a resize
 
 ## Reason
 
-A single PTY emits content laid out for its current width. If a passive viewer re-wraps that content to a narrower width, column-aligned and full-screen output (tables, code, TUIs) becomes garbled, and two clients viewing the same session show materially different, wrong-looking screens. Preserving the true width keeps every viewer faithful to what the program actually drew; scrolling is a lossless way to fit a wide screen into a narrow viewport.
+A single PTY emits content laid out for its current width. If a passive viewer re-wraps that content to a narrower width, column-aligned and full-screen output (tables, code, TUIs) becomes garbled, and two clients viewing the same session show materially different, wrong-looking screens. Preserving the true width keeps every viewer faithful to what the playbook actually drew; scrolling is a lossless way to fit a wide screen into a narrow viewport.
 
 ## Consequences
 

@@ -413,8 +413,8 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
            const transcriptPane = state.transcriptPaneById.get({b:?});
            const surfaceVisible = state.mode === 'terminal'
              ? !document.getElementById('terminalWrap').hidden
-             : state.mode === 'program'
-               ? !document.getElementById('programWrap').hidden
+             : state.mode === 'playbook'
+               ? !document.getElementById('playbookWrap').hidden
                : !!transcriptPane && !transcriptPane.hidden && focused?.contains(transcriptPane);
            return state.currentId === {b:?}
              && focusedPaneSessionId() === {b:?}

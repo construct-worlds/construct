@@ -74,7 +74,7 @@ fn compact_session_summary(
     Value::Object(out)
 }
 
-fn compact_program_blocks(blocks: &[construct_protocol::ProgramBlockView]) -> Vec<Value> {
+fn compact_playbook_blocks(blocks: &[construct_protocol::PlaybookBlockView]) -> Vec<Value> {
     blocks
         .iter()
         .map(|block| {
@@ -93,7 +93,7 @@ fn compact_program_blocks(blocks: &[construct_protocol::ProgramBlockView]) -> Ve
         .collect()
 }
 
-fn compact_program_run(run: &construct_protocol::ProgramRunProgress) -> Value {
+fn compact_playbook_run(run: &construct_protocol::PlaybookRunProgress) -> Value {
     json!({
         "stage": run.stage,
         "pending": run.pending_block_count(),
@@ -163,7 +163,7 @@ pub fn catalog() -> Vec<Value> {
         // ----- Read -----
         tool(
             CONTEXT_TOOL_NAME,
-            "Load current construct memory, Program-run state, and widget paths. Call before each task. Repeat calls omit unchanged and already-served content automatically; everything omitted stays recoverable (memory by path, the program via construct_program_get).",
+            "Load current construct memory, Playbook-run state, and widget paths. Call before each task. Repeat calls omit unchanged and already-served content automatically; everything omitted stays recoverable (memory by path, the playbook via construct_playbook_get).",
             json!({
                 "type": "object",
                 "properties": {
@@ -278,8 +278,8 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "construct_program_get",
-            "Fetch current Program Markdown once plus compact block refs/status. Revisions are omitted unless explicitly requested.",
+            "construct_playbook_get",
+            "Fetch current Playbook Markdown once plus compact block refs/status. Revisions are omitted unless explicitly requested.",
             json!({
                 "type": "object",
                 "properties": {
@@ -290,7 +290,7 @@ pub fn catalog() -> Vec<Value> {
         ),
         tool(
             "construct_search",
-            "Search session names, Programs, and transcripts. Results are bounded; use hit `seq` with construct_get_transcript for context.",
+            "Search session names, Playbooks, and transcripts. Results are bounded; use hit `seq` with construct_get_transcript for context.",
             json!({
                 "type": "object",
                 "properties": {
@@ -298,7 +298,7 @@ pub fn catalog() -> Vec<Value> {
                     "scopes": {
                         "type": "array",
                         "description": "Restrict the search to these scopes. Omit to search all three.",
-                        "items": { "type": "string", "enum": ["name", "program", "transcript"] }
+                        "items": { "type": "string", "enum": ["name", "playbook", "transcript"] }
                     },
                     "session_id": { "type": "string", "description": "Restrict the search to one session." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Global hit cap; default 20." }
@@ -307,19 +307,19 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "construct_program_list_templates",
-            "List Program template metadata, or fetch one template body by id.",
+            "construct_playbook_list_templates",
+            "List Playbook template metadata, or fetch one template body by id.",
             json!({ "type": "object", "properties": { "template_id": { "type": "string" } } }),
         ),
         tool(
-            "construct_program_list_verbs",
-            "List Program selection-verb metadata; internal purpose prompts are omitted.",
+            "construct_playbook_list_verbs",
+            "List Playbook selection-verb metadata; internal purpose prompts are omitted.",
             schema_empty(),
         ),
         // ----- Write -----
         tool(
-            "construct_program_edit",
-            "Edit Program text and/or run status against the latest document. Anchored replacements are atomic; put both halves of a move in ONE call. Set `keep_pending` when an edit changes unfinished work. `pending` maps stable block refs to concise hover statuses; `settled` clears refs. On the first planning pass, set `settle_others` to clear every block omitted from `pending`. Stale refs fail closed. The compact response returns only refs created or changed by this call.",
+            "construct_playbook_edit",
+            "Edit Playbook text and/or run status against the latest document. Anchored replacements are atomic; put both halves of a move in ONE call. Set `keep_pending` when an edit changes unfinished work. `pending` maps stable block refs to concise hover statuses; `settled` clears refs. On the first planning pass, set `settle_others` to clear every block omitted from `pending`. Stale refs fail closed. The compact response returns only refs created or changed by this call.",
             json!({
                 "type": "object",
                 "properties": {
@@ -354,8 +354,8 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "construct_program_update",
-            "Replace the entire Program document. Prefer anchored edit for targeted changes. `pending` maps zero-based block indexes in the new Markdown to concise statuses; omitted blocks settle. Returns compact block refs/status.",
+            "construct_playbook_update",
+            "Replace the entire Playbook document. Prefer anchored edit for targeted changes. `pending` maps zero-based block indexes in the new Markdown to concise statuses; omitted blocks settle. Returns compact block refs/status.",
             json!({
                 "type": "object",
                 "properties": {
@@ -374,8 +374,8 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "construct_program_execute",
-            "Execute the full Program or a selected fragment and return a compact run acknowledgement.",
+            "construct_playbook_execute",
+            "Execute the full Playbook or a selected fragment and return a compact run acknowledgement.",
             json!({
                 "type": "object",
                 "properties": {
@@ -391,14 +391,14 @@ pub fn catalog() -> Vec<Value> {
             }),
         ),
         tool(
-            "construct_program_verb_execute",
+            "construct_playbook_verb_execute",
             "Run a selection verb in a scoped subagent; the daemon merges its result. Returns the subagent id and only changed block refs.",
             json!({
                 "type": "object",
                 "properties": {
                     "session_id": { "type": "string" },
-                    "verb": { "type": "string", "description": "A verb `name` from construct_program_list_verbs." },
-                    "selection": { "type": "string", "description": "The exact Markdown substring to refine — must match the current program content." },
+                    "verb": { "type": "string", "description": "A verb `name` from construct_playbook_list_verbs." },
+                    "selection": { "type": "string", "description": "The exact Markdown substring to refine — must match the current playbook content." },
                     "base_version": { "type": "integer", "minimum": 0 },
                     "comment": { "type": "string", "description": "Optional one-line instruction composed onto the verb's purpose prompt." }
                 },
@@ -959,23 +959,23 @@ pub async fn call(
                     .await?,
             )?
         }
-        "construct_program_get" => {
+        "construct_playbook_get" => {
             let sid = optional_session_arg(&args, session_id)?;
-            let result = client.program_get(&sid).await?;
+            let result = client.playbook_get(&sid).await?;
             let mut out = serde_json::Map::new();
-            out.insert("session_id".into(), json!(result.program.session_id));
-            out.insert("markdown".into(), json!(result.program.markdown));
-            out.insert("version".into(), json!(result.program.version));
-            out.insert("updated_at_ms".into(), json!(result.program.updated_at_ms));
-            if let Some(template_id) = result.program.template_id {
+            out.insert("session_id".into(), json!(result.playbook.session_id));
+            out.insert("markdown".into(), json!(result.playbook.markdown));
+            out.insert("version".into(), json!(result.playbook.version));
+            out.insert("updated_at_ms".into(), json!(result.playbook.updated_at_ms));
+            if let Some(template_id) = result.playbook.template_id {
                 out.insert("template_id".into(), json!(template_id));
             }
             out.insert(
                 "blocks".into(),
-                json!(compact_program_blocks(&result.blocks)),
+                json!(compact_playbook_blocks(&result.blocks)),
             );
             if let Some(run) = &result.active_run {
-                out.insert("run".into(), compact_program_run(run));
+                out.insert("run".into(), compact_playbook_run(run));
             }
             match args
                 .get("revisions")
@@ -1008,8 +1008,8 @@ pub async fn call(
             }
             Value::Object(out)
         }
-        "construct_program_list_templates" => {
-            let templates = client.program_templates().await?.templates;
+        "construct_playbook_list_templates" => {
+            let templates = client.playbook_templates().await?.templates;
             if let Ok(template_id) = arg_str(&args, "template_id") {
                 let template = templates
                     .into_iter()
@@ -1032,8 +1032,8 @@ pub async fn call(
                 )
             }
         }
-        "construct_program_list_verbs" => {
-            let verbs = client.program_verbs().await?.verbs;
+        "construct_playbook_list_verbs" => {
+            let verbs = client.playbook_verbs().await?.verbs;
             Value::Array(
                 verbs
                     .iter()
@@ -1050,10 +1050,10 @@ pub async fn call(
             )
         }
         // ----- Write -----
-        "construct_program_update" => {
+        "construct_playbook_update" => {
             let sid = optional_session_arg(&args, session_id)?;
             let markdown = arg_str(&args, "markdown")?;
-            let block_count = construct_protocol::program_block_spans(&markdown).len();
+            let block_count = construct_protocol::playbook_block_spans(&markdown).len();
             let pending: HashMap<String, String> = match args.get("pending") {
                 Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
                     anyhow!(
@@ -1079,33 +1079,33 @@ pub async fn call(
                 shimmer[index] = true;
                 tooltips[index] = Some(status);
             }
-            let params = construct_protocol::ProgramUpdateParams {
+            let params = construct_protocol::PlaybookUpdateParams {
                 session_id: sid,
                 markdown,
                 base_version: args.get("base_version").and_then(|v| v.as_u64()),
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 template_id: arg_str(&args, "template_id").ok(),
                 note: arg_str(&args, "note").ok(),
                 shimmer: Some(shimmer),
                 shimmer_tooltips: Some(tooltips),
             };
-            let result = client.program_update(params).await?;
+            let result = client.playbook_update(params).await?;
             let mut out = serde_json::Map::new();
             out.insert("ok".into(), json!(true));
-            out.insert("version".into(), json!(result.program.version));
+            out.insert("version".into(), json!(result.playbook.version));
             out.insert(
                 "blocks".into(),
-                json!(compact_program_blocks(&result.blocks)),
+                json!(compact_playbook_blocks(&result.blocks)),
             );
             if let Some(run) = &result.active_run {
-                out.insert("run".into(), compact_program_run(run));
+                out.insert("run".into(), compact_playbook_run(run));
             }
             Value::Object(out)
         }
-        "construct_program_edit" => {
+        "construct_playbook_edit" => {
             let sid = optional_session_arg(&args, session_id)?;
-            let before = client.program_get(&sid).await?;
-            let edits: Vec<construct_protocol::ProgramEdit> = match args.get("edits") {
+            let before = client.playbook_get(&sid).await?;
+            let edits: Vec<construct_protocol::PlaybookEdit> = match args.get("edits") {
                 Some(v) => serde_json::from_value(v.clone())
                     .map_err(|e| anyhow!("invalid `edits`: {e}"))?,
                 None => Vec::new(),
@@ -1127,7 +1127,7 @@ pub async fn call(
                 .unwrap_or(false);
             if edits.is_empty() && pending.is_empty() && settled.is_empty() && !settle_others {
                 return Err(anyhow!(
-                    "program edit needs at least one edit or run-status change"
+                    "playbook edit needs at least one edit or run-status change"
                 ));
             }
             for (id, status) in &pending {
@@ -1140,9 +1140,9 @@ pub async fn call(
                     return Err(anyhow!("block {id} cannot be both pending and settled"));
                 }
             }
-            let mut shimmer: Vec<construct_protocol::ProgramShimmerDecl> = pending
+            let mut shimmer: Vec<construct_protocol::PlaybookShimmerDecl> = pending
                 .iter()
-                .map(|(id, tooltip)| construct_protocol::ProgramShimmerDecl {
+                .map(|(id, tooltip)| construct_protocol::PlaybookShimmerDecl {
                     id: id.clone(),
                     shimmer: true,
                     tooltip: Some(tooltip.clone()),
@@ -1159,20 +1159,20 @@ pub async fn call(
                 );
             }
             shimmer.extend(settled_refs.into_iter().map(|id| {
-                construct_protocol::ProgramShimmerDecl {
+                construct_protocol::PlaybookShimmerDecl {
                     id,
                     shimmer: false,
                     tooltip: None,
                 }
             }));
-            let params = construct_protocol::ProgramEditParams {
+            let params = construct_protocol::PlaybookEditParams {
                 session_id: sid.clone(),
                 edits,
-                actor: construct_protocol::ProgramUpdateActor::Agent,
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
                 note: arg_str(&args, "note").ok(),
                 shimmer,
             };
-            let result = client.program_edit(params).await?;
+            let result = client.playbook_edit(params).await?;
             let before_refs: HashSet<&str> = before
                 .blocks
                 .iter()
@@ -1196,8 +1196,8 @@ pub async fn call(
                 .collect();
             let mut response = serde_json::Map::new();
             response.insert("ok".into(), json!(true));
-            response.insert("version".into(), json!(result.program.version));
-            if result.program.version != before.program.version {
+            response.insert("version".into(), json!(result.playbook.version));
+            if result.playbook.version != before.playbook.version {
                 response.insert("changed".into(), json!(true));
             }
             if !changed_blocks.is_empty() {
@@ -1216,10 +1216,10 @@ pub async fn call(
             }
             Value::Object(response)
         }
-        "construct_program_execute" => {
+        "construct_playbook_execute" => {
             let sid = optional_session_arg(&args, session_id)?;
             let before_refs: HashSet<String> = client
-                .program_get(&sid)
+                .playbook_get(&sid)
                 .await?
                 .blocks
                 .into_iter()
@@ -1231,7 +1231,7 @@ pub async fn call(
                 })?),
                 None => None,
             };
-            let params = construct_protocol::ProgramExecuteParams {
+            let params = construct_protocol::PlaybookExecuteParams {
                 session_id: sid,
                 selection: arg_str(&args, "selection").ok(),
                 base_version: args.get("base_version").and_then(|v| v.as_u64()),
@@ -1240,10 +1240,10 @@ pub async fn call(
                 selection_block_ids: None,
                 fork: false,
             };
-            let result = client.program_execute(params).await?;
+            let result = client.playbook_execute(params).await?;
             let mut out = serde_json::Map::new();
             out.insert("ok".into(), json!(true));
-            out.insert("version".into(), json!(result.program.version));
+            out.insert("version".into(), json!(result.playbook.version));
             let changed: Vec<_> = result
                 .blocks
                 .iter()
@@ -1251,23 +1251,23 @@ pub async fn call(
                 .cloned()
                 .collect();
             if !changed.is_empty() {
-                out.insert("blocks".into(), json!(compact_program_blocks(&changed)));
+                out.insert("blocks".into(), json!(compact_playbook_blocks(&changed)));
             }
             if let Some(run) = &result.active_run {
-                out.insert("run".into(), compact_program_run(run));
+                out.insert("run".into(), compact_playbook_run(run));
             }
             Value::Object(out)
         }
-        "construct_program_verb_execute" => {
+        "construct_playbook_verb_execute" => {
             let sid = optional_session_arg(&args, session_id)?;
             let before_refs: HashSet<String> = client
-                .program_get(&sid)
+                .playbook_get(&sid)
                 .await?
                 .blocks
                 .into_iter()
                 .map(|block| block.id)
                 .collect();
-            let params = construct_protocol::ProgramVerbExecuteParams {
+            let params = construct_protocol::PlaybookVerbExecuteParams {
                 session_id: sid,
                 verb: arg_str(&args, "verb")?,
                 selection: arg_str(&args, "selection")?,
@@ -1277,8 +1277,8 @@ pub async fn call(
                 run_on_owner: false,
                 direct_edit: false,
             };
-            let result = client.program_verb_execute(params).await?;
-            let changed: Vec<Value> = compact_program_blocks(
+            let result = client.playbook_verb_execute(params).await?;
+            let changed: Vec<Value> = compact_playbook_blocks(
                 &result
                     .blocks
                     .into_iter()
@@ -1287,7 +1287,7 @@ pub async fn call(
             );
             json!({
                 "ok": true,
-                "version": result.program.version,
+                "version": result.playbook.version,
                 "subagent_id": result.subagent_session_id,
                 "verb": result.verb,
                 "blocks": changed,
@@ -1610,7 +1610,7 @@ fn arg_scopes(args: &Value, name: &str) -> Option<Vec<construct_protocol::Search
         .filter_map(|v| v.as_str())
         .filter_map(|s| match s {
             "name" => Some(construct_protocol::SearchScope::Name),
-            "program" => Some(construct_protocol::SearchScope::Program),
+            "playbook" => Some(construct_protocol::SearchScope::Playbook),
             "transcript" => Some(construct_protocol::SearchScope::Transcript),
             _ => None,
         })
@@ -1672,8 +1672,8 @@ mod tests {
     }
 
     #[test]
-    fn compact_program_blocks_omit_duplicate_text_and_legacy_ids() {
-        let blocks = compact_program_blocks(&[construct_protocol::ProgramBlockView {
+    fn compact_playbook_blocks_omit_duplicate_text_and_legacy_ids() {
+        let blocks = compact_playbook_blocks(&[construct_protocol::PlaybookBlockView {
             id: "b0:0".into(),
             block_id: "b0".into(),
             content_epoch: 0,
@@ -1732,7 +1732,7 @@ mod tests {
             }),
             project_memory: None,
             session_widgets: None,
-            program_run: None,
+            playbook_run: None,
         };
         let state = ContextServeState::default();
         let request = agent_context::ContextRequest::from_args(&json!({}));
@@ -1854,7 +1854,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_includes_program_tools() {
+    fn catalog_includes_playbook_tools() {
         let names: std::collections::HashSet<String> = catalog()
             .into_iter()
             .filter_map(|tool| {
@@ -1865,26 +1865,26 @@ mod tests {
             .collect();
 
         for expected in [
-            "construct_program_get",
-            "construct_program_list_templates",
-            "construct_program_update",
-            "construct_program_edit",
-            "construct_program_execute",
-            "construct_program_list_verbs",
-            "construct_program_verb_execute",
+            "construct_playbook_get",
+            "construct_playbook_list_templates",
+            "construct_playbook_update",
+            "construct_playbook_edit",
+            "construct_playbook_execute",
+            "construct_playbook_list_verbs",
+            "construct_playbook_verb_execute",
         ] {
             assert!(names.contains(expected), "missing {expected}");
         }
     }
 
     #[test]
-    fn program_edit_tool_guides_moves_into_one_call() {
+    fn playbook_edit_tool_guides_moves_into_one_call() {
         let tool = catalog()
             .into_iter()
             .find(|tool| {
-                tool.get("name").and_then(|name| name.as_str()) == Some("construct_program_edit")
+                tool.get("name").and_then(|name| name.as_str()) == Some("construct_playbook_edit")
             })
-            .expect("program edit tool");
+            .expect("playbook edit tool");
         let description = tool
             .get("description")
             .and_then(|description| description.as_str())
@@ -1929,7 +1929,7 @@ mod tests {
         assert!(find("construct_get_diff")
             .pointer("/inputSchema/properties/max_chars")
             .is_some());
-        assert!(find("construct_program_get")
+        assert!(find("construct_playbook_get")
             .pointer("/inputSchema/properties/revisions")
             .is_some());
         assert!(find(CONTEXT_TOOL_NAME)
@@ -1939,7 +1939,7 @@ mod tests {
             .pointer("/inputSchema/properties/skip_memory")
             .is_some());
 
-        let update = find("construct_program_update");
+        let update = find("construct_playbook_update");
         assert!(update.pointer("/inputSchema/properties/pending").is_some());
         assert!(update.pointer("/inputSchema/properties/shimmer").is_none());
         assert!(update.pointer("/inputSchema/properties/tooltips").is_none());

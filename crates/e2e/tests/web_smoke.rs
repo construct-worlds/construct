@@ -757,15 +757,15 @@ async fn web_client_loads_and_websocket_connects() {
         "no dangling mocked older requests: {chat_history_toggle:?}"
     );
 
-    // Lazy surface loading: a session restored directly into Program mode
+    // Lazy surface loading: a session restored directly into Playbook mode
     // should not fetch chat transcript, terminal replay, or session detail
-    // before mounting the Program document. Reconnect refreshes the visible
-    // Program surface as Program too, instead of falling back to transcript.
-    let lazy_program_surface: serde_json::Value = page
+    // before mounting the Playbook document. Reconnect refreshes the visible
+    // Playbook surface as Playbook too, instead of falling back to transcript.
+    let lazy_playbook_surface: serde_json::Value = page
         .evaluate(
             r#"
             (async () => {
-              const id = 's-lazy-program';
+              const id = 's-lazy-playbook';
               const saved = {
                 currentId: state.currentId,
                 sessions: state.sessions,
@@ -773,13 +773,13 @@ async fn web_client_loads_and_websocket_connects() {
                 viewModeById: state.viewModeById,
                 ws: state.ws,
                 widgetsById: state.widgetsById,
-                mountedId: state.program.mountedId,
-                docById: state.program.docById,
-                wrapHidden: programWrapEl.hidden,
+                mountedId: state.playbook.mountedId,
+                docById: state.playbook.docById,
+                wrapHidden: playbookWrapEl.hidden,
                 transcriptHidden: transcriptEl.hidden,
                 terminalHidden: terminalWrapEl.hidden,
                 sessionWidgetsHidden: sessionWidgetsEl.hidden,
-                inputHtml: programInputEl.innerHTML,
+                inputHtml: playbookInputEl.innerHTML,
               };
               const calls = [];
               const tick = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -794,7 +794,7 @@ async fn web_client_loads_and_websocket_connects() {
                 }];
                 state.currentId = null;
                 state.mode = 'chat';
-                state.viewModeById = new Map([[id, 'program']]);
+                state.viewModeById = new Map([[id, 'playbook']]);
                 state.widgetsById = new Map();
                 state.ws = {
                   readyState: 1,
@@ -804,11 +804,11 @@ async fn web_client_loads_and_websocket_connects() {
                     const pending = state.pending.get(msg.id);
                     state.pending.delete(msg.id);
                     let result = {};
-                    if (msg.method === 'program.get') {
+                    if (msg.method === 'playbook.get') {
                       result = {
-                        program: {
+                        playbook: {
                           session_id: id,
-                          markdown: '# Lazy Program\n- selected surface\n',
+                          markdown: '# Lazy Playbook\n- selected surface\n',
                           version: 2,
                           template_id: null,
                         },
@@ -816,7 +816,7 @@ async fn web_client_loads_and_websocket_connects() {
                         blocks: [],
                         collaborators: [],
                       };
-                    } else if (msg.method === 'program.list_templates') {
+                    } else if (msg.method === 'playbook.list_templates') {
                       result = { templates: [] };
                     } else if (msg.method === 'session.get') {
                       result = { ui_panels: [{ id: 'should-not-block', markdown: 'widget' }] };
@@ -832,7 +832,7 @@ async fn web_client_loads_and_websocket_connects() {
                 await selectSession(id, { replaceUrl: true });
                 await tick();
                 const firstCalls = calls.map((c) => c.method);
-                const firstProgramText = programSerialize();
+                const firstPlaybookText = playbookSerialize();
                 const firstWidgetsHidden = sessionWidgetsEl.hidden;
                 const firstTranscriptHidden = transcriptEl.hidden;
                 const firstTerminalHidden = terminalWrapEl.hidden;
@@ -845,7 +845,7 @@ async fn web_client_loads_and_websocket_connects() {
                 return {
                   firstCalls,
                   reconnectCalls,
-                  firstProgramText,
+                  firstPlaybookText,
                   firstWidgetsHidden,
                   firstTranscriptHidden,
                   firstTerminalHidden,
@@ -858,59 +858,59 @@ async fn web_client_loads_and_websocket_connects() {
                 state.viewModeById = saved.viewModeById;
                 state.ws = saved.ws;
                 state.widgetsById = saved.widgetsById;
-                state.program.mountedId = saved.mountedId;
-                state.program.docById = saved.docById;
-                programWrapEl.hidden = saved.wrapHidden;
+                state.playbook.mountedId = saved.mountedId;
+                state.playbook.docById = saved.docById;
+                playbookWrapEl.hidden = saved.wrapHidden;
                 transcriptEl.hidden = saved.transcriptHidden;
                 terminalWrapEl.hidden = saved.terminalHidden;
                 sessionWidgetsEl.hidden = saved.sessionWidgetsHidden;
-                programInputEl.innerHTML = saved.inputHtml;
+                playbookInputEl.innerHTML = saved.inputHtml;
               }
             })()
             "#,
         )
         .await
-        .expect("evaluate lazy program surface loading")
+        .expect("evaluate lazy playbook surface loading")
         .into_value::<serde_json::Value>()
         .expect("json object");
     assert!(
-        lazy_program_surface["firstCalls"]
+        lazy_playbook_surface["firstCalls"]
             .as_array()
-            .is_some_and(|calls| calls.iter().any(|m| m == "program.get")),
-        "program surface should fetch program.get: {lazy_program_surface:?}"
+            .is_some_and(|calls| calls.iter().any(|m| m == "playbook.get")),
+        "playbook surface should fetch playbook.get: {lazy_playbook_surface:?}"
     );
     for forbidden in ["session.get", "session.transcript", "session.pty_replay"] {
         assert!(
-            !lazy_program_surface["firstCalls"]
+            !lazy_playbook_surface["firstCalls"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|m| m == forbidden),
-            "Program select should not fetch {forbidden}: {lazy_program_surface:?}"
+            "Playbook select should not fetch {forbidden}: {lazy_playbook_surface:?}"
         );
         assert!(
-            !lazy_program_surface["reconnectCalls"]
+            !lazy_playbook_surface["reconnectCalls"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|m| m == forbidden),
-            "Program reconnect should not fetch {forbidden}: {lazy_program_surface:?}"
+            "Playbook reconnect should not fetch {forbidden}: {lazy_playbook_surface:?}"
         );
     }
     assert!(
-        lazy_program_surface["reconnectCalls"]
+        lazy_playbook_surface["reconnectCalls"]
             .as_array()
-            .is_some_and(|calls| calls.iter().any(|m| m == "program.get")),
-        "Program reconnect should refresh program.get: {lazy_program_surface:?}"
+            .is_some_and(|calls| calls.iter().any(|m| m == "playbook.get")),
+        "Playbook reconnect should refresh playbook.get: {lazy_playbook_surface:?}"
     );
     assert_eq!(
-        lazy_program_surface["firstProgramText"], "# Lazy Program\n- selected surface\n",
-        "{lazy_program_surface:?}"
+        lazy_playbook_surface["firstPlaybookText"], "# Lazy Playbook\n- selected surface\n",
+        "{lazy_playbook_surface:?}"
     );
-    assert_eq!(lazy_program_surface["firstWidgetsHidden"], true);
-    assert_eq!(lazy_program_surface["firstTranscriptHidden"], true);
-    assert_eq!(lazy_program_surface["firstTerminalHidden"], true);
-    assert_eq!(lazy_program_surface["mode"], "program");
+    assert_eq!(lazy_playbook_surface["firstWidgetsHidden"], true);
+    assert_eq!(lazy_playbook_surface["firstTranscriptHidden"], true);
+    assert_eq!(lazy_playbook_surface["firstTerminalHidden"], true);
+    assert_eq!(lazy_playbook_surface["mode"], "playbook");
 
     // Connection state is rendered as a tiny matrix canvas rather than
     // a static "connected" text label. The accessible label remains
@@ -976,7 +976,7 @@ async fn web_client_loads_and_websocket_connects() {
         "bundled xterm.js never loaded (window.Terminal !== 'function')"
     );
 
-    let program_hover: serde_json::Value = page
+    let playbook_hover: serde_json::Value = page
         .evaluate(
             r#"
             (async () => {
@@ -984,34 +984,34 @@ async fn web_client_loads_and_websocket_connects() {
                 sessions: state.sessions,
                 currentId: state.currentId,
                 mode: state.mode,
-                mountedId: state.program.mountedId,
-                docById: state.program.docById,
-                runById: state.program.runById,
-                hover: state.program.hover,
+                mountedId: state.playbook.mountedId,
+                docById: state.playbook.docById,
+                runById: state.playbook.runById,
+                hover: state.playbook.hover,
                 ws: state.ws,
-                html: programInputEl.innerHTML,
-                wrapHidden: programWrapEl.hidden,
+                html: playbookInputEl.innerHTML,
+                wrapHidden: playbookWrapEl.hidden,
               };
               const calls = [];
               try {
                 const markdown = 'Build worker @{session:s-worker}';
-                const block = programBlockSpans(markdown)[0];
+                const block = playbookBlockSpans(markdown)[0];
                 state.sessions = [
                   { id: 's-owner', title: 'Owner', harness: 'smith', state: 'running', has_pty: true },
                   { id: 's-worker', title: 'Worker', harness: 'shell', state: 'running', has_pty: true },
                 ];
                 state.currentId = 's-owner';
-                state.mode = 'program';
-                state.program.mountedId = 's-owner';
-                state.program.docById = new Map([['s-owner', {
+                state.mode = 'playbook';
+                state.playbook.mountedId = 's-owner';
+                state.playbook.docById = new Map([['s-owner', {
                   version: 1,
                   templateId: null,
-                  saved: programNormalizeClipIds(markdown),
-                  live: programNormalizeClipIds(markdown),
-                  blocks: programBlockSpans(markdown),
+                  saved: playbookNormalizeClipIds(markdown),
+                  live: playbookNormalizeClipIds(markdown),
+                  blocks: playbookBlockSpans(markdown),
                   pendingLive: 0,
                 }]]);
-                state.program.runById = new Map([['s-owner', {
+                state.playbook.runById = new Map([['s-owner', {
                   pendingIds: new Set([block.id]),
                   tooltips: new Map([[block.id, 'Building worker']]),
                   systemStatus: '',
@@ -1039,12 +1039,12 @@ async fn web_client_loads_and_websocket_connects() {
                   },
                 };
 
-                programWrapEl.hidden = false;
-                programRenderDoc(markdown);
-                programApplyShimmer();
+                playbookWrapEl.hidden = false;
+                playbookRenderDoc(markdown);
+                playbookApplyShimmer();
                 await new Promise((resolve) => requestAnimationFrame(resolve));
 
-                const line = programInputEl.querySelector('.program-line.is-running');
+                const line = playbookInputEl.querySelector('.playbook-line.is-running');
                 const lineRect = line.getBoundingClientRect();
                 line.dispatchEvent(new PointerEvent('pointermove', {
                   bubbles: true,
@@ -1053,10 +1053,10 @@ async fn web_client_loads_and_websocket_connects() {
                   clientY: lineRect.top + 6,
                 }));
                 await new Promise((resolve) => requestAnimationFrame(resolve));
-                const shimmerTooltip = programHoverTextEl.textContent;
-                const shimmerTerminalHidden = programHoverTerminalEl.hidden;
+                const shimmerTooltip = playbookHoverTextEl.textContent;
+                const shimmerTerminalHidden = playbookHoverTerminalEl.hidden;
 
-                const chip = programInputEl.querySelector('.program-clip[data-raw]');
+                const chip = playbookInputEl.querySelector('.playbook-clip[data-raw]');
                 const chipRect = chip.getBoundingClientRect();
                 chip.dispatchEvent(new PointerEvent('pointermove', {
                   bubbles: true,
@@ -1066,10 +1066,10 @@ async fn web_client_loads_and_websocket_connects() {
                 }));
                 for (let i = 0; i < 20; i++) {
                   await new Promise((resolve) => requestAnimationFrame(resolve));
-                  if (!programHoverTerminalEl.hidden) break;
+                  if (!playbookHoverTerminalEl.hidden) break;
                 }
                 const previewCall = calls.find((c) => c.method === 'session.pty_replay');
-                const active = state.program.hover?.term?.buffer?.active;
+                const active = state.playbook.hover?.term?.buffer?.active;
                 let previewText = '';
                 if (active) {
                   const rows = [];
@@ -1082,54 +1082,54 @@ async fn web_client_loads_and_websocket_connects() {
                 return {
                   shimmerTooltip,
                   shimmerTerminalHidden,
-                  cardVisible: !programHoverCardEl.hidden,
+                  cardVisible: !playbookHoverCardEl.hidden,
                   previewCallParams: previewCall && previewCall.params,
-                  previewTerminalVisible: !programHoverTerminalEl.hidden,
-                  previewCaption: programHoverCaptionEl.textContent,
+                  previewTerminalVisible: !playbookHoverTerminalEl.hidden,
+                  previewCaption: playbookHoverCaptionEl.textContent,
                   previewText,
                 };
               } finally {
-                programHideHover();
+                playbookHideHover();
                 state.sessions = saved.sessions;
                 state.currentId = saved.currentId;
                 state.mode = saved.mode;
-                state.program.mountedId = saved.mountedId;
-                state.program.docById = saved.docById;
-                state.program.runById = saved.runById;
-                state.program.hover = saved.hover;
+                state.playbook.mountedId = saved.mountedId;
+                state.playbook.docById = saved.docById;
+                state.playbook.runById = saved.runById;
+                state.playbook.hover = saved.hover;
                 state.ws = saved.ws;
-                programInputEl.innerHTML = saved.html;
-                programWrapEl.hidden = saved.wrapHidden;
+                playbookInputEl.innerHTML = saved.html;
+                playbookWrapEl.hidden = saved.wrapHidden;
               }
             })()
             "#,
         )
         .await
-        .expect("evaluate program hover")
+        .expect("evaluate playbook hover")
         .into_value::<serde_json::Value>()
         .expect("json object");
-    assert_eq!(program_hover["shimmerTooltip"], "Building worker");
-    assert_eq!(program_hover["shimmerTerminalHidden"], true);
-    assert_eq!(program_hover["cardVisible"], true);
+    assert_eq!(playbook_hover["shimmerTooltip"], "Building worker");
+    assert_eq!(playbook_hover["shimmerTerminalHidden"], true);
+    assert_eq!(playbook_hover["cardVisible"], true);
     assert_eq!(
-        program_hover["previewCallParams"]["session_id"], "s-worker",
-        "session clip hover should fetch the referenced session preview: {program_hover:?}"
+        playbook_hover["previewCallParams"]["session_id"], "s-worker",
+        "session clip hover should fetch the referenced session preview: {playbook_hover:?}"
     );
     assert_eq!(
-        program_hover["previewTerminalVisible"], true,
-        "session clip hover should upgrade to a terminal preview: {program_hover:?}"
+        playbook_hover["previewTerminalVisible"], true,
+        "session clip hover should upgrade to a terminal preview: {playbook_hover:?}"
     );
     assert!(
-        program_hover["previewCaption"]
+        playbook_hover["previewCaption"]
             .as_str()
             .is_some_and(|caption| caption.contains("Worker")),
-        "preview caption should identify the referenced session: {program_hover:?}"
+        "preview caption should identify the referenced session: {playbook_hover:?}"
     );
     assert!(
-        program_hover["previewText"]
+        playbook_hover["previewText"]
             .as_str()
             .is_some_and(|text| text.contains("WORKER_PREVIEW_LINE")),
-        "preview terminal should contain replayed PTY output: {program_hover:?}"
+        "preview terminal should contain replayed PTY output: {playbook_hover:?}"
     );
 
     // Mobile regression: selecting a PTY-backed session from the list must not
@@ -2895,50 +2895,50 @@ async fn web_client_loads_and_websocket_connects() {
     assert_eq!(attach_button["calls"][0]["params"]["mime"], "image/jpeg");
     assert_eq!(attach_button["overflowSmall"], "hidden");
 
-    // Program attachment chips (spec 0099): local-file Markdown links
+    // Playbook attachment chips (spec 0099): local-file Markdown links
     // tokenize into atomic chips that serialize back byte-identically;
     // http(s) links stay literal text.
-    let program_attachments: serde_json::Value = page
+    let playbook_attachments: serde_json::Value = page
         .evaluate(
             r#"
             (() => {
-              const img = programMdLinkParse('![shot](/a/b/s.png)');
-              const spaced = programMdLinkParse('![s](</a/b c/s.png>)');
-              const http = programMdLinkParse('[d](https://example.com)');
+              const img = playbookMdLinkParse('![shot](/a/b/s.png)');
+              const spaced = playbookMdLinkParse('![s](</a/b c/s.png>)');
+              const http = playbookMdLinkParse('[d](https://example.com)');
               const source = 'x ![shot](</a/b c/s.png>) y [d](https://example.com) [f](/tmp/n.pdf) z';
               const div = document.createElement('div');
-              programFillLine(div, source);
-              const chip = div.querySelector('.program-attachment');
+              playbookFillLine(div, source);
+              const chip = div.querySelector('.playbook-attachment');
               return {
                 imgPath: img && img.path,
                 imgIsImage: img && img.isImage,
                 spacedPath: spaced && spaced.path,
                 httpIsNull: http === null,
-                roundTrip: programSerializeInline(div),
+                roundTrip: playbookSerializeInline(div),
                 chipLabel: chip ? chip.textContent : null,
                 chipIsImage: chip ? chip.classList.contains('is-image') : null,
-                httpChipCount: div.querySelectorAll('.program-attachment').length,
+                httpChipCount: div.querySelectorAll('.playbook-attachment').length,
               };
             })()
             "#,
         )
         .await
-        .expect("evaluate program attachments")
+        .expect("evaluate playbook attachments")
         .into_value::<serde_json::Value>()
         .expect("json object");
-    assert_eq!(program_attachments["imgPath"], "/a/b/s.png");
-    assert_eq!(program_attachments["imgIsImage"], true);
-    assert_eq!(program_attachments["spacedPath"], "/a/b c/s.png");
-    assert_eq!(program_attachments["httpIsNull"], true);
+    assert_eq!(playbook_attachments["imgPath"], "/a/b/s.png");
+    assert_eq!(playbook_attachments["imgIsImage"], true);
+    assert_eq!(playbook_attachments["spacedPath"], "/a/b c/s.png");
+    assert_eq!(playbook_attachments["httpIsNull"], true);
     assert_eq!(
-        program_attachments["roundTrip"],
+        playbook_attachments["roundTrip"],
         "x ![shot](</a/b c/s.png>) y [d](https://example.com) [f](/tmp/n.pdf) z"
     );
-    assert_eq!(program_attachments["chipLabel"], "Image: shot");
-    assert_eq!(program_attachments["chipIsImage"], true);
+    assert_eq!(playbook_attachments["chipLabel"], "Image: shot");
+    assert_eq!(playbook_attachments["chipIsImage"], true);
     // Exactly one chip: the image. The http link AND the plain file link
     // both stay literal text (spec 0099: image links only).
-    assert_eq!(program_attachments["httpChipCount"], 1);
+    assert_eq!(playbook_attachments["httpChipCount"], 1);
 
     // Regression coverage for mobile terminal scroll containment:
     // when the native keyboard shrinks the visual viewport, scroll

@@ -8,7 +8,7 @@ Scope: A footer taller than one row slides the TUI's main block out of the viewp
 ## Decision
 
 The TUI's **main block** — the session list, the split session views, the pin
-strip, the lineage section, any program popups — is always laid out at the size
+strip, the lineage section, any playbook popups — is always laid out at the size
 it has when the footer occupies a single row. That size does not depend on how
 tall the footer actually is.
 
@@ -18,7 +18,7 @@ Rows that leave the top edge are cropped away; the bottom of the block stays
 flush with the modeline, so the newest terminal output remains on screen. The
 modeline stays pinned directly above the footer and never slides behind it.
 
-The slide is animated, matching the program view's slide-aside, and snaps
+The slide is animated, matching the playbook view's slide-aside, and snaps
 without easing while the user drags the panel's border so the block tracks the
 pointer.
 
@@ -33,11 +33,11 @@ Consequences for the rest of the client:
   tooltips anchored to them — is already in viewport coordinates and is not
   translated. Adding state to the frame's recorded geometry requires deciding
   which of the two it is.
-- **Geometry whose height feeds layout math** (a program's viewport rows, a
+- **Geometry whose height feeds layout math** (a playbook's viewport rows, a
   scrollbar's span) keeps its full height through the translation and carries
   the count of rows it lost instead. Anything mapping a viewport row back into
   that geometry's own rows — forwarding the mouse into a child PTY, placing the
-  caret in a program, sizing a scrollbar drag — adds that count back.
+  caret in a playbook, sizing a scrollbar drag — adds that count back.
 
 ## Reason
 
@@ -49,7 +49,7 @@ IPC each way. None of that work is wanted: the user is opening a panel, not
 resizing their terminal.
 
 Sliding costs nothing on the daemon side, because no pane ever changes size.
-It also matches how the program view already reveals the terminal underneath it
+It also matches how the playbook view already reveals the terminal underneath it
 — a surface moving aside rather than the layout reflowing around it — so the two
 reveals read as the same gesture.
 

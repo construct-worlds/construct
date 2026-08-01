@@ -35,7 +35,7 @@ mod lineage_section;
 mod matrix_clicks;
 mod minibuffer;
 mod mouse;
-mod program_popup;
+mod playbook_popup;
 pub mod route_menu;
 mod session_picker;
 mod session_title_menu;
@@ -100,43 +100,43 @@ pub const SCROLLBACK_MAX: usize = 5_000;
 pub const MINIBUFFER_PANEL_H_DEFAULT: u16 = 13;
 pub const MINIBUFFER_PANEL_H_MIN: u16 = 3;
 pub const MINIBUFFER_PANEL_H_MAX: u16 = 80;
-pub(crate) const PROGRAM_REVEAL_MS: u64 = 240;
-pub(crate) const PROGRAM_CONTENT_PADDING_X: u16 = 1;
-pub(crate) const PROGRAM_CONTENT_PADDING_Y: u16 = 1;
-/// Hard cap on how long a program Run shimmer animates without an observed
+pub(crate) const PLAYBOOK_REVEAL_MS: u64 = 240;
+pub(crate) const PLAYBOOK_CONTENT_PADDING_X: u16 = 1;
+pub(crate) const PLAYBOOK_CONTENT_PADDING_Y: u16 = 1;
+/// Hard cap on how long a playbook Run shimmer animates without an observed
 /// output signal. A missed first-output transition must never strand the
 /// animation; a timeout backstop is mandatory (spec 0042).
-pub(crate) const PROGRAM_RUN_MAX_MS: u64 = 10 * 60 * 1000;
+pub(crate) const PLAYBOOK_RUN_MAX_MS: u64 = 10 * 60 * 1000;
 /// How long an identical Run (same session, scope, and executed body) is
 /// suppressed after a successful dispatch (spec 0042 consequence): long
 /// enough to absorb a double `C-x C-r` / double-click, which the TUI's
 /// serialized event loop usually delivers as a second call milliseconds
 /// *after* the first has already finished its save/execute round trip, but
 /// short enough that a deliberate re-Run a moment later still goes through.
-pub(crate) const PROGRAM_RUN_DEDUP_WINDOW_MS: u64 = 1500;
-/// Grace window for ignoring a stale `program/state` clear that was queued
-/// before a just-adopted `program.execute` response run became visible.
-pub(crate) const PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS: u64 = 1500;
-/// Max gap between two clicks on the same Program `@{session:…}` clip for the
+pub(crate) const PLAYBOOK_RUN_DEDUP_WINDOW_MS: u64 = 1500;
+/// Grace window for ignoring a stale `playbook/state` clear that was queued
+/// before a just-adopted `playbook.execute` response run became visible.
+pub(crate) const PLAYBOOK_RUN_ADOPT_CLEAR_GRACE_MS: u64 = 1500;
+/// Max gap between two clicks on the same Playbook `@{session:…}` clip for the
 /// second to count as a double-click (navigate to the full session) rather
 /// than an independent single click (toggle the clip's pinned inline
 /// terminal). Matches common desktop double-click intervals; crossterm gives
 /// only raw mouse-down events, so this timing is owned here.
-pub(crate) const PROGRAM_CLIP_DOUBLE_CLICK_MS: u64 = 400;
-/// One-shot flourish shown when an authoritative program Run pending block
+pub(crate) const PLAYBOOK_CLIP_DOUBLE_CLICK_MS: u64 = 400;
+/// One-shot flourish shown when an authoritative playbook Run pending block
 /// settles. Presentation-only and client-local.
-pub(crate) const PROGRAM_SETTLE_FLASH_MS: u64 = 300;
-/// Remote Program collaborator cursors are presence hints. Hide them when the
+pub(crate) const PLAYBOOK_SETTLE_FLASH_MS: u64 = 300;
+/// Remote Playbook collaborator cursors are presence hints. Hide them when the
 /// peer has not published activity recently.
-pub(crate) const PROGRAM_COLLAB_CURSOR_TTL_MS: i64 = 60 * 1000;
-pub(crate) const PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS: i64 = 2 * 1000;
-/// Wrapped rows the program body scrolls per mouse-wheel notch.
-pub(crate) const PROGRAM_WHEEL_SCROLL_ROWS: usize = 3;
+pub(crate) const PLAYBOOK_COLLAB_CURSOR_TTL_MS: i64 = 60 * 1000;
+pub(crate) const PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS: i64 = 2 * 1000;
+/// Wrapped rows the playbook body scrolls per mouse-wheel notch.
+pub(crate) const PLAYBOOK_WHEEL_SCROLL_ROWS: usize = 3;
 /// Horizontal pan step for the pinned clip card (spec 0090). Much larger
 /// than the vertical step: the hidden width can span 70+ columns (a 140-col
 /// parser behind a 64-col card), and 3-per-tick was measured too slow to
 /// traverse with a discrete mouse wheel.
-pub(crate) const PROGRAM_PINNED_PAN_COLS_STEP: usize = 8;
+pub(crate) const PLAYBOOK_PINNED_PAN_COLS_STEP: usize = 8;
 /// Content dimensions of the transient clip-chip hover preview (spec 0060) —
 /// deliberately kept small and close to a 4:3 on-screen aspect (terminal
 /// cells are ~2:1 tall, so width:2*height ≈ 4:3; see
@@ -145,20 +145,20 @@ pub(crate) const PROGRAM_PINNED_PAN_COLS_STEP: usize = 8;
 /// default — that has its own, wider default below — this pair is read only
 /// by the un-pinned hover-preview path and as a last-resort fallback before
 /// a popup exists.
-pub(crate) const PROGRAM_CLIP_HOVER_PREVIEW_COLS: u16 = 64;
-pub(crate) const PROGRAM_CLIP_HOVER_PREVIEW_ROWS: u16 = 22;
+pub(crate) const PLAYBOOK_CLIP_HOVER_PREVIEW_COLS: u16 = 64;
+pub(crate) const PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS: u16 = 22;
 /// Starting content width for the pinned card (spec 0090) — wider than the
 /// transient hover preview above, since a pinned card is a working inline
 /// terminal a user reads and types into, not a glance. Also the terminal
 /// size a pinned card resizes its session to when it takes size ownership:
 /// the card and the PTY must agree exactly, or the parser would resize
-/// every frame. Height reuses `PROGRAM_CLIP_HOVER_PREVIEW_ROWS` — only the
+/// every frame. Height reuses `PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS` — only the
 /// width default differs; both axes are user-resizable from here by
 /// dragging the card's right/bottom border.
-pub(crate) const PROGRAM_PINNED_CARD_DEFAULT_COLS: u16 = 80;
+pub(crate) const PLAYBOOK_PINNED_CARD_DEFAULT_COLS: u16 = 80;
 /// Minimum content dims a pinned card can be drag-resized down to.
-pub(crate) const PROGRAM_PINNED_CARD_MIN_COLS: u16 = 20;
-pub(crate) const PROGRAM_PINNED_CARD_MIN_ROWS: u16 = 5;
+pub(crate) const PLAYBOOK_PINNED_CARD_MIN_COLS: u16 = 20;
+pub(crate) const PLAYBOOK_PINNED_CARD_MIN_ROWS: u16 = 5;
 
 /// An in-flight drag gesture on the pinned clip card (spec 0090).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,7 +176,7 @@ pub enum PinnedCardDrag {
     /// the pointer.
     Move { grab: (u16, u16) },
 }
-const PROGRAM_UNDO_STACK_LIMIT: usize = 100;
+const PLAYBOOK_UNDO_STACK_LIMIT: usize = 100;
 const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
 /// Minimum spacing between `usage.query` fetches for the same harness while
 /// its name is continuously hovered (spec 0086's tooltip). The daemon's own
@@ -300,7 +300,7 @@ fn selection_is_valid_for_sessions(
     match selection {
         Selection::None => true,
         // A pane may hold any live session, not just ones with a list row: a
-        // program clip can point the main view at a subagent. Keep the pane as
+        // playbook clip can point the main view at a subagent. Keep the pane as
         // long as the session still exists; pruning only fires once it's gone.
         Selection::Session(id) => sessions.iter().any(|s| s.id == *id),
         Selection::Group(id) => groups.iter().any(|g| g.id == *id),
@@ -1121,10 +1121,10 @@ pub enum MinibufferIntent {
     ConfirmLocalFileUpload {
         session_id: String,
         path: String,
-        /// True when the drop landed on the program editor: the uploaded
-        /// attachment inserts a Markdown link into the program (spec 0099)
+        /// True when the drop landed on the playbook editor: the uploaded
+        /// attachment inserts a Markdown link into the playbook (spec 0099)
         /// instead of pasting into the session PTY.
-        to_program: bool,
+        to_playbook: bool,
     },
     Rename {
         session_id: String,
@@ -1214,26 +1214,26 @@ impl MatrixRevealHit {
 }
 
 /// On-screen cell range of a session smart-clip (`@{session:id}`) rendered in
-/// the program body, captured each frame so a hover/click can map a cell back to
+/// the playbook body, captured each frame so a hover/click can map a cell back to
 /// its session id. A clip that word-wraps across rows contributes one hit per
 /// row segment. `col_end` is exclusive.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProgramClipHit {
+pub struct PlaybookClipHit {
     pub col_start: u16,
     pub col_end: u16,
     pub row: u16,
     pub session_id: String,
 }
 
-impl ProgramClipHit {
+impl PlaybookClipHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         row == self.row && col >= self.col_start && col < self.col_end
     }
 }
 
-/// One on-screen segment of a program attachment chip (spec 0099).
+/// One on-screen segment of a playbook attachment chip (spec 0099).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProgramAttachmentHit {
+pub struct PlaybookAttachmentHit {
     pub col_start: u16,
     pub col_end: u16,
     pub row: u16,
@@ -1244,19 +1244,19 @@ pub struct ProgramAttachmentHit {
     pub key: (u64, usize),
 }
 
-impl ProgramAttachmentHit {
+impl PlaybookAttachmentHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         row == self.row && col >= self.col_start && col < self.col_end
     }
 }
 
 /// On-screen cell range of an `[label](agentd:action/…)` action link rendered
-/// in the program body (spec 0074: action links are part of the shared
-/// dialect on every surface). Captured each frame like [`ProgramClipHit`] —
+/// in the playbook body (spec 0074: action links are part of the shared
+/// dialect on every surface). Captured each frame like [`PlaybookClipHit`] —
 /// one hit per wrapped-row segment — so a click can dispatch the action as
-/// user intent to the program's owning session. `col_end` is exclusive.
+/// user intent to the playbook's owning session. `col_end` is exclusive.
 #[derive(Debug, Clone)]
-pub struct ProgramActionLinkHit {
+pub struct PlaybookActionLinkHit {
     pub col_start: u16,
     pub col_end: u16,
     pub row: u16,
@@ -1264,29 +1264,29 @@ pub struct ProgramActionLinkHit {
     pub action: construct_protocol::UiAction,
 }
 
-impl ProgramActionLinkHit {
+impl PlaybookActionLinkHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         row == self.row && col >= self.col_start && col < self.col_end
     }
 }
 
-/// A clickable template button drawn in the empty-program placeholder. The box
+/// A clickable template button drawn in the empty-playbook placeholder. The box
 /// spans `row_start..=row_end` (top border, label, bottom border) over the
-/// columns `col_start..col_end`; clicking anywhere inside fills the program with
-/// that template's Markdown. Republished every frame the active program is empty.
+/// columns `col_start..col_end`; clicking anywhere inside fills the playbook with
+/// that template's Markdown. Republished every frame the active playbook is empty.
 #[derive(Debug, Clone)]
-pub struct ProgramTemplateHit {
+pub struct PlaybookTemplateHit {
     pub col_start: u16,
     pub col_end: u16,
     pub row_start: u16,
     pub row_end: u16,
-    /// Template id persisted on the program document once applied.
+    /// Template id persisted on the playbook document once applied.
     pub template_id: String,
     /// The template's Markdown, dropped straight into the buffer on click.
     pub markdown: String,
 }
 
-impl ProgramTemplateHit {
+impl PlaybookTemplateHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         row >= self.row_start && row <= self.row_end && col >= self.col_start && col < self.col_end
     }
@@ -1326,7 +1326,7 @@ pub struct DynamicUiHover {
 pub enum SessionTitleMenuAction {
     Rename,
     Fork,
-    ProgramTerminalMode,
+    PlaybookTerminalMode,
     SplitHorizontal,
     SplitVertical,
     CloseSplit,
@@ -1341,7 +1341,7 @@ impl SessionTitleMenuAction {
     pub const ALL: [Self; 9] = [
         Self::Rename,
         Self::Fork,
-        Self::ProgramTerminalMode,
+        Self::PlaybookTerminalMode,
         Self::SplitHorizontal,
         Self::SplitVertical,
         Self::CloseSplit,
@@ -1354,7 +1354,7 @@ impl SessionTitleMenuAction {
         match self {
             Self::Rename => "rename",
             Self::Fork => "fork",
-            Self::ProgramTerminalMode => "program mode",
+            Self::PlaybookTerminalMode => "playbook mode",
             Self::SplitHorizontal => "split horizontal",
             Self::SplitVertical => "split vertical",
             Self::CloseSplit => "close split",
@@ -1376,7 +1376,7 @@ pub struct SessionTitleMenu {
 }
 
 /// In-progress inline rename of a session's title, edited directly in its
-/// pane's title bar (or the program popup's) instead of the bottom
+/// pane's title bar (or the playbook popup's) instead of the bottom
 /// minibuffer prompt. `App::session_title_rename == None` means no rename
 /// is active; only one can be in progress at a time.
 #[derive(Debug, Clone)]
@@ -1398,8 +1398,8 @@ pub enum TitleRenameOrigin {
     /// A session pane's title bar, keyed by main-window id so a session shown
     /// in several split panes edits only in the clicked one.
     Pane(Option<u64>),
-    /// The program popup's title bar.
-    Program,
+    /// The playbook popup's title bar.
+    Playbook,
 }
 
 impl SessionTitleMenu {
@@ -1531,45 +1531,45 @@ pub struct App {
     /// Plugin-contributed palette/slash actions (spec 0152 phase 2),
     /// fetched once at startup/reconnect; empty when no plugins loaded.
     pub plugin_actions: Vec<construct_protocol::PluginActionInfo>,
-    /// Program templates offered as clickable buttons in the empty-program
+    /// Playbook templates offered as clickable buttons in the empty-playbook
     /// placeholder. Fetched at startup and on reconnect, and refreshed in the
-    /// background every time the program pane opens so edits to template files
+    /// background every time the playbook pane opens so edits to template files
     /// (or newly dropped files) appear on the next open without a daemon restart.
-    pub program_templates: Vec<construct_protocol::ProgramTemplate>,
-    /// Background channel for live-reloaded program templates. `open_program_popup`
+    pub playbook_templates: Vec<construct_protocol::PlaybookTemplate>,
+    /// Background channel for live-reloaded playbook templates. `open_playbook_popup`
     /// spawns a non-blocking fetch that delivers the latest list here; the event
     /// loop applies it on the next iteration (no flicker — the placeholder keeps
     /// the cached list until the fresh one lands).
-    pub program_templates_tx: mpsc::UnboundedSender<Vec<construct_protocol::ProgramTemplate>>,
-    /// Program selection verbs (spec 0089) offered as buttons in the
+    pub playbook_templates_tx: mpsc::UnboundedSender<Vec<construct_protocol::PlaybookTemplate>>,
+    /// Playbook selection verbs (spec 0089) offered as buttons in the
     /// selection context menu. Fetched and refreshed the same way as
-    /// `program_templates`.
-    pub program_verbs: Vec<construct_protocol::ProgramVerb>,
+    /// `playbook_templates`.
+    pub playbook_verbs: Vec<construct_protocol::PlaybookVerb>,
     /// True while Shift is held under enhanced keyboard reporting, or while
-    /// the latest mouse event carries Shift. The Program selection menu uses
+    /// the latest mouse event carries Shift. The Playbook selection menu uses
     /// this to preview its forked-execution override (spec 0137: Run and
-    /// verbs go to the Program-owning session by default; Shift diverts them
+    /// verbs go to the Playbook-owning session by default; Shift diverts them
     /// into an interactive fork).
-    pub program_selection_run_on_fork: bool,
-    /// Background channel for live-reloaded program verbs, the `program_verbs`
-    /// counterpart to `program_templates_tx`.
-    pub program_verbs_tx: mpsc::UnboundedSender<Vec<construct_protocol::ProgramVerb>>,
-    /// Latest daemon-side program Markdown per session id, backing widget
-    /// `:::clip program` projections (spec 0074: a widget mirrors a program
-    /// region by reference, never by copy). Kept fresh by `program/state`
-    /// notifications — the daemon broadcasts every program change to every
-    /// client, not only to open program views — and seeded on first use by a
-    /// non-blocking `request_program_projection` fetch.
-    pub program_markdown_cache: HashMap<String, String>,
-    /// Session ids with a background program fetch in flight, so a projection
+    pub playbook_selection_run_on_fork: bool,
+    /// Background channel for live-reloaded playbook verbs, the `playbook_verbs`
+    /// counterpart to `playbook_templates_tx`.
+    pub playbook_verbs_tx: mpsc::UnboundedSender<Vec<construct_protocol::PlaybookVerb>>,
+    /// Latest daemon-side playbook Markdown per session id, backing widget
+    /// `:::clip playbook` projections (spec 0074: a widget mirrors a playbook
+    /// region by reference, never by copy). Kept fresh by `playbook/state`
+    /// notifications — the daemon broadcasts every playbook change to every
+    /// client, not only to open playbook views — and seeded on first use by a
+    /// non-blocking `request_playbook_projection` fetch.
+    pub playbook_markdown_cache: HashMap<String, String>,
+    /// Session ids with a background playbook fetch in flight, so a projection
     /// rendered every frame spawns at most one fetch. An entry whose fetch
-    /// failed stays pending (the widget keeps its "loading program…" line)
-    /// until the next `program/state` notification fills the cache — retrying
+    /// failed stays pending (the widget keeps its "loading playbook…" line)
+    /// until the next `playbook/state` notification fills the cache — retrying
     /// per frame would hammer a struggling daemon.
-    pub program_projection_pending: HashSet<String>,
-    /// Background channel delivering `(session_id, program_markdown)` fetch
+    pub playbook_projection_pending: HashSet<String>,
+    /// Background channel delivering `(session_id, playbook_markdown)` fetch
     /// results into the event loop; drained alongside the template channel.
-    pub program_projection_tx: mpsc::UnboundedSender<(String, String)>,
+    pub playbook_projection_tx: mpsc::UnboundedSender<(String, String)>,
     /// Last `usage.query` result per harness *name* (spec 0086) — usage is
     /// per-subscription, shared across every session running that harness,
     /// so this is keyed by harness rather than session id. Populated by a
@@ -1815,11 +1815,11 @@ pub struct App {
     pub mouse_pos: Option<(u16, u16)>,
     /// When `mouse_pos` last actually changed to a new cell — a genuine
     /// pointer move, as opposed to the content under a stationary pointer
-    /// changing (e.g. a click starting a program Run shimmer at the same
+    /// changing (e.g. a click starting a playbook Run shimmer at the same
     /// cell the click itself landed on). Captured before any click handling
     /// for that same event runs, so a click's own coordinates never count as
     /// "arriving" at whatever starts shimmering as a result of that click.
-    /// Used to gate the program shimmer hover tooltip on pointer-enter (spec
+    /// Used to gate the playbook shimmer hover tooltip on pointer-enter (spec
     /// 0057) rather than merely "pointer happens to be here".
     pub mouse_moved_at: Option<Instant>,
     /// Whether this terminal has ever delivered a `MouseEventKind::Moved`
@@ -1835,14 +1835,14 @@ pub struct App {
     /// stops receiving mouse events so the user's terminal can perform
     /// native drag selection/copy.
     pub mouse_capture_enabled: bool,
-    /// `(session_id, click_instant)` of the last click on a Program
+    /// `(session_id, click_instant)` of the last click on a Playbook
     /// `@{session:…}` clip chip, used to detect a double-click within
-    /// `PROGRAM_CLIP_DOUBLE_CLICK_MS` on the *same* clip — crossterm only
+    /// `PLAYBOOK_CLIP_DOUBLE_CLICK_MS` on the *same* clip — crossterm only
     /// reports raw mouse-down events, so double-click detection is timing
     /// state we own. A single click pins/unpins the clip's inline terminal
-    /// (`ProgramPopup::pinned_clip`); a double-click navigates to the full
+    /// (`PlaybookPopup::pinned_clip`); a double-click navigates to the full
     /// session view, same as every click did before pinning existed.
-    pub last_program_clip_click: Option<(String, Instant)>,
+    pub last_playbook_clip_click: Option<(String, Instant)>,
     /// ID of the daemon-owned orchestrator session, if one is present
     /// in the sessions list. The orchestrator runs as a smith
     /// interactive (PTY) session; the TUI renders its PTY in the
@@ -1884,7 +1884,7 @@ pub struct App {
     /// Split-window divider drag: parent split id, direction, drag-start
     /// coordinate, drag-start ratio, and parent split area.
     pub resizing_main_window: Option<(u64, WindowSplitDirection, u16, u16, ratatui::layout::Rect)>,
-    pub resizing_program_popup: Option<()>,
+    pub resizing_playbook_popup: Option<()>,
     /// In-flight drag gesture on the pinned clip card (spec 0090): a grab
     /// on its right/bottom border resizes it, a grab on its top border
     /// moves it.
@@ -1952,42 +1952,42 @@ pub struct App {
     /// harness is available. Captures all input while open.
     pub configure_popup: Option<ConfigurePopup>,
     /// Reusable session-picker dialog (spec 0063): `None` = closed. Opened by
-    /// `C-x b` (switch the active window's session) and by the program view's
+    /// `C-x b` (switch the active window's session) and by the playbook view's
     /// `@`→session path (insert a session clip). Captures all input while open.
     pub session_picker: Option<SessionPickerDialog>,
-    /// Selected session's program, rendered in an in-TUI modal.
-    pub program_popup: Option<ProgramPopup>,
-    /// Open program popups for sessions that are not currently selected.
-    /// Presence means the program should be restored when that session is
+    /// Selected session's playbook, rendered in an in-TUI modal.
+    pub playbook_popup: Option<PlaybookPopup>,
+    /// Open playbook popups for sessions that are not currently selected.
+    /// Presence means the playbook should be restored when that session is
     /// focused again, including unsaved draft text and cursor state.
-    pub program_popups: HashMap<String, ProgramPopup>,
-    /// Remembered caret + scroll for each session's program, captured when the
-    /// program view is hidden so reopening it lands on the same position. This
-    /// is intentionally distinct from `program_popups`: that map drives split-
-    /// window rendering, so a fully-hidden program must not live there (it would
+    pub playbook_popups: HashMap<String, PlaybookPopup>,
+    /// Remembered caret + scroll for each session's playbook, captured when the
+    /// playbook view is hidden so reopening it lands on the same position. This
+    /// is intentionally distinct from `playbook_popups`: that map drives split-
+    /// window rendering, so a fully-hidden playbook must not live there (it would
     /// re-render in a split), yet its caret/scroll must still survive a
     /// hide→show cycle. Keyed by session id; consumed on the next open.
-    pub program_view_memory: HashMap<String, ProgramViewMemory>,
-    /// In-flight program Run animations, keyed by session id (spec 0042). An
-    /// entry means a program Run is believed to still be executing for that
+    pub playbook_view_memory: HashMap<String, PlaybookViewMemory>,
+    /// In-flight playbook Run animations, keyed by session id (spec 0042). An
+    /// entry means a playbook Run is believed to still be executing for that
     /// session; it drives the shimmer over the executed Markdown.
-    pub program_runs: HashMap<String, ProgramRun>,
+    pub playbook_runs: HashMap<String, PlaybookRun>,
     /// Run overlap/idempotency guard (spec 0042 consequence), keyed by
     /// `(session_id, is_selection, executed-body hash)`. A duplicate Run
     /// gesture — a double `C-x C-r`, a double-click on a Run button — for the
     /// exact same session/scope/body is coalesced into whichever dispatch is
     /// already in flight or just completed, rather than sending a second
-    /// `program.execute`. Keying on the executed body (not just session)
+    /// `playbook.execute`. Keying on the executed body (not just session)
     /// means a selection Run, a different selection, or a full re-Run whose
     /// body changed always dispatches — only a truly identical repeat is
-    /// suppressed. See `execute_program_popup`.
-    pub(crate) program_run_dispatch: HashMap<ProgramRunDispatchKey, ProgramRunDispatchState>,
-    /// Recently-settled program block refs, keyed by session id then block ref.
+    /// suppressed. See `execute_playbook_popup`.
+    pub(crate) playbook_run_dispatch: HashMap<PlaybookRunDispatchKey, PlaybookRunDispatchState>,
+    /// Recently-settled playbook block refs, keyed by session id then block ref.
     /// Renderers turn these into a short one-shot flourish and prune them after
-    /// `PROGRAM_SETTLE_FLASH_MS`.
-    pub program_settle_flourishes: HashMap<String, HashMap<String, Instant>>,
-    /// Ephemeral Program collaboration cursors, keyed by daemon client id.
-    pub program_collaborators: HashMap<String, construct_protocol::ProgramCursor>,
+    /// `PLAYBOOK_SETTLE_FLASH_MS`.
+    pub playbook_settle_flourishes: HashMap<String, HashMap<String, Instant>>,
+    /// Ephemeral Playbook collaboration cursors, keyed by daemon client id.
+    pub playbook_collaborators: HashMap<String, construct_protocol::PlaybookCursor>,
     /// Local receipt clock for agent-cursor freshness (spec 0065 agent
     /// presence), keyed by daemon client id: the agent cursor's
     /// `updated_at_ms` last observed for that client, alongside the local
@@ -1997,9 +1997,9 @@ pub struct App {
     /// before the first paint, so the daemon stamp alone makes the reveal
     /// invisible. Only bumped when the daemon stamp itself advances, so a
     /// rebase (position change, unchanged `updated_at_ms`) does not renew it.
-    pub program_agent_reveal_receipts: HashMap<String, (i64, Instant)>,
-    pub own_program_client_id: Option<String>,
-    pub program_clipboard: Option<String>,
+    pub playbook_agent_reveal_receipts: HashMap<String, (i64, Instant)>,
+    pub own_playbook_client_id: Option<String>,
+    pub playbook_clipboard: Option<String>,
     /// Live `/remote-control` modal — how to reach this daemon, and the
     /// providers that can widen that reach. `Some` while open, `None`
     /// otherwise. Dismissed with Esc the same way `tasks_popup` is.
@@ -2033,7 +2033,7 @@ pub struct App {
     /// Latest browser preview per session, fed by `SessionEvent::BrowserPreview`
     /// and rendered as a top-right overlay in the terminal view.
     pub browser_previews: HashMap<String, BrowserPreviewState>,
-    /// Decoded program-attachment images (spec 0099), keyed by path with the
+    /// Decoded playbook-attachment images (spec 0099), keyed by path with the
     /// file's mtime so an overwritten attachment re-decodes. `None` records a
     /// failed decode, so a broken file isn't re-read every frame.
     pub attachment_images: HashMap<
@@ -2045,12 +2045,12 @@ pub struct App {
     >,
     /// Live drag state for resizing an expanded inline attachment image:
     /// (instance key, on-screen row of the image block's top).
-    pub resizing_program_attachment: Option<((u64, usize), u16)>,
+    pub resizing_playbook_attachment: Option<((u64, usize), u16)>,
     /// Persisted per-session expansion state (spec 0099): session id →
     /// ("linehash:idx" → (path, rows)). Loaded lazily from the TUI state
-    /// file on first program open; written through on every toggle/resize.
-    pub program_expanded_store: HashMap<String, HashMap<String, (String, u16)>>,
-    pub program_expanded_store_loaded: bool,
+    /// file on first playbook open; written through on every toggle/resize.
+    pub playbook_expanded_store: HashMap<String, HashMap<String, (String, u16)>>,
+    pub playbook_expanded_store_loaded: bool,
     /// Adapter/file-backed dynamic UI panels, keyed by session id then panel id.
     /// Actions route back as normal session input.
     pub ui_panels: HashMap<String, HashMap<String, construct_protocol::UiPanel>>,
@@ -2684,30 +2684,30 @@ pub struct TasksPopup {
     pub tasks: Vec<construct_protocol::TaskInfo>,
 }
 
-/// In-TUI program surface for the selected session. The renderer treats
+/// In-TUI playbook surface for the selected session. The renderer treats
 /// Markdown as source and projects smart clips as chips/blocks.
 #[derive(Debug, Clone)]
-pub struct ProgramPopup {
-    pub program: construct_protocol::ProgramDocument,
+pub struct PlaybookPopup {
+    pub playbook: construct_protocol::PlaybookDocument,
     pub buffer: String,
     pub saved_markdown: String,
-    pub blocks: Vec<construct_protocol::ProgramBlockView>,
-    pub undo_stack: Vec<ProgramUndoState>,
+    pub blocks: Vec<construct_protocol::PlaybookBlockView>,
+    pub undo_stack: Vec<PlaybookUndoState>,
     pub cursor: usize,
     pub preferred_col: Option<usize>,
-    pub selection: Option<ProgramSelection>,
-    pub selection_menu: Option<ProgramSelectionMenu>,
-    pub smart_clip: Option<ProgramSmartClipSearch>,
+    pub selection: Option<PlaybookSelection>,
+    pub selection_menu: Option<PlaybookSelectionMenu>,
+    pub smart_clip: Option<PlaybookSmartClipSearch>,
     /// Image links currently expanded inline, keyed by link instance
     /// (line-content hash ⊕ dup ordinal, index within line) → (target path,
     /// block height in body rows). The path lets edits re-attach state to
-    /// the moved instance (see `reconcile_program_expanded`). Client-local
+    /// the moved instance (see `reconcile_playbook_expanded`). Client-local
     /// view state (spec 0099): persisted per session in the TUI's state
     /// file, never synced or written into the Markdown.
     pub expanded_attachments: HashMap<(u64, usize), (String, u16)>,
     /// Hash of the buffer the expansion map was last reconciled against.
     pub expanded_reconcile_hash: u64,
-    pub search: Option<ProgramSearch>,
+    pub search: Option<PlaybookSearch>,
     pub revealed_at: Instant,
     pub hide_after: Instant,
     pub closing: bool,
@@ -2715,13 +2715,13 @@ pub struct ProgramPopup {
     /// rows skipped off the top so the body can scroll when it overflows the
     /// viewport. Cursor moves follow the caret; the mouse wheel scrolls freely.
     pub scroll_offset: usize,
-    /// Percent of the owning pane height covered by the roll-down Program
+    /// Percent of the owning pane height covered by the roll-down Playbook
     /// surface. Defaults to roughly two thirds so the bottom third of the
     /// session terminal remains visible.
     pub cover_percent: u16,
-    /// True while this rolled-down Program is slid aside because the terminal
+    /// True while this rolled-down Playbook is slid aside because the terminal
     /// it exposes holds keyboard focus. Keys flow to the underlying session
-    /// instead of editing Program Markdown. Per-popup (not on `App`) so that
+    /// instead of editing Playbook Markdown. Per-popup (not on `App`) so that
     /// focusing a different split window leaves this popup's slide untouched:
     /// the popup stays slid in its own pane and is still slid when its window
     /// regains focus.
@@ -2729,9 +2729,9 @@ pub struct ProgramPopup {
     /// Terminal-focus slide animation: the slide fraction this popup had when
     /// `terminal_focus` last flipped (0.0 anchored, 1.0 fully slid), and when
     /// the flip happened. The renderer eases from this fraction toward the
-    /// focus target over `PROGRAM_REVEAL_MS`, so reversing focus mid-slide
+    /// focus target over `PLAYBOOK_REVEAL_MS`, so reversing focus mid-slide
     /// resumes from the popup's current position instead of snapping. Flip
-    /// focus via [`ProgramPopup::set_terminal_focus`].
+    /// focus via [`PlaybookPopup::set_terminal_focus`].
     pub slide_from: f32,
     pub slide_changed_at: Option<Instant>,
     /// Session id of the `@{session:…}` clip currently pinned open as a live,
@@ -2739,7 +2739,7 @@ pub struct ProgramPopup {
     /// pins it (clicking the same pinned clip again unpins); double-clicking
     /// navigates to the full session view instead, same as before this
     /// existed. While pinned, keystrokes route to this session's PTY instead
-    /// of editing Program Markdown — see `App::handle_pinned_clip_key`.
+    /// of editing Playbook Markdown — see `App::handle_pinned_clip_key`.
     /// Per-popup, not on `App`, for the same reason as `terminal_focus`.
     pub pinned_clip: Option<String>,
     /// Pinned-card crop pan (spec 0090): rows scrolled back from the live
@@ -2754,7 +2754,7 @@ pub struct ProgramPopup {
     /// pinned, so its PTY was resized to the card and the card renders at
     /// exactly these dims — full fidelity, no crop. `None` = crop mode (the
     /// session is visible elsewhere; the card never fights another render
-    /// site for size). Always set through `App::set_program_pinned_clip`.
+    /// site for size). Always set through `App::set_playbook_pinned_clip`.
     pub pinned_terminal_size: Option<(u16, u16)>,
     /// The pinned card's content dims (spec 0090), user-resizable by
     /// dragging the card's right/bottom border. Sticky across pin
@@ -2769,7 +2769,7 @@ pub struct ProgramPopup {
     pub pinned_card_pos: Option<(u16, u16)>,
 }
 
-impl ProgramPopup {
+impl PlaybookPopup {
     /// Set, switch, or clear the pinned clip, resetting the card's crop pan:
     /// a fresh pin (or unpin) always starts back at the live tail,
     /// left-aligned. Every `pinned_clip` change goes through here so a pan
@@ -2782,7 +2782,7 @@ impl ProgramPopup {
         self.pinned_card_pos = None;
     }
 
-    /// Flip keyboard focus between this rolled-down Program and the terminal
+    /// Flip keyboard focus between this rolled-down Playbook and the terminal
     /// it exposes. Every flip goes through here so the popup's terminal-focus
     /// slide animates instead of snapping: the current in-flight fraction is
     /// captured as the new starting point, so reversing focus mid-slide
@@ -2799,7 +2799,7 @@ impl ProgramPopup {
 
     /// Current terminal-focus slide fraction: 0.0 = anchored at the pane's
     /// left edge, 1.0 = fully slid right. Eases linearly from `slide_from`
-    /// toward the focus target over `PROGRAM_REVEAL_MS` (the same duration as
+    /// toward the focus target over `PLAYBOOK_REVEAL_MS` (the same duration as
     /// the roll-down reveal).
     pub(crate) fn slide_fraction(&self, now: Instant) -> f32 {
         let target = if self.terminal_focus { 1.0 } else { 0.0 };
@@ -2807,19 +2807,19 @@ impl ProgramPopup {
             return target;
         };
         let progress = (now.saturating_duration_since(changed_at).as_secs_f32()
-            / (PROGRAM_REVEAL_MS as f32 / 1000.0))
+            / (PLAYBOOK_REVEAL_MS as f32 / 1000.0))
             .clamp(0.0, 1.0);
         self.slide_from + (target - self.slide_from) * progress
     }
 }
 
-/// Caret + scroll of a program view, remembered across a hide→show cycle. When
-/// the program is hidden the active popup is dropped (it must not linger in
-/// `program_popups`, which renders split windows); this snapshot lets a later
+/// Caret + scroll of a playbook view, remembered across a hide→show cycle. When
+/// the playbook is hidden the active popup is dropped (it must not linger in
+/// `playbook_popups`, which renders split windows); this snapshot lets a later
 /// reopen restore the exact position the user left, even though the document is
 /// re-fetched fresh from the daemon.
 #[derive(Debug, Clone)]
-pub struct ProgramViewMemory {
+pub struct PlaybookViewMemory {
     /// Caret as a char offset into the buffer. Clamped to the (possibly changed)
     /// buffer length on restore.
     pub cursor: usize,
@@ -2832,33 +2832,33 @@ pub struct ProgramViewMemory {
     pub cover_percent: u16,
 }
 
-pub(crate) const PROGRAM_COVER_PERCENT_DEFAULT: u16 = 67;
-pub(crate) const PROGRAM_COVER_PERCENT_MIN: u16 = 30;
-pub(crate) const PROGRAM_COVER_PERCENT_MAX: u16 = 100;
+pub(crate) const PLAYBOOK_COVER_PERCENT_DEFAULT: u16 = 67;
+pub(crate) const PLAYBOOK_COVER_PERCENT_MIN: u16 = 30;
+pub(crate) const PLAYBOOK_COVER_PERCENT_MAX: u16 = 100;
 
 /// Key for the Run overlap/idempotency guard: the session a Run targets, the
-/// scope (`true` = selection, `false` = whole program), and a hash of the
-/// executed body. See `App::program_run_dispatch`.
-pub(crate) type ProgramRunDispatchKey = (String, bool, u64);
+/// scope (`true` = selection, `false` = whole playbook), and a hash of the
+/// executed body. See `App::playbook_run_dispatch`.
+pub(crate) type PlaybookRunDispatchKey = (String, bool, u64);
 
-/// State of one `ProgramRunDispatchKey` in `App::program_run_dispatch`.
+/// State of one `PlaybookRunDispatchKey` in `App::playbook_run_dispatch`.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ProgramRunDispatchState {
+pub(crate) enum PlaybookRunDispatchState {
     /// The save/execute round trip for this exact Run is still awaited. A
     /// second identical Run arriving while this is set is suppressed
     /// outright, regardless of how long ago the first began.
     InFlight,
-    /// The Run was dispatched (its `program.execute` request was sent) at
-    /// this instant. An identical repeat within `PROGRAM_RUN_DEDUP_WINDOW_MS`
+    /// The Run was dispatched (its `playbook.execute` request was sent) at
+    /// this instant. An identical repeat within `PLAYBOOK_RUN_DEDUP_WINDOW_MS`
     /// of this instant is suppressed; after that it dispatches again.
     Dispatched(Instant),
 }
 
-/// In-flight program Run animation state for one session (spec 0042). Present
-/// while a program Run this client issued is believed to still be executing in
+/// In-flight playbook Run animation state for one session (spec 0042). Present
+/// while a playbook Run this client issued is believed to still be executing in
 /// the owning session; drives the "shimmer" over the executed Markdown.
 #[derive(Debug, Clone)]
-pub struct ProgramRun {
+pub struct PlaybookRun {
     /// When Run was pressed. The shimmer wave is a function of elapsed time.
     pub started_at: Instant,
     /// Stable block refs (plus legacy fallback content ids) of blocks still
@@ -2886,9 +2886,9 @@ pub struct ProgramRun {
     pub first_output_seen: bool,
     /// Compact run-pipeline stage derived by the daemon, or Pressed for this
     /// client's optimistic pre-response state.
-    pub stage: construct_protocol::ProgramRunStage,
+    pub stage: construct_protocol::PlaybookRunStage,
     /// True once this run has been observed in a daemon payload. Local
-    /// optimistic starts stay false until program.execute or program/state
+    /// optimistic starts stay false until playbook.execute or playbook/state
     /// confirms them.
     pub daemon_confirmed: bool,
     /// Local instant when the daemon-confirmed run was adopted by this client.
@@ -2900,8 +2900,8 @@ pub struct ProgramRun {
     pub total_block_count: usize,
 }
 
-impl ProgramRun {
-    fn from_progress(mut progress: construct_protocol::ProgramRunProgress) -> Option<Self> {
+impl PlaybookRun {
+    fn from_progress(mut progress: construct_protocol::PlaybookRunProgress) -> Option<Self> {
         progress.refresh_stage();
         let now = Instant::now();
         let now_ms = SystemTime::now()
@@ -2921,7 +2921,7 @@ impl ProgramRun {
         let deadline = now + Duration::from_millis((progress.expires_at_ms - now_ms) as u64);
         let mut pending: HashSet<String> = progress.pending_block_refs.into_iter().collect();
         pending.extend(progress.pending_block_ids);
-        // Callers (`adopt_daemon_program_run`/`adopt_program_state_run`) merge
+        // Callers (`adopt_daemon_playbook_run`/`adopt_playbook_state_run`) merge
         // this against the prior run's `pending_since` so a block that stays
         // pending across the echo keeps its original timestamp; this default
         // only sticks for blocks genuinely new to the set.
@@ -2947,7 +2947,7 @@ impl ProgramRun {
     /// genuinely new to the set. Call this when replacing an existing run
     /// (re-Run, daemon echo) so a block already being hovered doesn't lose
     /// its armed hover state just because an unrelated re-Run or heartbeat
-    /// rebuilt the `ProgramRun`.
+    /// rebuilt the `PlaybookRun`.
     fn merged_pending_since(
         &self,
         pending: &HashSet<String>,
@@ -2963,10 +2963,10 @@ impl ProgramRun {
     }
 }
 
-/// A program "block": a maximal run of consecutive non-blank Markdown lines,
+/// A playbook "block": a maximal run of consecutive non-blank Markdown lines,
 /// identified by its legacy content id for dirty-buffer fallback. The daemon
 /// projection supplies authoritative stable refs for synced documents.
-pub(crate) struct ProgramBlock {
+pub(crate) struct PlaybookBlock {
     /// Source-line index range `[start_line, end_line)` into `markdown.lines()`.
     pub start_line: usize,
     pub end_line: usize,
@@ -2977,10 +2977,10 @@ pub(crate) struct ProgramBlock {
 /// Split Markdown into blocks (runs of consecutive non-blank lines), via the
 /// shared protocol parser so the TUI and the daemon agree on block boundaries
 /// and ids. The renderer uses this to decide which source lines shimmer.
-pub(crate) fn program_blocks(markdown: &str) -> Vec<ProgramBlock> {
-    construct_protocol::program_block_spans(markdown)
+pub(crate) fn playbook_blocks(markdown: &str) -> Vec<PlaybookBlock> {
+    construct_protocol::playbook_block_spans(markdown)
         .into_iter()
-        .map(|span| ProgramBlock {
+        .map(|span| PlaybookBlock {
             start_line: span.start_line,
             end_line: span.end_line,
             id: span.id,
@@ -2990,10 +2990,10 @@ pub(crate) fn program_blocks(markdown: &str) -> Vec<ProgramBlock> {
 
 /// Session ids referenced by `@{session:…}` smart clips anywhere in `markdown`,
 /// in first-seen order and deduplicated. Used to keep the referenced worker
-/// sessions' PTY history warm so the program hover preview (spec 0060) can paint
+/// sessions' PTY history warm so the playbook hover preview (spec 0060) can paint
 /// a live terminal tail the instant the pointer lands. `@{harness:…}` and other
 /// clip kinds are ignored — only sessions have a terminal to preview.
-pub(crate) fn program_referenced_session_ids(markdown: &str) -> Vec<String> {
+pub(crate) fn playbook_referenced_session_ids(markdown: &str) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     let mut rest = markdown;
     // `@`, `{`, `}` are ASCII so byte-`find` lands on char boundaries.
@@ -3019,22 +3019,22 @@ pub(crate) fn program_referenced_session_ids(markdown: &str) -> Vec<String> {
 
 /// Legacy content ids of the blocks contained in `body` — used for local
 /// optimistic/selection shimmer before the daemon returns stable refs.
-pub(crate) fn program_run_pending_ids(body: &str) -> HashSet<String> {
-    construct_protocol::program_block_spans(body)
+pub(crate) fn playbook_run_pending_ids(body: &str) -> HashSet<String> {
+    construct_protocol::playbook_block_spans(body)
         .into_iter()
         .map(|span| span.id)
         .collect()
 }
 
-fn program_run_progress_pending_ids(
-    progress: &construct_protocol::ProgramRunProgress,
+fn playbook_run_progress_pending_ids(
+    progress: &construct_protocol::PlaybookRunProgress,
 ) -> HashSet<String> {
     let mut pending: HashSet<String> = progress.pending_block_refs.iter().cloned().collect();
     pending.extend(progress.pending_block_ids.iter().cloned());
     pending
 }
 
-/// Next `program_agent_reveal_receipts` entry for an agent cursor carrying
+/// Next `playbook_agent_reveal_receipts` entry for an agent cursor carrying
 /// `updated_at_ms`, given the entry currently on file (if any) and the local
 /// time `now` this cursor was received at (spec 0065 agent presence).
 ///
@@ -3045,7 +3045,7 @@ fn program_run_progress_pending_ids(
 /// advancing its own timestamp, so the existing receipt (and thus the
 /// reveal's remaining freshness) carries over unchanged. Pure so the
 /// bump-vs-hold decision is unit-testable without an `App` or live clock.
-fn program_agent_reveal_receipt_update(
+fn playbook_agent_reveal_receipt_update(
     existing: Option<&(i64, Instant)>,
     updated_at_ms: i64,
     now: Instant,
@@ -3056,13 +3056,13 @@ fn program_agent_reveal_receipt_update(
     }
 }
 
-/// Result of flushing a program popup's buffer to the daemon.
-struct ProgramSaveOutcome {
+/// Result of flushing a playbook popup's buffer to the daemon.
+struct PlaybookSaveOutcome {
     /// The document as it now lives on the daemon (our content, possibly
     /// merged with concurrent edits).
-    program: construct_protocol::ProgramDocument,
+    playbook: construct_protocol::PlaybookDocument,
     /// Echoed per-block projection for stable shimmer refs.
-    blocks: Vec<construct_protocol::ProgramBlockView>,
+    blocks: Vec<construct_protocol::PlaybookBlockView>,
     /// A 3-way merge ran because the document advanced underneath us.
     merged: bool,
     /// The merge could not reconcile overlapping edits, so the saved content
@@ -3071,14 +3071,14 @@ struct ProgramSaveOutcome {
 }
 
 #[derive(Debug, Clone)]
-pub struct ProgramSelection {
+pub struct PlaybookSelection {
     pub anchor: usize,
     pub head: usize,
     pub dragged: bool,
 }
 
 #[derive(Debug, Clone)]
-pub struct ProgramSelectionMenu {
+pub struct PlaybookSelectionMenu {
     pub focused: bool,
     pub comment: String,
     pub cursor: usize,
@@ -3086,7 +3086,7 @@ pub struct ProgramSelectionMenu {
     /// (spec 0089): Comment, then Run, then each advertised verb in order.
     /// Enter activates whichever row this is. Typing/comment-editing keys
     /// only take effect while this is `Comment`.
-    pub selected_action: ProgramSelectionAction,
+    pub selected_action: PlaybookSelectionAction,
     /// When this menu was created. Gates the Run button's and each verb
     /// row's *mouse*-hover highlight: a resting pointer that merely happens
     /// to coincide with a fixed row the instant the menu appears must not
@@ -3098,56 +3098,56 @@ pub struct ProgramSelectionMenu {
     pub shown_at: Instant,
 }
 
-impl Default for ProgramSelectionMenu {
+impl Default for PlaybookSelectionMenu {
     fn default() -> Self {
         Self {
             focused: false,
             comment: String::new(),
             cursor: 0,
-            selected_action: ProgramSelectionAction::Comment,
+            selected_action: PlaybookSelectionAction::Comment,
             shown_at: Instant::now(),
         }
     }
 }
 
-/// One keyboard-navigable row of the Program selection context menu (spec
+/// One keyboard-navigable row of the Playbook selection context menu (spec
 /// 0087). Ordered `Comment, Run, Verb(0), Verb(1), ...` — the same order the
 /// menu renders in, and the order Up/Down/C-p/C-n cycle through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProgramSelectionAction {
+pub enum PlaybookSelectionAction {
     Comment,
     Run,
-    /// Index into `App::program_verbs`.
+    /// Index into `App::playbook_verbs`.
     Verb(usize),
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ProgramUndoState {
+pub(crate) struct PlaybookUndoState {
     buffer: String,
     cursor: usize,
     preferred_col: Option<usize>,
-    selection: Option<ProgramSelection>,
-    smart_clip: Option<ProgramSmartClipSearch>,
+    selection: Option<PlaybookSelection>,
+    smart_clip: Option<PlaybookSmartClipSearch>,
     scroll_offset: usize,
 }
 
 #[derive(Debug, Clone)]
-pub struct ProgramSmartClipSearch {
+pub struct PlaybookSmartClipSearch {
     pub trigger_start: usize,
     pub selected: usize,
-    /// Which menu level is on screen. The picker opens at [`ProgramSmartClipView::Root`]
+    /// Which menu level is on screen. The picker opens at [`PlaybookSmartClipView::Root`]
     /// (top-relevance section + category headers) and drills into a category's
     /// full submenu when one is activated.
-    pub view: ProgramSmartClipView,
+    pub view: PlaybookSmartClipView,
 }
 
 /// The level the `@` smart-clip picker is showing. `Root` is the two-part menu
 /// (up-to-5 most-relevant clips, a separator, then expandable category rows).
 /// `Submenu` is one category's full, list-view-ordered set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProgramSmartClipView {
+pub enum PlaybookSmartClipView {
     Root,
-    Submenu(ProgramSmartClipGroup),
+    Submenu(PlaybookSmartClipGroup),
 }
 
 /// One rendered/​navigable line of the smart-clip picker. The picker is built as
@@ -3155,12 +3155,12 @@ pub enum ProgramSmartClipView {
 /// ([`Self::Clip`], [`Self::Category`]) interleave with non-selectable
 /// decoration ([`Self::Separator`], [`Self::Header`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProgramSmartClipRow {
+pub enum PlaybookSmartClipRow {
     /// A selectable clip. `dimmed` is set inside a submenu for items that do not
     /// match the active type-ahead query — shown (so the full list stays
     /// visible) but de-emphasized so matches stand out.
     Clip {
-        candidate: ProgramSmartClipCandidate,
+        candidate: PlaybookSmartClipCandidate,
         dimmed: bool,
     },
     /// Divider between the top relevance section and the category list.
@@ -3168,7 +3168,7 @@ pub enum ProgramSmartClipRow {
     /// A root-view category header that expands into a submenu. `count` is the
     /// number of clips the submenu holds.
     Category {
-        group: ProgramSmartClipGroup,
+        group: PlaybookSmartClipGroup,
         count: usize,
     },
     /// A non-selectable project/group header inside the session submenu, mirroring
@@ -3176,14 +3176,14 @@ pub enum ProgramSmartClipRow {
     Header(String),
 }
 
-impl ProgramSmartClipRow {
+impl PlaybookSmartClipRow {
     pub fn is_selectable(&self) -> bool {
         matches!(self, Self::Clip { .. } | Self::Category { .. })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct ProgramSearch {
+pub struct PlaybookSearch {
     pub anchor_cursor: usize,
     pub query: String,
     pub matches: Vec<(usize, usize)>,
@@ -3191,20 +3191,20 @@ pub struct ProgramSearch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProgramSmartClipCandidate {
-    pub group: ProgramSmartClipGroup,
+pub struct PlaybookSmartClipCandidate {
+    pub group: PlaybookSmartClipGroup,
     pub clip: String,
     pub label: String,
     pub detail: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProgramSmartClipGroup {
+pub enum PlaybookSmartClipGroup {
     Session,
     Harness,
 }
 
-impl ProgramSmartClipGroup {
+impl PlaybookSmartClipGroup {
     pub fn label(self) -> &'static str {
         match self {
             Self::Session => "session",
@@ -3766,7 +3766,7 @@ pub struct LayoutSnapshot {
     /// outside-click-dismisses semantics don't apply here — but while the
     /// tour is active the card (painted last, on top, opaque) owns every
     /// button event inside this rect regardless of what's underneath: not
-    /// the pane's mouse-grabbing child, not the program editor's cursor
+    /// the pane's mouse-grabbing child, not the playbook editor's cursor
     /// placement, not pane focus/selection (#735). Scroll events fall
     /// through (the card has nothing to scroll), in-flight drags keep
     /// their owner, and an open help modal's close-on-interaction wins.
@@ -3840,68 +3840,68 @@ pub struct LayoutSnapshot {
     /// Set during the lineage section's hit walk; consumed by the frame's
     /// tooltip pass. `None` when nothing token-bearing is hovered.
     pub lineage_segment_tooltip: Option<(ratatui::layout::Rect, String)>,
-    /// Program title-bar Run button bounds: `(x_start, x_end, y)`.
-    pub program_title_run_hit: Option<(u16, u16, u16)>,
-    /// Program title-bar mode toggle bounds: `(x_start, x_end, y)`.
-    pub program_title_toggle_hit: Option<(u16, u16, u16)>,
-    /// Program title-bar close button bounds: `(x_start, x_end, y)`.
-    pub program_title_close_hit: Option<(u16, u16, u16)>,
-    /// Program title-bar session-name bounds: `(x_start, x_end, y)`. Click
-    /// starts an inline rename of the active popup's session — the program
+    /// Playbook title-bar Run button bounds: `(x_start, x_end, y)`.
+    pub playbook_title_run_hit: Option<(u16, u16, u16)>,
+    /// Playbook title-bar mode toggle bounds: `(x_start, x_end, y)`.
+    pub playbook_title_toggle_hit: Option<(u16, u16, u16)>,
+    /// Playbook title-bar close button bounds: `(x_start, x_end, y)`.
+    pub playbook_title_close_hit: Option<(u16, u16, u16)>,
+    /// Playbook title-bar session-name bounds: `(x_start, x_end, y)`. Click
+    /// starts an inline rename of the active popup's session — the playbook
     /// popup's counterpart to `session_title_name_hits`.
-    pub program_title_name_hit: Option<(u16, u16, u16)>,
+    pub playbook_title_name_hit: Option<(u16, u16, u16)>,
     /// `SessionTitleNameHit::window_start_chars` counterpart for
-    /// `program_title_name_hit`: char offset of the first rendered label char,
+    /// `playbook_title_name_hit`: char offset of the first rendered label char,
     /// non-zero only mid-rename when the edit window has slid.
-    pub program_title_name_window_start: usize,
-    /// Program selected-text context Run button bounds: `(x_start, x_end, y)`.
-    pub program_selection_run_hit: Option<(u16, u16, u16)>,
-    /// Program selected-text context menu verb-row bounds (spec 0089): one
+    pub playbook_title_name_window_start: usize,
+    /// Playbook selected-text context Run button bounds: `(x_start, x_end, y)`.
+    pub playbook_selection_run_hit: Option<(u16, u16, u16)>,
+    /// Playbook selected-text context menu verb-row bounds (spec 0089): one
     /// `(x_start, x_end, y, verb_name)` per rendered verb button, in the same
-    /// order as `App::program_verbs`.
-    pub program_selection_verb_hits: Vec<(u16, u16, u16, String)>,
-    /// Inner content rect of the active program popup from the last frame.
+    /// order as `App::playbook_verbs`.
+    pub playbook_selection_verb_hits: Vec<(u16, u16, u16, String)>,
+    /// Inner content rect of the active playbook popup from the last frame.
     /// Cursor-move handlers and the mouse wheel read its width/height to keep
-    /// the caret on-screen and to bound scrolling; `None` when no program is open.
-    pub program_inner_area: Option<ratatui::layout::Rect>,
-    /// Full pane rect the active Program is rolled down inside.
-    pub program_base_area: Option<ratatui::layout::Rect>,
-    /// Bottom border row of the active Program; dragging it resizes coverage.
-    pub program_resize_hit: Option<ratatui::layout::Rect>,
+    /// the caret on-screen and to bound scrolling; `None` when no playbook is open.
+    pub playbook_inner_area: Option<ratatui::layout::Rect>,
+    /// Full pane rect the active Playbook is rolled down inside.
+    pub playbook_base_area: Option<ratatui::layout::Rect>,
+    /// Bottom border row of the active Playbook; dragging it resizes coverage.
+    pub playbook_resize_hit: Option<ratatui::layout::Rect>,
     /// `@`-smart-clip anchor from the last frame: the editor cursor `Position`
-    /// the inline picker hangs from, plus the program's inner `Rect`. The
+    /// the inline picker hangs from, plus the playbook's inner `Rect`. The
     /// session-picker dialog reads this to render its `@`→session variant in
     /// place of the inline context menu instead of center-screen. `Some` only
-    /// while a program's `@` smart-clip search is live.
-    pub program_smart_clip_anchor: Option<(ratatui::layout::Position, ratatui::layout::Rect)>,
-    /// Session smart-clip hitboxes in the active program body from the last
+    /// while a playbook's `@` smart-clip search is live.
+    pub playbook_smart_clip_anchor: Option<(ratatui::layout::Position, ratatui::layout::Rect)>,
+    /// Session smart-clip hitboxes in the active playbook body from the last
     /// frame. Drives hover-preview and click-to-focus on `@{session:id}` chips.
-    pub program_clip_hits: Vec<ProgramClipHit>,
+    pub playbook_clip_hits: Vec<PlaybookClipHit>,
     /// Attachment-chip hitboxes (`![name](path)` / `[name](path)` rendered as
     /// `[Image: …]` / `[File: …]`, spec 0099) from the last frame. Drives the
     /// hover info card.
-    pub program_attachment_hits: Vec<ProgramAttachmentHit>,
+    pub playbook_attachment_hits: Vec<PlaybookAttachmentHit>,
     /// On-screen rects of expanded inline attachment images (spec 0099) from
     /// the last frame, with their target paths. Click inside collapses; a
     /// drag starting on the bottom edge resizes.
-    pub program_attachment_image_rects: Vec<(ratatui::layout::Rect, (u64, usize), String)>,
+    pub playbook_attachment_image_rects: Vec<(ratatui::layout::Rect, (u64, usize), String)>,
     /// Fat grab zones for resizing expanded images (bottom-edge row + the
     /// row below), with the image's top row for the drag's row math.
-    pub program_attachment_resize_zones: Vec<(ratatui::layout::Rect, (u64, usize), u16)>,
+    pub playbook_attachment_resize_zones: Vec<(ratatui::layout::Rect, (u64, usize), u16)>,
     /// Bounds of the pinned clip card (spec 0090) from the last frame, when
     /// one was painted. Clicks inside it are consumed by the card; a left
     /// click landing neither here nor on a session clip dismisses the pin.
-    pub program_pinned_card_rect: Option<ratatui::layout::Rect>,
-    /// Action-link hitboxes in the active program body from the last frame.
-    /// Clicking one dispatches the action to the program's owning session as
+    pub playbook_pinned_card_rect: Option<ratatui::layout::Rect>,
+    /// Action-link hitboxes in the active playbook body from the last frame.
+    /// Clicking one dispatches the action to the playbook's owning session as
     /// user intent (`OBSERVATION: ui.action …`), the same path widget action
-    /// links use. No keyboard shortcuts on this surface — the program is a
+    /// links use. No keyboard shortcuts on this surface — the playbook is a
     /// typing surface, so keys must keep typing.
-    pub program_action_link_hits: Vec<ProgramActionLinkHit>,
-    /// Template-button hitboxes drawn in the empty-program placeholder. Clicking
-    /// one fills the program with that template's Markdown. Empty unless the
-    /// active program is showing the empty-state placeholder.
-    pub program_template_hits: Vec<ProgramTemplateHit>,
+    pub playbook_action_link_hits: Vec<PlaybookActionLinkHit>,
+    /// Template-button hitboxes drawn in the empty-playbook placeholder. Clicking
+    /// one fills the playbook with that template's Markdown. Empty unless the
+    /// active playbook is showing the empty-state placeholder.
+    pub playbook_template_hits: Vec<PlaybookTemplateHit>,
     /// Bounds of the browser preview overlay rendered in the terminal view.
     pub browser_preview_area: Option<ratatui::layout::Rect>,
     /// Top-right close button bounds for the browser preview overlay: `(x_start, x_end, y)`.
@@ -3956,8 +3956,8 @@ pub struct LayoutSnapshot {
     pub main_window_hidden: HashMap<u64, u16>,
     /// `hidden` companions for the geometry that is shifted with its height
     /// preserved (so viewport math keeps working) instead of being clipped.
-    pub program_modal_hidden: u16,
-    pub program_base_hidden: u16,
+    pub playbook_modal_hidden: u16,
+    pub playbook_base_hidden: u16,
     pub terminal_scrollbar_hidden: u16,
     pub list_scrollbar_hidden: u16,
     pub lineage_scrollbar_hidden: u16,
@@ -3965,8 +3965,8 @@ pub struct LayoutSnapshot {
 }
 
 /// How long the main block takes to slide to a new offset (spec 0112). Matches
-/// the program view's slide so the two reveals read as the same gesture.
-pub const MAIN_SLIDE_MS: u64 = PROGRAM_REVEAL_MS;
+/// the playbook view's slide so the two reveals read as the same gesture.
+pub const MAIN_SLIDE_MS: u64 = PLAYBOOK_REVEAL_MS;
 
 /// Eased vertical offset of the main block while a multi-row footer is open
 /// (spec 0112). The footer's demand changes in one step — the panel opens at
@@ -4019,7 +4019,7 @@ impl MainSlideState {
 /// Vertical translation applied to the main block's recorded geometry once the
 /// frame buffer has been scrolled (spec 0112).
 ///
-/// The main block — session list, split panes, lineage, pin strip, program
+/// The main block — session list, split panes, lineage, pin strip, playbook
 /// popups — is always laid out at the size it has when the footer occupies a
 /// single row. A taller footer (operator panel, harness picker) slides that
 /// block up out of the viewport instead of shrinking it, so no pane changes
@@ -4148,23 +4148,23 @@ impl LayoutSnapshot {
             lineage_hscrollbar,
             lineage_box_hits,
             lineage_subagent_toggle_hits,
-            program_title_run_hit,
-            program_title_toggle_hit,
-            program_title_close_hit,
-            program_title_name_hit,
-            program_selection_run_hit,
-            program_selection_verb_hits,
-            program_inner_area,
-            program_base_area,
-            program_resize_hit,
-            program_smart_clip_anchor,
-            program_clip_hits,
-            program_attachment_hits,
-            program_attachment_image_rects,
-            program_attachment_resize_zones,
-            program_pinned_card_rect,
-            program_action_link_hits,
-            program_template_hits,
+            playbook_title_run_hit,
+            playbook_title_toggle_hit,
+            playbook_title_close_hit,
+            playbook_title_name_hit,
+            playbook_selection_run_hit,
+            playbook_selection_verb_hits,
+            playbook_inner_area,
+            playbook_base_area,
+            playbook_resize_hit,
+            playbook_smart_clip_anchor,
+            playbook_clip_hits,
+            playbook_attachment_hits,
+            playbook_attachment_image_rects,
+            playbook_attachment_resize_zones,
+            playbook_pinned_card_rect,
+            playbook_action_link_hits,
+            playbook_template_hits,
             browser_preview_area,
             browser_preview_close,
             terminal_scrollbar,
@@ -4210,13 +4210,13 @@ impl LayoutSnapshot {
             list_scroll_offset: _,
             lineage_v_overflow: _,
             lineage_h_overflow: _,
-            program_title_name_window_start: _,
+            playbook_title_name_window_start: _,
             dynamic_ui_scroll_metrics: _,
             // Written below.
             main_slide,
             main_window_hidden,
-            program_modal_hidden,
-            program_base_hidden,
+            playbook_modal_hidden,
+            playbook_base_hidden,
             terminal_scrollbar_hidden,
             list_scrollbar_hidden,
             lineage_scrollbar_hidden,
@@ -4239,8 +4239,8 @@ impl LayoutSnapshot {
         shift.opt_rect(browser_preview_area);
         shift.opt_rect(dynamic_ui_popover_area);
         shift.opt_rect(dynamic_ui_dropdown_area);
-        shift.opt_rect(program_resize_hit);
-        shift.opt_rect(program_pinned_card_rect);
+        shift.opt_rect(playbook_resize_hit);
+        shift.opt_rect(playbook_pinned_card_rect);
 
         // The list's row map is indexed by offset from the items area's top
         // row, so rows clipped off the top have to leave the map too.
@@ -4285,9 +4285,9 @@ impl LayoutSnapshot {
         shift.retain_rows(dynamic_ui_widget_hits, |hit| &mut hit.row);
         shift.retain_rows(dynamic_ui_panel_close_hits, |hit| &mut hit.row);
         shift.retain_rows(matrix_widget_hits, |hit| &mut hit.row);
-        shift.retain_rows(program_clip_hits, |hit| &mut hit.row);
-        shift.retain_rows(program_attachment_hits, |hit| &mut hit.row);
-        shift.retain_rows(program_action_link_hits, |hit| &mut hit.row);
+        shift.retain_rows(playbook_clip_hits, |hit| &mut hit.row);
+        shift.retain_rows(playbook_attachment_hits, |hit| &mut hit.row);
+        shift.retain_rows(playbook_action_link_hits, |hit| &mut hit.row);
         shift.retain_rows(dynamic_ui_triggers, |hit| &mut hit.2);
         shift.retain_rects(lineage_box_hits, |hit| &mut hit.area);
         shift.retain_rects(lineage_subagent_toggle_hits, |hit| &mut hit.area);
@@ -4301,7 +4301,7 @@ impl LayoutSnapshot {
         *dynamic_ui_trigger = dynamic_ui_trigger
             .take()
             .and_then(|(xs, xe, y, id)| shift.row(y).map(|y| (xs, xe, y, id)));
-        program_template_hits.retain_mut(|hit| {
+        playbook_template_hits.retain_mut(|hit| {
             // The box spans several rows; keep it while any row survives.
             let Some(row_end) = shift.row(hit.row_end) else {
                 return false;
@@ -4310,21 +4310,21 @@ impl LayoutSnapshot {
             hit.row_end = row_end;
             true
         });
-        program_selection_verb_hits.retain_mut(|hit| match shift.row(hit.2) {
+        playbook_selection_verb_hits.retain_mut(|hit| match shift.row(hit.2) {
             Some(y) => {
                 hit.2 = y;
                 true
             }
             None => false,
         });
-        program_attachment_image_rects.retain_mut(|(rect, _, _)| match shift.rect(*rect) {
+        playbook_attachment_image_rects.retain_mut(|(rect, _, _)| match shift.rect(*rect) {
             Some(r) => {
                 *rect = r;
                 true
             }
             None => false,
         });
-        program_attachment_resize_zones.retain_mut(|(rect, _, top)| match shift.rect(*rect) {
+        playbook_attachment_resize_zones.retain_mut(|(rect, _, top)| match shift.rect(*rect) {
             Some(r) => {
                 *rect = r;
                 *top = top.saturating_sub(shift.delta);
@@ -4333,11 +4333,11 @@ impl LayoutSnapshot {
             None => false,
         });
 
-        shift.opt_triple(program_title_run_hit);
-        shift.opt_triple(program_title_toggle_hit);
-        shift.opt_triple(program_title_close_hit);
-        shift.opt_triple(program_title_name_hit);
-        shift.opt_triple(program_selection_run_hit);
+        shift.opt_triple(playbook_title_run_hit);
+        shift.opt_triple(playbook_title_toggle_hit);
+        shift.opt_triple(playbook_title_close_hit);
+        shift.opt_triple(playbook_title_name_hit);
+        shift.opt_triple(playbook_selection_run_hit);
         shift.opt_triple(matrix_operator_loop_hit);
         shift.opt_triple(matrix_operator_title_hit);
         shift.opt_triple(matrix_panel_mode_hit);
@@ -4345,20 +4345,20 @@ impl LayoutSnapshot {
         shift.opt_triple(matrix_theme_hit);
         shift.opt_triple(browser_preview_close);
 
-        *program_smart_clip_anchor = program_smart_clip_anchor.take().and_then(|(pos, rect)| {
+        *playbook_smart_clip_anchor = playbook_smart_clip_anchor.take().and_then(|(pos, rect)| {
             let y = shift.row(pos.y)?;
             let rect = shift.rect(rect)?;
             Some((ratatui::layout::Position { y, ..pos }, rect))
         });
 
-        // Height-preserving cases: the program's viewport math and the
+        // Height-preserving cases: the playbook's viewport math and the
         // scrollbar drags read these heights, so they keep them and pair with
         // a `hidden` row count instead.
-        *program_modal_hidden = modal_area.map(|r| shift.hidden(r.y)).unwrap_or(0);
+        *playbook_modal_hidden = modal_area.map(|r| shift.hidden(r.y)).unwrap_or(0);
         *modal_area = modal_area.map(|r| shift.rect_keep_height(r));
-        *program_base_hidden = program_base_area.map(|r| shift.hidden(r.y)).unwrap_or(0);
-        *program_base_area = program_base_area.map(|r| shift.rect_keep_height(r));
-        *program_inner_area = program_inner_area.map(|r| shift.rect_keep_height(r));
+        *playbook_base_hidden = playbook_base_area.map(|r| shift.hidden(r.y)).unwrap_or(0);
+        *playbook_base_area = playbook_base_area.map(|r| shift.rect_keep_height(r));
+        *playbook_inner_area = playbook_inner_area.map(|r| shift.rect_keep_height(r));
         *terminal_scrollbar_hidden = terminal_scrollbar
             .map(|s| shift.hidden(s.area.y))
             .unwrap_or(0);
@@ -4797,13 +4797,13 @@ async fn run_with_socket_initial_selection(
     let harnesses = client.harnesses().await.unwrap_or_default();
     let features_status = client.features_status().await.ok();
     let plugin_actions = client.plugin_actions().await.unwrap_or_default();
-    let program_templates = client
-        .program_templates()
+    let playbook_templates = client
+        .playbook_templates()
         .await
         .map(|r| r.templates)
         .unwrap_or_default();
-    let program_verbs = client
-        .program_verbs()
+    let playbook_verbs = client
+        .playbook_verbs()
         .await
         .map(|r| r.verbs)
         .unwrap_or_default();
@@ -4933,9 +4933,9 @@ async fn run_with_socket_initial_selection(
     let socket = client.socket_path().to_path_buf();
     let (pty_input_tx, pty_input_errors) = spawn_pty_input_pump(client.clone());
     // Placeholder senders; `run_loop` installs the live channels it actually drains.
-    let program_templates_tx = mpsc::unbounded_channel().0;
-    let program_verbs_tx = mpsc::unbounded_channel().0;
-    let program_projection_tx = mpsc::unbounded_channel().0;
+    let playbook_templates_tx = mpsc::unbounded_channel().0;
+    let playbook_verbs_tx = mpsc::unbounded_channel().0;
+    let playbook_projection_tx = mpsc::unbounded_channel().0;
     let upgrade_status_tx = mpsc::unbounded_channel().0;
     let session_mutation_tx = mpsc::unbounded_channel().0;
     let initial_children_collapsed =
@@ -4980,14 +4980,14 @@ async fn run_with_socket_initial_selection(
             .as_ref()
             .is_some_and(|s| s.degradation_observed),
         plugin_actions,
-        program_templates,
-        program_templates_tx,
-        program_verbs,
-        program_selection_run_on_fork: false,
-        program_verbs_tx,
-        program_markdown_cache: HashMap::new(),
-        program_projection_pending: HashSet::new(),
-        program_projection_tx,
+        playbook_templates,
+        playbook_templates_tx,
+        playbook_verbs,
+        playbook_selection_run_on_fork: false,
+        playbook_verbs_tx,
+        playbook_markdown_cache: HashMap::new(),
+        playbook_projection_pending: HashSet::new(),
+        playbook_projection_tx,
         harness_usage: HashMap::new(),
         harness_usage_inflight: HashSet::new(),
         harness_usage_last_query: HashMap::new(),
@@ -5036,16 +5036,16 @@ async fn run_with_socket_initial_selection(
         lineage_subagents_expanded: HashSet::new(),
         configure_popup: None,
         session_picker: None,
-        program_popup: None,
-        program_popups: HashMap::new(),
-        program_view_memory: HashMap::new(),
-        program_runs: HashMap::new(),
-        program_run_dispatch: HashMap::new(),
-        program_settle_flourishes: HashMap::new(),
-        program_collaborators: HashMap::new(),
-        program_agent_reveal_receipts: HashMap::new(),
-        own_program_client_id: None,
-        program_clipboard: None,
+        playbook_popup: None,
+        playbook_popups: HashMap::new(),
+        playbook_view_memory: HashMap::new(),
+        playbook_runs: HashMap::new(),
+        playbook_run_dispatch: HashMap::new(),
+        playbook_settle_flourishes: HashMap::new(),
+        playbook_collaborators: HashMap::new(),
+        playbook_agent_reveal_receipts: HashMap::new(),
+        own_playbook_client_id: None,
+        playbook_clipboard: None,
         remote_control_popup: None,
         remote_control_task: None,
         terminal_pane_size: (100, 30),
@@ -5083,7 +5083,7 @@ async fn run_with_socket_initial_selection(
         mouse_moved_at: None,
         saw_mouse_motion: false,
         mouse_capture_enabled: true,
-        last_program_clip_click: None,
+        last_playbook_clip_click: None,
         orchestrator_id: initial_orch_id,
         list_panel_w: persisted.list_panel_w.unwrap_or(LIST_PANEL_W_DEFAULT),
         resizing_list: None,
@@ -5092,7 +5092,7 @@ async fn run_with_socket_initial_selection(
         matrix_rain_h: persisted.matrix_rain_h,
         resizing_matrix_rain: None,
         resizing_main_window: None,
-        resizing_program_popup: None,
+        resizing_playbook_popup: None,
         pinned_card_drag: None,
         list_collapsed: persisted.list_collapsed,
         editor_states: HashMap::new(),
@@ -5101,9 +5101,9 @@ async fn run_with_socket_initial_selection(
         pending_tool_approvals: HashMap::new(),
         browser_previews: HashMap::new(),
         attachment_images: HashMap::new(),
-        program_expanded_store: HashMap::new(),
-        program_expanded_store_loaded: false,
-        resizing_program_attachment: None,
+        playbook_expanded_store: HashMap::new(),
+        playbook_expanded_store_loaded: false,
+        resizing_playbook_attachment: None,
         ui_panels: HashMap::new(),
         dynamic_ui_popover_open: None,
         dynamic_ui_selected: persisted
@@ -5173,7 +5173,7 @@ async fn run_with_socket_initial_selection(
     if let Some(mode) = app.selected_session().map(natural_view_mode) {
         app.set_active_view(mode);
     }
-    app.restore_open_program_popups(&persisted.open_program_session_ids)
+    app.restore_open_playbook_popups(&persisted.open_playbook_session_ids)
         .await;
     // The lineage section's collapse state, height, and view mode survive
     // restarts.
@@ -5298,7 +5298,7 @@ async fn run_with_socket_initial_selection(
     );
     terminal.show_cursor().ok();
 
-    app.save_open_program_popups().await;
+    app.save_open_playbook_popups().await;
 
     let mut widgets: HashMap<String, crate::tui_state::WidgetState> = HashMap::new();
     for (session_id, panel_id) in &app.dynamic_ui_selected {
@@ -5325,7 +5325,7 @@ async fn run_with_socket_initial_selection(
         hide_pane_side_borders: app.hide_pane_side_borders,
         main_windows: Some(app.main_windows.clone()),
         active_window_id: Some(app.active_window_id),
-        open_program_session_ids: app.open_program_session_ids(),
+        open_playbook_session_ids: app.open_playbook_session_ids(),
         collapsed_session_ids: valid_collapsed_session_ids(
             &app.sessions,
             app.children_collapsed.iter().cloned(),
@@ -5377,24 +5377,24 @@ async fn run_loop(
         .take_notifications()
         .await
         .context("notifications channel already taken")?;
-    // Live-reload channel for program templates. The sender lives on `app` so
-    // `open_program_popup` can kick off a background refresh; this loop drains the
+    // Live-reload channel for playbook templates. The sender lives on `app` so
+    // `open_playbook_popup` can kick off a background refresh; this loop drains the
     // receiver and applies the freshest list.
-    let (program_templates_tx, mut program_templates_rx) =
-        mpsc::unbounded_channel::<Vec<construct_protocol::ProgramTemplate>>();
-    app.program_templates_tx = program_templates_tx;
-    // Live-reload channel for program verbs, the `program_templates_tx`
+    let (playbook_templates_tx, mut playbook_templates_rx) =
+        mpsc::unbounded_channel::<Vec<construct_protocol::PlaybookTemplate>>();
+    app.playbook_templates_tx = playbook_templates_tx;
+    // Live-reload channel for playbook verbs, the `playbook_templates_tx`
     // counterpart for spec 0089's selection-menu verbs.
-    let (program_verbs_tx, mut program_verbs_rx) =
-        mpsc::unbounded_channel::<Vec<construct_protocol::ProgramVerb>>();
-    app.program_verbs_tx = program_verbs_tx;
-    // Background channel for widget program projections: `request_program_projection`
-    // (kicked off by the widget renderer when a `:::clip program` block has no
-    // cached program yet) delivers `(session_id, markdown)` here; the loop
+    let (playbook_verbs_tx, mut playbook_verbs_rx) =
+        mpsc::unbounded_channel::<Vec<construct_protocol::PlaybookVerb>>();
+    app.playbook_verbs_tx = playbook_verbs_tx;
+    // Background channel for widget playbook projections: `request_playbook_projection`
+    // (kicked off by the widget renderer when a `:::clip playbook` block has no
+    // cached playbook yet) delivers `(session_id, markdown)` here; the loop
     // fills the cache so the projection paints on the next frame.
-    let (program_projection_tx, mut program_projection_rx) =
+    let (playbook_projection_tx, mut playbook_projection_rx) =
         mpsc::unbounded_channel::<(String, String)>();
-    app.program_projection_tx = program_projection_tx;
+    app.playbook_projection_tx = playbook_projection_tx;
     // Status messages from a background `spawn_detached_upgrade` (see
     // `MinibufferIntent::UpgradeConfirm`). The sender lives on `app` so the
     // minibuffer handler can kick off the install without blocking the event
@@ -5555,7 +5555,7 @@ async fn run_loop(
                 .into_iter()
                 .chain(app.pinned_sessions_needing_hydration())
                 .chain(app.orchestrator_session_needing_hydration())
-                .chain(app.program_referenced_sessions_needing_hydration())
+                .chain(app.playbook_referenced_sessions_needing_hydration())
             {
                 if selected_hydrating.contains(&id)
                     || pinned_hydration_session.as_deref() == Some(id.as_str())
@@ -5646,7 +5646,7 @@ async fn run_loop(
                 if Instant::now() >= deadline {
                     // Resolve the *effective* query before borrowing the
                     // dialog mutably — the `@`→session clip variant's query
-                    // is the program buffer's live `@<typeahead>` token,
+                    // is the playbook buffer's live `@<typeahead>` token,
                     // not `dialog.query`.
                     let query = app.session_picker_effective_query().trim().to_string();
                     if let Some(dialog) = app.session_picker.as_mut() {
@@ -5666,7 +5666,7 @@ async fn run_loop(
                                         .search(construct_protocol::SearchParams {
                                             query,
                                             scopes: Some(vec![
-                                                construct_protocol::SearchScope::Program,
+                                                construct_protocol::SearchScope::Playbook,
                                                 construct_protocol::SearchScope::Transcript,
                                             ]),
                                             session_ids: None,
@@ -5952,45 +5952,45 @@ async fn run_loop(
                     }
                 }
             }
-            templates = program_templates_rx.recv() => {
-                // Live-reloaded program templates from a background fetch
-                // (`refresh_program_templates`, kicked off when the program pane
+            templates = playbook_templates_rx.recv() => {
+                // Live-reloaded playbook templates from a background fetch
+                // (`refresh_playbook_templates`, kicked off when the playbook pane
                 // opens). Apply only the freshest value: drain any queued
                 // refreshes so a burst of opens collapses to the latest list.
                 if let Some(mut latest) = templates {
-                    while let Ok(next) = program_templates_rx.try_recv() {
+                    while let Ok(next) = playbook_templates_rx.try_recv() {
                         latest = next;
                     }
                     if !latest.is_empty() {
-                        app.program_templates = latest;
+                        app.playbook_templates = latest;
                     }
                 }
             }
-            verbs = program_verbs_rx.recv() => {
-                // Live-reloaded program verbs (spec 0089), the `templates`
+            verbs = playbook_verbs_rx.recv() => {
+                // Live-reloaded playbook verbs (spec 0089), the `templates`
                 // arm's counterpart — same drain-to-latest, same
                 // don't-replace-with-empty guard.
                 if let Some(mut latest) = verbs {
-                    while let Ok(next) = program_verbs_rx.try_recv() {
+                    while let Ok(next) = playbook_verbs_rx.try_recv() {
                         latest = next;
                     }
                     if !latest.is_empty() {
-                        app.program_verbs = latest;
+                        app.playbook_verbs = latest;
                     }
                 }
             }
-            fetched = program_projection_rx.recv() => {
-                // A background program fetch for a widget `:::clip program`
+            fetched = playbook_projection_rx.recv() => {
+                // A background playbook fetch for a widget `:::clip playbook`
                 // projection landed; cache it (draining any queued siblings)
-                // so the projection replaces its "loading program…" line on
-                // the next frame. Later `program/state` notifications keep
+                // so the projection replaces its "loading playbook…" line on
+                // the next frame. Later `playbook/state` notifications keep
                 // the entry fresh.
                 if let Some((session_id, markdown)) = fetched {
-                    app.program_projection_pending.remove(&session_id);
-                    app.program_markdown_cache.insert(session_id, markdown);
-                    while let Ok((session_id, markdown)) = program_projection_rx.try_recv() {
-                        app.program_projection_pending.remove(&session_id);
-                        app.program_markdown_cache.insert(session_id, markdown);
+                    app.playbook_projection_pending.remove(&session_id);
+                    app.playbook_markdown_cache.insert(session_id, markdown);
+                    while let Ok((session_id, markdown)) = playbook_projection_rx.try_recv() {
+                        app.playbook_projection_pending.remove(&session_id);
+                        app.playbook_markdown_cache.insert(session_id, markdown);
                     }
                 }
             }
@@ -6083,7 +6083,7 @@ async fn run_loop(
                     }
                 }
                 app.update_browser_preview_hover_and_expiry();
-                app.expire_program_runs(Instant::now());
+                app.expire_playbook_runs(Instant::now());
                 app.tutorial_tick(Instant::now());
                 app.sample_compute_time(Instant::now());
             }
@@ -6246,13 +6246,13 @@ impl App {
         let groups = client.list_projects().await.unwrap_or_default();
         let harnesses = client.harnesses().await.unwrap_or_default();
         let plugin_actions = client.plugin_actions().await.unwrap_or_default();
-        let program_templates = client
-            .program_templates()
+        let playbook_templates = client
+            .playbook_templates()
             .await
             .map(|r| r.templates)
             .unwrap_or_default();
-        let program_verbs = client
-            .program_verbs()
+        let playbook_verbs = client
+            .playbook_verbs()
             .await
             .map(|r| r.verbs)
             .unwrap_or_default();
@@ -6266,11 +6266,11 @@ impl App {
         self.harnesses = harnesses;
         self.refresh_features().await;
         self.plugin_actions = plugin_actions;
-        if !program_templates.is_empty() {
-            self.program_templates = program_templates;
+        if !playbook_templates.is_empty() {
+            self.playbook_templates = playbook_templates;
         }
-        if !program_verbs.is_empty() {
-            self.program_verbs = program_verbs;
+        if !playbook_verbs.is_empty() {
+            self.playbook_verbs = playbook_verbs;
         }
         // A daemon restart respawns every PTY session and truncates each
         // session's pty.log so the new child renders into a clean slate
@@ -6413,8 +6413,8 @@ impl App {
             return;
         }
 
-        if self.program_search_active() {
-            self.append_program_search_query_text(&text);
+        if self.playbook_search_active() {
+            self.append_playbook_search_query_text(&text);
             return;
         }
 
@@ -6426,41 +6426,41 @@ impl App {
         }
 
         // Mirror the keystroke routing precedence (see `on_key`): pasted
-        // text lands in the program only when no minibuffer/palette overlay is
+        // text lands in the playbook only when no minibuffer/palette overlay is
         // capturing input *and* the view pane holds focus. With an overlay open,
         // `dispatch_paste_text` below routes the paste to the minibuffer /
         // orchestrator instead; with focus on the list, it routes to the
-        // selected session rather than editing the program.
+        // selected session rather than editing the playbook.
         if self
-            .program_popup
+            .playbook_popup
             .as_ref()
             .is_some_and(|popup| !popup.terminal_focus)
             && self.minibuffer.is_none()
             && self.focus == PaneFocus::View
         {
-            // A file dropped onto the program editor over an ssh bridge:
+            // A file dropped onto the playbook editor over an ssh bridge:
             // the pasted local path is unreadable here — offer the upload
             // (spec 0098) and insert an attachment link (spec 0099) on
             // confirm, instead of pasting a dead path into the doc.
             if crate::clipboard_bridge::socket_from_env().is_some() {
                 if let Some(path) = crate::clipboard_bridge::droppable_local_path(&text) {
                     if let Some(session_id) = self
-                        .program_popup
+                        .playbook_popup
                         .as_ref()
-                        .map(|p| p.program.session_id.clone())
+                        .map(|p| p.playbook.session_id.clone())
                     {
                         let name = std::path::Path::new(&path)
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| path.clone());
                         self.minibuffer = Some(Minibuffer {
-                            prompt: format!("Upload local file {name} to the program? [y/n] "),
+                            prompt: format!("Upload local file {name} to the playbook? [y/n] "),
                             input: String::new(),
                             cursor: 0,
                             intent: MinibufferIntent::ConfirmLocalFileUpload {
                                 session_id,
                                 path,
-                                to_program: true,
+                                to_playbook: true,
                             },
                             error: None,
                         });
@@ -6483,11 +6483,11 @@ impl App {
                     } else {
                         path.clone()
                     };
-                    self.insert_program_text(&format!("![{name}]({target})"));
+                    self.insert_playbook_text(&format!("![{name}]({target})"));
                     return;
                 }
             }
-            self.insert_program_text(&text);
+            self.insert_playbook_text(&text);
             // Pasted text can extend (or tear down) the live `@<typeahead>`
             // token backing the `@`→session picker's effective query; keep
             // the tier-2 content search in step with it (spec 0076).
@@ -6525,7 +6525,7 @@ impl App {
                         intent: MinibufferIntent::ConfirmLocalFileUpload {
                             session_id,
                             path,
-                            to_program: false,
+                            to_playbook: false,
                         },
                         error: None,
                     });
@@ -6708,16 +6708,16 @@ impl App {
             self.on_paste(text).await;
             return;
         }
-        // With the program editor focused, a binary paste becomes a program
+        // With the playbook editor focused, a binary paste becomes a playbook
         // attachment link (spec 0099) rather than a PTY paste.
         if self
-            .program_popup
+            .playbook_popup
             .as_ref()
             .is_some_and(|popup| !popup.terminal_focus)
             && self.minibuffer.is_none()
             && self.focus == PaneFocus::View
         {
-            self.attach_item_to_program(item).await;
+            self.attach_item_to_playbook(item).await;
             return;
         }
         // Prefer the same target the oversized-text paste flow would use
@@ -6732,18 +6732,18 @@ impl App {
             .await;
     }
 
-    /// Attach `item` to the program's session and insert a Markdown link to
-    /// it at the program cursor (spec 0099): `![name](path)` for images,
+    /// Attach `item` to the playbook's session and insert a Markdown link to
+    /// it at the playbook cursor (spec 0099): `![name](path)` for images,
     /// `[name](path)` otherwise, with the path `<…>`-wrapped when it
     /// contains spaces so standard Markdown parsers keep accepting it.
-    async fn attach_item_to_program(&mut self, item: crate::clipboard_bridge::PasteItem) {
+    async fn attach_item_to_playbook(&mut self, item: crate::clipboard_bridge::PasteItem) {
         use base64::Engine as _;
         let Some(session_id) = self
-            .program_popup
+            .playbook_popup
             .as_ref()
-            .map(|p| p.program.session_id.clone())
+            .map(|p| p.playbook.session_id.clone())
         else {
-            self.set_status("program closed; nothing attached".to_string());
+            self.set_status("playbook closed; nothing attached".to_string());
             return;
         };
         let filename = item
@@ -6772,13 +6772,13 @@ impl App {
                 } else {
                     format!("[{filename}]({target})")
                 };
-                self.insert_program_text(&link);
+                self.insert_playbook_text(&link);
                 self.set_status(format!(
-                    "attached {filename} ({} KiB) to the program",
+                    "attached {filename} ({} KiB) to the playbook",
                     item.bytes.len().div_ceil(1024),
                 ));
             }
-            Err(e) => self.set_status(format!("program attachment failed: {e}")),
+            Err(e) => self.set_status(format!("playbook attachment failed: {e}")),
         }
     }
 
@@ -6836,14 +6836,14 @@ impl App {
     /// Confirmed drag-drop upload (spec 0098): fetch the dropped file's
     /// bytes from the local machine through the clipboard bridge and attach
     /// them to the session. Runs only after the user approved the exact
-    /// path in the confirmation prompt. With `to_program`, the attachment
-    /// inserts a Markdown link into the program (spec 0099) instead of
+    /// path in the confirmation prompt. With `to_playbook`, the attachment
+    /// inserts a Markdown link into the playbook (spec 0099) instead of
     /// pasting into the PTY.
     pub(super) async fn upload_local_file(
         &mut self,
         session_id: String,
         path: String,
-        to_program: bool,
+        to_playbook: bool,
     ) {
         let Some(sock) = crate::clipboard_bridge::socket_from_env() else {
             self.set_status("clipboard bridge is gone; upload cancelled".to_string());
@@ -6865,11 +6865,11 @@ impl App {
                 return;
             }
         };
-        if to_program {
+        if to_playbook {
             // Falls back to a plain session attachment inside when the
-            // program closed while the confirm prompt was up.
-            if self.program_popup.is_some() {
-                self.attach_item_to_program(item).await;
+            // playbook closed while the confirm prompt was up.
+            if self.playbook_popup.is_some() {
+                self.attach_item_to_playbook(item).await;
                 return;
             }
         }
@@ -6958,11 +6958,11 @@ impl App {
             .map(natural_view_mode)
             .unwrap_or(ViewMode::Chat);
         self.set_active_view(natural);
-        // The program is a per-session surface: keep it attached to whatever
-        // session is now selected. The outgoing session's program is stashed
-        // and the incoming one revealed (if it has a program open). Navigation
-        // never *closes* a program — only its title-glyph toggle / C-x Space do.
-        self.sync_program_popup_with_selection();
+        // The playbook is a per-session surface: keep it attached to whatever
+        // session is now selected. The outgoing session's playbook is stashed
+        // and the incoming one revealed (if it has a playbook open). Navigation
+        // never *closes* a playbook — only its title-glyph toggle / C-x Space do.
+        self.sync_playbook_popup_with_selection();
     }
 
     /// Topmost ancestor of a session's fork/subagent lineage. Keeping this
@@ -7409,17 +7409,17 @@ impl App {
         (needs_history || needs_ui_panels).then(|| id.clone())
     }
 
-    /// Worker sessions referenced by a `@{session:…}` smart clip in a program
-    /// that is currently on screen — a program restored in a main-window leaf,
-    /// or the active program popup. Their PTY history must be warm so the
+    /// Worker sessions referenced by a `@{session:…}` smart clip in a playbook
+    /// that is currently on screen — a playbook restored in a main-window leaf,
+    /// or the active playbook popup. Their PTY history must be warm so the
     /// clip-chip hover preview (spec 0060) can paint a cropped live terminal
     /// tail the instant the pointer lands on the clip. (The shimmer-text hover
-    /// always targets the program's own dispatching session, which is already
+    /// always targets the playbook's own dispatching session, which is already
     /// warm, so it doesn't need this.) These workers are usually neither
     /// selected, pinned, nor the orchestrator, so without this nothing else
     /// hydrates them and the clip-chip preview silently degrades to the bare
     /// text tooltip.
-    fn program_referenced_sessions_needing_hydration(&self) -> Vec<String> {
+    fn playbook_referenced_sessions_needing_hydration(&self) -> Vec<String> {
         fn collect_leaf_sessions(node: &MainWindowTree, out: &mut Vec<String>) {
             match node {
                 MainWindowTree::Leaf { selection, .. } => {
@@ -7435,23 +7435,23 @@ impl App {
                 }
             }
         }
-        let mut visible_program_owners = Vec::new();
-        collect_leaf_sessions(&self.main_windows, &mut visible_program_owners);
+        let mut visible_playbook_owners = Vec::new();
+        collect_leaf_sessions(&self.main_windows, &mut visible_playbook_owners);
 
         let mut referenced: Vec<String> = Vec::new();
         let add_refs = |markdown: &str, referenced: &mut Vec<String>| {
-            for id in program_referenced_session_ids(markdown) {
+            for id in playbook_referenced_session_ids(markdown) {
                 if !referenced.iter().any(|existing| existing == &id) {
                     referenced.push(id);
                 }
             }
         };
-        for owner in &visible_program_owners {
-            if let Some(popup) = self.program_popups.get(owner) {
+        for owner in &visible_playbook_owners {
+            if let Some(popup) = self.playbook_popups.get(owner) {
                 add_refs(&popup.buffer, &mut referenced);
             }
         }
-        if let Some(popup) = self.program_popup.as_ref() {
+        if let Some(popup) = self.playbook_popup.as_ref() {
             add_refs(&popup.buffer, &mut referenced);
         }
 
@@ -8503,10 +8503,10 @@ impl App {
                 // focused pane's session no longer matches.
                 self.close_suggest_deck_if_session_changed();
             }
-            // Keep the program attached to the focused pane's session (stash
+            // Keep the playbook attached to the focused pane's session (stash
             // the outgoing one, reveal the incoming). A no-op when the
             // selection didn't actually change.
-            self.sync_program_popup_with_selection();
+            self.sync_playbook_popup_with_selection();
             self.report_focused_sessions();
         }
     }
@@ -8837,10 +8837,10 @@ impl App {
         // exists, even when it has no navigable list row — e.g. a subagent,
         // which renders only as a child of its parent (and never at all when
         // the parent is the hidden orchestrator) but is reachable through a
-        // program session clip. The main view can display any live session;
+        // playbook session clip. The main view can display any live session;
         // the list simply won't highlight a row for it. Without this, clicking
         // such a clip selects the session and the next session-list refresh
-        // would immediately revert the selection (popping the stashed program
+        // would immediately revert the selection (popping the stashed playbook
         // back open over the would-be target).
         if let Selection::Session(id) = &self.selection {
             if self.sessions.iter().any(|s| s.id == *id) {
@@ -9528,23 +9528,23 @@ impl App {
                     }
                 }
             }
-            m if m == construct_protocol::ipc_notif::PROGRAM_STATE => {
+            m if m == construct_protocol::ipc_notif::PLAYBOOK_STATE => {
                 if let Some(p) = n.params {
                     if let Ok(payload) = serde_json::from_value::<
-                        construct_protocol::ProgramStateNotificationPayload,
+                        construct_protocol::PlaybookStateNotificationPayload,
                     >(p)
                     {
-                        self.on_program_state(payload.program, payload.active_run, payload.blocks);
+                        self.on_playbook_state(payload.playbook, payload.active_run, payload.blocks);
                     }
                 }
             }
-            m if m == construct_protocol::ipc_notif::PROGRAM_CURSOR => {
+            m if m == construct_protocol::ipc_notif::PLAYBOOK_CURSOR => {
                 if let Some(p) = n.params {
                     if let Ok(payload) = serde_json::from_value::<
-                        construct_protocol::ProgramCursorNotificationPayload,
+                        construct_protocol::PlaybookCursorNotificationPayload,
                     >(p)
                     {
-                        self.on_program_cursor(payload.cursor);
+                        self.on_playbook_cursor(payload.cursor);
                     }
                 }
             }
@@ -9552,61 +9552,61 @@ impl App {
         }
     }
 
-    fn on_program_cursor(&mut self, cursor: construct_protocol::ProgramCursor) {
-        let is_own = self.own_program_client_id.as_deref() == Some(cursor.client_id.as_str());
+    fn on_playbook_cursor(&mut self, cursor: construct_protocol::PlaybookCursor) {
+        let is_own = self.own_playbook_client_id.as_deref() == Some(cursor.client_id.as_str());
         if cursor.active {
             if cursor.kind == "agent" {
-                let existing = self.program_agent_reveal_receipts.get(&cursor.client_id);
-                let receipt = program_agent_reveal_receipt_update(
+                let existing = self.playbook_agent_reveal_receipts.get(&cursor.client_id);
+                let receipt = playbook_agent_reveal_receipt_update(
                     existing,
                     cursor.updated_at_ms,
                     Instant::now(),
                 );
-                self.program_agent_reveal_receipts
+                self.playbook_agent_reveal_receipts
                     .insert(cursor.client_id.clone(), receipt);
             }
-            self.program_collaborators
+            self.playbook_collaborators
                 .insert(cursor.client_id.clone(), cursor.clone());
             if is_own {
-                self.apply_own_program_cursor(&cursor);
+                self.apply_own_playbook_cursor(&cursor);
             }
         } else {
-            self.program_collaborators.remove(&cursor.client_id);
-            self.program_agent_reveal_receipts.remove(&cursor.client_id);
+            self.playbook_collaborators.remove(&cursor.client_id);
+            self.playbook_agent_reveal_receipts.remove(&cursor.client_id);
         }
     }
 
     /// Elapsed time since this agent cursor's `updated_at_ms` last genuinely
-    /// advanced, per the local receipt clock `on_program_cursor` maintains.
+    /// advanced, per the local receipt clock `on_playbook_cursor` maintains.
     /// `None` when no receipt has been recorded for `client_id` (not an
     /// agent-kind cursor, or never observed live) — callers should treat that
     /// as "not fresh" rather than falling back to the daemon's timestamp,
     /// which is what made the reveal invisible in the first place.
-    pub(crate) fn program_agent_reveal_elapsed(
+    pub(crate) fn playbook_agent_reveal_elapsed(
         &self,
         client_id: &str,
         now: Instant,
     ) -> Option<Duration> {
-        self.program_agent_reveal_receipts
+        self.playbook_agent_reveal_receipts
             .get(client_id)
             .map(|(_, receipt_at)| now.saturating_duration_since(*receipt_at))
     }
 
-    fn apply_own_program_cursor(&mut self, cursor: &construct_protocol::ProgramCursor) {
+    fn apply_own_playbook_cursor(&mut self, cursor: &construct_protocol::PlaybookCursor) {
         let updating_session_id = cursor.session_id.clone();
         let popup = if self
-            .program_popup
+            .playbook_popup
             .as_ref()
-            .is_some_and(|p| p.program.session_id == updating_session_id)
+            .is_some_and(|p| p.playbook.session_id == updating_session_id)
         {
-            self.program_popup.as_mut()
+            self.playbook_popup.as_mut()
         } else {
-            self.program_popups.get_mut(&updating_session_id)
+            self.playbook_popups.get_mut(&updating_session_id)
         };
         let Some(popup) = popup else {
             return;
         };
-        if program_popup_has_unsaved_edits(popup) {
+        if playbook_popup_has_unsaved_edits(popup) {
             return;
         }
         let buffer_len = popup.buffer.chars().count();
@@ -9620,7 +9620,7 @@ impl App {
         // genuine daemon-side rebases — our offsets shifted by another
         // client's edit — which is the case this method exists for. The
         // equality check below still matters: with adopt-side rebasing in
-        // `on_program_state`, our own rebase of a just-adopted edit often
+        // `on_playbook_state`, our own rebase of a just-adopted edit often
         // lands on the exact same offsets the daemon's rebase broadcast
         // carries, and applying that redundant "update" is not a no-op — it
         // resets `preferred_col` (losing C-n/C-p column stickiness) and used
@@ -9634,127 +9634,127 @@ impl App {
         // A zero-width pair is a C-Space mark awaiting its first motion, not
         // "no selection" — keep it alive across the rebase so the next motion
         // key extends from the rebased mark instead of merely moving.
-        popup.selection = incoming_selection.map(|(anchor, head)| ProgramSelection {
+        popup.selection = incoming_selection.map(|(anchor, head)| PlaybookSelection {
             anchor,
             head,
             dragged: false,
         });
         popup.preferred_col = None;
-        Self::update_program_smart_clip_after_cursor_move(popup);
+        Self::update_playbook_smart_clip_after_cursor_move(popup);
     }
 
-    fn adopt_daemon_program_run(
+    fn adopt_daemon_playbook_run(
         &mut self,
         session_id: &str,
-        active_run: Option<construct_protocol::ProgramRunProgress>,
+        active_run: Option<construct_protocol::PlaybookRunProgress>,
     ) {
-        match active_run.and_then(ProgramRun::from_progress) {
+        match active_run.and_then(PlaybookRun::from_progress) {
             Some(mut run) => {
-                if let Some(old) = self.program_runs.get(session_id) {
+                if let Some(old) = self.playbook_runs.get(session_id) {
                     run.pending_since = old.merged_pending_since(&run.pending, Instant::now());
                 }
-                self.program_runs.insert(session_id.to_string(), run);
+                self.playbook_runs.insert(session_id.to_string(), run);
             }
             None => {
-                self.program_runs.remove(session_id);
+                self.playbook_runs.remove(session_id);
             }
         }
     }
 
-    fn adopt_program_state_run(
+    fn adopt_playbook_state_run(
         &mut self,
         session_id: &str,
-        active_run: Option<construct_protocol::ProgramRunProgress>,
+        active_run: Option<construct_protocol::PlaybookRunProgress>,
     ) {
         match active_run {
-            Some(progress) => match ProgramRun::from_progress(progress) {
+            Some(progress) => match PlaybookRun::from_progress(progress) {
                 Some(mut run) => {
-                    if let Some(old) = self.program_runs.get(session_id) {
+                    if let Some(old) = self.playbook_runs.get(session_id) {
                         run.pending_since = old.merged_pending_since(&run.pending, Instant::now());
                     }
-                    self.program_runs.insert(session_id.to_string(), run);
+                    self.playbook_runs.insert(session_id.to_string(), run);
                 }
                 None => {
                     if self
-                        .program_runs
+                        .playbook_runs
                         .get(session_id)
                         .is_some_and(|run| run.daemon_confirmed)
                     {
-                        self.program_runs.remove(session_id);
+                        self.playbook_runs.remove(session_id);
                     }
                 }
             },
             None => {
-                let should_clear = self.program_runs.get(session_id).is_some_and(|run| {
+                let should_clear = self.playbook_runs.get(session_id).is_some_and(|run| {
                     run.daemon_confirmed
                         && !run.daemon_adopted_at.is_some_and(|adopted_at| {
                             Instant::now()
                                 .checked_duration_since(adopted_at)
                                 .is_some_and(|age| {
-                                    age < Duration::from_millis(PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS)
+                                    age < Duration::from_millis(PLAYBOOK_RUN_ADOPT_CLEAR_GRACE_MS)
                                 })
                         })
                 });
                 if should_clear {
-                    self.program_runs.remove(session_id);
+                    self.playbook_runs.remove(session_id);
                 }
             }
         }
     }
 
-    /// A program changed on the daemon (most often the owning agent edited it).
+    /// A playbook changed on the daemon (most often the owning agent edited it).
     /// Keep any open popup for that session in sync: when the user has no
     /// unsaved edits, adopt the new content live so they see the agent's
     /// changes and our tracked version stays fresh. When the user is mid-edit,
     /// leave the buffer and the (now stale) base version alone — the
     /// merge-on-save path reconciles both sides without losing either.
-    fn on_program_state(
+    fn on_playbook_state(
         &mut self,
-        program: construct_protocol::ProgramDocument,
-        active_run: Option<construct_protocol::ProgramRunProgress>,
-        blocks: Vec<construct_protocol::ProgramBlockView>,
+        playbook: construct_protocol::PlaybookDocument,
+        active_run: Option<construct_protocol::PlaybookRunProgress>,
+        blocks: Vec<construct_protocol::PlaybookBlockView>,
     ) {
         // Keep the widget-projection cache fresh for every session, before
-        // any open-popup early return below: `:::clip program` projections
-        // update through the same notification that keeps program views in
-        // sync (spec 0074's liveness consequence), whether or not a program
+        // any open-popup early return below: `:::clip playbook` projections
+        // update through the same notification that keeps playbook views in
+        // sync (spec 0074's liveness consequence), whether or not a playbook
         // view is open for this session.
-        self.program_markdown_cache
-            .insert(program.session_id.clone(), program.markdown.clone());
-        self.program_projection_pending.remove(&program.session_id);
+        self.playbook_markdown_cache
+            .insert(playbook.session_id.clone(), playbook.markdown.clone());
+        self.playbook_projection_pending.remove(&playbook.session_id);
         let previous_pending = self
-            .program_runs
-            .get(&program.session_id)
+            .playbook_runs
+            .get(&playbook.session_id)
             .map(|run| run.pending.clone());
-        let next_pending = active_run.as_ref().map(program_run_progress_pending_ids);
+        let next_pending = active_run.as_ref().map(playbook_run_progress_pending_ids);
         if let (Some(previous_pending), Some(next_pending)) =
             (previous_pending.as_ref(), next_pending.as_ref())
         {
-            self.record_program_settle_flourishes(
-                &program.session_id,
+            self.record_playbook_settle_flourishes(
+                &playbook.session_id,
                 previous_pending,
                 next_pending,
                 Instant::now(),
             );
         }
-        self.adopt_program_state_run(&program.session_id, active_run);
-        let updating_session_id = program.session_id.clone();
+        self.adopt_playbook_state_run(&playbook.session_id, active_run);
+        let updating_session_id = playbook.session_id.clone();
         let popup = if self
-            .program_popup
+            .playbook_popup
             .as_ref()
-            .is_some_and(|p| p.program.session_id == updating_session_id)
+            .is_some_and(|p| p.playbook.session_id == updating_session_id)
         {
-            self.program_popup.as_mut()
+            self.playbook_popup.as_mut()
         } else {
-            self.program_popups.get_mut(&updating_session_id)
+            self.playbook_popups.get_mut(&updating_session_id)
         };
         let Some(popup) = popup else {
             return;
         };
-        if program.version <= popup.program.version {
+        if playbook.version <= popup.playbook.version {
             return;
         }
-        if program_popup_has_unsaved_edits(popup) {
+        if playbook_popup_has_unsaved_edits(popup) {
             // Don't clobber unsaved edits. Keep the stale base version so the
             // next save detects the conflict and 3-way merges both sides.
             return;
@@ -9765,15 +9765,15 @@ impl App {
         // now occupies their old offset — usually garbage — whenever the
         // adopted change inserted or removed text before them; a rebase
         // keeps them pinned to the same logical position in the document.
-        let diff_span = program_document_diff_span(&popup.buffer, &program.markdown);
-        popup.buffer = program.markdown.clone();
-        popup.saved_markdown = program.markdown.clone();
+        let diff_span = playbook_document_diff_span(&popup.buffer, &playbook.markdown);
+        popup.buffer = playbook.markdown.clone();
+        popup.saved_markdown = playbook.markdown.clone();
         popup.blocks = blocks;
-        popup.program = program;
+        popup.playbook = playbook;
         let buffer_len = popup.buffer.chars().count();
         let rebase = |pos: usize| -> usize {
             match diff_span {
-                Some(span) => program_rebase_position(pos, span),
+                Some(span) => playbook_rebase_position(pos, span),
                 None => pos,
             }
             .min(buffer_len)
@@ -9789,7 +9789,7 @@ impl App {
         popup.preferred_col = None;
         popup.undo_stack.clear();
         if popup.search.is_some() {
-            self.refresh_program_search_for_session(&updating_session_id);
+            self.refresh_playbook_search_for_session(&updating_session_id);
         }
     }
 
@@ -9963,27 +9963,27 @@ impl App {
         self.ui_panels.remove(id);
         self.pty_activity.remove(id);
         self.matrix_rain.forget_session(id);
-        // Program state is keyed by session id and otherwise never expires —
-        // left uncleaned, a long-running TUI that opens/closes Program views
+        // Playbook state is keyed by session id and otherwise never expires —
+        // left uncleaned, a long-running TUI that opens/closes Playbook views
         // across many short-lived sessions accumulates stale entries forever.
-        // `open_program_session_ids()` sorts every entry in `program_popups`
+        // `open_playbook_session_ids()` sorts every entry in `playbook_popups`
         // and runs once per visible split pane per frame, so this leak turns
         // into an ever-growing per-frame cost that gets paid once per split —
         // exactly the "lag after deleting a session, then splitting" reports.
         if self
-            .program_popup
+            .playbook_popup
             .as_ref()
-            .is_some_and(|popup| popup.program.session_id == id)
+            .is_some_and(|popup| popup.playbook.session_id == id)
         {
-            self.program_popup = None;
+            self.playbook_popup = None;
         }
-        self.program_popups.remove(id);
-        self.program_runs.remove(id);
-        self.program_settle_flourishes.remove(id);
-        self.program_view_memory.remove(id);
-        self.program_markdown_cache.remove(id);
-        self.program_projection_pending.remove(id);
-        self.program_collaborators
+        self.playbook_popups.remove(id);
+        self.playbook_runs.remove(id);
+        self.playbook_settle_flourishes.remove(id);
+        self.playbook_view_memory.remove(id);
+        self.playbook_markdown_cache.remove(id);
+        self.playbook_projection_pending.remove(id);
+        self.playbook_collaborators
             .retain(|_, cursor| cursor.session_id != id);
         // Orchestrator session went away → palette fallback after the
         // re-derive below. The orchestrator's PTY parser in
@@ -10046,7 +10046,7 @@ impl App {
                     k.code,
                     KeyCode::Modifier(ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift)
                 ) {
-                    self.program_selection_run_on_fork = !matches!(k.kind, KeyEventKind::Release);
+                    self.playbook_selection_run_on_fork = !matches!(k.kind, KeyEventKind::Release);
                 }
                 if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                     self.on_key(k).await;
@@ -10066,16 +10066,16 @@ impl App {
         if !self.mouse_capture_enabled {
             return;
         }
-        self.program_selection_run_on_fork = ev.modifiers.contains(KeyModifiers::SHIFT);
+        self.playbook_selection_run_on_fork = ev.modifiers.contains(KeyModifiers::SHIFT);
         use crossterm::event::MouseButton;
         const LIST_STEP: i32 = 3;
         let scrollback_step = self.mouse_scrollback_step();
         // Track every event's cell so hover-aware rendering (diamond
-        // tooltip, program shimmer preview, etc.) has a current position to
+        // tooltip, playbook shimmer preview, etc.) has a current position to
         // render against.
         let next_pos = (ev.column, ev.row);
         // Record a genuine pointer move *before* any click handling below
-        // runs (and can start a program Run) — so a click's own coordinates
+        // runs (and can start a playbook Run) — so a click's own coordinates
         // are never mistaken for "the pointer arrived" at whatever starts
         // shimmering as a result of that same click (spec 0057 hover-intent).
         if self.mouse_pos != Some(next_pos) {
@@ -10094,7 +10094,7 @@ impl App {
             return;
         }
         // Help is painted above every interactive surface, so a click must
-        // dismiss it before program hit-testing or a mouse-grabbing child PTY
+        // dismiss it before playbook hit-testing or a mouse-grabbing child PTY
         // can consume the event. The matching button-up is swallowed too, so
         // the dismissing click cannot activate a control behind the dialog.
         // The wheel scrolls the dialog's own content instead of falling
@@ -10142,7 +10142,7 @@ impl App {
         // An in-progress inline title rename commits on any click outside its
         // own name field — clicking away applies, like blurring an edited
         // text field (`Esc` remains the cancel path). This must run before
-        // every other click consumer (program popup, child-mouse forwarding,
+        // every other click consumer (playbook popup, child-mouse forwarding,
         // pane hit-tests) so no click path can leave a stale rename behind;
         // the click then proceeds normally on whatever it landed on. Clicks
         // *inside* the field fall through to the cursor-repositioning
@@ -10157,9 +10157,9 @@ impl App {
                                 && hit.contains(ev.column, ev.row)
                         })
                     }
-                    TitleRenameOrigin::Program => {
+                    TitleRenameOrigin::Playbook => {
                         self.layout
-                            .program_title_name_hit
+                            .playbook_title_name_hit
                             .is_some_and(|(xs, xe, y)| {
                                 ev.row == y && ev.column >= xs && ev.column < xe
                             })
@@ -10183,15 +10183,15 @@ impl App {
         // While the tour is active, its card — always painted topmost, opaque
         // (`Clear`) — owns every button/motion event inside its rect, no
         // matter what surface lies underneath: a mouse-grabbing PTY child, the
-        // program editor, anything. Same principle as the URL-click intercept
+        // playbook editor, anything. Same principle as the URL-click intercept
         // below: if the card shows its controls as clickable (hover underline
         // every frame), they must respond to clicks. Three carve-outs:
         //  - in-flight construct drag gestures keep their owner — a drag that
         //    started outside the card must not be hijacked crossing it (the
-        //    program's own resize drag included);
+        //    playbook's own resize drag included);
         //  - scroll wheels fall through — the card has nothing to scroll, so
         //    the surface underneath keeps scrolling as if the card weren't
-        //    there (program scroll, PTY scroll forward, pane scrollback);
+        //    there (playbook scroll, PTY scroll forward, pane scrollback);
         //  - while the help modal is open, help's any-key/any-click close
         //    semantics win over the card (step 7 opens help on purpose).
         let card_owns_event = !self.help_visible
@@ -10211,14 +10211,14 @@ impl App {
             && self.resizing_orchestrator_panel.is_none()
             && self.resizing_matrix_rain.is_none()
             && self.resizing_main_window.is_none()
-            && self.resizing_program_popup.is_none()
+            && self.resizing_playbook_popup.is_none()
             && self.resizing_lineage.is_none()
             && self.dragging_terminal_scrollbar.is_none()
             && self.dragging_list_scrollbar.is_none()
             && self.dragging_lineage_scrollbar.is_none()
             && self.text_selection.is_none()
             && self.mouse_over_tutorial_card(ev.column, ev.row);
-        if !card_owns_event && self.handle_program_mouse(&ev).await {
+        if !card_owns_event && self.handle_playbook_mouse(&ev).await {
             return;
         }
         // URL clicks must be intercepted before the child-mouse-forward path so
@@ -10266,7 +10266,7 @@ impl App {
             && self.dragging_lineage_scrollbar.is_none()
             && self.text_selection.is_none()
             && !card_owns_event
-            // A modal (remote-control dialog, program editor, help, tasks)
+            // A modal (remote-control dialog, playbook editor, help, tasks)
             // paints on top and owns every mouse event over it — forwarding to
             // the session PTY underneath would let a mouse-grabbing child (e.g.
             // a full-screen harness) swallow clicks meant for the dialog's
@@ -10428,22 +10428,22 @@ impl App {
                 }
                 // A `Below` split's resize divider is two rows tall — the upper
                 // pane's bottom border *and* the lower pane's top border. That
-                // lower row is the lower pane's title bar, where its program
+                // lower row is the lower pane's title bar, where its playbook
                 // status-glyph toggle sits. The toggle fires from the regular
                 // click pipeline on mouse-up (`handle_left_click`); without this
                 // exception the resize hit-test below would claim the mouse-down
                 // first and the click never reached the toggle, so "show
-                // program" silently failed on every non-top split pane. (Hide
-                // kept working because the active program's own mouse handler
+                // playbook" silently failed on every non-top split pane. (Hide
+                // kept working because the active playbook's own mouse handler
                 // intercepts that click earlier.) The session-actions button is
                 // already protected by the mouse-down handler above; let the
                 // toggle glyph fall through the same way.
-                let on_pane_program_toggle = self.layout.main_window_areas.iter().any(|pane| {
+                let on_pane_playbook_toggle = self.layout.main_window_areas.iter().any(|pane| {
                     let (x_start, x_end, y) =
-                        crate::ui::view_program_toggle_button_range(pane.area);
+                        crate::ui::view_playbook_toggle_button_range(pane.area);
                     ev.row == y && ev.column >= x_start && ev.column < x_end
                 });
-                if !on_pane_program_toggle {
+                if !on_pane_playbook_toggle {
                     if let Some(hit) = self
                         .layout
                         .main_window_dividers
@@ -10626,7 +10626,7 @@ impl App {
                     || self.resizing_matrix_rain.is_some()
                     || self.resizing_main_window.is_some()
                     || self.resizing_lineage.is_some()
-                    || self.resizing_program_attachment.is_some();
+                    || self.resizing_playbook_attachment.is_some();
                 self.resizing_list = None;
                 self.resizing_pin_strip = None;
                 self.resizing_orchestrator_panel = None;
@@ -10636,10 +10636,10 @@ impl App {
                 self.resizing_matrix_rain = None;
                 self.resizing_main_window = None;
                 self.resizing_lineage = None;
-                if self.resizing_program_attachment.take().is_some() {
+                if self.resizing_playbook_attachment.take().is_some() {
                     // The drag adjusted heights on every move; persist the
                     // final size once, when the drag settles.
-                    self.persist_program_expanded();
+                    self.persist_playbook_expanded();
                 }
                 if was_resizing {
                     self.text_selection = None;
@@ -10796,7 +10796,7 @@ impl App {
             return;
         }
         // Tour card clicks — checked BEFORE the modal branch below, because
-        // an open program sets `modal_area` and would otherwise claim the
+        // an open playbook sets `modal_area` and would otherwise claim the
         // click for cursor placement even though the card paints on top of
         // it. Deliberately NOT a reordering of the shortcut_hints loop
         // further down: only zones inside the card rect gain this pre-modal
@@ -10818,22 +10818,22 @@ impl App {
                 self.run_action(action).await;
             }
             // Zone hit or not, the click stops here: the card is painted
-            // opaque, so falling through to program-cursor placement / pane
+            // opaque, so falling through to playbook-cursor placement / pane
             // focus / selection on the surface underneath is always wrong.
             return;
         }
         if let Some(modal) = self.layout.modal_area {
-            if self.program_popup.is_some() {
+            if self.playbook_popup.is_some() {
                 if contains(modal, col, row) {
-                    self.place_program_cursor(modal, col, row);
+                    self.place_playbook_cursor(modal, col, row);
                     return;
                 }
-                // A click outside the program never closes it. The program is a
+                // A click outside the playbook never closes it. The playbook is a
                 // per-session surface dismissed only via its title-glyph
                 // toggle or C-x Space. Fall through so the click still selects
-                // a session / focuses a pane; the program then follows the new
-                // selection (the prior program is stashed, not destroyed) via
-                // sync_program_popup_with_selection.
+                // a session / focuses a pane; the playbook then follows the new
+                // selection (the prior playbook is stashed, not destroyed) via
+                // sync_playbook_popup_with_selection.
             } else if !contains(modal, col, row) {
                 self.dismiss_modal();
                 return;
@@ -10995,13 +10995,13 @@ impl App {
                 let (close_x_start, close_x_end, close_y) =
                     crate::ui::view_close_button_range(view);
                 let (toggle_x_start, toggle_x_end, toggle_y) =
-                    crate::ui::view_program_toggle_button_range(view);
+                    crate::ui::view_playbook_toggle_button_range(view);
                 if self.selected_session().is_some()
                     && row == toggle_y
                     && col >= toggle_x_start
                     && col < toggle_x_end
                 {
-                    self.toggle_program_popup().await;
+                    self.toggle_playbook_popup().await;
                     return;
                 }
                 if self.selected_id().is_some()
@@ -11046,11 +11046,11 @@ impl App {
     }
 
     fn dismiss_modal(&mut self) {
-        if self.program_popup.is_some() {
+        if self.playbook_popup.is_some() {
             // Remember caret + scroll so reopening restores them, matching the
             // toggle-close path.
-            self.remember_program_view_state();
-            self.program_popup = None;
+            self.remember_playbook_view_state();
+            self.playbook_popup = None;
             return;
         }
         if self.tasks_popup.take().is_some() {
@@ -11500,7 +11500,7 @@ impl App {
         if self.suggest_deck.is_some() && self.handle_suggest_deck_key(key).await {
             return;
         }
-        // Help is the topmost keyboard surface. Check it before the program,
+        // Help is the topmost keyboard surface. Check it before the playbook,
         // minibuffer, and focused child PTY routing. Up/Down/PageUp/PageDown
         // scroll the dialog's content (help text usually overflows a normal
         // terminal height); every other key still closes it immediately, so
@@ -11527,15 +11527,15 @@ impl App {
         // An in-progress inline title rename owns every keystroke, same
         // precedence class as the minibuffer/session-picker below — it must
         // come first so a rename started by clicking a pane's name doesn't
-        // leak keystrokes into that pane's PTY or the program buffer.
+        // leak keystrokes into that pane's PTY or the playbook buffer.
         if self.session_title_rename.is_some() {
             self.handle_session_title_rename_key(key).await;
             return;
         }
         // The session-picker dialog is the topmost modal: while open it owns
-        // every keystroke. This must sit above the program-popup gate below so
-        // that a dialog opened from the program view's `@`→session path
-        // captures input instead of leaking it into the program buffer.
+        // every keystroke. This must sit above the playbook-popup gate below so
+        // that a dialog opened from the playbook view's `@`→session path
+        // captures input instead of leaking it into the playbook buffer.
         if self.session_picker_active() {
             self.handle_session_picker_key(key);
             return;
@@ -11569,8 +11569,8 @@ impl App {
             }
         }
         // A pinned clip's inline terminal owns keyboard focus while pinned
-        // (same tier as the program popup itself, checked first so the pinned
-        // terminal — not the Program markdown editor — receives keystrokes).
+        // (same tier as the playbook popup itself, checked first so the pinned
+        // terminal — not the Playbook markdown editor — receives keystrokes).
         // Keys forward to the pinned session's PTY, with two carve-outs that
         // return `false` here and fall through to the tiers below: the
         // global `C-x` chord prefix (and any key continuing a chord in
@@ -11580,33 +11580,33 @@ impl App {
         if self.focus == PaneFocus::View && self.handle_pinned_clip_key(key).await {
             return;
         }
-        // The program captures keystrokes only while it is the topmost input
+        // The playbook captures keystrokes only while it is the topmost input
         // surface *and* the view pane holds focus. If a minibuffer/palette
         // overlay is open over it (e.g. `C-x x` opened the command palette or
         // the operator input), that overlay must capture input instead —
-        // otherwise typed keys leak into the program buffer and the
+        // otherwise typed keys leak into the playbook buffer and the
         // palette/operator is unusable. The `C-x` chord that *opens* an overlay
-        // still reaches the program global handler because no minibuffer exists
+        // still reaches the playbook global handler because no minibuffer exists
         // yet at that point; once the overlay is open the minibuffer block below
         // takes over.
         //
         // The `PaneFocus::View` gate is what lets `C-x o` hand control back to
-        // the session list while the program stays visible in the view pane.
+        // the session list while the playbook stays visible in the view pane.
         // With focus on the list, Up/Down and `C-n`/`C-p` fall through to the
-        // keymap and move the list selection instead of the program cursor.
-        // Opening a program focuses the view (see `open_program_popup`), so the
+        // keymap and move the list selection instead of the playbook cursor.
+        // Opening a playbook focuses the view (see `open_playbook_popup`), so the
         // common open-then-type flow is unchanged.
         if self
-            .program_popup
+            .playbook_popup
             .as_ref()
             .is_some_and(|popup| !popup.terminal_focus)
             && self.minibuffer.is_none()
             && self.focus == PaneFocus::View
         {
-            if self.handle_program_global_key(key).await {
+            if self.handle_playbook_global_key(key).await {
                 return;
             }
-            self.handle_program_key(key).await;
+            self.handle_playbook_key(key).await;
             return;
         }
         // /remote-control modal: arrow keys pick a tunnel provider,
@@ -11754,7 +11754,7 @@ impl App {
             // captured (same effect as the `C-x [` / `C-x ]` chords) instead
             // of being forwarded to the child. Guarded to a plain press with
             // no chord in flight, so a mid-chord key still reaches the keymap.
-            // Tradeoff: a full-screen program in the PTY (less, vim, man) no
+            // Tradeoff: a full-screen playbook in the PTY (less, vim, man) no
             // longer receives bare PageUp/PageDown — scrollback wins.
             if self.chord_state.is_empty()
                 && key.modifiers.is_empty()
@@ -11812,8 +11812,8 @@ impl App {
                 | KeyAction::ToggleView
                 | KeyAction::ToggleZoom
                 | KeyAction::ToggleHelp
-                | KeyAction::OpenProgram
-                | KeyAction::ToggleProgramTerminalFocus
+                | KeyAction::OpenPlaybook
+                | KeyAction::TogglePlaybookTerminalFocus
                 | KeyAction::OpenCommandPalette
                 | KeyAction::OpenSwitchSession
                 | KeyAction::OpenNewSession
@@ -11839,11 +11839,11 @@ impl App {
     }
 
     fn should_autofocus_view_from_list(&self, key: KeyEvent) -> bool {
-        // With a program visible in the view pane, the list-focused state is
+        // With a playbook visible in the view pane, the list-focused state is
         // purely for navigation: a stray letter must not auto-focus the view
         // (which would leak the keystroke into the shadowed PTY rather than the
-        // program). Editing the program is an explicit `C-x o` away.
-        if self.program_popup.is_some() {
+        // playbook). Editing the playbook is an explicit `C-x o` away.
+        if self.playbook_popup.is_some() {
             return false;
         }
         should_autofocus_view_from_list(
@@ -12099,41 +12099,41 @@ impl App {
                     }
                 }
             },
-            OpenProgram => {
-                self.toggle_program_popup().await;
+            OpenPlaybook => {
+                self.toggle_playbook_popup().await;
             }
-            UndoProgram => {
-                self.undo_program_edit();
+            UndoPlaybook => {
+                self.undo_playbook_edit();
             }
-            SaveProgram => {
-                self.save_program_popup().await;
+            SavePlaybook => {
+                self.save_playbook_popup().await;
             }
-            RunProgram => {
+            RunPlaybook => {
                 // Keyboard equivalent of the title-bar ▶ button and the
                 // selection ▶ Run button: run just the highlighted selection
-                // when one is active, otherwise run the whole program. No-op
-                // (with a status hint) when no program surface is open.
-                let selected = self.program_popup.as_ref().and_then(|popup| {
+                // when one is active, otherwise run the whole playbook. No-op
+                // (with a status hint) when no playbook surface is open.
+                let selected = self.playbook_popup.as_ref().and_then(|popup| {
                     Some((
-                        Self::selected_program_text(popup)?,
-                        Self::selected_program_block_ids(popup)?,
+                        Self::selected_playbook_text(popup)?,
+                        Self::selected_playbook_block_ids(popup)?,
                     ))
                 });
                 let (selection, selected_block_ids) =
                     selected.map_or((None, None), |(text, ids)| (Some(text), Some(ids)));
                 if selection.is_some() {
-                    if let Some(popup) = self.program_popup.as_mut() {
+                    if let Some(popup) = self.playbook_popup.as_mut() {
                         popup.selection = None;
                         popup.selection_menu = None;
                     }
-                    self.layout.program_selection_run_hit = None;
-                    self.layout.program_selection_verb_hits.clear();
+                    self.layout.playbook_selection_run_hit = None;
+                    self.layout.playbook_selection_verb_hits.clear();
                 }
-                self.execute_program_popup(selection, selected_block_ids, None)
+                self.execute_playbook_popup(selection, selected_block_ids, None)
                     .await;
             }
-            ToggleProgramTerminalFocus => {
-                self.toggle_program_terminal_focus();
+            TogglePlaybookTerminalFocus => {
+                self.toggle_playbook_terminal_focus();
             }
             OpenSuggestions => self.toggle_suggest_deck().await,
             OpenDiff => {
@@ -12855,12 +12855,12 @@ impl App {
         }
 
         if self
-            .program_popup
+            .playbook_popup
             .as_ref()
             .is_some_and(|popup| !popup.terminal_focus)
         {
-            let rows = PROGRAM_WHEEL_SCROLL_ROWS as isize;
-            self.scroll_program_popup(if down { rows } else { -rows });
+            let rows = PLAYBOOK_WHEEL_SCROLL_ROWS as isize;
+            self.scroll_playbook_popup(if down { rows } else { -rows });
             return;
         }
 
@@ -13030,7 +13030,7 @@ impl App {
             "delete" | "kill" | "rm" => self.run_action(KeyAction::OpenDeleteConfirm).await,
             "rename" => self.run_action(KeyAction::OpenRename).await,
             "fork" => self.run_action(KeyAction::OpenFork).await,
-            "program" | "edit-program" => self.run_action(KeyAction::OpenProgram).await,
+            "playbook" | "edit-playbook" => self.run_action(KeyAction::OpenPlaybook).await,
             "zoom" | "fullscreen" => self.run_action(KeyAction::ToggleZoom).await,
             "tokens" | "token-meter" | "meter" => {
                 self.matrix_panel_mode = MatrixPanelMode::Tokens;
@@ -14383,7 +14383,7 @@ fn byte_pos(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-fn program_cursor_at_modal_point(
+fn playbook_cursor_at_modal_point(
     app: Option<&App>,
     buffer: &str,
     modal: ratatui::layout::Rect,
@@ -14394,11 +14394,11 @@ fn program_cursor_at_modal_point(
     let inner_x = modal
         .x
         .saturating_add(1)
-        .saturating_add(PROGRAM_CONTENT_PADDING_X);
+        .saturating_add(PLAYBOOK_CONTENT_PADDING_X);
     let inner_y = modal
         .y
         .saturating_add(1)
-        .saturating_add(PROGRAM_CONTENT_PADDING_Y);
+        .saturating_add(PLAYBOOK_CONTENT_PADDING_Y);
     if row < inner_y {
         return None;
     }
@@ -14408,14 +14408,14 @@ fn program_cursor_at_modal_point(
     // offset instead of being treated as a whole logical line.
     let target_row = (row.saturating_sub(inner_y) as usize).saturating_add(scroll_offset);
     let target_col = col.saturating_sub(inner_x) as usize;
-    let width = ui::program_modal_inner_width(modal);
-    Some(program_normalize_program_cursor(
+    let width = ui::playbook_modal_inner_width(modal);
+    Some(playbook_normalize_playbook_cursor(
         buffer,
-        ui::program_visual_to_cursor(app, buffer, target_row, target_col, width),
+        ui::playbook_visual_to_cursor(app, buffer, target_row, target_col, width),
     ))
 }
 
-fn program_list_marker_content_start(raw_line: &str) -> Option<usize> {
+fn playbook_list_marker_content_start(raw_line: &str) -> Option<usize> {
     // Start-trimmed detection, matching the renderer: a marker-only `- ` is
     // already a bullet (spec 0094), so the cursor snaps past its marker too.
     let stripped = raw_line.trim_start();
@@ -14426,10 +14426,10 @@ fn program_list_marker_content_start(raw_line: &str) -> Option<usize> {
     }
 }
 
-/// The list-aware action Enter performs at `cursor` in the program buffer
+/// The list-aware action Enter performs at `cursor` in the playbook buffer
 /// (spec 0094).
 #[derive(Debug, PartialEq, Eq)]
-enum ProgramNewline {
+enum PlaybookNewline {
     /// Not on a list item (or the caret sits inside the indent/marker, or a
     /// selection is being replaced): insert a plain newline.
     Plain,
@@ -14443,7 +14443,7 @@ enum ProgramNewline {
     ClearItem { line_start: usize, line_end: usize },
 }
 
-fn program_newline_action(buffer: &str, cursor: usize) -> ProgramNewline {
+fn playbook_newline_action(buffer: &str, cursor: usize) -> PlaybookNewline {
     let mut line_start = 0usize;
     for (idx, ch) in buffer.chars().enumerate() {
         if idx >= cursor {
@@ -14453,7 +14453,7 @@ fn program_newline_action(buffer: &str, cursor: usize) -> ProgramNewline {
             line_start = idx + 1;
         }
     }
-    let line_end = program_line_end(buffer, cursor);
+    let line_end = playbook_line_end(buffer, cursor);
     let raw_line: String = buffer
         .chars()
         .skip(line_start)
@@ -14469,7 +14469,7 @@ fn program_newline_action(buffer: &str, cursor: usize) -> ProgramNewline {
         .map(|rest| ("- ", rest))
         .or_else(|| after_indent.strip_prefix("* ").map(|rest| ("* ", rest)))
     else {
-        return ProgramNewline::Plain;
+        return PlaybookNewline::Plain;
     };
     // Checklist items (the four marks the renderer styles) continue with a
     // fresh todo box; the current item keeps its own mark.
@@ -14480,18 +14480,18 @@ fn program_newline_action(buffer: &str, cursor: usize) -> ProgramNewline {
     let content = &rest[box_len..];
     let content_start = line_start + indent.chars().count() + 2 + box_len;
     if cursor < content_start {
-        return ProgramNewline::Plain;
+        return PlaybookNewline::Plain;
     }
     if content.trim().is_empty() {
-        return ProgramNewline::ClearItem {
+        return PlaybookNewline::ClearItem {
             line_start,
             line_end,
         };
     }
-    ProgramNewline::Continue(format!("{indent}{marker}{continuation_box}"))
+    PlaybookNewline::Continue(format!("{indent}{marker}{continuation_box}"))
 }
 
-fn program_list_marker_cursor(buffer: &str, cursor: usize) -> Option<usize> {
+fn playbook_list_marker_cursor(buffer: &str, cursor: usize) -> Option<usize> {
     let mut line_start = 0usize;
     for (idx, ch) in buffer.chars().enumerate() {
         if idx >= cursor {
@@ -14506,16 +14506,16 @@ fn program_list_marker_cursor(buffer: &str, cursor: usize) -> Option<usize> {
         .skip(line_start)
         .take_while(|ch| *ch != '\n')
         .collect();
-    program_list_marker_content_start(&raw_line).map(|offset| line_start + offset)
+    playbook_list_marker_content_start(&raw_line).map(|offset| line_start + offset)
 }
 
-fn program_normalize_program_cursor(buffer: &str, cursor: usize) -> usize {
-    program_list_marker_cursor(buffer, cursor)
+fn playbook_normalize_playbook_cursor(buffer: &str, cursor: usize) -> usize {
+    playbook_list_marker_cursor(buffer, cursor)
         .map(|marker_start| marker_start.max(cursor))
         .unwrap_or(cursor)
 }
 
-fn program_smart_clip_query(popup: &ProgramPopup, trigger_start: usize) -> Option<String> {
+fn playbook_smart_clip_query(popup: &PlaybookPopup, trigger_start: usize) -> Option<String> {
     if popup.cursor <= trigger_start {
         return None;
     }
@@ -14543,7 +14543,7 @@ fn program_smart_clip_query(popup: &ProgramPopup, trigger_start: usize) -> Optio
 /// lowercased blob of every searchable field. Higher is better; `None` means no
 /// match at all. Drives both the top relevance section (rank, take 5) and submenu
 /// dimming (matched = `Some`).
-pub(crate) fn program_clip_match_score(query: &str, label: &str, haystack: &str) -> Option<i32> {
+pub(crate) fn playbook_clip_match_score(query: &str, label: &str, haystack: &str) -> Option<i32> {
     debug_assert!(!query.is_empty());
     let label = label.to_ascii_lowercase();
     if label == query {
@@ -14567,7 +14567,7 @@ pub(crate) fn program_clip_match_score(query: &str, label: &str, haystack: &str)
     // Loose fuzzy fallback, but only against the visible label — a subsequence
     // over the whole haystack matches almost anything for short queries (so it
     // would never dim a submenu item).
-    if program_clip_is_subsequence(query, &label) {
+    if playbook_clip_is_subsequence(query, &label) {
         return Some(250);
     }
     None
@@ -14575,7 +14575,7 @@ pub(crate) fn program_clip_match_score(query: &str, label: &str, haystack: &str)
 
 /// Whether `needle`'s chars appear in `haystack` in order (gaps allowed) — the
 /// loose fuzzy fallback used for ranking when no contiguous match exists.
-fn program_clip_is_subsequence(needle: &str, haystack: &str) -> bool {
+fn playbook_clip_is_subsequence(needle: &str, haystack: &str) -> bool {
     let mut hay = haystack.chars();
     'next: for nc in needle.chars() {
         for hc in hay.by_ref() {
@@ -14588,7 +14588,7 @@ fn program_clip_is_subsequence(needle: &str, haystack: &str) -> bool {
     true
 }
 
-fn program_search_matches(buffer: &str, query: &str) -> Vec<(usize, usize)> {
+fn playbook_search_matches(buffer: &str, query: &str) -> Vec<(usize, usize)> {
     if query.is_empty() {
         return Vec::new();
     }
@@ -14617,7 +14617,7 @@ fn program_search_matches(buffer: &str, query: &str) -> Vec<(usize, usize)> {
 /// highlighted and the cursor navigates to it.  Clips that are already covered by
 /// an existing raw-buffer match (e.g. the query happens to appear inside the clip
 /// syntax itself) are skipped to avoid duplicate matches at overlapping ranges.
-fn program_search_add_clip_label_matches(
+fn playbook_search_add_clip_label_matches(
     app: &App,
     buffer: &str,
     query: &str,
@@ -14642,7 +14642,7 @@ fn program_search_add_clip_label_matches(
             .iter()
             .any(|&(ms, me)| ms < clip_char_end && me > clip_char_start);
         if !already_covered {
-            let (_, label) = crate::ui::program_smart_clip_label(Some(app), raw_clip);
+            let (_, label) = crate::ui::playbook_smart_clip_label(Some(app), raw_clip);
             if label.contains(query) {
                 matches.push((clip_char_start, clip_char_end));
             }
@@ -14653,8 +14653,8 @@ fn program_search_add_clip_label_matches(
     }
 }
 
-fn program_smart_clip_with_instance_id(clip: &str, buffer: &str) -> String {
-    if program_smart_clip_instance_id(clip).is_some() {
+fn playbook_smart_clip_with_instance_id(clip: &str, buffer: &str) -> String {
+    if playbook_smart_clip_instance_id(clip).is_some() {
         return clip.to_string();
     }
     let Some(body) = clip.strip_prefix("@{").and_then(|s| s.strip_suffix('}')) else {
@@ -14663,7 +14663,7 @@ fn program_smart_clip_with_instance_id(clip: &str, buffer: &str) -> String {
     format!(
         "@{{{} clip_id={}}}",
         body,
-        program_next_smart_clip_id(buffer)
+        playbook_next_smart_clip_id(buffer)
     )
 }
 
@@ -14673,21 +14673,21 @@ fn program_smart_clip_with_instance_id(clip: &str, buffer: &str) -> String {
 /// `clip_id=` (or with duplicate ids), so the normalized form of an untouched
 /// buffer never equals the raw `saved_markdown`; comparing normalized to raw
 /// would misread such a popup as dirty and silently skip every live agent
-/// update until the program was hidden and reopened. Normalize both sides so
+/// update until the playbook was hidden and reopened. Normalize both sides so
 /// only real edits count (the web UI does the same — it stores and compares
 /// normalized content).
-fn program_popup_has_unsaved_edits(popup: &ProgramPopup) -> bool {
-    program_normalize_smart_clip_instance_ids(&popup.buffer)
-        != program_normalize_smart_clip_instance_ids(&popup.saved_markdown)
+fn playbook_popup_has_unsaved_edits(popup: &PlaybookPopup) -> bool {
+    playbook_normalize_smart_clip_instance_ids(&popup.buffer)
+        != playbook_normalize_smart_clip_instance_ids(&popup.saved_markdown)
 }
 
 /// The char-offset span (in `old`/`new` coordinates respectively) where `old`
 /// and `new` differ, via common-prefix/suffix trim — mirrors
-/// `program_edit_overall_span` in crates/daemon/src/session.rs. Returns
+/// `playbook_edit_overall_span` in crates/daemon/src/session.rs. Returns
 /// `(prefix, old_end, new_end)`: chars before `prefix` are shared, chars from
 /// `prefix` to `old_end` in `old` were replaced by chars from `prefix` to
 /// `new_end` in `new`. `None` when `old == new` (no rebase needed).
-fn program_document_diff_span(old: &str, new: &str) -> Option<(usize, usize, usize)> {
+fn playbook_document_diff_span(old: &str, new: &str) -> Option<(usize, usize, usize)> {
     if old == new {
         return None;
     }
@@ -14710,11 +14710,11 @@ fn program_document_diff_span(old: &str, new: &str) -> Option<(usize, usize, usi
 }
 
 /// Rebase a char offset in the old document through to the new document,
-/// given the diff span from [`program_document_diff_span`]. Positions at or
+/// given the diff span from [`playbook_document_diff_span`]. Positions at or
 /// before the changed span's start are unchanged; positions at or after the
 /// old span's end shift by the length delta; positions inside the changed
 /// span clamp to the new span's end.
-fn program_rebase_position(pos: usize, span: (usize, usize, usize)) -> usize {
+fn playbook_rebase_position(pos: usize, span: (usize, usize, usize)) -> usize {
     let (prefix, old_end, new_end) = span;
     if pos <= prefix {
         pos
@@ -14726,8 +14726,8 @@ fn program_rebase_position(pos: usize, span: (usize, usize, usize)) -> usize {
     }
 }
 
-fn program_normalize_smart_clip_instance_ids(markdown: &str) -> String {
-    let ranges = program_smart_clip_ranges(markdown);
+fn playbook_normalize_smart_clip_instance_ids(markdown: &str) -> String {
+    let ranges = playbook_smart_clip_ranges(markdown);
     if ranges.is_empty() {
         return markdown.to_string();
     }
@@ -14736,7 +14736,7 @@ fn program_normalize_smart_clip_instance_ids(markdown: &str) -> String {
     for range in &ranges {
         let start_b = byte_pos(markdown, range.start + 2);
         let end_b = byte_pos(markdown, range.end.saturating_sub(1));
-        if let Some(id) = program_smart_clip_instance_id(&markdown[start_b..end_b]) {
+        if let Some(id) = playbook_smart_clip_instance_id(&markdown[start_b..end_b]) {
             if let Some(num) = id
                 .strip_prefix("clip_")
                 .and_then(|s| s.parse::<usize>().ok())
@@ -14758,7 +14758,7 @@ fn program_normalize_smart_clip_instance_ids(markdown: &str) -> String {
         normalized.push_str(&markdown[last_b..clip_start_b]);
 
         let body = &markdown[body_start_b..body_end_b];
-        let existing = program_smart_clip_instance_id(body).map(str::to_string);
+        let existing = playbook_smart_clip_instance_id(body).map(str::to_string);
         if existing.as_ref().is_some_and(|id| used.insert(id.clone())) {
             normalized.push_str(&markdown[clip_start_b..clip_end_b]);
         } else {
@@ -14769,7 +14769,7 @@ fn program_normalize_smart_clip_instance_ids(markdown: &str) -> String {
                     break candidate;
                 }
             };
-            let body_without_id = program_smart_clip_body_without_instance_id(body);
+            let body_without_id = playbook_smart_clip_body_without_instance_id(body);
             normalized.push_str("@{");
             normalized.push_str(&body_without_id);
             if !body_without_id.is_empty() {
@@ -14785,12 +14785,12 @@ fn program_normalize_smart_clip_instance_ids(markdown: &str) -> String {
     normalized
 }
 
-fn program_next_smart_clip_id(buffer: &str) -> String {
+fn playbook_next_smart_clip_id(buffer: &str) -> String {
     let mut max = 0usize;
-    for range in program_smart_clip_ranges(buffer) {
+    for range in playbook_smart_clip_ranges(buffer) {
         let start_b = byte_pos(buffer, range.start + 2);
         let end_b = byte_pos(buffer, range.end.saturating_sub(1));
-        if let Some(id) = program_smart_clip_instance_id(&buffer[start_b..end_b]) {
+        if let Some(id) = playbook_smart_clip_instance_id(&buffer[start_b..end_b]) {
             if let Some(num) = id
                 .strip_prefix("clip_")
                 .and_then(|s| s.parse::<usize>().ok())
@@ -14802,14 +14802,14 @@ fn program_next_smart_clip_id(buffer: &str) -> String {
     format!("clip_{}", max + 1)
 }
 
-fn program_smart_clip_instance_id(raw_clip: &str) -> Option<&str> {
+fn playbook_smart_clip_instance_id(raw_clip: &str) -> Option<&str> {
     raw_clip.split_whitespace().find_map(|part| {
         part.strip_prefix("clip_id=")
             .filter(|value| !value.is_empty())
     })
 }
 
-fn program_smart_clip_body_without_instance_id(raw_clip: &str) -> String {
+fn playbook_smart_clip_body_without_instance_id(raw_clip: &str) -> String {
     raw_clip
         .split_whitespace()
         .filter(|part| !part.starts_with("clip_id="))
@@ -14818,56 +14818,56 @@ fn program_smart_clip_body_without_instance_id(raw_clip: &str) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProgramSmartClipRange {
+struct PlaybookSmartClipRange {
     start: usize,
     end: usize,
 }
 
-fn program_cursor_left(buffer: &str, cursor: usize) -> usize {
-    let cursor = program_normalize_program_cursor(buffer, cursor);
-    if let Some(marker_start) = program_list_marker_cursor(buffer, cursor) {
+fn playbook_cursor_left(buffer: &str, cursor: usize) -> usize {
+    let cursor = playbook_normalize_playbook_cursor(buffer, cursor);
+    if let Some(marker_start) = playbook_list_marker_cursor(buffer, cursor) {
         if cursor <= marker_start {
             return marker_start;
         }
     }
-    program_normalize_program_cursor(
+    playbook_normalize_playbook_cursor(
         buffer,
-        program_smart_clip_range_before_or_containing(buffer, cursor)
+        playbook_smart_clip_range_before_or_containing(buffer, cursor)
             .map(|range| range.start)
             .unwrap_or_else(|| cursor.saturating_sub(1)),
     )
 }
 
-fn program_cursor_right(buffer: &str, cursor: usize) -> usize {
+fn playbook_cursor_right(buffer: &str, cursor: usize) -> usize {
     let len = buffer.chars().count();
-    let cursor = program_normalize_program_cursor(buffer, cursor);
-    program_normalize_program_cursor(
+    let cursor = playbook_normalize_playbook_cursor(buffer, cursor);
+    playbook_normalize_playbook_cursor(
         buffer,
-        program_smart_clip_range_at_or_containing(buffer, cursor)
+        playbook_smart_clip_range_at_or_containing(buffer, cursor)
             .map(|range| range.end)
             .unwrap_or_else(|| (cursor + 1).min(len)),
     )
 }
 
-fn program_smart_clip_range_at_or_containing(
+fn playbook_smart_clip_range_at_or_containing(
     buffer: &str,
     cursor: usize,
-) -> Option<ProgramSmartClipRange> {
-    program_smart_clip_ranges(buffer)
+) -> Option<PlaybookSmartClipRange> {
+    playbook_smart_clip_ranges(buffer)
         .into_iter()
         .find(|range| cursor >= range.start && cursor < range.end)
 }
 
-fn program_smart_clip_range_before_or_containing(
+fn playbook_smart_clip_range_before_or_containing(
     buffer: &str,
     cursor: usize,
-) -> Option<ProgramSmartClipRange> {
-    program_smart_clip_ranges(buffer)
+) -> Option<PlaybookSmartClipRange> {
+    playbook_smart_clip_ranges(buffer)
         .into_iter()
         .find(|range| cursor > range.start && cursor <= range.end)
 }
 
-fn program_smart_clip_ranges(buffer: &str) -> Vec<ProgramSmartClipRange> {
+fn playbook_smart_clip_ranges(buffer: &str) -> Vec<PlaybookSmartClipRange> {
     let chars: Vec<char> = buffer.chars().collect();
     let mut ranges = Vec::new();
     let mut idx = 0usize;
@@ -14881,7 +14881,7 @@ fn program_smart_clip_ranges(buffer: &str) -> Vec<ProgramSmartClipRange> {
             end += 1;
         }
         if end < chars.len() {
-            ranges.push(ProgramSmartClipRange {
+            ranges.push(PlaybookSmartClipRange {
                 start: idx,
                 end: end + 1,
             });
@@ -14893,14 +14893,14 @@ fn program_smart_clip_ranges(buffer: &str) -> Vec<ProgramSmartClipRange> {
     ranges
 }
 
-fn program_popup_from_document(
-    program: construct_protocol::ProgramDocument,
-    blocks: Vec<construct_protocol::ProgramBlockView>,
+fn playbook_popup_from_document(
+    playbook: construct_protocol::PlaybookDocument,
+    blocks: Vec<construct_protocol::PlaybookBlockView>,
     now: Instant,
-) -> ProgramPopup {
-    let markdown = program.markdown.clone();
-    ProgramPopup {
-        program,
+) -> PlaybookPopup {
+    let markdown = playbook.markdown.clone();
+    PlaybookPopup {
+        playbook,
         buffer: markdown.clone(),
         saved_markdown: markdown,
         blocks,
@@ -14917,7 +14917,7 @@ fn program_popup_from_document(
         hide_after: now + Duration::from_secs(365 * 24 * 60 * 60),
         closing: false,
         scroll_offset: 0,
-        cover_percent: PROGRAM_COVER_PERCENT_DEFAULT,
+        cover_percent: PLAYBOOK_COVER_PERCENT_DEFAULT,
         terminal_focus: false,
         slide_from: 0.0,
         slide_changed_at: None,
@@ -14925,8 +14925,8 @@ fn program_popup_from_document(
         pinned_scroll_rows: 0,
         pinned_scroll_cols: 0,
         pinned_terminal_size: None,
-        pinned_card_cols: PROGRAM_PINNED_CARD_DEFAULT_COLS,
-        pinned_card_rows: PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
+        pinned_card_cols: PLAYBOOK_PINNED_CARD_DEFAULT_COLS,
+        pinned_card_rows: PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS,
         pinned_card_pos: None,
     }
 }
@@ -14934,7 +14934,7 @@ fn program_popup_from_document(
 /// Resolve a char offset into the buffer to its `(line index, column)` where
 /// column is the char offset within that line and `'\n'` counts as one char.
 /// `lines` must be the buffer split on `'\n'` (so the count is preserved).
-fn program_offset_to_line_col(lines: &[String], offset: usize) -> (usize, usize) {
+fn playbook_offset_to_line_col(lines: &[String], offset: usize) -> (usize, usize) {
     let mut consumed = 0usize;
     for (i, line) in lines.iter().enumerate() {
         let len = line.chars().count();
@@ -14950,8 +14950,8 @@ fn program_offset_to_line_col(lines: &[String], offset: usize) -> (usize, usize)
     )
 }
 
-/// Inverse of [`program_offset_to_line_col`]: the char offset of `(line, col)`.
-fn program_line_col_to_offset(lines: &[String], line: usize, col: usize) -> usize {
+/// Inverse of [`playbook_offset_to_line_col`]: the char offset of `(line, col)`.
+fn playbook_line_col_to_offset(lines: &[String], line: usize, col: usize) -> usize {
     let mut offset = 0usize;
     for l in lines.iter().take(line) {
         offset += l.chars().count() + 1;
@@ -14959,7 +14959,7 @@ fn program_line_col_to_offset(lines: &[String], line: usize, col: usize) -> usiz
     offset + col
 }
 
-fn program_line_start(s: &str, cursor: usize) -> usize {
+fn playbook_line_start(s: &str, cursor: usize) -> usize {
     let mut line_start = 0usize;
     for (idx, ch) in s.chars().enumerate() {
         if idx >= cursor {
@@ -14969,7 +14969,7 @@ fn program_line_start(s: &str, cursor: usize) -> usize {
             line_start = idx + 1;
         }
     }
-    if let Some(marker_start) = program_list_marker_cursor(s, cursor) {
+    if let Some(marker_start) = playbook_list_marker_cursor(s, cursor) {
         if marker_start >= line_start {
             return marker_start;
         }
@@ -14977,7 +14977,7 @@ fn program_line_start(s: &str, cursor: usize) -> usize {
     line_start
 }
 
-fn program_line_end(s: &str, cursor: usize) -> usize {
+fn playbook_line_end(s: &str, cursor: usize) -> usize {
     for (idx, ch) in s.chars().enumerate().skip(cursor) {
         if ch == '\n' {
             return idx;
@@ -15049,9 +15049,9 @@ mod tests {
     /// that leaves it unchanged (GAP D — a rebase must not re-trigger the
     /// reveal).
     #[test]
-    fn program_agent_reveal_receipt_update_bumps_on_new_stamp_holds_on_rebase() {
+    fn playbook_agent_reveal_receipt_update_bumps_on_new_stamp_holds_on_rebase() {
         let t0 = Instant::now();
-        let first = program_agent_reveal_receipt_update(None, 1_000, t0);
+        let first = playbook_agent_reveal_receipt_update(None, 1_000, t0);
         assert_eq!(
             first,
             (1_000, t0),
@@ -15059,14 +15059,14 @@ mod tests {
         );
 
         let t1 = t0 + Duration::from_millis(50);
-        let rebased = program_agent_reveal_receipt_update(Some(&first), 1_000, t1);
+        let rebased = playbook_agent_reveal_receipt_update(Some(&first), 1_000, t1);
         assert_eq!(
             rebased, first,
             "unchanged updated_at_ms (a rebase) must not renew the receipt"
         );
 
         let t2 = t1 + Duration::from_millis(50);
-        let renewed = program_agent_reveal_receipt_update(Some(&rebased), 1_200, t2);
+        let renewed = playbook_agent_reveal_receipt_update(Some(&rebased), 1_200, t2);
         assert_eq!(
             renewed,
             (1_200, t2),
@@ -15408,24 +15408,24 @@ mod tests {
             lineage_box_hits: Vec::new(),
             lineage_subagent_toggle_hits: Vec::new(),
             lineage_segment_tooltip: None,
-            program_title_run_hit: None,
-            program_title_toggle_hit: None,
-            program_title_close_hit: None,
-            program_title_name_hit: None,
-            program_title_name_window_start: 0,
-            program_selection_run_hit: None,
-            program_selection_verb_hits: Vec::new(),
-            program_inner_area: None,
-            program_base_area: None,
-            program_resize_hit: None,
-            program_smart_clip_anchor: None,
-            program_clip_hits: Vec::new(),
-            program_attachment_hits: Vec::new(),
-            program_attachment_image_rects: Vec::new(),
-            program_attachment_resize_zones: Vec::new(),
-            program_pinned_card_rect: None,
-            program_action_link_hits: Vec::new(),
-            program_template_hits: Vec::new(),
+            playbook_title_run_hit: None,
+            playbook_title_toggle_hit: None,
+            playbook_title_close_hit: None,
+            playbook_title_name_hit: None,
+            playbook_title_name_window_start: 0,
+            playbook_selection_run_hit: None,
+            playbook_selection_verb_hits: Vec::new(),
+            playbook_inner_area: None,
+            playbook_base_area: None,
+            playbook_resize_hit: None,
+            playbook_smart_clip_anchor: None,
+            playbook_clip_hits: Vec::new(),
+            playbook_attachment_hits: Vec::new(),
+            playbook_attachment_image_rects: Vec::new(),
+            playbook_attachment_resize_zones: Vec::new(),
+            playbook_pinned_card_rect: None,
+            playbook_action_link_hits: Vec::new(),
+            playbook_template_hits: Vec::new(),
             browser_preview_area: None,
             browser_preview_close: None,
             terminal_scrollbar: None,
@@ -15448,8 +15448,8 @@ mod tests {
             configure_tab_hits: Vec::new(),
             main_slide: 0,
             main_window_hidden: HashMap::new(),
-            program_modal_hidden: 0,
-            program_base_hidden: 0,
+            playbook_modal_hidden: 0,
+            playbook_base_hidden: 0,
             terminal_scrollbar_hidden: 0,
             list_scrollbar_hidden: 0,
             lineage_scrollbar_hidden: 0,
@@ -15565,14 +15565,14 @@ mod tests {
             features: Vec::new(),
             features_degradation_observed: false,
             plugin_actions: Vec::new(),
-            program_templates: Vec::new(),
-            program_templates_tx: mpsc::unbounded_channel().0,
-            program_verbs: Vec::new(),
-            program_selection_run_on_fork: false,
-            program_verbs_tx: mpsc::unbounded_channel().0,
-            program_markdown_cache: HashMap::new(),
-            program_projection_pending: HashSet::new(),
-            program_projection_tx: mpsc::unbounded_channel().0,
+            playbook_templates: Vec::new(),
+            playbook_templates_tx: mpsc::unbounded_channel().0,
+            playbook_verbs: Vec::new(),
+            playbook_selection_run_on_fork: false,
+            playbook_verbs_tx: mpsc::unbounded_channel().0,
+            playbook_markdown_cache: HashMap::new(),
+            playbook_projection_pending: HashSet::new(),
+            playbook_projection_tx: mpsc::unbounded_channel().0,
             harness_usage: HashMap::new(),
             harness_usage_inflight: HashSet::new(),
             harness_usage_last_query: HashMap::new(),
@@ -15646,7 +15646,7 @@ mod tests {
             mouse_moved_at: None,
             saw_mouse_motion: false,
             mouse_capture_enabled: true,
-            last_program_clip_click: None,
+            last_playbook_clip_click: None,
             orchestrator_id: None,
             list_panel_w: LIST_PANEL_W_DEFAULT,
             resizing_list: None,
@@ -15655,7 +15655,7 @@ mod tests {
             matrix_rain_h: None,
             resizing_matrix_rain: None,
             resizing_main_window: None,
-            resizing_program_popup: None,
+            resizing_playbook_popup: None,
             pinned_card_drag: None,
             list_collapsed: false,
             tasks_popup: None,
@@ -15672,16 +15672,16 @@ mod tests {
             lineage_subagents_expanded: HashSet::new(),
             configure_popup: None,
             session_picker: None,
-            program_popup: None,
-            program_popups: HashMap::new(),
-            program_view_memory: HashMap::new(),
-            program_runs: HashMap::new(),
-            program_run_dispatch: HashMap::new(),
-            program_settle_flourishes: HashMap::new(),
-            program_collaborators: HashMap::new(),
-            program_agent_reveal_receipts: HashMap::new(),
-            own_program_client_id: None,
-            program_clipboard: None,
+            playbook_popup: None,
+            playbook_popups: HashMap::new(),
+            playbook_view_memory: HashMap::new(),
+            playbook_runs: HashMap::new(),
+            playbook_run_dispatch: HashMap::new(),
+            playbook_settle_flourishes: HashMap::new(),
+            playbook_collaborators: HashMap::new(),
+            playbook_agent_reveal_receipts: HashMap::new(),
+            own_playbook_client_id: None,
+            playbook_clipboard: None,
             remote_control_popup: None,
             remote_control_task: None,
             editor_states: HashMap::new(),
@@ -15690,9 +15690,9 @@ mod tests {
             pending_tool_approvals: HashMap::new(),
             browser_previews: HashMap::new(),
             attachment_images: HashMap::new(),
-            program_expanded_store: HashMap::new(),
-            program_expanded_store_loaded: false,
-            resizing_program_attachment: None,
+            playbook_expanded_store: HashMap::new(),
+            playbook_expanded_store_loaded: false,
+            resizing_playbook_attachment: None,
             ui_panels: HashMap::new(),
             dynamic_ui_popover_open: None,
             dynamic_ui_selected: HashSet::new(),
@@ -16110,7 +16110,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn op_xy_aux_scroll_follows_list_lineage_and_program_focus() {
+    async fn op_xy_aux_scroll_follows_list_lineage_and_playbook_focus() {
         let (mut app, _dir, server) = empty_app().await;
         app.sessions = (0..10)
             .map(|index| {
@@ -16142,19 +16142,19 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         app.focus = PaneFocus::View;
-        app.program_popup = Some(program_popup_for_test("s0", &markdown, 0));
-        app.layout.program_inner_area = Some(ratatui::layout::Rect::new(0, 0, 40, 5));
+        app.playbook_popup = Some(playbook_popup_for_test("s0", &markdown, 0));
+        app.layout.playbook_inner_area = Some(ratatui::layout::Rect::new(0, 0, 40, 5));
         app.handle_op_xy_aux_control(crate::midi::OpXyAuxControl::ScrollDown)
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().scroll_offset,
-            PROGRAM_WHEEL_SCROLL_ROWS,
-            "focused program document scrolls"
+            app.playbook_popup.as_ref().unwrap().scroll_offset,
+            PLAYBOOK_WHEEL_SCROLL_ROWS,
+            "focused playbook document scrolls"
         );
 
         app.handle_op_xy_aux_control(crate::midi::OpXyAuxControl::ScrollUp)
             .await;
-        assert_eq!(app.program_popup.as_ref().unwrap().scroll_offset, 0);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().scroll_offset, 0);
         server.abort();
     }
 
@@ -16543,10 +16543,10 @@ mod tests {
         assert_eq!(restored, vec!["fork-parent", "parent"]);
     }
 
-    fn program_popup_for_test(session_id: &str, markdown: &str, cursor: usize) -> ProgramPopup {
+    fn playbook_popup_for_test(session_id: &str, markdown: &str, cursor: usize) -> PlaybookPopup {
         let now = Instant::now();
-        ProgramPopup {
-            program: construct_protocol::ProgramDocument {
+        PlaybookPopup {
+            playbook: construct_protocol::PlaybookDocument {
                 session_id: session_id.to_string(),
                 markdown: markdown.to_string(),
                 version: 1,
@@ -16569,7 +16569,7 @@ mod tests {
             hide_after: now + Duration::from_secs(60),
             closing: false,
             scroll_offset: 0,
-            cover_percent: PROGRAM_COVER_PERCENT_DEFAULT,
+            cover_percent: PLAYBOOK_COVER_PERCENT_DEFAULT,
             terminal_focus: false,
             slide_from: 0.0,
             slide_changed_at: None,
@@ -16577,18 +16577,18 @@ mod tests {
             pinned_scroll_rows: 0,
             pinned_scroll_cols: 0,
             pinned_terminal_size: None,
-            pinned_card_cols: PROGRAM_PINNED_CARD_DEFAULT_COLS,
-            pinned_card_rows: PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
+            pinned_card_cols: PLAYBOOK_PINNED_CARD_DEFAULT_COLS,
+            pinned_card_rows: PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS,
             pinned_card_pos: None,
         }
     }
 
-    /// Mock daemon for tests exercising Program open/edit/save end to end:
-    /// replies to `program.get` / `program.update` with the session id
+    /// Mock daemon for tests exercising Playbook open/edit/save end to end:
+    /// replies to `playbook.get` / `playbook.update` with the session id
     /// echoed from params, and to `session.transcript` with an empty
     /// transcript. Everything else gets a `null` result (fine for
     /// fire-and-forget calls whose errors are swallowed by the caller).
-    async fn program_flow_mock_daemon(
+    async fn playbook_flow_mock_daemon(
     ) -> (Arc<Client>, tempfile::TempDir, tokio::task::JoinHandle<()>) {
         use construct_protocol::ipc_method;
         use serde_json::Value;
@@ -16629,13 +16629,13 @@ mod tests {
                             .unwrap_or("s1")
                             .to_string();
                         let result = match method.as_str() {
-                            ipc_method::PROGRAM_GET => {
+                            ipc_method::PLAYBOOK_GET => {
                                 let markdown = params
                                     .get("markdown")
                                     .and_then(Value::as_str)
                                     .unwrap_or("")
                                     .to_string();
-                                serde_json::json!({ "program": {
+                                serde_json::json!({ "playbook": {
                                     "session_id": session_id,
                                     "markdown": markdown,
                                     "version": 1,
@@ -16643,13 +16643,13 @@ mod tests {
                                     "template_id": null,
                                 }})
                             }
-                            ipc_method::PROGRAM_UPDATE => {
+                            ipc_method::PLAYBOOK_UPDATE => {
                                 let markdown = params
                                     .get("markdown")
                                     .and_then(Value::as_str)
                                     .unwrap_or("")
                                     .to_string();
-                                serde_json::json!({ "program": {
+                                serde_json::json!({ "playbook": {
                                     "session_id": session_id,
                                     "markdown": markdown,
                                     "version": 2,
@@ -17799,21 +17799,21 @@ mod tests {
         assert!(!no_agent_harness_available(&one_agent_ready));
     }
 
-    // End-to-end reproduction of the reported repro: open Program on a
+    // End-to-end reproduction of the reported repro: open Playbook on a
     // session, edit and save; split the window onto a second session listed
     // just above it; delete that second session so `focus_neighbor_of`
     // reassigns its pane to the neighbor — both panes now show the *first*
-    // session, which still has a Program open. Drives the real
-    // `open_program_popup` / `select_session` / `split_active_window` /
+    // session, which still has a Playbook open. Drives the real
+    // `open_playbook_popup` / `select_session` / `split_active_window` /
     // `on_session_deleted` methods (not hand-built App state) and checks
-    // Program-popup bookkeeping stays consistent through the convergence:
+    // Playbook-popup bookkeeping stays consistent through the convergence:
     // no duplicate stashed entry, and the popup is restored to the session
     // both panes now share. Render-cost characteristics of this exact
     // shape are covered by
     // `two_split_panes_same_session_reuses_cached_size_instead_of_thrashing`.
     #[tokio::test]
-    async fn two_windows_converging_on_one_session_with_program_open() {
-        let (client, _dir, _server) = program_flow_mock_daemon().await;
+    async fn two_windows_converging_on_one_session_with_playbook_open() {
+        let (client, _dir, _server) = playbook_flow_mock_daemon().await;
         let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
         s1.id = "s1".into();
         s1.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
@@ -17822,14 +17822,14 @@ mod tests {
         app.active_window_id = 1;
         app.main_windows = MainWindowTree::single(1, Selection::Session("s1".into()));
 
-        // 1. Open Program on s1, edit, and save.
-        app.open_program_popup().await;
-        assert!(app.program_popup.is_some(), "program should have opened");
-        app.program_popup.as_mut().unwrap().buffer = "# Notes\n\nedited body\n".to_string();
-        assert!(app.save_program_popup().await, "save should succeed");
+        // 1. Open Playbook on s1, edit, and save.
+        app.open_playbook_popup().await;
+        assert!(app.playbook_popup.is_some(), "playbook should have opened");
+        app.playbook_popup.as_mut().unwrap().buffer = "# Notes\n\nedited body\n".to_string();
+        assert!(app.save_playbook_popup().await, "save should succeed");
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
-            app.program_popup.as_ref().unwrap().saved_markdown,
+            app.playbook_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().saved_markdown,
             "buffer should be clean (not dirty) after save"
         );
 
@@ -17855,9 +17855,9 @@ mod tests {
         app.select_session("s2".into());
         app.sync_active_window_selection();
         assert_eq!(app.main_windows.visible_session_ids(), vec!["s1", "s2"]);
-        // s1's program is now stashed (focus moved to s2's window).
-        assert!(app.program_popup.is_none());
-        assert!(app.program_popups.contains_key("s1"));
+        // s1's playbook is now stashed (focus moved to s2's window).
+        assert!(app.playbook_popup.is_none());
+        assert!(app.playbook_popups.contains_key("s1"));
 
         // 3. Delete s2. Its window's selection is reassigned to its list
         // neighbor (s1) — both windows now show s1.
@@ -17869,34 +17869,34 @@ mod tests {
         );
 
         // Render a few frames to drive the post-convergence bookkeeping
-        // (`sync_program_popup_with_selection`) to steady state.
+        // (`sync_playbook_popup_with_selection`) to steady state.
         let backend = ratatui::backend::TestBackend::new(160, 45);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         for _ in 0..3 {
             term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         }
         assert!(
-            app.program_popup.is_some(),
-            "program_popup should have been restored to s1 after convergence"
+            app.playbook_popup.is_some(),
+            "playbook_popup should have been restored to s1 after convergence"
         );
         assert!(
-            app.program_popups.is_empty(),
-            "program_popups should not retain a duplicate stashed entry for s1"
+            app.playbook_popups.is_empty(),
+            "playbook_popups should not retain a duplicate stashed entry for s1"
         );
     }
 
-    // Regression: deleting a session must drop its Program-related state, not
-    // just its terminal/history state. `program_popups` in particular is
-    // scanned in full (sorted, cloned ids) by `open_program_session_ids()`
+    // Regression: deleting a session must drop its Playbook-related state, not
+    // just its terminal/history state. `playbook_popups` in particular is
+    // scanned in full (sorted, cloned ids) by `open_playbook_session_ids()`
     // once per visible split pane on every frame — left uncleaned, opening
-    // and deleting sessions with a Program view over a long-running TUI
+    // and deleting sessions with a Playbook view over a long-running TUI
     // session grows that map without bound, and the per-frame cost grows
     // with it, multiplied by however many split panes are open. That matches
     // reports of the TUI getting laggy after "delete a session from a split,
     // then create a new split": more splits pay the growing cost more times
     // per frame.
     #[tokio::test]
-    async fn deleting_a_session_clears_its_program_state() {
+    async fn deleting_a_session_clears_its_playbook_state() {
         let (mut app, _dir, _server) = two_session_app().await;
         app.main_windows = MainWindowTree::Split {
             direction: WindowSplitDirection::Right,
@@ -17912,15 +17912,15 @@ mod tests {
         };
         app.active_window_id = 1;
         app.selection = Selection::Session("s1".into());
-        // s1's program is the active popup; s2's is stashed (not focused).
-        app.program_popup = Some(program_popup_for_test("s1", "# Rule\n\nbody\n", 0));
-        app.program_popups.insert(
+        // s1's playbook is the active popup; s2's is stashed (not focused).
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "# Rule\n\nbody\n", 0));
+        app.playbook_popups.insert(
             "s2".into(),
-            program_popup_for_test("s2", "# Rule\n\nother\n", 0),
+            playbook_popup_for_test("s2", "# Rule\n\nother\n", 0),
         );
-        app.program_runs.insert(
+        app.playbook_runs.insert(
             "s1".into(),
-            ProgramRun {
+            PlaybookRun {
                 started_at: Instant::now(),
                 pending: ["s1-block".to_string()].into_iter().collect(),
                 pending_tooltips: HashMap::new(),
@@ -17928,25 +17928,25 @@ mod tests {
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(30),
                 first_output_seen: false,
-                stage: construct_protocol::ProgramRunStage::Delivered,
+                stage: construct_protocol::PlaybookRunStage::Delivered,
                 daemon_confirmed: true,
                 daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
                 total_block_count: 1,
             },
         );
-        app.program_view_memory.insert(
+        app.playbook_view_memory.insert(
             "s1".into(),
-            ProgramViewMemory {
+            PlaybookViewMemory {
                 cursor: 3,
                 preferred_col: None,
                 scroll_offset: 0,
-                cover_percent: PROGRAM_COVER_PERCENT_DEFAULT,
+                cover_percent: PLAYBOOK_COVER_PERCENT_DEFAULT,
             },
         );
-        app.program_collaborators.insert(
+        app.playbook_collaborators.insert(
             "client-1".into(),
-            construct_protocol::ProgramCursor {
+            construct_protocol::PlaybookCursor {
                 client_id: "client-1".into(),
                 session_id: "s1".into(),
                 label: "Web".into(),
@@ -17964,20 +17964,20 @@ mod tests {
         app.on_session_deleted("s1").await;
 
         assert!(
-            app.program_popup.is_none(),
+            app.playbook_popup.is_none(),
             "the active popup for the deleted session must not linger"
         );
-        assert!(!app.program_popups.contains_key("s1"));
-        assert!(!app.program_runs.contains_key("s1"));
-        assert!(!app.program_view_memory.contains_key("s1"));
+        assert!(!app.playbook_popups.contains_key("s1"));
+        assert!(!app.playbook_runs.contains_key("s1"));
+        assert!(!app.playbook_view_memory.contains_key("s1"));
         assert!(
-            !app.program_collaborators
+            !app.playbook_collaborators
                 .values()
                 .any(|c| c.session_id == "s1"),
             "collaborator cursors for the deleted session must be dropped"
         );
-        // s2's program state is untouched — only s1's is gone.
-        assert!(app.program_popups.contains_key("s2"));
+        // s2's playbook state is untouched — only s1's is gone.
+        assert!(app.playbook_popups.contains_key("s2"));
     }
 
     // Split-view focus cue: when focus moves to the session list, the pane
@@ -18054,22 +18054,22 @@ mod tests {
         );
     }
 
-    // The active Program popup previously rendered with a hardcoded
+    // The active Playbook popup previously rendered with a hardcoded
     // active=true, so its border never dimmed when focus moved to the
     // session list. The border must dim like any other split pane while the
     // session label in the title keeps full brightness (the popup belongs to
     // the last-focused pane).
     #[tokio::test]
-    async fn program_border_dims_when_list_takes_focus_but_label_stays_bright() {
+    async fn playbook_border_dims_when_list_takes_focus_but_label_stays_bright() {
         let (mut app, _dir, _server) = two_session_app().await;
         app.selection = Selection::Session("s1".into());
         app.active_window_id = 1;
         app.main_windows = MainWindowTree::single(1, Selection::Session("s1".into()));
-        let mut popup = program_popup_for_test("s1", "# Rule\n\nbody\n", 0);
+        let mut popup = playbook_popup_for_test("s1", "# Rule\n\nbody\n", 0);
         // Skip the roll-down animation so the frame renders at full height.
         popup.revealed_at = Instant::now() - Duration::from_secs(60);
         popup.hide_after = Instant::now() + Duration::from_secs(600);
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         app.focus = PaneFocus::List;
 
         let backend = ratatui::backend::TestBackend::new(160, 45);
@@ -18077,16 +18077,16 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let buffer = term.backend().buffer().clone();
 
-        let base = app.layout.program_base_area.expect("program base area");
-        let accent = app.theme.program_border;
+        let base = app.layout.playbook_base_area.expect("playbook base area");
+        let accent = app.theme.playbook_border;
         let corner = buffer
             .cell((base.x, base.y))
-            .expect("program corner cell")
+            .expect("playbook corner cell")
             .style();
-        assert_eq!(corner.fg, Some(accent), "program border keeps its hue");
+        assert_eq!(corner.fg, Some(accent), "playbook border keeps its hue");
         assert!(
             corner.add_modifier.contains(ratatui::style::Modifier::DIM),
-            "program border must dim when focus moves to the session list"
+            "playbook border must dim when focus moves to the session list"
         );
         let label_bright = (base.x..base.x + base.width).any(|x| {
             let style = buffer.cell((x, base.y)).expect("title row cell").style();
@@ -18096,21 +18096,21 @@ mod tests {
         });
         assert!(
             label_bright,
-            "program title label must keep focused brightness while the list has focus"
+            "playbook title label must keep focused brightness while the list has focus"
         );
 
         // Sanity: with the pane focused the border is bright again.
         app.focus = PaneFocus::View;
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let buffer = term.backend().buffer().clone();
-        let base = app.layout.program_base_area.expect("program base area");
+        let base = app.layout.playbook_base_area.expect("playbook base area");
         let corner = buffer
             .cell((base.x, base.y))
-            .expect("program corner cell")
+            .expect("playbook corner cell")
             .style();
         assert!(
             !corner.add_modifier.contains(ratatui::style::Modifier::DIM),
-            "focused program border renders at full brightness"
+            "focused playbook border renders at full brightness"
         );
     }
 
@@ -18193,25 +18193,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_scroll_offset_follows_cursor_down_and_back() {
+    async fn playbook_scroll_offset_follows_cursor_down_and_back() {
         let (mut app, _dir, _server) = empty_app().await;
         // Twenty short, non-wrapping lines rendered into a 5-row-tall viewport.
         let markdown = (0..20)
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        app.program_popup = Some(program_popup_for_test("s1", &markdown, 0));
-        app.layout.program_inner_area = Some(ratatui::layout::Rect::new(0, 0, 40, 5));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", &markdown, 0));
+        app.layout.playbook_inner_area = Some(ratatui::layout::Rect::new(0, 0, 40, 5));
 
         // (3) Short content / cursor near the top keeps the offset pinned to 0.
-        app.follow_program_scroll();
-        assert_eq!(app.program_popup.as_ref().unwrap().scroll_offset, 0);
+        app.follow_playbook_scroll();
+        assert_eq!(app.playbook_popup.as_ref().unwrap().scroll_offset, 0);
 
         // (1) Cursor jumps to the final line: the window scrolls so the cursor
         // (visual row 19) stays inside the 5-row viewport.
-        app.program_popup.as_mut().unwrap().cursor = markdown.chars().count();
-        app.follow_program_scroll();
-        let offset = app.program_popup.as_ref().unwrap().scroll_offset;
+        app.playbook_popup.as_mut().unwrap().cursor = markdown.chars().count();
+        app.follow_playbook_scroll();
+        let offset = app.playbook_popup.as_ref().unwrap().scroll_offset;
         assert!(
             offset > 0,
             "offset should advance below the fold, got {offset}"
@@ -18223,46 +18223,46 @@ mod tests {
         );
 
         // (2) Cursor returns to the top: the window snaps back to offset 0.
-        app.program_popup.as_mut().unwrap().cursor = 0;
-        app.follow_program_scroll();
-        assert_eq!(app.program_popup.as_ref().unwrap().scroll_offset, 0);
+        app.playbook_popup.as_mut().unwrap().cursor = 0;
+        app.follow_playbook_scroll();
+        assert_eq!(app.playbook_popup.as_ref().unwrap().scroll_offset, 0);
     }
 
     #[tokio::test]
-    async fn program_hide_then_show_restores_cursor_and_scroll() {
+    async fn playbook_hide_then_show_restores_cursor_and_scroll() {
         let (mut app, _dir, server) = empty_app().await;
         let markdown = (0..20)
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Active program with the user parked partway down: a non-zero caret,
+        // Active playbook with the user parked partway down: a non-zero caret,
         // a remembered preferred column, and a freely-scrolled viewport.
-        let mut popup = program_popup_for_test("s1", &markdown, 42);
+        let mut popup = playbook_popup_for_test("s1", &markdown, 42);
         popup.scroll_offset = 7;
         popup.preferred_col = Some(3);
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
 
         // Hide: capture the position, then drop the popup the way the close
         // animation eventually does.
-        app.remember_program_view_state();
-        app.program_popup = None;
+        app.remember_playbook_view_state();
+        app.playbook_popup = None;
         assert!(
-            app.program_view_memory.contains_key("s1"),
-            "hiding must remember the program's caret + scroll"
+            app.playbook_view_memory.contains_key("s1"),
+            "hiding must remember the playbook's caret + scroll"
         );
 
         // Show: a fresh popup is rebuilt from the daemon document (caret 0,
         // scroll 0); restore must put the user back where they were.
-        let mut reopened = program_popup_for_test("s1", &markdown, 0);
+        let mut reopened = playbook_popup_for_test("s1", &markdown, 0);
         assert_eq!(reopened.cursor, 0);
         assert_eq!(reopened.scroll_offset, 0);
-        app.restore_program_view_state(&mut reopened);
+        app.restore_playbook_view_state(&mut reopened);
         assert_eq!(reopened.cursor, 42, "caret survives hide→show");
         assert_eq!(reopened.scroll_offset, 7, "scroll survives hide→show");
         assert_eq!(reopened.preferred_col, Some(3), "preferred column survives");
         assert!(
-            !app.program_view_memory.contains_key("s1"),
+            !app.playbook_view_memory.contains_key("s1"),
             "restoring consumes the remembered position"
         );
 
@@ -18270,27 +18270,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_show_clamps_restored_cursor_to_shrunk_buffer() {
+    async fn playbook_show_clamps_restored_cursor_to_shrunk_buffer() {
         let (mut app, _dir, server) = empty_app().await;
 
         // Hidden with the caret deep in a long document.
-        let mut popup = program_popup_for_test("s1", "a very long original line", 24);
+        let mut popup = playbook_popup_for_test("s1", "a very long original line", 24);
         popup.scroll_offset = 4;
-        app.program_popup = Some(popup);
-        app.remember_program_view_state();
-        app.program_popup = None;
+        app.playbook_popup = Some(popup);
+        app.remember_playbook_view_state();
+        app.playbook_popup = None;
 
         // The document shrank on the daemon while hidden; the restored caret is
         // clamped to the new buffer rather than pointing past its end.
-        let mut reopened = program_popup_for_test("s1", "short", 0);
-        app.restore_program_view_state(&mut reopened);
+        let mut reopened = playbook_popup_for_test("s1", "short", 0);
+        app.restore_playbook_view_state(&mut reopened);
         assert_eq!(reopened.cursor, "short".chars().count());
 
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_clip_click_resolves_and_focuses_session() {
+    async fn playbook_clip_click_resolves_and_focuses_session() {
         let (mut app, _dir, _server) = empty_app().await;
         let s1 = summary_with_kind(construct_protocol::SessionKind::User);
         let mut s2 = summary_with_kind(construct_protocol::SessionKind::User);
@@ -18298,8 +18298,8 @@ mod tests {
         app.sessions = vec![s1, s2];
         app.selection = Selection::Session("s1".into());
 
-        // Pretend the last program render captured a clip for s2 at row 3, cols 4..16.
-        app.layout.program_clip_hits = vec![ProgramClipHit {
+        // Pretend the last playbook render captured a clip for s2 at row 3, cols 4..16.
+        app.layout.playbook_clip_hits = vec![PlaybookClipHit {
             col_start: 4,
             col_end: 16,
             row: 3,
@@ -18307,20 +18307,20 @@ mod tests {
         }];
 
         // A cell inside the chip resolves to its session; outside it does not.
-        assert_eq!(app.program_clip_session_at(10, 3), Some("s2".to_string()));
-        assert_eq!(app.program_clip_session_at(2, 3), None);
-        assert_eq!(app.program_clip_session_at(10, 4), None);
+        assert_eq!(app.playbook_clip_session_at(10, 3), Some("s2".to_string()));
+        assert_eq!(app.playbook_clip_session_at(2, 3), None);
+        assert_eq!(app.playbook_clip_session_at(10, 4), None);
 
         // Resolving + focusing (what the click handler does) selects that session.
-        let target = app.program_clip_session_at(10, 3).expect("clip resolves");
+        let target = app.playbook_clip_session_at(10, 3).expect("clip resolves");
         app.focus = PaneFocus::List;
         app.select_session(target);
         assert_eq!(app.selection.session_id(), Some("s2"));
     }
 
     #[test]
-    fn program_template_hit_contains_spans_box_rows() {
-        let hit = ProgramTemplateHit {
+    fn playbook_template_hit_contains_spans_box_rows() {
+        let hit = PlaybookTemplateHit {
             col_start: 4,
             col_end: 18,
             row_start: 3,
@@ -18338,40 +18338,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_template_button_fills_empty_buffer() {
+    async fn playbook_template_button_fills_empty_buffer() {
         let (mut app, _dir, _server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
 
-        app.apply_program_template("tasks".into(), "# Todo\n\n# Done\n".into());
+        app.apply_playbook_template("tasks".into(), "# Todo\n\n# Done\n".into());
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "# Todo\n\n# Done\n");
         // Cursor lands at the end of the inserted template.
         assert_eq!(popup.cursor, "# Todo\n\n# Done\n".chars().count());
         // The template id is stamped onto the document for persistence.
-        assert_eq!(popup.program.template_id.as_deref(), Some("tasks"));
+        assert_eq!(popup.playbook.template_id.as_deref(), Some("tasks"));
         // The prior (empty) state is recorded so the fill can be undone.
         assert_eq!(popup.undo_stack.len(), 1);
 
-        app.undo_program_edit();
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "");
+        app.undo_playbook_edit();
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "");
     }
 
     /// Clicking a clip that points at a session with no navigable list row —
     /// the canonical case being a subagent, which renders only as a child of
     /// its parent (and never at all when the parent is the hidden
     /// orchestrator) — must switch to it *persistently*. Two prior bugs made
-    /// it flicker back to the program: (1) the click never synced the active
+    /// it flicker back to the playbook: (1) the click never synced the active
     /// window pane, so the main view kept rendering the old session, and
     /// (2) the next `refresh_sessions → ensure_selection_valid` reverted the
     /// selection because the subagent isn't in `list_items()`, which also
-    /// popped the stashed program back open.
+    /// popped the stashed playbook back open.
     #[tokio::test]
-    async fn program_clip_click_to_subagent_persists_across_refresh() {
+    async fn playbook_clip_click_to_subagent_persists_across_refresh() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         let s1 = summary_with_kind(construct_protocol::SessionKind::User);
-        // The orchestrator (the fleet dispatcher whose program holds the clips)
+        // The orchestrator (the fleet dispatcher whose playbook holds the clips)
         // is hidden from the list, so its subagent children never get a row.
         let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
         orch.id = "orch".into();
@@ -18380,11 +18380,11 @@ mod tests {
         sub.parent_session_id = Some("orch".into());
         app.sessions = vec![s1, orch, sub];
         app.orchestrator_id = Some("orch".into());
-        // The program-owner session is selected and its program is open; the
+        // The playbook-owner session is selected and its playbook is open; the
         // active window pane points at it (test_app's initial leaf is s1).
         app.selection = Selection::Session("s1".into());
         app.sync_active_window_selection();
-        app.program_popup = Some(program_popup_for_test("s1", "see @{session:sub1}", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "see @{session:sub1}", 0));
         // The subagent isn't reachable through the list at all.
         assert!(
             !app.list_items()
@@ -18393,10 +18393,10 @@ mod tests {
             "subagent must not have a navigable list row"
         );
 
-        // Geometry the last program render would have captured: a modal area
+        // Geometry the last playbook render would have captured: a modal area
         // and a clip hit for the subagent.
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![ProgramClipHit {
+        app.layout.playbook_clip_hits = vec![PlaybookClipHit {
             col_start: 4,
             col_end: 16,
             row: 3,
@@ -18413,11 +18413,11 @@ mod tests {
             row: 3,
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
-        app.handle_program_mouse(&click).await;
-        let consumed = app.handle_program_mouse(&click).await;
+        app.handle_playbook_mouse(&click).await;
+        let consumed = app.handle_playbook_mouse(&click).await;
         assert!(
             consumed,
-            "clip click is handled by the program mouse router"
+            "clip click is handled by the playbook mouse router"
         );
         assert_eq!(app.selection.session_id(), Some("sub1"));
         // The active window pane drives the main view; it must point at the
@@ -18439,8 +18439,8 @@ mod tests {
         );
     }
 
-    fn program_clip_click_fixture(session_id: &str) -> ProgramClipHit {
-        ProgramClipHit {
+    fn playbook_clip_click_fixture(session_id: &str) -> PlaybookClipHit {
+        PlaybookClipHit {
             col_start: 4,
             col_end: 16,
             row: 3,
@@ -18449,19 +18449,19 @@ mod tests {
     }
 
     /// A single click on a clip pins its inline terminal instead of
-    /// navigating away — the user stays on the Program doc.
+    /// navigating away — the user stays on the Playbook doc.
     #[tokio::test]
-    async fn program_clip_single_click_pins_without_navigating() {
+    async fn playbook_clip_single_click_pins_without_navigating() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "see @{session:worker1}", 0));
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.playbook_clip_hits = vec![playbook_clip_click_fixture("worker1")];
 
         let consumed = app
-            .handle_program_mouse(&MouseEvent {
+            .handle_playbook_mouse(&MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 10,
                 row: 3,
@@ -18471,14 +18471,14 @@ mod tests {
 
         assert!(consumed, "clip click is handled");
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            app.playbook_popup.as_ref().unwrap().pinned_clip.as_deref(),
             Some("worker1"),
             "single click pins the clip"
         );
         assert_eq!(
             app.selection.session_id(),
             Some("s1"),
-            "single click must not navigate away from the Program doc"
+            "single click must not navigate away from the Playbook doc"
         );
     }
 
@@ -18486,14 +18486,14 @@ mod tests {
     /// window, is an independent click — it toggles the pin off rather than
     /// counting as a double-click navigate.
     #[tokio::test]
-    async fn program_clip_slow_second_click_unpins_instead_of_navigating() {
+    async fn playbook_clip_slow_second_click_unpins_instead_of_navigating() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "see @{session:worker1}", 0));
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.playbook_clip_hits = vec![playbook_clip_click_fixture("worker1")];
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 10,
@@ -18501,24 +18501,24 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
 
-        app.handle_program_mouse(&click).await;
+        app.handle_playbook_mouse(&click).await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            app.playbook_popup.as_ref().unwrap().pinned_clip.as_deref(),
             Some("worker1")
         );
         // Simulate enough elapsed time that the next click falls outside the
         // double-click window, without an actual sleep.
-        app.last_program_clip_click = app.last_program_clip_click.take().map(|(id, _)| {
+        app.last_playbook_clip_click = app.last_playbook_clip_click.take().map(|(id, _)| {
             (
                 id,
-                Instant::now() - Duration::from_millis(PROGRAM_CLIP_DOUBLE_CLICK_MS + 50),
+                Instant::now() - Duration::from_millis(PLAYBOOK_CLIP_DOUBLE_CLICK_MS + 50),
             )
         });
 
-        app.handle_program_mouse(&click).await;
+        app.handle_playbook_mouse(&click).await;
 
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_clip,
+            app.playbook_popup.as_ref().unwrap().pinned_clip,
             None,
             "a slow second click unpins rather than navigating"
         );
@@ -18534,7 +18534,7 @@ mod tests {
     /// height in the painter (which proves the wrap math agrees — the
     /// Paragraph and the row counters share the padded text).
     #[tokio::test]
-    async fn program_expanded_attachment_shifts_following_lines() {
+    async fn playbook_expanded_attachment_shifts_following_lines() {
         let (mut app, _dir, _server) = empty_app().await;
         let tmp = tempfile::tempdir().expect("tempdir");
         let img_path = tmp.path().join("shot.png");
@@ -18552,9 +18552,9 @@ mod tests {
         );
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test("s1", &md, 0);
+        let mut popup = playbook_popup_for_test("s1", &md, 0);
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
 
         fn marker_rows(app: &mut App) -> (u16, u16) {
             let backend = ratatui::backend::TestBackend::new(100, 40);
@@ -18580,13 +18580,13 @@ mod tests {
         let (a, o) = marker_rows(&mut app);
         assert_eq!(o - a, 2, "collapsed chip line occupies one row");
 
-        app.program_popup
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .expanded_attachments
             .insert(
                 (
-                    crate::ui::program_line_key(&format!(
+                    crate::ui::playbook_line_key(&format!(
                         "lead text ![shot]({}) tail",
                         img_path.display()
                     )),
@@ -18604,18 +18604,18 @@ mod tests {
     /// (GitHub semantic, spec 0099): the chip disappears — no chip hitbox —
     /// and the line occupies exactly the image rows.
     #[tokio::test]
-    async fn program_expanded_standalone_image_replaces_its_line() {
+    async fn playbook_expanded_standalone_image_replaces_its_line() {
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
         let mut popup =
-            program_popup_for_test("s1", "alphaword\n![shot](/tmp/shot.png)\nomegaword", 0);
+            playbook_popup_for_test("s1", "alphaword\n![shot](/tmp/shot.png)\nomegaword", 0);
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
         popup.expanded_attachments.insert(
-            (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0),
+            (crate::ui::playbook_line_key("![shot](/tmp/shot.png)"), 0),
             ("/tmp/shot.png".to_string(), 5),
         );
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
 
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
@@ -18636,7 +18636,7 @@ mod tests {
         }
         assert!(!chip, "the image replaces the chip — no chip text painted");
         assert!(
-            app.layout.program_attachment_hits.is_empty(),
+            app.layout.playbook_attachment_hits.is_empty(),
             "no chip hitbox on a replaced line"
         );
         assert_eq!(
@@ -18650,14 +18650,14 @@ mod tests {
     /// (spec 0099) — end-to-end through render-registered hitboxes and the
     /// real mouse handler.
     #[tokio::test]
-    async fn program_attachment_chip_click_toggles_expansion() {
+    async fn playbook_attachment_chip_click_toggles_expansion() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test("s1", "note ![shot](/tmp/shot.png) end", 0);
+        let mut popup = playbook_popup_for_test("s1", "note ![shot](/tmp/shot.png) end", 0);
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
 
         fn render_once(app: &mut App) {
             let backend = ratatui::backend::TestBackend::new(100, 40);
@@ -18667,7 +18667,7 @@ mod tests {
         render_once(&mut app);
         let hit = app
             .layout
-            .program_attachment_hits
+            .playbook_attachment_hits
             .first()
             .cloned()
             .expect("chip hitbox registered");
@@ -18677,19 +18677,19 @@ mod tests {
             row: hit.row,
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
-        app.handle_program_mouse(&click).await;
+        app.handle_playbook_mouse(&click).await;
         assert_eq!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .unwrap()
                 .expanded_attachments
                 .get(&(
-                    crate::ui::program_line_key("note ![shot](/tmp/shot.png) end"),
+                    crate::ui::playbook_line_key("note ![shot](/tmp/shot.png) end"),
                     0
                 )),
             Some(&(
                 "/tmp/shot.png".to_string(),
-                crate::ui::PROGRAM_ATTACHMENT_DEFAULT_ROWS
+                crate::ui::PLAYBOOK_ATTACHMENT_DEFAULT_ROWS
             )),
             "first click expands at the default height"
         );
@@ -18718,16 +18718,16 @@ mod tests {
              affordance"
         );
         assert!(
-            app.layout.program_attachment_hits.is_empty(),
+            app.layout.playbook_attachment_hits.is_empty(),
             "no chip hitbox while expanded"
         );
         let (rect, _, _) = app
             .layout
-            .program_attachment_image_rects
+            .playbook_attachment_image_rects
             .first()
             .cloned()
             .expect("image rect registered");
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: rect.x,
             row: rect.y,
@@ -18735,7 +18735,7 @@ mod tests {
         })
         .await;
         assert!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .unwrap()
                 .expanded_attachments
@@ -18747,18 +18747,18 @@ mod tests {
     /// Two byte-identical image-link lines expand independently (spec 0099):
     /// toggling the first leaves the second collapsed.
     #[tokio::test]
-    async fn program_identical_image_lines_expand_independently() {
+    async fn playbook_identical_image_lines_expand_independently() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test(
+        let mut popup = playbook_popup_for_test(
             "s1",
             "![shot](/tmp/shot.png)\nmiddle\n![shot](/tmp/shot.png)",
             0,
         );
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
 
         fn render_once(app: &mut App) {
             let backend = ratatui::backend::TestBackend::new(100, 40);
@@ -18767,14 +18767,14 @@ mod tests {
         }
         render_once(&mut app);
         assert_eq!(
-            app.layout.program_attachment_hits.len(),
+            app.layout.playbook_attachment_hits.len(),
             2,
             "both instances start as chips"
         );
-        let first = app.layout.program_attachment_hits[0].clone();
-        let second = app.layout.program_attachment_hits[1].clone();
+        let first = app.layout.playbook_attachment_hits[0].clone();
+        let second = app.layout.playbook_attachment_hits[1].clone();
         assert_ne!(first.key, second.key, "instances carry distinct keys");
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: first.col_start,
             row: first.row,
@@ -18784,13 +18784,13 @@ mod tests {
 
         render_once(&mut app);
         assert_eq!(
-            app.layout.program_attachment_hits.len(),
+            app.layout.playbook_attachment_hits.len(),
             1,
             "only the second instance still shows a chip"
         );
-        assert_eq!(app.layout.program_attachment_hits[0].key, second.key);
+        assert_eq!(app.layout.playbook_attachment_hits[0].key, second.key);
         assert_eq!(
-            app.layout.program_attachment_image_rects.len(),
+            app.layout.playbook_attachment_image_rects.len(),
             1,
             "exactly one image block renders"
         );
@@ -18800,32 +18800,32 @@ mod tests {
     /// from one popup, seed a fresh popup for the same session, state
     /// restored (spec 0099).
     #[tokio::test]
-    async fn program_expanded_state_roundtrips_through_store() {
+    async fn playbook_expanded_state_roundtrips_through_store() {
         let (mut app, _dir, _server) = empty_app().await;
-        let key = (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0);
-        let mut popup = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
+        let key = (crate::ui::playbook_line_key("![shot](/tmp/shot.png)"), 0);
+        let mut popup = playbook_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
         popup
             .expanded_attachments
             .insert(key, ("/tmp/shot.png".to_string(), 9));
-        app.program_popup = Some(popup);
-        app.persist_program_expanded();
+        app.playbook_popup = Some(popup);
+        app.persist_playbook_expanded();
 
-        let mut fresh = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
-        app.seed_program_expanded(&mut fresh);
+        let mut fresh = playbook_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
+        app.seed_playbook_expanded(&mut fresh);
         assert_eq!(
             fresh.expanded_attachments.get(&key),
             Some(&("/tmp/shot.png".to_string(), 9))
         );
 
         // Collapsing everything clears the session's entry.
-        app.program_popup
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .expanded_attachments
             .clear();
-        app.persist_program_expanded();
-        let mut fresh = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
-        app.seed_program_expanded(&mut fresh);
+        app.persist_playbook_expanded();
+        let mut fresh = playbook_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
+        app.seed_playbook_expanded(&mut fresh);
         assert!(fresh.expanded_attachments.is_empty());
     }
 
@@ -18833,23 +18833,23 @@ mod tests {
     /// block's last row), not before it (spec 0099) — completing `)` leaves
     /// the visible caret below the image.
     #[tokio::test]
-    async fn program_caret_after_expanded_image_paints_at_block_end() {
+    async fn playbook_caret_after_expanded_image_paints_at_block_end() {
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
         let line = "![shot](/tmp/shot.png)";
         let md = format!("{line}\nomegaword");
-        let mut popup = program_popup_for_test("s1", &md, line.chars().count());
+        let mut popup = playbook_popup_for_test("s1", &md, line.chars().count());
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
         popup.expanded_attachments.insert(
-            (crate::ui::program_line_key(line), 0),
+            (crate::ui::playbook_line_key(line), 0),
             ("/tmp/shot.png".to_string(), 5),
         );
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
 
         let width = 90usize;
         let (row, _col) =
-            crate::ui::program_cursor_visual_pos(Some(&app), &md, line.chars().count(), width);
+            crate::ui::playbook_cursor_visual_pos(Some(&app), &md, line.chars().count(), width);
         assert_eq!(
             row, 4,
             "caret at the line end sits on the block's last row (rows 0..=4)"
@@ -18860,17 +18860,17 @@ mod tests {
         // inside the leading text stay on the text row.
         let line = "test ![shot](/tmp/shot.png)";
         let md = format!("{line}\nomegaword");
-        let mut popup = program_popup_for_test("s1", &md, line.chars().count());
+        let mut popup = playbook_popup_for_test("s1", &md, line.chars().count());
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
         popup.expanded_attachments.insert(
-            (crate::ui::program_line_key(line), 0),
+            (crate::ui::playbook_line_key(line), 0),
             ("/tmp/shot.png".to_string(), 5),
         );
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         let (row, _) =
-            crate::ui::program_cursor_visual_pos(Some(&app), &md, line.chars().count(), width);
+            crate::ui::playbook_cursor_visual_pos(Some(&app), &md, line.chars().count(), width);
         assert_eq!(row, 5, "line-end caret sits on the last image row");
-        let (row, _) = crate::ui::program_cursor_visual_pos(Some(&app), &md, 2, width);
+        let (row, _) = crate::ui::playbook_cursor_visual_pos(Some(&app), &md, 2, width);
         assert_eq!(
             row, 0,
             "caret inside the leading text stays on the text row"
@@ -18881,23 +18881,23 @@ mod tests {
     /// the line's content key, and reconciliation re-attaches the state to
     /// the moved instance (spec 0099).
     #[tokio::test]
-    async fn program_typing_after_image_keeps_expansion() {
+    async fn playbook_typing_after_image_keeps_expansion() {
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
+        let mut popup = playbook_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
         popup.expanded_attachments.insert(
-            (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0),
+            (crate::ui::playbook_line_key("![shot](/tmp/shot.png)"), 0),
             ("/tmp/shot.png".to_string(), 5),
         );
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
 
         // Simulate typing after the link: the line's content (and key) change.
-        app.program_popup.as_mut().unwrap().buffer = "![shot](/tmp/shot.png) x".to_string();
-        app.reconcile_program_expanded();
-        let popup = app.program_popup.as_ref().unwrap();
-        let new_key = (crate::ui::program_line_key("![shot](/tmp/shot.png) x"), 0);
+        app.playbook_popup.as_mut().unwrap().buffer = "![shot](/tmp/shot.png) x".to_string();
+        app.reconcile_playbook_expanded();
+        let popup = app.playbook_popup.as_ref().unwrap();
+        let new_key = (crate::ui::playbook_line_key("![shot](/tmp/shot.png) x"), 0);
         assert_eq!(
             popup.expanded_attachments.get(&new_key),
             Some(&("/tmp/shot.png".to_string(), 5)),
@@ -18907,7 +18907,7 @@ mod tests {
         // Migration writes through to the persisted store, so a restart
         // right after the edit seeds the migrated key.
         assert_eq!(
-            app.program_expanded_store
+            app.playbook_expanded_store
                 .get("s1")
                 .and_then(|m| m.get(&format!("{}:{}", new_key.0, new_key.1))),
             Some(&("/tmp/shot.png".to_string(), 5)),
@@ -18915,10 +18915,10 @@ mod tests {
         );
 
         // Breaking the link keeps the entry parked for restore-on-retype.
-        app.program_popup.as_mut().unwrap().buffer = "![shot](/tmp/shot.png x".to_string();
-        app.reconcile_program_expanded();
+        app.playbook_popup.as_mut().unwrap().buffer = "![shot](/tmp/shot.png x".to_string();
+        app.reconcile_playbook_expanded();
         assert_eq!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .unwrap()
                 .expanded_attachments
@@ -18926,10 +18926,10 @@ mod tests {
             1,
             "orphaned entry is kept while the link is broken"
         );
-        app.program_popup.as_mut().unwrap().buffer = "![shot](/tmp/shot.png) x".to_string();
-        app.reconcile_program_expanded();
+        app.playbook_popup.as_mut().unwrap().buffer = "![shot](/tmp/shot.png) x".to_string();
+        app.reconcile_playbook_expanded();
         assert_eq!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .unwrap()
                 .expanded_attachments
@@ -18940,21 +18940,21 @@ mod tests {
     }
 
     /// Dragging an expanded image's bottom edge resizes it — the whole
-    /// gesture (Down on the edge, Drag, Up) flows through the program mouse
+    /// gesture (Down on the edge, Drag, Up) flows through the playbook mouse
     /// handler, which owns drags over the popup body (spec 0099).
     #[tokio::test]
-    async fn program_attachment_bottom_edge_drag_resizes() {
+    async fn playbook_attachment_bottom_edge_drag_resizes() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let key = (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0);
-        let mut popup = program_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
+        let key = (crate::ui::playbook_line_key("![shot](/tmp/shot.png)"), 0);
+        let mut popup = playbook_popup_for_test("s1", "![shot](/tmp/shot.png)", 0);
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
         popup
             .expanded_attachments
             .insert(key, ("/tmp/shot.png".to_string(), 5));
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
 
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
@@ -18963,7 +18963,7 @@ mod tests {
             .expect("draw");
         let (rect, _, _) = app
             .layout
-            .program_attachment_image_rects
+            .playbook_attachment_image_rects
             .first()
             .cloned()
             .expect("image rect registered");
@@ -18980,15 +18980,15 @@ mod tests {
             row,
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
-        app.handle_program_mouse(&ev(MouseEventKind::Down(MouseButton::Left), bottom))
+        app.handle_playbook_mouse(&ev(MouseEventKind::Down(MouseButton::Left), bottom))
             .await;
-        assert!(app.resizing_program_attachment.is_some(), "drag armed");
+        assert!(app.resizing_playbook_attachment.is_some(), "drag armed");
         let consumed = app
-            .handle_program_mouse(&ev(MouseEventKind::Drag(MouseButton::Left), rect.y + 9))
+            .handle_playbook_mouse(&ev(MouseEventKind::Drag(MouseButton::Left), rect.y + 9))
             .await;
-        assert!(consumed, "program handler owns the drag");
+        assert!(consumed, "playbook handler owns the drag");
         assert_eq!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .unwrap()
                 .expanded_attachments
@@ -18997,28 +18997,28 @@ mod tests {
             Some(10),
             "drag to row top+9 sets 10 rows"
         );
-        app.handle_program_mouse(&ev(MouseEventKind::Up(MouseButton::Left), rect.y + 9))
+        app.handle_playbook_mouse(&ev(MouseEventKind::Up(MouseButton::Left), rect.y + 9))
             .await;
-        assert!(app.resizing_program_attachment.is_none(), "drag settles");
+        assert!(app.resizing_playbook_attachment.is_none(), "drag settles");
     }
 
     /// Vertical caret motion hops over an expanded image's rows instead of
     /// getting stuck remapping into them (spec 0099).
     #[tokio::test]
-    async fn program_cursor_vertical_skips_expanded_image_rows() {
+    async fn playbook_cursor_vertical_skips_expanded_image_rows() {
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
         let md = "alphaword\n![shot](/tmp/shot.png)\nomegaword";
-        let mut popup = program_popup_for_test("s1", md, 0);
+        let mut popup = playbook_popup_for_test("s1", md, 0);
         popup.revealed_at = Instant::now() - Duration::from_secs(10);
         popup.expanded_attachments.insert(
-            (crate::ui::program_line_key("![shot](/tmp/shot.png)"), 0),
+            (crate::ui::playbook_line_key("![shot](/tmp/shot.png)"), 0),
             ("/tmp/shot.png".to_string(), 5),
         );
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
 
-        // Render once so `program_inner_area` (which vertical motion needs)
+        // Render once so `playbook_inner_area` (which vertical motion needs)
         // is captured.
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
@@ -19027,16 +19027,16 @@ mod tests {
             .expect("draw");
 
         let omega_start = md.find("omegaword").unwrap();
-        assert_eq!(app.program_popup.as_ref().unwrap().cursor, 0);
-        app.move_program_cursor_vertical(1);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 0);
+        app.move_playbook_cursor_vertical(1);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             omega_start,
             "C-n from the line above hops over the image block"
         );
-        app.move_program_cursor_vertical(-1);
+        app.move_playbook_cursor_vertical(-1);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             0,
             "C-p from below hops back over the image block"
         );
@@ -19045,20 +19045,20 @@ mod tests {
     /// Clicking a different clip while one is pinned switches the pin to it
     /// rather than requiring an explicit unpin first.
     #[tokio::test]
-    async fn program_clip_click_different_clip_switches_pin() {
+    async fn playbook_clip_click_different_clip_switches_pin() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s1",
             "see @{session:worker1} and @{session:worker2}",
             0,
         ));
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![
-            program_clip_click_fixture("worker1"),
-            ProgramClipHit {
+        app.layout.playbook_clip_hits = vec![
+            playbook_clip_click_fixture("worker1"),
+            PlaybookClipHit {
                 col_start: 20,
                 col_end: 32,
                 row: 3,
@@ -19066,7 +19066,7 @@ mod tests {
             },
         ];
 
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 10,
             row: 3,
@@ -19074,11 +19074,11 @@ mod tests {
         })
         .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            app.playbook_popup.as_ref().unwrap().pinned_clip.as_deref(),
             Some("worker1")
         );
 
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 25,
             row: 3,
@@ -19086,7 +19086,7 @@ mod tests {
         })
         .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            app.playbook_popup.as_ref().unwrap().pinned_clip.as_deref(),
             Some("worker2"),
             "clicking a different clip switches the pin rather than requiring an unpin first"
         );
@@ -19094,22 +19094,22 @@ mod tests {
 
     /// A left click that lands neither on the pinned card nor on a session
     /// clip dismisses the pin (spec 0090), then proceeds with its normal
-    /// effect (here: placing the caret in the Program body).
+    /// effect (here: placing the caret in the Playbook body).
     #[tokio::test]
-    async fn program_click_outside_pinned_card_unpins() {
+    async fn playbook_click_outside_pinned_card_unpins() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
-        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+        app.layout.playbook_clip_hits = vec![playbook_clip_click_fixture("worker1")];
+        app.layout.playbook_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
 
         let consumed = app
-            .handle_program_mouse(&MouseEvent {
+            .handle_playbook_mouse(&MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 5,
                 row: 1,
@@ -19117,9 +19117,9 @@ mod tests {
             })
             .await;
 
-        assert!(consumed, "the click still lands in the Program body");
+        assert!(consumed, "the click still lands in the Playbook body");
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_clip,
+            app.playbook_popup.as_ref().unwrap().pinned_clip,
             None,
             "a click outside the card and off every clip dismisses the pin"
         );
@@ -19129,22 +19129,22 @@ mod tests {
     /// into the pinned session (keyboard-only scope, spec 0090) nor
     /// dismisses the pin — and reclaims keyboard focus for the card.
     #[tokio::test]
-    async fn program_click_on_pinned_card_is_consumed_and_keeps_pin() {
+    async fn playbook_click_on_pinned_card_is_consumed_and_keeps_pin() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
         app.focus = PaneFocus::List;
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
-        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
-        let buffer_before = app.program_popup.as_ref().unwrap().buffer.clone();
+        app.layout.playbook_clip_hits = vec![playbook_clip_click_fixture("worker1")];
+        app.layout.playbook_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+        let buffer_before = app.playbook_popup.as_ref().unwrap().buffer.clone();
 
         let consumed = app
-            .handle_program_mouse(&MouseEvent {
+            .handle_playbook_mouse(&MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 20,
                 row: 6,
@@ -19154,7 +19154,7 @@ mod tests {
 
         assert!(consumed, "card clicks are consumed by the card");
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            app.playbook_popup.as_ref().unwrap().pinned_clip.as_deref(),
             Some("worker1"),
             "clicking the card keeps the pin"
         );
@@ -19164,28 +19164,28 @@ mod tests {
             "clicking the card reclaims keyboard focus so typing forwards to the pin"
         );
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().buffer,
             buffer_before,
-            "the consumed click must not edit or place a caret in the Program body"
+            "the consumed click must not edit or place a caret in the Playbook body"
         );
     }
 
-    /// A click entirely outside the Program modal (e.g. on the session list)
+    /// A click entirely outside the Playbook modal (e.g. on the session list)
     /// also dismisses the pin, then falls through to whatever pane it hit.
     #[tokio::test]
-    async fn program_click_outside_modal_unpins_and_falls_through() {
+    async fn playbook_click_outside_modal_unpins_and_falls_through() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
+        app.layout.playbook_clip_hits = vec![playbook_clip_click_fixture("worker1")];
 
         let consumed = app
-            .handle_program_mouse(&MouseEvent {
+            .handle_playbook_mouse(&MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 50,
                 row: 15,
@@ -19198,7 +19198,7 @@ mod tests {
             "an outside-the-modal click still falls through to other panes"
         );
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_clip,
+            app.playbook_popup.as_ref().unwrap().pinned_clip,
             None,
             "the pin is dismissed on the way through"
         );
@@ -19210,18 +19210,18 @@ mod tests {
     /// survives, and nothing forwards to the session. Unpinning resets the
     /// pan so it never bleeds into the next pin.
     #[tokio::test]
-    async fn program_wheel_over_pinned_card_pans_crop() {
+    async fn playbook_wheel_over_pinned_card_pans_crop() {
         use crate::pty_render::ItemHistory;
         use crossterm::event::{MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
-        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+        app.layout.playbook_clip_hits = vec![playbook_clip_click_fixture("worker1")];
+        app.layout.playbook_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
         let mut history = ItemHistory::new();
         history.feed_pty(b"content");
         let _ = history.replay(140, 40, 0);
@@ -19234,15 +19234,15 @@ mod tests {
         };
 
         let consumed = app
-            .handle_program_mouse(&wheel(
+            .handle_playbook_mouse(&wheel(
                 MouseEventKind::ScrollUp,
                 crossterm::event::KeyModifiers::empty(),
             ))
             .await;
         assert!(consumed, "wheel over the card is consumed by the card");
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
-            popup.pinned_scroll_rows, PROGRAM_WHEEL_SCROLL_ROWS as u16,
+            popup.pinned_scroll_rows, PLAYBOOK_WHEEL_SCROLL_ROWS as u16,
             "wheel-up pans one step back from the tail"
         );
         assert_eq!(
@@ -19251,18 +19251,18 @@ mod tests {
             "pin survives"
         );
 
-        app.handle_program_mouse(&wheel(
+        app.handle_playbook_mouse(&wheel(
             MouseEventKind::ScrollDown,
             crossterm::event::KeyModifiers::empty(),
         ))
         .await;
-        app.handle_program_mouse(&wheel(
+        app.handle_playbook_mouse(&wheel(
             MouseEventKind::ScrollDown,
             crossterm::event::KeyModifiers::empty(),
         ))
         .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_scroll_rows,
+            app.playbook_popup.as_ref().unwrap().pinned_scroll_rows,
             0,
             "wheel-down returns toward the live tail and saturates at it"
         );
@@ -19271,40 +19271,40 @@ mod tests {
         // terminals deliver horizontal deltas gesture-encoded, without the
         // scroll-intent normalization they apply vertically (see
         // `pan_pinned_clip_card`).
-        app.handle_program_mouse(&wheel(
+        app.handle_playbook_mouse(&wheel(
             MouseEventKind::ScrollUp,
             crossterm::event::KeyModifiers::SHIFT,
         ))
         .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_scroll_cols,
-            PROGRAM_PINNED_PAN_COLS_STEP as u16,
+            app.playbook_popup.as_ref().unwrap().pinned_scroll_cols,
+            PLAYBOOK_PINNED_PAN_COLS_STEP as u16,
             "Shift+wheel pans horizontally, one h-step per tick"
         );
-        app.handle_program_mouse(&wheel(
+        app.handle_playbook_mouse(&wheel(
             MouseEventKind::ScrollLeft,
             crossterm::event::KeyModifiers::empty(),
         ))
         .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_scroll_cols,
-            2 * PROGRAM_PINNED_PAN_COLS_STEP as u16,
+            app.playbook_popup.as_ref().unwrap().pinned_scroll_cols,
+            2 * PLAYBOOK_PINNED_PAN_COLS_STEP as u16,
             "a raw ScrollLeft event pans the crop right (gesture-encoded)"
         );
-        app.handle_program_mouse(&wheel(
+        app.handle_playbook_mouse(&wheel(
             MouseEventKind::ScrollRight,
             crossterm::event::KeyModifiers::empty(),
         ))
         .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_scroll_cols,
-            PROGRAM_PINNED_PAN_COLS_STEP as u16,
+            app.playbook_popup.as_ref().unwrap().pinned_scroll_cols,
+            PLAYBOOK_PINNED_PAN_COLS_STEP as u16,
             "a raw ScrollRight event pans the crop back left (gesture-encoded)"
         );
 
         // Unpinning resets the pan; the next pin starts at the live tail.
-        app.set_program_pinned_clip(None).await;
-        let popup = app.program_popup.as_ref().unwrap();
+        app.set_playbook_pinned_clip(None).await;
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.pinned_clip, None);
         assert_eq!(
             (popup.pinned_scroll_rows, popup.pinned_scroll_cols),
@@ -19317,19 +19317,19 @@ mod tests {
     /// exists because some terminals never report Shift-modified wheel
     /// events to the application (Shift is reserved for native selection).
     #[tokio::test]
-    async fn program_alt_wheel_over_pinned_card_pans_horizontally() {
+    async fn playbook_alt_wheel_over_pinned_card_pans_horizontally() {
         use crossterm::event::{MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
-        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+        app.layout.playbook_clip_hits = vec![playbook_clip_click_fixture("worker1")];
+        app.layout.playbook_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
 
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 20,
             row: 6,
@@ -19337,9 +19337,9 @@ mod tests {
         })
         .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
-            popup.pinned_scroll_cols, PROGRAM_PINNED_PAN_COLS_STEP as u16,
+            popup.pinned_scroll_cols, PLAYBOOK_PINNED_PAN_COLS_STEP as u16,
             "Alt+wheel pans horizontally"
         );
         assert_eq!(
@@ -19356,13 +19356,13 @@ mod tests {
     async fn pinned_clip_shift_arrows_pan_without_forwarding() {
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
         app.pty_input_tx = tx;
-        let v_step = PROGRAM_WHEEL_SCROLL_ROWS as u16;
-        let h_step = PROGRAM_PINNED_PAN_COLS_STEP as u16;
+        let v_step = PLAYBOOK_WHEEL_SCROLL_ROWS as u16;
+        let h_step = PLAYBOOK_PINNED_PAN_COLS_STEP as u16;
 
         for (code, expect_cols, expect_rows) in [
             (KeyCode::Right, h_step, 0),
@@ -19374,7 +19374,7 @@ mod tests {
                 .handle_pinned_clip_key(KeyEvent::new(code, KeyModifiers::SHIFT))
                 .await;
             assert!(handled);
-            let popup = app.program_popup.as_ref().unwrap();
+            let popup = app.playbook_popup.as_ref().unwrap();
             assert_eq!(
                 (popup.pinned_scroll_cols, popup.pinned_scroll_rows),
                 (expect_cols, expect_rows),
@@ -19400,27 +19400,27 @@ mod tests {
     /// (spec 0090): the PTY is resized to the card's content dims and the
     /// popup records them; unpinning releases ownership.
     #[tokio::test]
-    async fn program_pin_takes_size_ownership_when_session_unviewed() {
+    async fn playbook_pin_takes_size_ownership_when_session_unviewed() {
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "see @{session:worker1}", 0));
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
 
-        app.set_program_pinned_clip(Some("worker1".to_string()))
+        app.set_playbook_pinned_clip(Some("worker1".to_string()))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.pinned_clip.as_deref(), Some("worker1"));
         assert_eq!(
             popup.pinned_terminal_size,
             // Card cols clamp to the modal (40 - 2); rows are the default.
-            Some((38, PROGRAM_CLIP_HOVER_PREVIEW_ROWS)),
+            Some((38, PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS)),
             "an unviewed session pins with size ownership at the card's dims"
         );
 
-        app.set_program_pinned_clip(None).await;
-        let popup = app.program_popup.as_ref().unwrap();
+        app.set_playbook_pinned_clip(None).await;
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.pinned_clip, None);
         assert_eq!(
             popup.pinned_terminal_size, None,
@@ -19432,7 +19432,7 @@ mod tests {
     /// resize it — the card stays a crop so it never fights the pane for
     /// the session's size (spec 0025/0090).
     #[tokio::test]
-    async fn program_pin_stays_crop_when_session_visible_elsewhere() {
+    async fn playbook_pin_stays_crop_when_session_visible_elsewhere() {
         let (mut app, _dir, _server) = empty_app().await;
         let mut worker = summary_with_kind(construct_protocol::SessionKind::User);
         worker.id = "worker1".into();
@@ -19444,13 +19444,13 @@ mod tests {
             id: 1,
             selection: Selection::Session("worker1".into()),
         };
-        app.program_popup = Some(program_popup_for_test("s1", "see @{session:worker1}", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "see @{session:worker1}", 0));
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
 
-        app.set_program_pinned_clip(Some("worker1".to_string()))
+        app.set_playbook_pinned_clip(Some("worker1".to_string()))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.pinned_clip.as_deref(), Some("worker1"));
         assert_eq!(
             popup.pinned_terminal_size, None,
@@ -19461,22 +19461,22 @@ mod tests {
     /// Dragging the card's right/bottom border resizes it; on release a
     /// size-owning pin's PTY follows the final dims (spec 0090).
     #[tokio::test]
-    async fn program_pinned_card_border_drag_resizes() {
+    async fn playbook_pinned_card_border_drag_resizes() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
         popup.pinned_terminal_size = Some((38, 22));
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
-        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+        app.layout.playbook_clip_hits = vec![playbook_clip_click_fixture("worker1")];
+        app.layout.playbook_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
 
         // Grab the bottom-right corner (right border column, bottom row).
         let consumed = app
-            .handle_program_mouse(&MouseEvent {
+            .handle_playbook_mouse(&MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 34,
                 row: 8,
@@ -19489,19 +19489,19 @@ mod tests {
             "border grab starts a resize drag"
         );
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            app.playbook_popup.as_ref().unwrap().pinned_clip.as_deref(),
             Some("worker1"),
             "border grab must not toggle the pin"
         );
 
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
             column: 44,
             row: 9,
             modifiers: crossterm::event::KeyModifiers::empty(),
         })
         .await;
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
             column: 44,
             row: 9,
@@ -19510,7 +19510,7 @@ mod tests {
         .await;
 
         assert_eq!(app.pinned_card_drag, None, "release ends the drag");
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         // +10 cols / +1 row from the drag, clamped to the modal (40x10):
         // cols cap = 36, rows cap = 6.
         assert_eq!(
@@ -19528,19 +19528,19 @@ mod tests {
     /// Dragging the card's top border moves it; the chosen position sticks
     /// and clamps inside the modal (spec 0090).
     #[tokio::test]
-    async fn program_pinned_card_top_border_drag_moves() {
+    async fn playbook_pinned_card_top_border_drag_moves() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
-        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+        app.layout.playbook_clip_hits = vec![playbook_clip_click_fixture("worker1")];
+        app.layout.playbook_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
 
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 20,
             row: 5,
@@ -19552,14 +19552,14 @@ mod tests {
             "top-border grab starts a move drag"
         );
 
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
             column: 8,
             row: 3,
             modifiers: crossterm::event::KeyModifiers::empty(),
         })
         .await;
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
             column: 8,
             row: 3,
@@ -19569,37 +19569,37 @@ mod tests {
 
         assert_eq!(app.pinned_card_drag, None);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_card_pos,
+            app.playbook_popup.as_ref().unwrap().pinned_card_pos,
             // Grab offset was (5, 0) inside the card, so the card's
             // top-left lands at pointer minus grab.
             Some((3, 3)),
             "top-border drag moves the card"
         );
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            app.playbook_popup.as_ref().unwrap().pinned_clip.as_deref(),
             Some("worker1"),
             "moving must not dismiss the pin"
         );
     }
 
-    /// Wheel outside the pinned card keeps scrolling the Program doc and
+    /// Wheel outside the pinned card keeps scrolling the Playbook doc and
     /// leaves both the pin and its pan untouched — only left clicks dismiss.
     #[tokio::test]
-    async fn program_wheel_outside_pinned_card_scrolls_doc_and_keeps_pin() {
+    async fn playbook_wheel_outside_pinned_card_scrolls_doc_and_keeps_pin() {
         use crossterm::event::{MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
         popup.pinned_scroll_rows = 7;
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
-        app.layout.program_clip_hits = vec![program_clip_click_fixture("worker1")];
-        app.layout.program_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
+        app.layout.playbook_clip_hits = vec![playbook_clip_click_fixture("worker1")];
+        app.layout.playbook_pinned_card_rect = Some(ratatui::layout::Rect::new(15, 5, 20, 4));
 
         let consumed = app
-            .handle_program_mouse(&MouseEvent {
+            .handle_playbook_mouse(&MouseEvent {
                 kind: MouseEventKind::ScrollUp,
                 column: 5,
                 row: 1,
@@ -19608,7 +19608,7 @@ mod tests {
             .await;
 
         assert!(consumed, "the doc still consumes its own wheel events");
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.pinned_clip.as_deref(),
             Some("worker1"),
@@ -19622,15 +19622,15 @@ mod tests {
 
     /// While a clip is pinned, keystrokes forward to *that* session's PTY —
     /// not `self.selected_id()`, which is usually a different session (the
-    /// Program-owning session, not the worker the clip names).
+    /// Playbook-owning session, not the worker the clip names).
     #[tokio::test]
     async fn pinned_clip_key_forwards_to_pinned_session_not_selected_session() {
         let (mut app, _dir, server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
         app.selection = Selection::Session("s1".into());
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
         app.pty_input_tx = tx;
 
@@ -19648,9 +19648,9 @@ mod tests {
         );
         assert_eq!(job.bytes, b"y");
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().buffer,
             "see @{session:worker1}",
-            "the Program buffer itself is untouched while a clip is pinned"
+            "the Playbook buffer itself is untouched while a clip is pinned"
         );
         server.abort();
     }
@@ -19663,9 +19663,9 @@ mod tests {
     async fn pinned_clip_ctrl_x_prefix_falls_through_to_keymap() {
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
         app.pty_input_tx = tx;
         let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
@@ -19705,9 +19705,9 @@ mod tests {
     async fn pinned_clip_esc_forwards_to_session_and_keeps_pin() {
         let (mut app, _dir, _server) = empty_app().await;
         app.sessions = vec![summary_with_kind(construct_protocol::SessionKind::User)];
-        let mut popup = program_popup_for_test("s1", "see @{session:worker1}", 0);
+        let mut popup = playbook_popup_for_test("s1", "see @{session:worker1}", 0);
         popup.pinned_clip = Some("worker1".to_string());
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
         app.pty_input_tx = tx;
 
@@ -19717,7 +19717,7 @@ mod tests {
 
         assert!(handled);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().pinned_clip.as_deref(),
+            app.playbook_popup.as_ref().unwrap().pinned_clip.as_deref(),
             Some("worker1"),
             "Esc must not unpin"
         );
@@ -19730,11 +19730,11 @@ mod tests {
     }
 
     /// No clip pinned: the handler is a no-op that reports "not handled" so
-    /// the key falls through to ordinary Program-editor routing.
+    /// the key falls through to ordinary Playbook-editor routing.
     #[tokio::test]
     async fn pinned_clip_key_handler_is_noop_when_nothing_pinned() {
         let (mut app, _dir, _server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "plain text", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "plain text", 0));
 
         let handled = app
             .handle_pinned_clip_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
@@ -19744,19 +19744,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_c_l_centers_cursor_row_in_viewport() {
+    async fn playbook_c_l_centers_cursor_row_in_viewport() {
         let (mut app, _dir, _server) = empty_app().await;
         // 30 short lines into a 7-row viewport.
         let markdown = (0..30)
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        app.program_popup = Some(program_popup_for_test("s1", &markdown, 0));
-        app.layout.program_inner_area = Some(ratatui::layout::Rect::new(0, 0, 40, 7));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", &markdown, 0));
+        app.layout.playbook_inner_area = Some(ratatui::layout::Rect::new(0, 0, 40, 7));
 
         // Start near top: center should be near 0 (clamped).
-        app.center_program_cursor();
-        let off0 = app.program_popup.as_ref().unwrap().scroll_offset;
+        app.center_playbook_cursor();
+        let off0 = app.playbook_popup.as_ref().unwrap().scroll_offset;
         assert!(
             off0 <= 3,
             "near-top center should keep offset small, got {off0}"
@@ -19764,11 +19764,11 @@ mod tests {
 
         // Move cursor far down (visual row ~29).
         let total_chars = markdown.chars().count();
-        app.program_popup.as_mut().unwrap().cursor = total_chars;
-        app.center_program_cursor();
-        let off = app.program_popup.as_ref().unwrap().scroll_offset;
+        app.playbook_popup.as_mut().unwrap().cursor = total_chars;
+        app.center_playbook_cursor();
+        let off = app.playbook_popup.as_ref().unwrap().scroll_offset;
         let cursor_row =
-            crate::ui::program_cursor_visual_row(Some(&app), &markdown, total_chars, 40);
+            crate::ui::playbook_cursor_visual_row(Some(&app), &markdown, total_chars, 40);
         // Cursor row should be roughly centered in the 7-row window.
         // With half=3, we expect offset ~ cursor_row - 3, cursor visible in middle.
         assert!(
@@ -19784,113 +19784,113 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_open_state_is_preserved_per_session() {
+    async fn playbook_open_state_is_preserved_per_session() {
         let (mut app, _dir, server) = empty_app().await;
         let s1 = summary_with_kind(construct_protocol::SessionKind::User);
         let mut s2 = summary_with_kind(construct_protocol::SessionKind::User);
         s2.id = "s2".into();
         app.sessions = vec![s1, s2];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 3));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 3));
 
         app.selection = Selection::Session("s2".into());
-        app.sync_program_popup_with_selection();
-        assert!(app.program_popup.is_none());
-        assert!(app.program_popups.contains_key("s1"));
+        app.sync_playbook_popup_with_selection();
+        assert!(app.playbook_popup.is_none());
+        assert!(app.playbook_popups.contains_key("s1"));
 
         app.selection = Selection::Session("s1".into());
-        app.sync_program_popup_with_selection();
-        let popup = app.program_popup.as_ref().expect("s1 program restored");
+        app.sync_playbook_popup_with_selection();
+        let popup = app.playbook_popup.as_ref().expect("s1 playbook restored");
         assert_eq!(popup.buffer, "draft");
         assert_eq!(popup.cursor, 3);
-        assert!(!app.program_popups.contains_key("s1"));
+        assert!(!app.playbook_popups.contains_key("s1"));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_selection_cut_and_insert_replaces_selection() {
+    async fn playbook_selection_cut_and_insert_replaces_selection() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
-        app.begin_program_selection();
-        app.move_program_cursor(3);
-        app.cut_program_selection();
-        assert_eq!(app.program_clipboard.as_deref(), Some("cde"));
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "abf");
-        app.insert_program_text("XY");
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "abXYf");
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 2));
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(3);
+        app.cut_playbook_selection();
+        assert_eq!(app.playbook_clipboard.as_deref(), Some("cde"));
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "abf");
+        app.insert_playbook_text("XY");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "abXYf");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_ctrl_g_does_not_close_popup() {
+    async fn playbook_ctrl_g_does_not_close_popup() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
             .await;
 
-        assert!(app.program_popup.is_some());
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "draft");
+        assert!(app.playbook_popup.is_some());
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "draft");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_escape_clears_active_selection() {
+    async fn playbook_escape_clears_active_selection() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
-        app.begin_program_selection();
-        app.move_program_cursor(3);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 2));
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(3);
         assert!(
-            app.program_popup.as_ref().unwrap().selection.is_some(),
+            app.playbook_popup.as_ref().unwrap().selection.is_some(),
             "selection should be active before Esc"
         );
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert!(popup.selection.is_none(), "Esc should clear the selection");
         // Cancelling the mark must not mutate the buffer or move text around.
         assert_eq!(popup.buffer, "abcdef");
         assert_eq!(
             app.status.as_ref().map(|(status, _)| status.as_str()),
-            Some("program selection canceled"),
+            Some("playbook selection canceled"),
             "Esc should replace the stale selection-started status"
         );
-        assert_eq!(app.program_clipboard, None);
+        assert_eq!(app.playbook_clipboard, None);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_shift_arrow_starts_keyboard_selection() {
+    async fn playbook_shift_arrow_starts_keyboard_selection() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 2));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 3);
-        assert_eq!(App::program_selection_range(popup), Some((2, 3)));
-        assert_eq!(App::selected_program_text(popup).as_deref(), Some("c"));
+        assert_eq!(App::playbook_selection_range(popup), Some((2, 3)));
+        assert_eq!(App::selected_playbook_text(popup).as_deref(), Some("c"));
 
-        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
-        app.handle_program_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT))
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 2));
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 1);
-        assert_eq!(App::program_selection_range(popup), Some((1, 2)));
-        assert_eq!(App::selected_program_text(popup).as_deref(), Some("b"));
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 2)));
+        assert_eq!(App::selected_playbook_text(popup).as_deref(), Some("b"));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_shift_click_extends_selection_to_clicked_point() {
+    async fn playbook_shift_click_extends_selection_to_clicked_point() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 1));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 1));
         // inner content origin = (modal.x + 1 + pad, modal.y + 1 + pad) = (2, 2);
         // inner width = 9 - 2 border - 2 pad = 5, so "abcdef" paints on one row.
         let modal = Rect::new(0, 0, 9, 20);
@@ -19898,176 +19898,176 @@ mod tests {
 
         // Shift-click past the cursor (no prior selection): extends from the
         // pre-click cursor (1) to the clicked offset (4), like Shift+Arrow.
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 6,
             row: 2,
             modifiers: KeyModifiers::SHIFT,
         })
         .await;
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 4);
-        assert_eq!(App::program_selection_range(popup), Some((1, 4)));
-        assert_eq!(App::selected_program_text(popup).as_deref(), Some("bcd"));
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 4)));
+        assert_eq!(App::selected_playbook_text(popup).as_deref(), Some("bcd"));
 
         // A second shift-click keeps the original anchor (1) and moves only
         // the head, rather than restarting the selection at the new click.
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 2,
             row: 2,
             modifiers: KeyModifiers::SHIFT,
         })
         .await;
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 0);
-        assert_eq!(App::program_selection_range(popup), Some((0, 1)));
-        assert_eq!(App::selected_program_text(popup).as_deref(), Some("a"));
+        assert_eq!(App::playbook_selection_range(popup), Some((0, 1)));
+        assert_eq!(App::selected_playbook_text(popup).as_deref(), Some("a"));
 
         // Releasing the mouse after a shift-click commits the selection (like
         // a drag) instead of clearing it the way a plain click-release would.
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
             column: 2,
             row: 2,
             modifiers: KeyModifiers::NONE,
         })
         .await;
-        let popup = app.program_popup.as_ref().unwrap();
-        assert_eq!(App::program_selection_range(popup), Some((0, 1)));
-        assert_eq!(app.program_clipboard.as_deref(), Some("a"));
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(App::playbook_selection_range(popup), Some((0, 1)));
+        assert_eq!(app.playbook_clipboard.as_deref(), Some("a"));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_ctrl_space_extends_selection_with_emacs_motion() {
+    async fn playbook_ctrl_space_extends_selection_with_emacs_motion() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abc\ndef", 1));
-        app.layout.program_inner_area = Some(Rect::new(0, 0, 20, 5));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abc\ndef", 1));
+        app.layout.playbook_inner_area = Some(Rect::new(0, 0, 20, 5));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 2);
-        assert_eq!(App::program_selection_range(popup), Some((1, 2)));
-        assert_eq!(App::selected_program_text(popup).as_deref(), Some("b"));
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 2)));
+        assert_eq!(App::selected_playbook_text(popup).as_deref(), Some("b"));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
             .await;
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 1);
         assert!(popup.selection.is_some());
-        assert_eq!(App::program_selection_range(popup), None);
+        assert_eq!(App::playbook_selection_range(popup), None);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 5);
-        assert_eq!(App::program_selection_range(popup), Some((1, 5)));
-        assert_eq!(App::selected_program_text(popup).as_deref(), Some("bc\nd"));
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 5)));
+        assert_eq!(App::selected_playbook_text(popup).as_deref(), Some("bc\nd"));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 1);
         assert!(popup.selection.is_some());
-        assert_eq!(App::program_selection_range(popup), None);
+        assert_eq!(App::playbook_selection_range(popup), None);
 
         // C-e / C-a (end-of-line / beginning-of-line) must extend the mark
         // too, not just the char/line motions above.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
             .await;
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 3);
-        assert_eq!(App::program_selection_range(popup), Some((1, 3)));
-        assert_eq!(App::selected_program_text(popup).as_deref(), Some("bc"));
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 3)));
+        assert_eq!(App::selected_playbook_text(popup).as_deref(), Some("bc"));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .await;
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 0);
-        assert_eq!(App::program_selection_range(popup), Some((0, 1)));
-        assert_eq!(App::selected_program_text(popup).as_deref(), Some("a"));
+        assert_eq!(App::playbook_selection_range(popup), Some((0, 1)));
+        assert_eq!(App::selected_playbook_text(popup).as_deref(), Some("a"));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_ctrl_space_extends_selection_with_raw_control_bytes() {
+    async fn playbook_ctrl_space_extends_selection_with_raw_control_bytes() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abc\ndef", 1));
-        app.layout.program_inner_area = Some(Rect::new(0, 0, 20, 5));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abc\ndef", 1));
+        app.layout.playbook_inner_area = Some(Rect::new(0, 0, 20, 5));
 
         // Some terminal paths deliver Emacs control keys as raw ASCII control
-        // bytes with no CONTROL modifier. Program selection must handle those
+        // bytes with no CONTROL modifier. Playbook selection must handle those
         // the same way as normalized Ctrl+letter events.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('\0'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('\0'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('\x06'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('\x06'), KeyModifiers::NONE))
             .await; // C-f
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 2);
-        assert_eq!(App::program_selection_range(popup), Some((1, 2)));
-        assert_eq!(App::selected_program_text(popup).as_deref(), Some("b"));
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 2)));
+        assert_eq!(App::selected_playbook_text(popup).as_deref(), Some("b"));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('\x05'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('\x05'), KeyModifiers::NONE))
             .await; // C-e
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 3);
-        assert_eq!(App::program_selection_range(popup), Some((1, 3)));
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 3)));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('\x01'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('\x01'), KeyModifiers::NONE))
             .await; // C-a
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 0);
-        assert_eq!(App::program_selection_range(popup), Some((0, 1)));
+        assert_eq!(App::playbook_selection_range(popup), Some((0, 1)));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('\x0e'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('\x0e'), KeyModifiers::NONE))
             .await; // C-n
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 4);
-        assert_eq!(App::program_selection_range(popup), Some((1, 4)));
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 4)));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('\x10'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('\x10'), KeyModifiers::NONE))
             .await; // C-p
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 0);
-        assert_eq!(App::program_selection_range(popup), Some((0, 1)));
+        assert_eq!(App::playbook_selection_range(popup), Some((0, 1)));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('\x02'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('\x02'), KeyModifiers::NONE))
             .await; // C-b at start stays put and keeps the mark alive.
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 0);
         assert!(popup.selection.is_some());
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('\x07'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('\x07'), KeyModifiers::NONE))
             .await; // C-g
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert!(popup.selection.is_none(), "raw C-g should cancel selection");
         assert_eq!(popup.buffer, "abc\ndef");
         assert_eq!(
             app.status.as_ref().map(|(status, _)| status.as_str()),
-            Some("program selection canceled")
+            Some("playbook selection canceled")
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_ctrl_space_accepts_terminal_aliases() {
+    async fn playbook_ctrl_space_accepts_terminal_aliases() {
         for mark_char in ['@', '\0'] {
             let (mut app, _dir, server) = empty_app().await;
-            app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
+            app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 2));
 
-            app.handle_program_key(KeyEvent::new(
+            app.handle_playbook_key(KeyEvent::new(
                 KeyCode::Char(mark_char),
                 KeyModifiers::CONTROL,
             ))
             .await;
 
-            let popup = app.program_popup.as_ref().unwrap();
+            let popup = app.playbook_popup.as_ref().unwrap();
             let selection = popup.selection.as_ref().expect("selection mark");
             assert_eq!(selection.anchor, 2);
             assert_eq!(selection.head, 2);
@@ -20077,17 +20077,17 @@ mod tests {
 
     /// The daemon broadcast that echoes our own cursor publish back at us,
     /// exactly as a live session sees after every keystroke.
-    fn own_program_cursor_echo(app: &App) -> construct_protocol::ProgramCursor {
-        let popup = app.program_popup.as_ref().unwrap();
-        construct_protocol::ProgramCursor {
-            session_id: popup.program.session_id.clone(),
+    fn own_playbook_cursor_echo(app: &App) -> construct_protocol::PlaybookCursor {
+        let popup = app.playbook_popup.as_ref().unwrap();
+        construct_protocol::PlaybookCursor {
+            session_id: popup.playbook.session_id.clone(),
             client_id: "c7".into(),
             label: "TUI".into(),
             kind: "tui".into(),
             cursor: popup.cursor,
             selection_anchor: popup.selection.as_ref().map(|s| s.anchor),
             selection_head: popup.selection.as_ref().map(|s| s.head),
-            version: Some(popup.program.version),
+            version: Some(popup.playbook.version),
             color_index: 0,
             updated_at_ms: 0,
             active: true,
@@ -20095,113 +20095,113 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_ctrl_space_mark_survives_own_cursor_echo() {
+    async fn playbook_ctrl_space_mark_survives_own_cursor_echo() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abc\ndef", 1));
-        app.layout.program_inner_area = Some(Rect::new(0, 0, 20, 5));
-        app.own_program_client_id = Some("c7".to_string());
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abc\ndef", 1));
+        app.layout.playbook_inner_area = Some(Rect::new(0, 0, 20, 5));
+        app.own_playbook_client_id = Some("c7".to_string());
 
         // C-Space publishes the fresh zero-width mark and the daemon
         // broadcasts it straight back. That echo used to fall into the
         // "no selection" arm (anchor == head) and drop the mark, so in a
         // live session C-f/C-b/C-p/C-n/C-a/C-e after C-Space only moved
         // the cursor — even though handler-only tests passed.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL))
             .await;
-        app.on_program_cursor(own_program_cursor_echo(&app));
-        let popup = app.program_popup.as_ref().unwrap();
+        app.on_playbook_cursor(own_playbook_cursor_echo(&app));
+        let popup = app.playbook_popup.as_ref().unwrap();
         let selection = popup.selection.as_ref().expect("mark survives own echo");
         assert_eq!((selection.anchor, selection.head), (1, 1));
 
         // C-f extends by one char; the echo after it must keep the range.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
             .await;
-        app.on_program_cursor(own_program_cursor_echo(&app));
-        let popup = app.program_popup.as_ref().unwrap();
-        assert_eq!(App::program_selection_range(popup), Some((1, 2)));
+        app.on_playbook_cursor(own_playbook_cursor_echo(&app));
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 2)));
 
         // C-e extends to end of line.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
             .await;
-        app.on_program_cursor(own_program_cursor_echo(&app));
-        let popup = app.program_popup.as_ref().unwrap();
-        assert_eq!(App::program_selection_range(popup), Some((1, 3)));
+        app.on_playbook_cursor(own_playbook_cursor_echo(&app));
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 3)));
 
         // C-n extends a line down and must keep the sticky visual column
         // across the echo (the echo used to reset `preferred_col`).
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
-        app.on_program_cursor(own_program_cursor_echo(&app));
-        let popup = app.program_popup.as_ref().unwrap();
-        assert_eq!(App::program_selection_range(popup), Some((1, 7)));
+        app.on_playbook_cursor(own_playbook_cursor_echo(&app));
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 7)));
         assert!(
             popup.preferred_col.is_some(),
             "own echo must not reset the C-n/C-p sticky column"
         );
 
         // C-p extends back up.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
-        app.on_program_cursor(own_program_cursor_echo(&app));
-        let popup = app.program_popup.as_ref().unwrap();
-        assert_eq!(App::program_selection_range(popup), Some((1, 3)));
+        app.on_playbook_cursor(own_playbook_cursor_echo(&app));
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(App::playbook_selection_range(popup), Some((1, 3)));
 
         // C-a extends to start of line.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .await;
-        app.on_program_cursor(own_program_cursor_echo(&app));
-        let popup = app.program_popup.as_ref().unwrap();
-        assert_eq!(App::program_selection_range(popup), Some((0, 1)));
+        app.on_playbook_cursor(own_playbook_cursor_echo(&app));
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(App::playbook_selection_range(popup), Some((0, 1)));
 
         // C-b at buffer start stays put and keeps the mark alive.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
             .await;
-        app.on_program_cursor(own_program_cursor_echo(&app));
-        let popup = app.program_popup.as_ref().unwrap();
+        app.on_playbook_cursor(own_playbook_cursor_echo(&app));
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 0);
-        assert_eq!(App::program_selection_range(popup), Some((0, 1)));
+        assert_eq!(App::playbook_selection_range(popup), Some((0, 1)));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_own_cursor_rebase_keeps_zero_width_mark() {
+    async fn playbook_own_cursor_rebase_keeps_zero_width_mark() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abc\ndef", 1));
-        app.layout.program_inner_area = Some(Rect::new(0, 0, 20, 5));
-        app.own_program_client_id = Some("c7".to_string());
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abc\ndef", 1));
+        app.layout.playbook_inner_area = Some(Rect::new(0, 0, 20, 5));
+        app.own_playbook_client_id = Some("c7".to_string());
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL))
             .await;
 
         // Another client's edit rebased our cursor daemon-side: same
         // zero-width mark shape, shifted offsets. The rebase must land and
         // the mark must stay alive at the new position.
-        let mut rebased = own_program_cursor_echo(&app);
+        let mut rebased = own_playbook_cursor_echo(&app);
         rebased.cursor = 5;
         rebased.selection_anchor = Some(5);
         rebased.selection_head = Some(5);
-        app.on_program_cursor(rebased);
-        let popup = app.program_popup.as_ref().unwrap();
+        app.on_playbook_cursor(rebased);
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 5);
         let selection = popup.selection.as_ref().expect("rebased mark stays alive");
         assert_eq!((selection.anchor, selection.head), (5, 5));
 
         // The next motion extends from the rebased mark.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
             .await;
-        let popup = app.program_popup.as_ref().unwrap();
-        assert_eq!(App::program_selection_range(popup), Some((5, 6)));
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(App::playbook_selection_range(popup), Some((5, 6)));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_shift_arrow_selection_wins_over_split_focus_shortcut() {
+    async fn playbook_shift_arrow_selection_wins_over_split_focus_shortcut() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 2));
         app.layout.main_window_areas = vec![
             WindowPaneHit {
                 id: 1,
@@ -20235,142 +20235,142 @@ mod tests {
 
         assert_eq!(
             app.active_window_id, 1,
-            "Program should consume Shift+Right before split focus navigation"
+            "Playbook should consume Shift+Right before split focus navigation"
         );
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 3);
-        assert_eq!(App::program_selection_range(popup), Some((2, 3)));
+        assert_eq!(App::playbook_selection_range(popup), Some((2, 3)));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_ctrl_g_dismisses_smart_clip_picker() {
+    async fn playbook_ctrl_g_dismisses_smart_clip_picker() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
         // Typing the trigger opens the inline smart-clip picker.
-        app.insert_program_text("@");
-        assert!(app.program_smart_clip_active(), "typing @ opens the picker");
+        app.insert_playbook_text("@");
+        assert!(app.playbook_smart_clip_active(), "typing @ opens the picker");
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
             .await;
 
-        assert!(!app.program_smart_clip_active(), "C-g dismisses the picker");
+        assert!(!app.playbook_smart_clip_active(), "C-g dismisses the picker");
         assert!(
-            app.program_popup.is_some(),
-            "C-g must not close the program"
+            app.playbook_popup.is_some(),
+            "C-g must not close the playbook"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_meta_w_copies_selection_without_mutating() {
+    async fn playbook_meta_w_copies_selection_without_mutating() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
-        app.begin_program_selection();
-        app.move_program_cursor(3);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 2));
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(3);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT))
             .await;
 
         // M-w is kill-ring-save: it copies but never deletes.
-        assert_eq!(app.program_clipboard.as_deref(), Some("cde"));
-        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(app.playbook_clipboard.as_deref(), Some("cde"));
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "abcdef", "M-w must not mutate the buffer");
         assert!(popup.selection.is_none(), "M-w deactivates the selection");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_ctrl_c_copies_selection_like_meta_w() {
+    async fn playbook_ctrl_c_copies_selection_like_meta_w() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
-        app.begin_program_selection();
-        app.move_program_cursor(3);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 2));
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(3);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
             .await;
 
-        assert_eq!(app.program_clipboard.as_deref(), Some("cde"));
-        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(app.playbook_clipboard.as_deref(), Some("cde"));
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "abcdef", "C-c must not mutate the buffer");
         assert!(popup.selection.is_none(), "C-c deactivates the selection");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_super_c_copies_selection_like_meta_w() {
+    async fn playbook_super_c_copies_selection_like_meta_w() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
-        app.begin_program_selection();
-        app.move_program_cursor(3);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 2));
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(3);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER))
             .await;
 
-        assert_eq!(app.program_clipboard.as_deref(), Some("cde"));
-        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(app.playbook_clipboard.as_deref(), Some("cde"));
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "abcdef", "Cmd-C must not mutate the buffer");
         assert!(popup.selection.is_none(), "Cmd-C deactivates the selection");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_ctrl_slash_undo_reverts_last_edit() {
+    async fn playbook_ctrl_slash_undo_reverts_last_edit() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 5));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 5));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
             .await;
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "draft!");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "draft!");
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL))
             .await;
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "draft");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "draft");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_c_x_u_undo_reverts_last_edit() {
+    async fn playbook_c_x_u_undo_reverts_last_edit() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 5));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 5));
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
         app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().buffer,
             "draft",
             "with no edits, C-x u is currently a no-op"
         );
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
             .await;
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "draft!");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "draft!");
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
         app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().buffer,
             "draft",
-            "C-x u should undo the previous program edit"
+            "C-x u should undo the previous playbook edit"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_c_x_u_undo_reverts_multiple_edits_in_order() {
+    async fn playbook_c_x_u_undo_reverts_multiple_edits_in_order() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 5));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 5));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().buffer,
             "draft!?",
             "both edits should be appended"
         );
@@ -20380,7 +20380,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().buffer,
             "draft!",
             "first C-x u should undo only the most recent edit"
         );
@@ -20390,7 +20390,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().buffer,
             "draft",
             "second C-x u should undo the next edit"
         );
@@ -20398,77 +20398,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_copy_with_no_selection_is_noop() {
+    async fn playbook_copy_with_no_selection_is_noop() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abcdef", 2));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 2));
 
         // No active selection: M-w and C-c must not panic, must not copy, and
         // must leave the buffer untouched.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
             .await;
 
-        assert_eq!(app.program_clipboard, None, "nothing should be copied");
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "abcdef");
+        assert_eq!(app.playbook_clipboard, None, "nothing should be copied");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "abcdef");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_esc_does_not_close_popup() {
+    async fn playbook_esc_does_not_close_popup() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .await;
 
-        // Esc is not a program-hide affordance — the surface stays open and
+        // Esc is not a playbook-hide affordance — the surface stays open and
         // its buffer is untouched. Show/hide is C-x Space only.
-        assert!(app.program_popup.is_some());
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "draft");
+        assert!(app.playbook_popup.is_some());
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "draft");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_esc_still_cancels_smart_clip_picker() {
+    async fn playbook_esc_still_cancels_smart_clip_picker() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
         // Type the smart-clip trigger so the inline picker is active.
-        app.insert_program_text("@");
+        app.insert_playbook_text("@");
         assert!(
-            app.program_smart_clip_active(),
+            app.playbook_smart_clip_active(),
             "typing @ should open the smart-clip picker"
         );
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .await;
 
-        // Esc dismisses just the picker; the program surface remains open.
+        // Esc dismisses just the picker; the playbook surface remains open.
         assert!(
-            !app.program_smart_clip_active(),
+            !app.playbook_smart_clip_active(),
             "Esc should cancel the picker"
         );
         assert!(
-            app.program_popup.is_some(),
-            "Esc must not close the program"
+            app.playbook_popup.is_some(),
+            "Esc must not close the playbook"
         );
         server.abort();
     }
 
-    /// Regression for the program/palette input-routing bug: with the
-    /// program open, `C-x x` opens the command palette over it, and the
+    /// Regression for the playbook/palette input-routing bug: with the
+    /// playbook open, `C-x x` opens the command palette over it, and the
     /// keys typed afterwards must fill the palette input — not leak into
-    /// the program buffer underneath. The top-level dispatch used to route
-    /// every key to the program whenever `program_popup` was `Some`, so the
-    /// palette was unusable while a program was focused.
+    /// the playbook buffer underneath. The top-level dispatch used to route
+    /// every key to the playbook whenever `playbook_popup` was `Some`, so the
+    /// palette was unusable while a playbook was focused.
     #[tokio::test]
-    async fn program_open_command_palette_captures_typed_chars() {
+    async fn playbook_open_command_palette_captures_typed_chars() {
         let (mut app, _dir, server) = empty_app().await;
         // No orchestrator session → `C-x x` opens the M-x command palette.
         app.orchestrator_id = None;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
 
-        // `C-x x` while the program is focused opens the command palette.
+        // `C-x x` while the playbook is focused opens the command palette.
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
@@ -20478,7 +20478,7 @@ mod tests {
                 app.minibuffer.as_ref().map(|m| &m.intent),
                 Some(MinibufferIntent::CommandPalette)
             ),
-            "C-x x must open the command palette over the program"
+            "C-x x must open the command palette over the playbook"
         );
 
         // Subsequent keystrokes must land in the palette input...
@@ -20492,24 +20492,24 @@ mod tests {
             Some("hi"),
             "typing must fill the command palette input"
         );
-        // ...and must NOT leak into the program buffer underneath.
+        // ...and must NOT leak into the playbook buffer underneath.
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().buffer,
             "draft",
-            "typing into the palette must not insert into the program"
+            "typing into the palette must not insert into the playbook"
         );
         server.abort();
     }
 
     /// Same routing precedence for the operator/orchestrator panel: when
     /// `C-x x` opens the persistent orchestrator input over a focused
-    /// program, keys must go to the orchestrator (its PTY), not the program.
+    /// playbook, keys must go to the orchestrator (its PTY), not the playbook.
     #[tokio::test]
-    async fn program_open_orchestrator_panel_captures_typed_chars() {
+    async fn playbook_open_orchestrator_panel_captures_typed_chars() {
         let (mut app, _dir, server) = empty_app().await;
         // An orchestrator session → `C-x x` opens the operator input panel.
         app.orchestrator_id = Some("orch".to_string());
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
@@ -20520,12 +20520,12 @@ mod tests {
                 app.minibuffer.as_ref().map(|m| &m.intent),
                 Some(MinibufferIntent::Orchestrator)
             ),
-            "C-x x must open the orchestrator panel over the program"
+            "C-x x must open the orchestrator panel over the playbook"
         );
 
         // A plain keystroke is forwarded to the orchestrator's PTY, which
         // snaps its scrollback back to live — an observable side effect of
-        // the orchestrator path running instead of the program path.
+        // the orchestrator path running instead of the playbook path.
         app.orchestrator_scrollback = 7;
         app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .await;
@@ -20534,46 +20534,46 @@ mod tests {
             "typing must route to the orchestrator PTY (snaps scrollback to live)"
         );
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().buffer,
             "draft",
-            "typing into the orchestrator must not insert into the program"
+            "typing into the orchestrator must not insert into the playbook"
         );
         server.abort();
     }
 
     /// Counterpart guard: with NO minibuffer/palette overlay open, the
-    /// program keeps capturing keystrokes as before.
+    /// playbook keeps capturing keystrokes as before.
     #[tokio::test]
-    async fn program_typing_with_no_overlay_still_inserts() {
+    async fn playbook_typing_with_no_overlay_still_inserts() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 5));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 5));
         assert!(app.minibuffer.is_none(), "precondition: no overlay open");
 
         app.on_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
             .await;
 
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().buffer,
             "draft!",
-            "with no overlay, a typed char inserts into the program"
+            "with no overlay, a typed char inserts into the playbook"
         );
         assert!(app.minibuffer.is_none());
         server.abort();
     }
 
-    /// Regression: with a program visible in the view pane, switching focus to
+    /// Regression: with a playbook visible in the view pane, switching focus to
     /// the session list (`C-x o`) must let Up/Down and `C-n`/`C-p` move the
     /// list selection. The top-level dispatch used to route every keystroke to
-    /// the program whenever `program_popup` was `Some`, ignoring focus — so
-    /// list navigation appeared dead while a program was open.
+    /// the playbook whenever `playbook_popup` was `Some`, ignoring focus — so
+    /// list navigation appeared dead while a playbook was open.
     #[tokio::test]
-    async fn program_open_list_focus_navigates_session_list() {
+    async fn playbook_open_list_focus_navigates_session_list() {
         let (mut app, _dir, server) = two_session_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
         app.focus = PaneFocus::List;
         assert_eq!(app.selection.session_id(), Some("s1"));
 
-        // Down -> NextSession moves the list selection, not the program cursor.
+        // Down -> NextSession moves the list selection, not the playbook cursor.
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
         assert_eq!(
@@ -20599,52 +20599,52 @@ mod tests {
         server.abort();
     }
 
-    /// Counterpart guard: when the program itself holds focus, arrow keys still
-    /// drive the program cursor and never touch the list selection. (Vertical
+    /// Counterpart guard: when the playbook itself holds focus, arrow keys still
+    /// drive the playbook cursor and never touch the list selection. (Vertical
     /// movement needs a rendered viewport, so this exercises the horizontal
     /// Right key, which routes through the same focus-gated dispatch.)
     #[tokio::test]
-    async fn program_open_view_focus_moves_program_cursor() {
+    async fn playbook_open_view_focus_moves_playbook_cursor() {
         let (mut app, _dir, server) = two_session_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "ab\ncd\nef", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "ab\ncd\nef", 0));
         app.focus = PaneFocus::View;
         assert_eq!(app.selection.session_id(), Some("s1"));
 
-        // Right advances the program cursor one character, leaving the list
+        // Right advances the playbook cursor one character, leaving the list
         // selection untouched.
         app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             1,
-            "Right moves the program cursor while the view is focused"
+            "Right moves the playbook cursor while the view is focused"
         );
         assert_eq!(
             app.selection.session_id(),
             Some("s1"),
-            "moving the program cursor must not change the list selection"
+            "moving the playbook cursor must not change the list selection"
         );
 
         server.abort();
     }
 
-    /// Regression: clicking the program body reclaims keyboard focus for the
+    /// Regression: clicking the playbook body reclaims keyboard focus for the
     /// view pane. The reported bug was: click the session list (focus → List),
-    /// then click back on the visible program — the caret moved but `focus`
+    /// then click back on the visible playbook — the caret moved but `focus`
     /// stayed `List`, so the `on_key` routing gate kept sending keystrokes to
-    /// the list and typing into the program silently did nothing.
+    /// the list and typing into the playbook silently did nothing.
     #[tokio::test]
-    async fn program_body_click_reclaims_view_focus() {
+    async fn playbook_body_click_reclaims_view_focus() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, server) = two_session_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "ab\ncd\nef", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "ab\ncd\nef", 0));
         app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 40, 10));
         // Precondition the bug hit: the session list had grabbed keyboard focus
-        // while the program stayed visible in the view pane.
+        // while the playbook stayed visible in the view pane.
         app.focus = PaneFocus::List;
 
         let consumed = app
-            .handle_program_mouse(&MouseEvent {
+            .handle_playbook_mouse(&MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 2,
                 row: 3,
@@ -20654,121 +20654,121 @@ mod tests {
 
         assert!(
             consumed,
-            "a click inside the program modal is handled by the program mouse router"
+            "a click inside the playbook modal is handled by the playbook mouse router"
         );
         assert_eq!(
             app.focus,
             PaneFocus::View,
-            "clicking the program body must reclaim view focus so typing reaches it"
+            "clicking the playbook body must reclaim view focus so typing reaches it"
         );
 
-        // End-to-end: with focus reclaimed, keystrokes now drive the program
+        // End-to-end: with focus reclaimed, keystrokes now drive the playbook
         // cursor rather than the list selection. (Cursor reset to 0 so the
         // assertion is independent of where the click's caret landed.)
-        app.program_popup.as_mut().unwrap().cursor = 0;
+        app.playbook_popup.as_mut().unwrap().cursor = 0;
         app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             1,
-            "after the click, Right moves the program cursor (input routed to the program)"
+            "after the click, Right moves the playbook cursor (input routed to the playbook)"
         );
         assert_eq!(
             app.selection.session_id(),
             Some("s1"),
-            "typing into the reclaimed program must not move the list selection"
+            "typing into the reclaimed playbook must not move the list selection"
         );
 
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_ctrl_s_starts_program_search() {
+    async fn playbook_ctrl_s_starts_playbook_search() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
-        app.program_popup.as_mut().unwrap().buffer = "draft changed".to_string();
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
+        app.playbook_popup.as_mut().unwrap().buffer = "draft changed".to_string();
 
         let handled = tokio::time::timeout(
             Duration::from_millis(100),
-            app.handle_program_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            app.handle_playbook_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
         )
         .await;
 
-        assert!(handled.is_ok(), "raw C-s should not call program save");
-        let popup = app.program_popup.as_ref().unwrap();
+        assert!(handled.is_ok(), "raw C-s should not call playbook save");
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "draft changed");
         assert_eq!(popup.saved_markdown, "draft");
-        assert!(popup.search.is_some(), "C-s starts program search");
+        assert!(popup.search.is_some(), "C-s starts playbook search");
         assert_eq!(popup.search.as_ref().unwrap().query, "");
         assert!(popup.search.as_ref().unwrap().matches.is_empty());
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_incremental_search_navigates_matches() {
+    async fn playbook_incremental_search_navigates_matches() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta alpha", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta alpha", 0));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup.search.as_ref().expect("search active");
         assert_eq!(search.query, "alpha");
         assert_eq!(search.matches, vec![(0, 5), (11, 16)]);
         assert_eq!(search.selected, 0);
         assert_eq!(popup.cursor, 0);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .await;
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup.search.as_ref().expect("search still active");
         assert_eq!(search.selected, 1);
         assert_eq!(popup.cursor, 11);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
             .await;
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup.search.as_ref().expect("search still active");
         assert_eq!(search.selected, 0);
         assert_eq!(popup.cursor, 0);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
-        assert!(app.program_popup.as_ref().unwrap().search.is_none());
-        assert_eq!(app.program_popup.as_ref().unwrap().cursor, 0);
+        assert!(app.playbook_popup.as_ref().unwrap().search.is_none());
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 0);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_incremental_search_starts_at_or_after_anchor_cursor() {
+    async fn playbook_incremental_search_starts_at_or_after_anchor_cursor() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "one alpha two alpha", 10));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "one alpha two alpha", 10));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup.search.as_ref().expect("search active");
         assert_eq!(search.query, "alpha");
         assert_eq!(search.matches, vec![(4, 9), (14, 19)]);
@@ -20778,38 +20778,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_incremental_search_cancel_restores_anchor_cursor() {
+    async fn playbook_incremental_search_cancel_restores_anchor_cursor() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "alpha alpha", 6));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha alpha", 6));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .await;
 
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             6,
             "during search the first match >= anchor is selected (cursor moves)"
         );
-        app.handle_program_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .await;
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert!(popup.search.is_none(), "Esc exits search");
         assert_eq!(popup.cursor, 6);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_search_finds_smart_clip_by_label() {
+    async fn playbook_search_finds_smart_clip_by_label() {
         // Buffer: "hello @{session:stest} world"
         // Session "stest" has title "my-task" and harness "shell", state Done.
         // Searching "my-task" should find the clip (label "✓ my-task · shell")
@@ -20824,20 +20824,20 @@ mod tests {
         session.harness = "shell".into();
         session.state = construct_protocol::SessionState::Done;
         app.sessions = vec![session];
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s1",
             "hello @{session:stest} world",
             0,
         ));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .await;
         for ch in "my-task".chars() {
-            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+            app.handle_playbook_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
                 .await;
         }
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup.search.as_ref().expect("search active");
         assert_eq!(search.query, "my-task");
         assert!(
@@ -20852,7 +20852,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_search_highlights_raw_text_match_inside_smart_clip() {
+    async fn playbook_search_highlights_raw_text_match_inside_smart_clip() {
         // Buffer: "hello @{session:stest} world"
         // Searching "stest" — it appears literally inside the raw clip body.
         // The raw-buffer match must be found and its start must sit inside the
@@ -20861,20 +20861,20 @@ mod tests {
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "stest".into();
         app.sessions = vec![session];
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s1",
             "hello @{session:stest} world",
             0,
         ));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .await;
         for ch in "stest".chars() {
-            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+            app.handle_playbook_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
                 .await;
         }
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup.search.as_ref().expect("search active");
         assert_eq!(search.query, "stest");
         assert!(
@@ -20892,15 +20892,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_incremental_search_paste_extends_query_not_buffer() {
+    async fn playbook_incremental_search_paste_extends_query_not_buffer() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta alpha", 6));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta alpha", 6));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .await;
         app.on_paste("alpha".to_string()).await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup.search.as_ref().expect("search remains active");
         assert_eq!(popup.buffer, "alpha beta alpha");
         assert_eq!(search.query, "alpha");
@@ -20911,11 +20911,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_focused_program_routes_paste_to_session_pty() {
+    async fn terminal_focused_playbook_routes_paste_to_session_pty() {
         let (mut app, _dir, server) = captured_app().await;
-        let mut popup = program_popup_for_test("s1", "draft", 5);
+        let mut popup = playbook_popup_for_test("s1", "draft", 5);
         popup.set_terminal_focus(true);
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
         let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
         app.pty_input_tx = tx;
 
@@ -20924,20 +20924,20 @@ mod tests {
         let job = rx.try_recv().expect("paste should reach the session PTY");
         assert_eq!(job.session_id, "s1");
         assert_eq!(job.bytes, b"pasted text");
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "draft");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "draft");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_tab_indents_list_item() {
+    async fn playbook_tab_indents_list_item() {
         let (mut app, _dir, server) = empty_app().await;
         // Cursor at the end of "- item" (char offset 6).
-        app.program_popup = Some(program_popup_for_test("s1", "- item", 6));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "- item", 6));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "  - item", "Tab adds one indent level");
         // The cursor rides along with the text it was on (still end of line).
         assert_eq!(popup.cursor, 8);
@@ -20945,29 +20945,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_shift_tab_outdents_list_item() {
+    async fn playbook_shift_tab_outdents_list_item() {
         let (mut app, _dir, server) = empty_app().await;
         // Cursor at the end of "  - item" (char offset 8).
-        app.program_popup = Some(program_popup_for_test("s1", "  - item", 8));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "  - item", 8));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "- item", "Shift-Tab removes one indent level");
         assert_eq!(popup.cursor, 6);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_shift_tab_at_top_level_is_noop() {
+    async fn playbook_shift_tab_at_top_level_is_noop() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "- item", 3));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "- item", 3));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.buffer, "- item",
             "outdent at column 0 clamps to a no-op"
@@ -20980,18 +20980,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_tab_focuses_selection_menu_for_multi_line_selection() {
+    async fn playbook_tab_focuses_selection_menu_for_multi_line_selection() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "- one\n- two", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "- one\n- two", 0));
         // Select from the start of the buffer through the end of the second
         // list line so both lines fall inside the selection.
-        app.begin_program_selection();
-        app.move_program_cursor(11);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(11);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.buffer, "- one\n- two",
             "Tab focuses the selected-text run menu instead of editing the selection"
@@ -21005,22 +21005,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_nested_list_item_renders_more_indented() {
+    async fn playbook_nested_list_item_renders_more_indented() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "- parent\n  - child", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "- parent\n  - child", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let text = rendered_text(term.backend().buffer());
 
         let parent_line = text
@@ -21040,34 +21040,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_render_registers_run_affordance_hits() {
+    async fn playbook_render_registers_run_affordance_hits() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.begin_program_selection();
-        app.move_program_cursor(5);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let text = rendered_text(term.backend().buffer());
 
         assert!(text.contains("▶"), "title run icon should render: {text:?}");
         assert!(
             text.contains("▣"),
-            "program mode toggle should render: {text:?}"
+            "playbook mode toggle should render: {text:?}"
         );
         assert!(
-            !text.contains("<program>"),
-            "title should no longer render a literal program label: {text:?}"
+            !text.contains("<playbook>"),
+            "title should no longer render a literal playbook label: {text:?}"
         );
         assert!(
             text.contains("Run"),
@@ -21077,43 +21077,43 @@ mod tests {
             text.contains("type additional") && text.contains("instruction"),
             "selection run menu should render the comment placeholder even when wrapped: {text:?}"
         );
-        assert!(app.layout.program_title_run_hit.is_some());
-        assert!(app.layout.program_title_toggle_hit.is_some());
-        assert!(app.layout.program_selection_run_hit.is_some());
+        assert!(app.layout.playbook_title_run_hit.is_some());
+        assert!(app.layout.playbook_title_toggle_hit.is_some());
+        assert!(app.layout.playbook_selection_run_hit.is_some());
         server.abort();
     }
 
     /// spec 0089: the selection menu renders one row per advertised verb,
     /// below the comment/Run row, each with its own click hit-rect.
     #[tokio::test]
-    async fn program_render_registers_verb_button_hits() {
+    async fn playbook_render_registers_verb_button_hits() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_verbs = vec![construct_protocol::ProgramVerb {
+        app.playbook_verbs = vec![construct_protocol::PlaybookVerb {
             name: "simplify".to_string(),
             label: "Simplify".to_string(),
             description: None,
-            effect: construct_protocol::ProgramVerbEffect::Rewrite,
-            interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+            effect: construct_protocol::PlaybookVerbEffect::Rewrite,
+            interaction: construct_protocol::PlaybookVerbInteraction::SingleShot,
             order: 0,
             built_in: true,
             prompt: "test".to_string(),
         }];
-        app.begin_program_selection();
-        app.move_program_cursor(5);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let text = rendered_text(term.backend().buffer());
 
         assert!(
@@ -21121,26 +21121,26 @@ mod tests {
             "verb label should render in the selection menu: {text:?}"
         );
         assert_eq!(
-            app.layout.program_selection_verb_hits.len(),
+            app.layout.playbook_selection_verb_hits.len(),
             1,
             "one hit-rect per advertised verb"
         );
-        assert_eq!(app.layout.program_selection_verb_hits[0].3, "simplify");
+        assert_eq!(app.layout.playbook_selection_verb_hits[0].3, "simplify");
         server.abort();
     }
 
     fn test_verb_with_description(
         name: &str,
         label: &str,
-        effect: construct_protocol::ProgramVerbEffect,
+        effect: construct_protocol::PlaybookVerbEffect,
         description: &str,
-    ) -> construct_protocol::ProgramVerb {
-        construct_protocol::ProgramVerb {
+    ) -> construct_protocol::PlaybookVerb {
+        construct_protocol::PlaybookVerb {
             name: name.to_string(),
             label: label.to_string(),
             description: Some(description.to_string()),
             effect,
-            interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+            interaction: construct_protocol::PlaybookVerbInteraction::SingleShot,
             order: 0,
             built_in: true,
             prompt: "test".to_string(),
@@ -21152,30 +21152,30 @@ mod tests {
     /// only Tab-focusing (which can then have a highlighted row) reserves
     /// the extra row.
     #[tokio::test]
-    async fn program_selection_menu_hides_description_row_when_unfocused() {
+    async fn playbook_selection_menu_hides_description_row_when_unfocused() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_verbs = vec![test_verb_with_description(
+        app.playbook_verbs = vec![test_verb_with_description(
             "simplify",
             "Simplify",
-            construct_protocol::ProgramVerbEffect::Rewrite,
+            construct_protocol::PlaybookVerbEffect::Rewrite,
             "reduce to the minimum that preserves intent.",
         )];
-        app.begin_program_selection();
-        app.move_program_cursor(5);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             !text.contains("reduce to the minimum")
@@ -21190,43 +21190,43 @@ mod tests {
     /// description appears, and it updates as Up/Down moves the highlight
     /// to a different row instead of getting stuck on the first one shown.
     #[tokio::test]
-    async fn program_selection_menu_shows_highlighted_row_description() {
+    async fn playbook_selection_menu_shows_highlighted_row_description() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_verbs = vec![
+        app.playbook_verbs = vec![
             test_verb_with_description(
                 "simplify",
                 "Simplify",
-                construct_protocol::ProgramVerbEffect::Rewrite,
+                construct_protocol::PlaybookVerbEffect::Rewrite,
                 "reduce to the minimum that preserves intent.",
             ),
             test_verb_with_description(
                 "crystallize",
                 "Crystallize spec",
-                construct_protocol::ProgramVerbEffect::Rewrite,
+                construct_protocol::PlaybookVerbEffect::Rewrite,
                 "restructure into a goal.",
             ),
         ];
-        app.begin_program_selection();
-        app.move_program_cursor(5);
-        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
+        app.playbook_popup.as_mut().unwrap().selection_menu = Some(PlaybookSelectionMenu {
             focused: true,
-            selected_action: ProgramSelectionAction::Run,
+            selected_action: PlaybookSelectionAction::Run,
             ..Default::default()
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("Execute the selection now"),
@@ -21237,25 +21237,25 @@ mod tests {
             "the default destination is explicit: {text:?}"
         );
 
-        app.program_selection_run_on_fork = true;
+        app.playbook_selection_run_on_fork = true;
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render with Shift held");
+            .expect("playbook should render with Shift held");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("Run in fork") && text.contains("interactive") && text.contains("fork."),
             "holding Shift previews the forked-execution override: {text:?}"
         );
-        app.program_selection_run_on_fork = false;
+        app.playbook_selection_run_on_fork = false;
 
-        app.program_popup
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .selection_menu
             .as_mut()
             .unwrap()
-            .selected_action = ProgramSelectionAction::Verb(0);
+            .selected_action = PlaybookSelectionAction::Verb(0);
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render after navigating to verb 0");
+            .expect("playbook should render after navigating to verb 0");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("reduce to the minimum"),
@@ -21266,15 +21266,15 @@ mod tests {
             "Run's description must not linger once highlight moved off Run: {text:?}"
         );
 
-        app.program_popup
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .selection_menu
             .as_mut()
             .unwrap()
-            .selected_action = ProgramSelectionAction::Verb(1);
+            .selected_action = PlaybookSelectionAction::Verb(1);
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render after navigating to verb 1");
+            .expect("playbook should render after navigating to verb 1");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("restructure into a goal"),
@@ -21293,58 +21293,58 @@ mod tests {
     /// user always sees exactly what the verb is about to do to the
     /// document, regardless of how its `description` frontmatter is worded.
     #[tokio::test]
-    async fn program_selection_menu_description_prefixed_by_declared_effect() {
+    async fn playbook_selection_menu_description_prefixed_by_declared_effect() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_verbs = vec![
+        app.playbook_verbs = vec![
             test_verb_with_description(
                 "challenge-assumptions",
                 "Challenge assumptions",
-                construct_protocol::ProgramVerbEffect::Annotate,
+                construct_protocol::PlaybookVerbEffect::Annotate,
                 "surface hidden assumptions.",
             ),
             test_verb_with_description(
                 "simplify",
                 "Simplify",
-                construct_protocol::ProgramVerbEffect::Rewrite,
+                construct_protocol::PlaybookVerbEffect::Rewrite,
                 "reduce to the minimum.",
             ),
         ];
-        app.begin_program_selection();
-        app.move_program_cursor(5);
-        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
+        app.playbook_popup.as_mut().unwrap().selection_menu = Some(PlaybookSelectionMenu {
             focused: true,
-            selected_action: ProgramSelectionAction::Verb(0),
+            selected_action: PlaybookSelectionAction::Verb(0),
             ..Default::default()
         });
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("Annotate: surface hidden assumptions"),
             "an annotate-effect verb's description is prefixed 'Annotate: ': {text:?}"
         );
 
-        app.program_popup
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .selection_menu
             .as_mut()
             .unwrap()
-            .selected_action = ProgramSelectionAction::Verb(1);
+            .selected_action = PlaybookSelectionAction::Verb(1);
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render after navigating to verb 1");
+            .expect("playbook should render after navigating to verb 1");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("Rewrite: reduce to the minimum"),
@@ -21357,21 +21357,21 @@ mod tests {
     /// instead of being cut with an ellipsis — the full text must remain
     /// readable, including its tail.
     #[tokio::test]
-    async fn program_selection_menu_description_wraps_instead_of_truncating() {
+    async fn playbook_selection_menu_description_wraps_instead_of_truncating() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_verbs = vec![test_verb_with_description(
+        app.playbook_verbs = vec![test_verb_with_description(
             "crystallize",
             "Crystallize spec",
-            construct_protocol::ProgramVerbEffect::Rewrite,
+            construct_protocol::PlaybookVerbEffect::Rewrite,
             // A single trailing token (no internal spaces) so it can never
             // itself be split across a wrapped line boundary — makes the
             // "still present after wrapping" assertion below unambiguous.
@@ -21379,20 +21379,20 @@ mod tests {
              constraints, and a handful of acceptance criteria that reach all the way to \
              TAILMARKERWORD.",
         )];
-        app.begin_program_selection();
-        app.move_program_cursor(5);
-        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
+        app.playbook_popup.as_mut().unwrap().selection_menu = Some(PlaybookSelectionMenu {
             focused: true,
-            selected_action: ProgramSelectionAction::Verb(0),
+            selected_action: PlaybookSelectionAction::Verb(0),
             ..Default::default()
         });
 
         // Wide enough backend that the menu isn't itself squeezed by the
-        // outer program area, only by its own fixed width.
+        // outer playbook area, only by its own fixed width.
         let backend = ratatui::backend::TestBackend::new(140, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             !text.contains('…'),
@@ -21413,29 +21413,29 @@ mod tests {
     /// showing pre-highlighted the moment the menu opens, with no genuine
     /// hover from the user.
     #[tokio::test]
-    async fn program_selection_menu_ignores_stale_mouse_position_on_first_render() {
+    async fn playbook_selection_menu_ignores_stale_mouse_position_on_first_render() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_verbs = vec![construct_protocol::ProgramVerb {
+        app.playbook_verbs = vec![construct_protocol::PlaybookVerb {
             name: "crystallize".to_string(),
             label: "Crystallize spec".to_string(),
             description: None,
-            effect: construct_protocol::ProgramVerbEffect::Rewrite,
-            interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+            effect: construct_protocol::PlaybookVerbEffect::Rewrite,
+            interaction: construct_protocol::PlaybookVerbInteraction::SingleShot,
             order: 0,
             built_in: true,
             prompt: "test".to_string(),
         }];
-        app.begin_program_selection();
-        app.move_program_cursor(5);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
 
         // First render: compute where the verb row and Run button will land,
         // then plant a stale mouse position exactly on the verb row — as if
@@ -21446,17 +21446,17 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
-        let verb_hit = app.layout.program_selection_verb_hits[0].clone();
+            .expect("playbook should render");
+        let verb_hit = app.layout.playbook_selection_verb_hits[0].clone();
         let run_hit = app
             .layout
-            .program_selection_run_hit
+            .playbook_selection_run_hit
             .expect("run hit registered");
         assert!(app.mouse_moved_at.is_none(), "no genuine pointer move yet");
         app.mouse_pos = Some((verb_hit.0, verb_hit.2));
 
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render with stale mouse position");
+            .expect("playbook should render with stale mouse position");
         let buf = term.backend().buffer();
         let verb_cell = buf.cell((verb_hit.0, verb_hit.2)).expect("verb row cell");
         assert_ne!(
@@ -21468,7 +21468,7 @@ mod tests {
         // Also plant one on the Run button, for the same reason.
         app.mouse_pos = Some((run_hit.0, run_hit.2));
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render with stale mouse over Run");
+            .expect("playbook should render with stale mouse over Run");
         let buf = term.backend().buffer();
         let run_cell = buf.cell((run_hit.0, run_hit.2)).expect("Run cell");
         assert_ne!(
@@ -21486,7 +21486,7 @@ mod tests {
         })
         .await;
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render after a genuine move");
+            .expect("playbook should render after a genuine move");
         let buf = term.backend().buffer();
         let verb_cell = buf.cell((verb_hit.0, verb_hit.2)).expect("verb row cell");
         assert_eq!(
@@ -21498,24 +21498,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_selection_comment_text_is_underlined_not_highlighted() {
+    async fn playbook_selection_comment_text_is_underlined_not_highlighted() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.begin_program_selection();
-        app.move_program_cursor(5);
-        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
+        app.playbook_popup.as_mut().unwrap().selection_menu = Some(PlaybookSelectionMenu {
             focused: true,
             comment: "focus".into(),
             cursor: 5,
-            selected_action: ProgramSelectionAction::Comment,
+            selected_action: PlaybookSelectionAction::Comment,
 
             ..Default::default()
         });
@@ -21523,7 +21523,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let buf = term.backend().buffer();
         let mut focus_pos = None;
         for y in 0..buf.area.height {
@@ -21560,26 +21560,26 @@ mod tests {
     /// Run and confirm the comment text is still underlined and still not
     /// styled identically to an unselected action row.
     #[tokio::test]
-    async fn program_selection_comment_text_stays_underlined_after_focus_moves_to_run() {
+    async fn playbook_selection_comment_text_stays_underlined_after_focus_moves_to_run() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.begin_program_selection();
-        app.move_program_cursor(5);
-        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
+        app.playbook_popup.as_mut().unwrap().selection_menu = Some(PlaybookSelectionMenu {
             focused: true,
             comment: "focus".into(),
             cursor: 5,
             // Run, not Comment: the bug reproduces once the highlight moves
             // off the comment row.
-            selected_action: ProgramSelectionAction::Run,
+            selected_action: PlaybookSelectionAction::Run,
 
             ..Default::default()
         });
@@ -21587,7 +21587,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let buf = term.backend().buffer();
         let mut focus_pos = None;
         for y in 0..buf.area.height {
@@ -21622,27 +21622,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_selection_comment_run_button_is_right_aligned_and_contrasting() {
+    async fn playbook_selection_comment_run_button_is_right_aligned_and_contrasting() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.begin_program_selection();
-        app.move_program_cursor(5);
-        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
+        app.playbook_popup.as_mut().unwrap().selection_menu = Some(PlaybookSelectionMenu {
             focused: true,
             comment: "focus".into(),
             cursor: 5,
             // Run, not Comment: this test asserts the Run button's own
             // highlighted appearance, which now depends on Run specifically
             // being the keyboard-selected row (spec 0089).
-            selected_action: ProgramSelectionAction::Run,
+            selected_action: PlaybookSelectionAction::Run,
 
             ..Default::default()
         });
@@ -21650,11 +21650,11 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let buf = term.backend().buffer();
         let hit = app
             .layout
-            .program_selection_run_hit
+            .playbook_selection_run_hit
             .expect("selection menu hit registered");
         let y = hit.2;
         let focus_x = (0..hit.0)
@@ -21706,28 +21706,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_selection_run_button_highlights_after_navigating_down_from_comment() {
+    async fn playbook_selection_run_button_highlights_after_navigating_down_from_comment() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.begin_program_selection();
-        app.move_program_cursor(5);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let buf = term.backend().buffer();
         let hit = app
             .layout
-            .program_selection_run_hit
+            .playbook_selection_run_hit
             .expect("selection menu hit registered");
         let run_cell = buf
             .cell((hit.1.saturating_sub(3), hit.2))
@@ -21738,14 +21738,14 @@ mod tests {
             "Run button should not be highlighted before Tab focuses the menu"
         );
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render after focus");
+            .expect("playbook should render after focus");
         let buf = term.backend().buffer();
         let hit = app
             .layout
-            .program_selection_run_hit
+            .playbook_selection_run_hit
             .expect("selection menu hit registered");
         let tab_focused_run_cell = buf
             .cell((hit.1.saturating_sub(3), hit.2))
@@ -21757,14 +21757,14 @@ mod tests {
         );
 
         // Down moves keyboard selection off Comment onto Run (spec 0089).
-        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render after down");
+            .expect("playbook should render after down");
         let buf = term.backend().buffer();
         let hit = app
             .layout
-            .program_selection_run_hit
+            .playbook_selection_run_hit
             .expect("selection menu hit registered");
         let focused_run_cell = buf
             .cell((hit.1.saturating_sub(3), hit.2))
@@ -21778,24 +21778,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_selection_comment_text_wraps_before_right_button() {
+    async fn playbook_selection_comment_text_wraps_before_right_button() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.begin_program_selection();
-        app.move_program_cursor(5);
-        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
+        app.playbook_popup.as_mut().unwrap().selection_menu = Some(PlaybookSelectionMenu {
             focused: true,
             comment: "alpha beta gamma delta epsilon zeta eta theta".into(),
             cursor: 45,
-            selected_action: ProgramSelectionAction::Comment,
+            selected_action: PlaybookSelectionAction::Comment,
 
             ..Default::default()
         });
@@ -21803,11 +21803,11 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let buf = term.backend().buffer();
         let hit = app
             .layout
-            .program_selection_run_hit
+            .playbook_selection_run_hit
             .expect("selection menu hit registered");
         let first_comment_y = hit.2;
         let first_row: String = (0..buf.area.width)
@@ -21853,21 +21853,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_remote_cursor_does_not_replace_underlying_character_and_labels_are_tagged() {
+    async fn playbook_remote_cursor_does_not_replace_underlying_character_and_labels_are_tagged() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
         let cursor = "\n".chars().count() + "alp".chars().count();
-        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "\nalpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_collaborators.insert(
+        app.playbook_collaborators.insert(
             "peer-1".to_string(),
-            construct_protocol::ProgramCursor {
+            construct_protocol::PlaybookCursor {
                 session_id: "s1".to_string(),
                 client_id: "peer-1".to_string(),
                 label: "Peer".to_string(),
@@ -21885,11 +21885,11 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let inner = app.layout.program_inner_area.expect("program inner area");
-        let popup = app.program_popup.as_ref().expect("program popup");
-        let (visual_row, col) = crate::ui::program_cursor_visual_pos(
+        let inner = app.layout.playbook_inner_area.expect("playbook inner area");
+        let popup = app.playbook_popup.as_ref().expect("playbook popup");
+        let (visual_row, col) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             &popup.buffer,
             cursor,
@@ -21938,21 +21938,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_remote_cursor_hides_after_inactivity_timeout() {
+    async fn playbook_remote_cursor_hides_after_inactivity_timeout() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
         let cursor = "\n".chars().count() + "alp".chars().count();
-        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "\nalpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_collaborators.insert(
+        app.playbook_collaborators.insert(
             "peer-1".to_string(),
-            construct_protocol::ProgramCursor {
+            construct_protocol::PlaybookCursor {
                 session_id: "s1".to_string(),
                 client_id: "peer-1".to_string(),
                 label: "Peer".to_string(),
@@ -21964,7 +21964,7 @@ mod tests {
                 color_index: 2,
                 updated_at_ms: chrono::Utc::now()
                     .timestamp_millis()
-                    .saturating_sub(PROGRAM_COLLAB_CURSOR_TTL_MS + 1),
+                    .saturating_sub(PLAYBOOK_COLLAB_CURSOR_TTL_MS + 1),
                 active: true,
             },
         );
@@ -21972,11 +21972,11 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let inner = app.layout.program_inner_area.expect("program inner area");
-        let popup = app.program_popup.as_ref().expect("program popup");
-        let (visual_row, col) = crate::ui::program_cursor_visual_pos(
+        let inner = app.layout.playbook_inner_area.expect("playbook inner area");
+        let popup = app.playbook_popup.as_ref().expect("playbook popup");
+        let (visual_row, col) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             &popup.buffer,
             cursor,
@@ -22002,21 +22002,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_agent_cursor_hides_after_agent_inactivity_timeout() {
+    async fn playbook_agent_cursor_hides_after_agent_inactivity_timeout() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
         let cursor = "\n".chars().count() + "alp".chars().count();
-        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "\nalpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_collaborators.insert(
+        app.playbook_collaborators.insert(
             "agent-1".to_string(),
-            construct_protocol::ProgramCursor {
+            construct_protocol::PlaybookCursor {
                 session_id: "s1".to_string(),
                 client_id: "agent-1".to_string(),
                 label: "Agent".to_string(),
@@ -22028,7 +22028,7 @@ mod tests {
                 color_index: 2,
                 updated_at_ms: chrono::Utc::now()
                     .timestamp_millis()
-                    .saturating_sub(PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS + 1),
+                    .saturating_sub(PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS + 1),
                 active: true,
             },
         );
@@ -22036,11 +22036,11 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let inner = app.layout.program_inner_area.expect("program inner area");
-        let popup = app.program_popup.as_ref().expect("program popup");
-        let (visual_row, col) = crate::ui::program_cursor_visual_pos(
+        let inner = app.layout.playbook_inner_area.expect("playbook inner area");
+        let popup = app.playbook_popup.as_ref().expect("playbook popup");
+        let (visual_row, col) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             &popup.buffer,
             cursor,
@@ -22066,21 +22066,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_remote_cursor_label_truncates_to_capped_highlight_width() {
+    async fn playbook_remote_cursor_label_truncates_to_capped_highlight_width() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
         let cursor = "\n".chars().count() + "alp".chars().count();
-        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "\nalpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_collaborators.insert(
+        app.playbook_collaborators.insert(
             "peer-1".to_string(),
-            construct_protocol::ProgramCursor {
+            construct_protocol::PlaybookCursor {
                 session_id: "s1".to_string(),
                 client_id: "peer-1".to_string(),
                 label: "PeerCollaborator".to_string(),
@@ -22098,11 +22098,11 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let inner = app.layout.program_inner_area.expect("program inner area");
-        let popup = app.program_popup.as_ref().expect("program popup");
-        let (visual_row, col) = crate::ui::program_cursor_visual_pos(
+        let inner = app.layout.playbook_inner_area.expect("playbook inner area");
+        let popup = app.playbook_popup.as_ref().expect("playbook popup");
+        let (visual_row, col) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             &popup.buffer,
             cursor,
@@ -22147,21 +22147,21 @@ mod tests {
     /// styled distinctly from a human TUI/web peer's cursor (italic instead
     /// of underline) without hiding the target glyph.
     #[tokio::test]
-    async fn program_remote_agent_cursor_uses_italic_instead_of_underline() {
+    async fn playbook_remote_agent_cursor_uses_italic_instead_of_underline() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
         let cursor = "\n".chars().count() + "alp".chars().count();
-        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "\nalpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_collaborators.insert(
+        app.playbook_collaborators.insert(
             "agent-1".to_string(),
-            construct_protocol::ProgramCursor {
+            construct_protocol::PlaybookCursor {
                 session_id: "s1".to_string(),
                 client_id: "agent-1".to_string(),
                 label: "claude".to_string(),
@@ -22179,11 +22179,11 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let inner = app.layout.program_inner_area.expect("program inner area");
-        let popup = app.program_popup.as_ref().expect("program popup");
-        let (visual_row, col) = crate::ui::program_cursor_visual_pos(
+        let inner = app.layout.playbook_inner_area.expect("playbook inner area");
+        let popup = app.playbook_popup.as_ref().expect("playbook popup");
+        let (visual_row, col) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             &popup.buffer,
             cursor,
@@ -22228,27 +22228,27 @@ mod tests {
     }
 
     /// Spec 0065 agent presence: a fresh agent edit's span (carried in
-    /// `selection_anchor`/`selection_head`) briefly tints the program body
+    /// `selection_anchor`/`selection_head`) briefly tints the playbook body
     /// instead of repainting it instantly.
     #[tokio::test]
-    async fn program_remote_agent_cursor_reveals_edited_span_briefly() {
+    async fn playbook_remote_agent_cursor_reveals_edited_span_briefly() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "\nalpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
         // "alpha" spans char offsets [1, 6); the point cursor sits at the end
         // of that span (offset 6, the following space). Routed through
-        // `on_program_cursor` (rather than a raw `program_collaborators`
+        // `on_playbook_cursor` (rather than a raw `playbook_collaborators`
         // insert) so it also records the client-receipt freshness the reveal
         // gate now keys off (GAP D) — the daemon's `updated_at_ms` alone no
         // longer drives it.
-        app.on_program_cursor(construct_protocol::ProgramCursor {
+        app.on_playbook_cursor(construct_protocol::PlaybookCursor {
             session_id: "s1".to_string(),
             client_id: "agent-1".to_string(),
             label: "claude".to_string(),
@@ -22261,25 +22261,25 @@ mod tests {
             updated_at_ms: chrono::Utc::now().timestamp_millis(),
             active: true,
         });
-        // The reveal now sweeps in over `PROGRAM_AGENT_REVEAL_MS` (GAP D
+        // The reveal now sweeps in over `PLAYBOOK_AGENT_REVEAL_MS` (GAP D
         // typewriter effect) rather than tinting the whole span the instant
         // it's received, so observe it partway through the window — the
         // leading part of "alpha" should already be tinted, but the sweep
         // shouldn't have caught up to its tail yet. Half the window leaves
         // generous margin on both sides against test-execution jitter.
-        if let Some(entry) = app.program_agent_reveal_receipts.get_mut("agent-1") {
+        if let Some(entry) = app.playbook_agent_reveal_receipts.get_mut("agent-1") {
             entry.1 = Instant::now()
-                - Duration::from_millis((crate::ui::PROGRAM_AGENT_REVEAL_MS / 2) as u64);
+                - Duration::from_millis((crate::ui::PLAYBOOK_AGENT_REVEAL_MS / 2) as u64);
         }
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let inner = app.layout.program_inner_area.expect("program inner area");
-        let popup = app.program_popup.as_ref().expect("program popup");
-        let (visual_row, start_col) = crate::ui::program_cursor_visual_pos(
+        let inner = app.layout.playbook_inner_area.expect("playbook inner area");
+        let popup = app.playbook_popup.as_ref().expect("playbook popup");
+        let (visual_row, start_col) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             &popup.buffer,
             1,
@@ -22309,21 +22309,21 @@ mod tests {
 
     /// Spec 0065 agent presence (GAP D typewriter sweep): right when an agent
     /// edit's cursor is received, none of its span should be tinted yet —
-    /// the reveal sweeps in over `PROGRAM_AGENT_REVEAL_MS` rather than
+    /// the reveal sweeps in over `PLAYBOOK_AGENT_REVEAL_MS` rather than
     /// painting the whole span instantly.
     #[tokio::test]
-    async fn program_remote_agent_cursor_reveal_starts_unswept() {
+    async fn playbook_remote_agent_cursor_reveal_starts_unswept() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "\nalpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.on_program_cursor(construct_protocol::ProgramCursor {
+        app.on_playbook_cursor(construct_protocol::PlaybookCursor {
             session_id: "s1".to_string(),
             client_id: "agent-1".to_string(),
             label: "claude".to_string(),
@@ -22340,11 +22340,11 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let inner = app.layout.program_inner_area.expect("program inner area");
-        let popup = app.program_popup.as_ref().expect("program popup");
-        let (visual_row, start_col) = crate::ui::program_cursor_visual_pos(
+        let inner = app.layout.playbook_inner_area.expect("playbook inner area");
+        let popup = app.playbook_popup.as_ref().expect("playbook popup");
+        let (visual_row, start_col) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             &popup.buffer,
             1,
@@ -22369,24 +22369,24 @@ mod tests {
     /// before the first paint, so a cursor whose daemon stamp already reads
     /// as stale must still reveal if this is the first time it's been seen.
     #[tokio::test]
-    async fn program_remote_agent_cursor_reveal_is_receipt_not_daemon_stamp_gated() {
+    async fn playbook_remote_agent_cursor_reveal_is_receipt_not_daemon_stamp_gated() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "\nalpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
         // Daemon stamp is already past the reveal window, but still inside
         // the short agent presence TTL — under the old daemon-stamp reveal
         // gate this would never reveal. Received live just now, it must
         // reveal anyway.
-        let daemon_stamp_age_ms = crate::ui::PROGRAM_AGENT_REVEAL_MS + 100;
-        assert!(daemon_stamp_age_ms < PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS);
-        app.on_program_cursor(construct_protocol::ProgramCursor {
+        let daemon_stamp_age_ms = crate::ui::PLAYBOOK_AGENT_REVEAL_MS + 100;
+        assert!(daemon_stamp_age_ms < PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS);
+        app.on_playbook_cursor(construct_protocol::PlaybookCursor {
             session_id: "s1".to_string(),
             client_id: "agent-1".to_string(),
             label: "claude".to_string(),
@@ -22402,22 +22402,22 @@ mod tests {
             active: true,
         });
         // As above: observe partway through the reveal window (still driven
-        // by the fresh local receipt `on_program_cursor` just recorded, not
+        // by the fresh local receipt `on_playbook_cursor` just recorded, not
         // by the ancient `updated_at_ms` above) rather than the unswept
         // instant right after the notification arrives.
-        if let Some(entry) = app.program_agent_reveal_receipts.get_mut("agent-1") {
+        if let Some(entry) = app.playbook_agent_reveal_receipts.get_mut("agent-1") {
             entry.1 = Instant::now()
-                - Duration::from_millis((crate::ui::PROGRAM_AGENT_REVEAL_MS / 2) as u64);
+                - Duration::from_millis((crate::ui::PLAYBOOK_AGENT_REVEAL_MS / 2) as u64);
         }
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let inner = app.layout.program_inner_area.expect("program inner area");
-        let popup = app.program_popup.as_ref().expect("program popup");
-        let (visual_row, start_col) = crate::ui::program_cursor_visual_pos(
+        let inner = app.layout.playbook_inner_area.expect("playbook inner area");
+        let popup = app.playbook_popup.as_ref().expect("playbook popup");
+        let (visual_row, start_col) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             &popup.buffer,
             1,
@@ -22442,19 +22442,19 @@ mod tests {
     /// receipt clock must honor that rather than treating every notification
     /// as a fresh write.
     #[tokio::test]
-    async fn program_remote_agent_cursor_rebase_does_not_retrigger_reveal() {
+    async fn playbook_remote_agent_cursor_rebase_does_not_retrigger_reveal() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "\nalpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
         let updated_at_ms = chrono::Utc::now().timestamp_millis();
-        app.on_program_cursor(construct_protocol::ProgramCursor {
+        app.on_playbook_cursor(construct_protocol::PlaybookCursor {
             session_id: "s1".to_string(),
             client_id: "agent-1".to_string(),
             label: "claude".to_string(),
@@ -22470,11 +22470,11 @@ mod tests {
         // Age the receipt out past the reveal window, then rebase (same
         // `updated_at_ms`, shifted offsets) — mirroring what the daemon sends
         // when someone else's edit lands after the agent's own.
-        if let Some(entry) = app.program_agent_reveal_receipts.get_mut("agent-1") {
+        if let Some(entry) = app.playbook_agent_reveal_receipts.get_mut("agent-1") {
             entry.1 = Instant::now()
-                - Duration::from_millis((crate::ui::PROGRAM_AGENT_REVEAL_MS + 1) as u64);
+                - Duration::from_millis((crate::ui::PLAYBOOK_AGENT_REVEAL_MS + 1) as u64);
         }
-        app.on_program_cursor(construct_protocol::ProgramCursor {
+        app.on_playbook_cursor(construct_protocol::PlaybookCursor {
             session_id: "s1".to_string(),
             client_id: "agent-1".to_string(),
             label: "claude".to_string(),
@@ -22491,11 +22491,11 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let inner = app.layout.program_inner_area.expect("program inner area");
-        let popup = app.program_popup.as_ref().expect("program popup");
-        let (visual_row, start_col) = crate::ui::program_cursor_visual_pos(
+        let inner = app.layout.playbook_inner_area.expect("playbook inner area");
+        let popup = app.playbook_popup.as_ref().expect("playbook popup");
+        let (visual_row, start_col) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             &popup.buffer,
             2,
@@ -22519,22 +22519,22 @@ mod tests {
     /// even though the point cursor + label remain until the normal
     /// one-minute presence TTL.
     #[tokio::test]
-    async fn program_remote_agent_cursor_reveal_fades_after_its_window() {
+    async fn playbook_remote_agent_cursor_reveal_fades_after_its_window() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "\nalpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "\nalpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
         // Establish the cursor + its (fresh) local receipt via the real
         // notification path, then backdate the receipt directly — the reveal
         // now fades on the client's own receipt clock, not the daemon's
         // `updated_at_ms`, so that's what must age out here.
-        app.on_program_cursor(construct_protocol::ProgramCursor {
+        app.on_playbook_cursor(construct_protocol::PlaybookCursor {
             session_id: "s1".to_string(),
             client_id: "agent-1".to_string(),
             label: "claude".to_string(),
@@ -22547,19 +22547,19 @@ mod tests {
             updated_at_ms: chrono::Utc::now().timestamp_millis(),
             active: true,
         });
-        if let Some(entry) = app.program_agent_reveal_receipts.get_mut("agent-1") {
+        if let Some(entry) = app.playbook_agent_reveal_receipts.get_mut("agent-1") {
             entry.1 = Instant::now()
-                - Duration::from_millis((crate::ui::PROGRAM_AGENT_REVEAL_MS + 1) as u64);
+                - Duration::from_millis((crate::ui::PLAYBOOK_AGENT_REVEAL_MS + 1) as u64);
         }
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let inner = app.layout.program_inner_area.expect("program inner area");
-        let popup = app.program_popup.as_ref().expect("program popup");
-        let (visual_row, start_col) = crate::ui::program_cursor_visual_pos(
+        let inner = app.layout.playbook_inner_area.expect("playbook inner area");
+        let popup = app.playbook_popup.as_ref().expect("playbook popup");
+        let (visual_row, start_col) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             &popup.buffer,
             1,
@@ -22585,7 +22585,7 @@ mod tests {
     /// both paint at the edit's own location — so the bottom border should
     /// grow a plain-language "agent editing ↓" indicator pointing at it.
     #[tokio::test]
-    async fn program_agent_edge_indicator_points_down_for_activity_below_viewport() {
+    async fn playbook_agent_edge_indicator_points_down_for_activity_below_viewport() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
@@ -22596,15 +22596,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let end_cursor = markdown.chars().count();
-        app.program_popup = Some(program_popup_for_test("s1", &markdown, end_cursor));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", &markdown, end_cursor));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
             popup.scroll_offset = 0;
         }
         // The agent's own edit landed at the very end of a long document; the
         // popup is still scrolled to the top, so it's off the bottom.
-        app.on_program_cursor(construct_protocol::ProgramCursor {
+        app.on_playbook_cursor(construct_protocol::PlaybookCursor {
             session_id: "s1".to_string(),
             client_id: "agent-1".to_string(),
             label: "claude".to_string(),
@@ -22621,9 +22621,9 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let rect = app.layout.modal_area.expect("program modal area");
+        let rect = app.layout.modal_area.expect("playbook modal area");
         let buffer = term.backend().buffer();
         let bottom_y = rect.y + rect.height - 1;
         let text: String = (rect.x..rect.x + rect.width)
@@ -22642,7 +22642,7 @@ mod tests {
     /// position (`view_close_button_range` assumes it's always the pane's
     /// very corner).
     #[tokio::test]
-    async fn program_agent_edge_indicator_points_up_for_activity_above_viewport() {
+    async fn playbook_agent_edge_indicator_points_up_for_activity_above_viewport() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
@@ -22652,16 +22652,16 @@ mod tests {
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        app.program_popup = Some(program_popup_for_test("s1", &markdown, 5));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", &markdown, 5));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
             // Scrolled far down; clamped to the real max inside the renderer.
             popup.scroll_offset = 500;
         }
         // The agent's edit landed near the very top of the document, off the
         // top of the scrolled-down viewport.
-        app.on_program_cursor(construct_protocol::ProgramCursor {
+        app.on_playbook_cursor(construct_protocol::PlaybookCursor {
             session_id: "s1".to_string(),
             client_id: "agent-1".to_string(),
             label: "claude".to_string(),
@@ -22678,9 +22678,9 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let rect = app.layout.modal_area.expect("program modal area");
+        let rect = app.layout.modal_area.expect("playbook modal area");
         let buffer = term.backend().buffer();
         let top_y = rect.y;
         let text: String = (rect.x..rect.x + rect.width)
@@ -22709,32 +22709,32 @@ mod tests {
     }
 
     #[test]
-    fn program_selection_block_ids_include_touched_full_blocks() {
-        let mut popup = program_popup_for_test("s1", "- alpha beta\n\n- gamma", 0);
-        popup.selection = Some(ProgramSelection {
+    fn playbook_selection_block_ids_include_touched_full_blocks() {
+        let mut popup = playbook_popup_for_test("s1", "- alpha beta\n\n- gamma", 0);
+        popup.selection = Some(PlaybookSelection {
             anchor: 2,
             head: 7,
             dragged: false,
         });
 
-        let ids = App::selected_program_block_ids(&popup).expect("selected block ids");
+        let ids = App::selected_playbook_block_ids(&popup).expect("selected block ids");
 
         assert!(
-            ids.contains(&construct_protocol::program_block_id("- alpha beta")),
+            ids.contains(&construct_protocol::playbook_block_id("- alpha beta")),
             "a partial text selection should shimmer its enclosing block"
         );
         assert!(
-            !ids.contains(&construct_protocol::program_block_id("- gamma")),
+            !ids.contains(&construct_protocol::playbook_block_id("- gamma")),
             "untouched blocks should not shimmer for a selection run"
         );
     }
 
     /// The widget indicator's leading "─" stitches the square into the title
-    /// bar's top border, so it must carry the *program* border color
-    /// (`program_border`), not the session view's green `pane_border_style`.
-    /// Regression: it painted a green dash on the program's accent border.
+    /// bar's top border, so it must carry the *playbook* border color
+    /// (`playbook_border`), not the session view's green `pane_border_style`.
+    /// Regression: it painted a green dash on the playbook's accent border.
     #[tokio::test]
-    async fn program_widget_icon_dash_matches_program_border_color() {
+    async fn playbook_widget_icon_dash_matches_playbook_border_color() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
@@ -22754,16 +22754,16 @@ mod tests {
                 },
             )]),
         );
-        app.program_popup = Some(program_popup_for_test("s1", "# program\n\nbody", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "# playbook\n\nbody", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
         // The widget title actually painted (otherwise this test is vacuous).
         assert!(
@@ -22771,11 +22771,11 @@ mod tests {
             "widget title square should register a hit"
         );
 
-        let modal = app.layout.modal_area.expect("program modal area");
-        let accent = app.theme.program_border;
+        let modal = app.layout.modal_area.expect("playbook modal area");
+        let accent = app.theme.playbook_border;
         let buf = term.backend().buffer();
         let y = modal.y;
-        // Every "─" on the program's top border — including the indicator's
+        // Every "─" on the playbook's top border — including the indicator's
         // leading dash — must use the accent border color, never the green
         // session-view border.
         let mismatched: Vec<u16> = (modal.x..modal.x + modal.width)
@@ -22784,17 +22784,17 @@ mod tests {
             .collect();
         assert!(
             mismatched.is_empty(),
-            "program top-border dashes must match the accent border color; mismatched cols: {mismatched:?}"
+            "playbook top-border dashes must match the accent border color; mismatched cols: {mismatched:?}"
         );
         server.abort();
     }
 
-    /// Hovering/pinning a session's sticky widget while its program is open must
-    /// reveal the widget body *on top of* the program. Regression: the program's
+    /// Hovering/pinning a session's sticky widget while its playbook is open must
+    /// reveal the widget body *on top of* the playbook. Regression: the playbook's
     /// own `Clear` wiped the widget the session view had drawn underneath, so the
-    /// widget was never visible while the program was shown.
+    /// widget was never visible while the playbook was shown.
     #[tokio::test]
-    async fn program_reveals_pinned_widget_over_program() {
+    async fn playbook_reveals_pinned_widget_over_playbook() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
@@ -22817,80 +22817,80 @@ mod tests {
         // Pin the widget so it is visible without simulating a hover.
         app.dynamic_ui_selected
             .insert(("s1".to_string(), "w1".to_string()));
-        app.program_popup = Some(program_popup_for_test("s1", "# program\n\nbody", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "# playbook\n\nbody", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let text = rendered_text(term.backend().buffer());
 
         assert!(
             text.contains("ZZWIDGET"),
-            "pinned widget body should render on top of the program: {text:?}"
+            "pinned widget body should render on top of the playbook: {text:?}"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_defaults_to_roll_down_with_terminal_visible() {
+    async fn playbook_defaults_to_roll_down_with_terminal_visible() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "# program\n\nbody", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "# playbook\n\nbody", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
 
         let backend = ratatui::backend::TestBackend::new(120, 45);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let base = app.layout.program_base_area.expect("program base area");
-        let modal = app.layout.modal_area.expect("program modal area");
+        let base = app.layout.playbook_base_area.expect("playbook base area");
+        let modal = app.layout.modal_area.expect("playbook modal area");
         assert_eq!(modal.y, base.y);
         assert_eq!(modal.width, base.width);
         assert!(
             modal.height < base.height,
-            "default Program should leave terminal visible: modal={modal:?} base={base:?}"
+            "default Playbook should leave terminal visible: modal={modal:?} base={base:?}"
         );
         assert_eq!(
-            app.layout.program_resize_hit,
+            app.layout.playbook_resize_hit,
             Some(Rect::new(
                 modal.x,
                 modal.y + modal.height - 1,
                 modal.width,
                 1
             )),
-            "Program bottom border should be the resize hit row"
+            "Playbook bottom border should be the resize hit row"
         );
         assert!(
             (modal.height as i32 - ((base.height as i32 * 67 + 50) / 100)).abs() <= 1,
-            "default Program coverage should be about two thirds: modal={modal:?} base={base:?}"
+            "default Playbook coverage should be about two thirds: modal={modal:?} base={base:?}"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_bottom_border_drag_resizes_coverage() {
+    async fn playbook_bottom_border_drag_resizes_coverage() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
-        app.layout.program_base_area = Some(Rect::new(20, 0, 80, 30));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
+        app.layout.playbook_base_area = Some(Rect::new(20, 0, 80, 30));
         app.layout.modal_area = Some(Rect::new(20, 0, 80, 20));
-        app.layout.program_resize_hit = Some(Rect::new(20, 19, 80, 1));
+        app.layout.playbook_resize_hit = Some(Rect::new(20, 19, 80, 1));
 
         assert!(
-            app.handle_program_mouse(&MouseEvent {
+            app.handle_playbook_mouse(&MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 40,
                 row: 19,
@@ -22899,41 +22899,41 @@ mod tests {
             .await,
             "resize border should consume mouse down"
         );
-        assert!(app.resizing_program_popup.is_some());
+        assert!(app.resizing_playbook_popup.is_some());
 
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
             column: 40,
             row: 28,
             modifiers: KeyModifiers::NONE,
         })
         .await;
-        assert_eq!(app.program_popup.as_ref().unwrap().cover_percent, 97);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cover_percent, 97);
 
-        app.handle_program_mouse(&MouseEvent {
+        app.handle_playbook_mouse(&MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
             column: 40,
             row: 8,
             modifiers: KeyModifiers::NONE,
         })
         .await;
-        assert!(app.resizing_program_popup.is_none());
-        assert_eq!(app.program_popup.as_ref().unwrap().cover_percent, 30);
+        assert!(app.resizing_playbook_popup.is_none());
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cover_percent, 30);
         server.abort();
     }
 
     #[tokio::test]
-    async fn clicking_exposed_terminal_focuses_terminal_without_hiding_program() {
+    async fn clicking_exposed_terminal_focuses_terminal_without_hiding_playbook() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
         app.focus = PaneFocus::View;
-        app.layout.program_base_area = Some(Rect::new(20, 0, 80, 30));
+        app.layout.playbook_base_area = Some(Rect::new(20, 0, 80, 30));
         app.layout.modal_area = Some(Rect::new(20, 0, 80, 20));
 
         let consumed = app
-            .handle_program_mouse(&MouseEvent {
+            .handle_playbook_mouse(&MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 40,
                 row: 24,
@@ -22942,7 +22942,7 @@ mod tests {
             .await;
 
         assert!(!consumed, "exposed terminal click should fall through");
-        let popup = app.program_popup.as_ref().expect("Program remains visible");
+        let popup = app.playbook_popup.as_ref().expect("Playbook remains visible");
         assert!(popup.terminal_focus);
         assert!(
             popup.slide_changed_at.is_some(),
@@ -22952,17 +22952,17 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().buffer,
+            app.playbook_popup.as_ref().unwrap().buffer,
             "draft",
-            "terminal-focused keys must not edit Program Markdown"
+            "terminal-focused keys must not edit Playbook Markdown"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn c_x_ctrl_o_toggles_between_program_and_terminal_focus() {
+    async fn c_x_ctrl_o_toggles_between_playbook_and_terminal_focus() {
         let (mut app, _dir, server) = captured_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
         app.focus = PaneFocus::View;
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
@@ -22970,10 +22970,10 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
             .await;
 
-        let popup = app.program_popup.as_ref().expect("program remains open");
+        let popup = app.playbook_popup.as_ref().expect("playbook remains open");
         assert!(
             popup.terminal_focus,
-            "C-x C-o from Program focus should focus the terminal"
+            "C-x C-o from Playbook focus should focus the terminal"
         );
         assert_eq!(app.focus, PaneFocus::View);
         assert_eq!(
@@ -22990,42 +22990,42 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
             .await;
 
-        let popup = app.program_popup.as_ref().expect("program remains open");
+        let popup = app.playbook_popup.as_ref().expect("playbook remains open");
         assert!(
             !popup.terminal_focus,
-            "C-x C-o from terminal focus should refocus Program"
+            "C-x C-o from terminal focus should refocus Playbook"
         );
         assert_eq!(app.focus, PaneFocus::View);
         assert_eq!(
             app.status.as_ref().map(|(message, _)| message.as_str()),
-            Some("focus: program")
+            Some("focus: playbook")
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_terminal_focus_slide_animates_and_reverses_mid_flight() {
+    async fn playbook_terminal_focus_slide_animates_and_reverses_mid_flight() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
 
         // Before any focus flip, the fraction sits at the anchored endpoint.
         assert_eq!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .unwrap()
                 .slide_fraction(Instant::now()),
             0.0
         );
 
-        app.set_program_terminal_focus(true);
+        app.set_playbook_terminal_focus(true);
         let changed_at = app
-            .program_popup
+            .playbook_popup
             .as_ref()
             .unwrap()
             .slide_changed_at
             .expect("focus flip records its instant");
         assert!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .unwrap()
                 .slide_fraction(changed_at)
@@ -23033,74 +23033,74 @@ mod tests {
             "the slide starts anchored, not snapped right"
         );
         let half = app
-            .program_popup
+            .playbook_popup
             .as_ref()
             .unwrap()
-            .slide_fraction(changed_at + Duration::from_millis(PROGRAM_REVEAL_MS / 2));
+            .slide_fraction(changed_at + Duration::from_millis(PLAYBOOK_REVEAL_MS / 2));
         assert!(
             (half - 0.5).abs() < 0.05,
             "halfway through the popup is mid-slide, got {half}"
         );
         assert_eq!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .unwrap()
-                .slide_fraction(changed_at + Duration::from_millis(PROGRAM_REVEAL_MS),),
+                .slide_fraction(changed_at + Duration::from_millis(PLAYBOOK_REVEAL_MS),),
             1.0,
             "the slide settles fully slid"
         );
 
         // A redundant flip must not restart the animation.
-        app.set_program_terminal_focus(true);
+        app.set_playbook_terminal_focus(true);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().slide_changed_at,
+            app.playbook_popup.as_ref().unwrap().slide_changed_at,
             Some(changed_at)
         );
 
         // Reversing mid-flight resumes from the in-flight fraction instead of
         // snapping to an endpoint: simulate a slide-right that started half a
-        // reveal ago, then hand focus back to the Program.
+        // reveal ago, then hand focus back to the Playbook.
         {
-            let popup = app.program_popup.as_mut().unwrap();
+            let popup = app.playbook_popup.as_mut().unwrap();
             popup.slide_from = 0.0;
             popup.slide_changed_at =
-                Some(Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS / 2));
+                Some(Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS / 2));
         }
-        app.set_program_terminal_focus(false);
+        app.set_playbook_terminal_focus(false);
         assert!(
-            (app.program_popup.as_ref().unwrap().slide_from - 0.5).abs() < 0.1,
+            (app.playbook_popup.as_ref().unwrap().slide_from - 0.5).abs() < 0.1,
             "reversal should start near the mid-flight position, got {}",
-            app.program_popup.as_ref().unwrap().slide_from
+            app.playbook_popup.as_ref().unwrap().slide_from
         );
         let done = app
-            .program_popup
+            .playbook_popup
             .as_ref()
             .unwrap()
             .slide_changed_at
             .expect("reversal records instant")
-            + Duration::from_millis(PROGRAM_REVEAL_MS);
+            + Duration::from_millis(PLAYBOOK_REVEAL_MS);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().slide_fraction(done),
+            app.playbook_popup.as_ref().unwrap().slide_fraction(done),
             0.0,
             "the reversed slide settles back at the pane's left edge"
         );
         server.abort();
     }
 
-    /// The Run button now lives in the LEFT cluster of the program title bar,
+    /// The Run button now lives in the LEFT cluster of the playbook title bar,
     /// between the session name and the ` * modified` marker — not pinned to the
     /// right side any more.
     #[tokio::test]
-    async fn program_title_run_button_sits_in_left_cluster() {
+    async fn playbook_title_run_button_sits_in_left_cluster() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
             // Diverge the buffer from the saved markdown so the ` * modified`
             // marker renders to the right of the Run button.
             popup.buffer = "alpha beta".into();
@@ -23109,13 +23109,13 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let buf = term.backend().buffer();
         let modal = app.layout.modal_area.expect("modal area");
 
         let run = app
             .layout
-            .program_title_run_hit
+            .playbook_title_run_hit
             .expect("run hit registered");
         assert_eq!(run.2, modal.y, "run sits on the title border row");
         assert!(
@@ -23141,36 +23141,36 @@ mod tests {
         server.abort();
     }
 
-    /// The program session-actions button reuses the session chat view's
+    /// The playbook session-actions button reuses the session chat view's
     /// geometry — the same `view_close_button_range` slot — but as of #556 it
-    /// paints in the program border color (`program_border`) so the ☰ reads as
-    /// part of the program frame, not in the shared session-view `matrix_close`
+    /// paints in the playbook border color (`playbook_border`) so the ☰ reads as
+    /// part of the playbook frame, not in the shared session-view `matrix_close`
     /// hue.
     #[tokio::test]
-    async fn program_title_actions_reuse_session_geometry_in_program_border_color() {
+    async fn playbook_title_actions_reuse_session_geometry_in_playbook_border_color() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        // Program border color (#556): `program_border_style` paints the frame in
-        // `program_border`, and the render path passes that hue through to the ☰.
-        let program_border_color = app.theme.program_border;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+        // Playbook border color (#556): `playbook_border_style` paints the frame in
+        // `playbook_border`, and the render path passes that hue through to the ☰.
+        let playbook_border_color = app.theme.playbook_border;
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let buf = term.backend().buffer();
         let modal = app.layout.modal_area.expect("modal area");
 
         assert_eq!(
-            app.layout.program_title_close_hit,
+            app.layout.playbook_title_close_hit,
             Some(crate::ui::view_close_button_range(modal)),
-            "program actions must reuse the session-view action geometry"
+            "playbook actions must reuse the session-view action geometry"
         );
         let (cx, ce, cy) = crate::ui::view_close_button_range(modal);
         let glyph_cell = (cx..ce)
@@ -23179,34 +23179,34 @@ mod tests {
             .expect("hamburger glyph paints in its range");
         assert_eq!(
             glyph_cell.style().fg,
-            Some(program_border_color),
-            "program action glyph should use the program border color (#556)"
+            Some(playbook_border_color),
+            "playbook action glyph should use the playbook border color (#556)"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_run_button_spins_while_running() {
+    async fn playbook_run_button_spins_while_running() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
 
-        app.start_program_run("s1", "alpha beta", false, "");
+        app.start_playbook_run("s1", "alpha beta", false, "");
 
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let run = app
             .layout
-            .program_title_run_hit
+            .playbook_title_run_hit
             .expect("run hit registered");
         let run_glyph = term
             .backend()
@@ -23219,7 +23219,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_run_button_spins_on_rerun_when_shimmer_already_exists() {
+    async fn playbook_run_button_spins_on_rerun_when_shimmer_already_exists() {
         // Pressing Run while a shimmer block already exists for this session
         // (an older run whose first output has already been seen, so the
         // button had stopped pulsing) must still restart the pulse for the
@@ -23229,14 +23229,14 @@ mod tests {
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
-        app.program_runs.insert(
+        app.playbook_runs.insert(
             "s1".to_string(),
-            ProgramRun {
+            PlaybookRun {
                 started_at: Instant::now() - Duration::from_secs(5),
                 pending: HashSet::new(),
                 pending_tooltips: HashMap::new(),
@@ -23244,7 +23244,7 @@ mod tests {
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
-                stage: construct_protocol::ProgramRunStage::FirstOutput,
+                stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
                 daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
@@ -23252,15 +23252,15 @@ mod tests {
             },
         );
 
-        app.start_program_run("s1", "alpha beta", false, "alpha beta");
+        app.start_playbook_run("s1", "alpha beta", false, "alpha beta");
 
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let run = app
             .layout
-            .program_title_run_hit
+            .playbook_title_run_hit
             .expect("run hit registered");
         let run_glyph = term
             .backend()
@@ -23273,7 +23273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_clip_chip_color_reflects_live_session_status() {
+    async fn playbook_clip_chip_color_reflects_live_session_status() {
         let (mut app, _dir, server) = empty_app().await;
         let mut running = summary_with_kind(construct_protocol::SessionKind::User);
         running.id = "s-run".into();
@@ -23283,20 +23283,20 @@ mod tests {
         errored.state = construct_protocol::SessionState::Errored;
         app.sessions = vec![running, errored];
         app.selection = Selection::Session("s-run".into());
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s-run",
             "@{session:s-run} @{session:s-err} @{session:s-ghost}",
             0,
         ));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
 
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
-        let hits = app.layout.program_clip_hits.clone();
+        let hits = app.layout.playbook_clip_hits.clone();
         assert_eq!(hits.len(), 3, "expected three session clip hits: {hits:?}");
         let buf = term.backend().buffer();
         // Sample a couple of cells into the chip rather than `col_start`
@@ -23347,22 +23347,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_clip_hover_shows_missing_session_tooltip() {
+    async fn playbook_clip_hover_shows_missing_session_tooltip() {
         let (mut app, _dir, server) = empty_app().await;
         let s1 = summary_with_kind(construct_protocol::SessionKind::User);
         app.sessions = vec![s1];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "talk @{session:ghost}", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "talk @{session:ghost}", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
 
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let hit = app
             .layout
-            .program_clip_hits
+            .playbook_clip_hits
             .first()
             .cloned()
             .expect("clip hit for ghost session");
@@ -23380,7 +23380,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_session_hover_card_shows_session_output() {
+    async fn playbook_session_hover_card_shows_session_output() {
         use crate::pty_render::ItemHistory;
 
         let (mut app, _dir, server) = empty_app().await;
@@ -23391,9 +23391,9 @@ mod tests {
         s2.title = Some("Worker".into());
         app.sessions = vec![s1, s2];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "talk @{session:s2}", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "talk @{session:s2}", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
 
         let mut history = ItemHistory::new();
         history.feed_pty(b"SESS_PREVIEW_MARKER\nsecond line");
@@ -23402,17 +23402,17 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let hit = app
             .layout
-            .program_clip_hits
+            .playbook_clip_hits
             .first()
             .cloned()
             .expect("clip hit for s2");
         app.mouse_pos = Some((hit.col_start, hit.row));
 
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program hover card should render");
+            .expect("playbook hover card should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("SESS_PREVIEW_"),
@@ -23434,7 +23434,7 @@ mod tests {
     /// every frame while both were on screen (the same failure shape as
     /// `pin_tile_reuses_cached_size_to_avoid_split_thrash`).
     #[tokio::test]
-    async fn program_session_hover_card_crops_without_resizing_shared_parser() {
+    async fn playbook_session_hover_card_crops_without_resizing_shared_parser() {
         use crate::pty_render::ItemHistory;
 
         let (mut app, _dir, server) = empty_app().await;
@@ -23444,9 +23444,9 @@ mod tests {
         s2.id = "s2".into();
         app.sessions = vec![s1, s2];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "talk @{session:s2}", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "talk @{session:s2}", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
 
         // Simulate the main/split render having already sized the shared
         // parser: seed the history with a full-size 140x40 replay.
@@ -23458,17 +23458,17 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let hit = app
             .layout
-            .program_clip_hits
+            .playbook_clip_hits
             .first()
             .cloned()
             .expect("clip hit for s2");
         app.mouse_pos = Some((hit.col_start, hit.row));
 
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program hover card should render");
+            .expect("playbook hover card should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("HOVER_CROP_"),
@@ -23501,7 +23501,7 @@ mod tests {
     /// crops the session's existing viewport rather than resizing the shared
     /// parser to its own preview size.
     #[tokio::test]
-    async fn program_pinned_clip_card_renders_regardless_of_mouse_and_crops_shared_parser() {
+    async fn playbook_pinned_clip_card_renders_regardless_of_mouse_and_crops_shared_parser() {
         use crate::pty_render::ItemHistory;
 
         let (mut app, _dir, server) = empty_app().await;
@@ -23511,10 +23511,10 @@ mod tests {
         s2.id = "s2".into();
         app.sessions = vec![s1, s2];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "talk @{session:s2}", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        app.program_popup.as_mut().unwrap().pinned_clip = Some("s2".to_string());
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "talk @{session:s2}", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+        app.playbook_popup.as_mut().unwrap().pinned_clip = Some("s2".to_string());
 
         let mut history = ItemHistory::new();
         history.feed_pty(b"PINNED_CARD_MARKER\nsecond line");
@@ -23556,7 +23556,7 @@ mod tests {
     /// pan right (clamping at the screen's right edge). The parser is still
     /// never resized.
     #[tokio::test]
-    async fn program_pinned_clip_card_pans_crop_with_scroll_offsets() {
+    async fn playbook_pinned_clip_card_pans_crop_with_scroll_offsets() {
         use crate::pty_render::ItemHistory;
 
         let (mut app, _dir, server) = empty_app().await;
@@ -23566,10 +23566,10 @@ mod tests {
         s2.id = "s2".into();
         app.sessions = vec![s1, s2];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "talk @{session:s2}", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        app.program_popup.as_mut().unwrap().pinned_clip = Some("s2".to_string());
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "talk @{session:s2}", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+        app.playbook_popup.as_mut().unwrap().pinned_clip = Some("s2".to_string());
         app.mouse_pos = Some((0, 0));
 
         // 30 content rows in a 140x40 parser: the 22-row card crops the tail,
@@ -23601,7 +23601,7 @@ mod tests {
         );
 
         // Over-scrolled vertical pan clamps at the content's top.
-        app.program_popup.as_mut().unwrap().pinned_scroll_rows = 200;
+        app.playbook_popup.as_mut().unwrap().pinned_scroll_rows = 200;
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("render");
         let text = rendered_text(term.backend().buffer());
@@ -23612,7 +23612,7 @@ mod tests {
 
         // Horizontal pan reveals content beyond the card's right edge,
         // clamped so the crop never runs past the screen's width.
-        let popup = app.program_popup.as_mut().unwrap();
+        let popup = app.playbook_popup.as_mut().unwrap();
         popup.pinned_scroll_rows = 0;
         popup.pinned_scroll_cols = 500;
         term.draw(|f| crate::ui::render(f, &mut app))
@@ -23638,7 +23638,7 @@ mod tests {
     /// own dims — the parser follows the card instead of staying at the
     /// main-view size, because the PTY itself was resized to the card.
     #[tokio::test]
-    async fn program_pinned_clip_card_owned_mode_renders_at_card_dims() {
+    async fn playbook_pinned_clip_card_owned_mode_renders_at_card_dims() {
         use crate::pty_render::ItemHistory;
 
         let (mut app, _dir, server) = empty_app().await;
@@ -23648,10 +23648,10 @@ mod tests {
         s2.id = "s2".into();
         app.sessions = vec![s1, s2];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "talk @{session:s2}", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        let popup = app.program_popup.as_mut().unwrap();
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "talk @{session:s2}", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+        let popup = app.playbook_popup.as_mut().unwrap();
         popup.pinned_clip = Some("s2".to_string());
         popup.pinned_card_cols = 64;
         popup.pinned_card_rows = 22;
@@ -23685,7 +23685,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_session_hover_card_works_on_unfocused_split_program() {
+    async fn playbook_session_hover_card_works_on_unfocused_split_playbook() {
         use crate::pty_render::ItemHistory;
 
         let (mut app, _dir, server) = empty_app().await;
@@ -23711,9 +23711,9 @@ mod tests {
         };
         app.active_window_id = 2;
         app.selection = Selection::Session("s2".into());
-        let mut inactive_program = program_popup_for_test("s1", "talk @{session:s3}", 0);
-        inactive_program.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        app.program_popups.insert("s1".into(), inactive_program);
+        let mut inactive_playbook = playbook_popup_for_test("s1", "talk @{session:s3}", 0);
+        inactive_playbook.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+        app.playbook_popups.insert("s1".into(), inactive_playbook);
 
         let mut history = ItemHistory::new();
         history.feed_pty(b"UNFOCUSED_SPLIT_PREVIEW\nsecond line");
@@ -23722,7 +23722,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(160, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
         let pane = app
             .layout
@@ -23732,28 +23732,28 @@ mod tests {
             .expect("inactive split pane")
             .area;
         let inner = pane.inner(ratatui::layout::Margin {
-            horizontal: 1 + PROGRAM_CONTENT_PADDING_X,
-            vertical: 1 + PROGRAM_CONTENT_PADDING_Y,
+            horizontal: 1 + PLAYBOOK_CONTENT_PADDING_X,
+            vertical: 1 + PLAYBOOK_CONTENT_PADDING_Y,
         });
-        let popup = app.program_popups.get("s1").expect("stashed s1 program");
-        let hit = crate::ui::program_session_clip_hits(Some(&app), &popup.buffer, 0, inner)
+        let popup = app.playbook_popups.get("s1").expect("stashed s1 playbook");
+        let hit = crate::ui::playbook_session_clip_hits(Some(&app), &popup.buffer, 0, inner)
             .into_iter()
             .find(|hit| hit.session_id == "s3")
-            .expect("inactive program clip hit");
+            .expect("inactive playbook clip hit");
         app.mouse_pos = Some((hit.col_start, hit.row));
 
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("inactive program hover card should render");
+            .expect("inactive playbook hover card should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("UNFOCUSED_SPLIT_"),
-            "hovering a clip in an unfocused split program should show the session tail"
+            "hovering a clip in an unfocused split playbook should show the session tail"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_shimmer_tooltip_works_on_unfocused_split_program() {
+    async fn playbook_shimmer_tooltip_works_on_unfocused_split_playbook() {
         let (mut app, _dir, server) = empty_app().await;
         let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
         let mut s2 = summary_with_kind(construct_protocol::SessionKind::User);
@@ -23775,14 +23775,14 @@ mod tests {
         app.active_window_id = 2;
         app.selection = Selection::Session("s2".into());
         let markdown = "running shimmer";
-        let mut inactive_program = program_popup_for_test("s1", markdown, 0);
-        inactive_program.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        app.program_popups.insert("s1".into(), inactive_program);
+        let mut inactive_playbook = playbook_popup_for_test("s1", markdown, 0);
+        inactive_playbook.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+        app.playbook_popups.insert("s1".into(), inactive_playbook);
 
-        let block_id = construct_protocol::program_block_id(markdown);
-        app.program_runs.insert(
+        let block_id = construct_protocol::playbook_block_id(markdown);
+        app.playbook_runs.insert(
             "s1".into(),
-            ProgramRun {
+            PlaybookRun {
                 started_at: Instant::now(),
                 pending: HashSet::from([block_id.clone()]),
                 pending_tooltips: HashMap::from([(block_id, "Still running".into())]),
@@ -23790,7 +23790,7 @@ mod tests {
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
-                stage: construct_protocol::ProgramRunStage::FirstOutput,
+                stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
                 daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
@@ -23801,7 +23801,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(160, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
         let pane = app
             .layout
@@ -23811,27 +23811,27 @@ mod tests {
             .expect("inactive split pane")
             .area;
         let inner = pane.inner(ratatui::layout::Margin {
-            horizontal: 1 + PROGRAM_CONTENT_PADDING_X,
-            vertical: 1 + PROGRAM_CONTENT_PADDING_Y,
+            horizontal: 1 + PLAYBOOK_CONTENT_PADDING_X,
+            vertical: 1 + PLAYBOOK_CONTENT_PADDING_Y,
         });
         app.mouse_pos = Some((inner.x, inner.y));
 
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("inactive program hover tooltip should render");
+            .expect("inactive playbook hover tooltip should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
             text.contains("Still running"),
-            "hovering shimmer in an unfocused split program should show its tooltip"
+            "hovering shimmer in an unfocused split playbook should show its tooltip"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_shimmer_hover_shows_status_text_not_session_preview() {
+    async fn playbook_shimmer_hover_shows_status_text_not_session_preview() {
         use crate::pty_render::ItemHistory;
 
         // Hovering a shimmering block's prose (away from its clip chip) shows
-        // only the block's concise status tooltip. The rolled-down Program view
+        // only the block's concise status tooltip. The rolled-down Playbook view
         // can expose the terminal directly; session previews remain exclusive
         // to explicit session clip chips.
         let (mut app, _dir, server) = empty_app().await;
@@ -23858,9 +23858,9 @@ mod tests {
         app.selection = Selection::Session("s2".into());
 
         let markdown = "Building the PR @{session:s3}";
-        let mut inactive_program = program_popup_for_test("s1", markdown, 0);
-        inactive_program.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        app.program_popups.insert("s1".into(), inactive_program);
+        let mut inactive_playbook = playbook_popup_for_test("s1", markdown, 0);
+        inactive_playbook.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+        app.playbook_popups.insert("s1".into(), inactive_playbook);
 
         let mut dispatcher_history = ItemHistory::new();
         dispatcher_history.feed_pty(b"SHIMMER_TERMINAL_PREVIEW\nsecond line");
@@ -23869,14 +23869,14 @@ mod tests {
         worker_history.feed_pty(b"WORKER_TERMINAL_OUTPUT\nsecond line");
         app.histories.insert("s3".into(), worker_history);
 
-        let block_id = construct_protocol::program_block_spans(markdown)
+        let block_id = construct_protocol::playbook_block_spans(markdown)
             .into_iter()
             .next()
             .expect("one block")
             .id;
-        app.program_runs.insert(
+        app.playbook_runs.insert(
             "s1".into(),
-            ProgramRun {
+            PlaybookRun {
                 started_at: Instant::now(),
                 pending: HashSet::from([block_id.clone()]),
                 pending_tooltips: HashMap::from([(block_id, "Building PR".into())]),
@@ -23884,7 +23884,7 @@ mod tests {
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
-                stage: construct_protocol::ProgramRunStage::FirstOutput,
+                stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
                 daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
@@ -23895,7 +23895,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(160, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
         let pane = app
             .layout
@@ -23905,8 +23905,8 @@ mod tests {
             .expect("inactive split pane")
             .area;
         let inner = pane.inner(ratatui::layout::Margin {
-            horizontal: 1 + PROGRAM_CONTENT_PADDING_X,
-            vertical: 1 + PROGRAM_CONTENT_PADDING_Y,
+            horizontal: 1 + PLAYBOOK_CONTENT_PADDING_X,
+            vertical: 1 + PLAYBOOK_CONTENT_PADDING_Y,
         });
         // Hover the block's leading text cell — away from the trailing clip chip —
         // so the shimmer hover, not the clip hover, owns the tooltip.
@@ -23931,7 +23931,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_shimmer_status_tooltip_persists_while_pointer_stays_still() {
+    async fn playbook_shimmer_status_tooltip_persists_while_pointer_stays_still() {
         // The shimmer-text tooltip must persist for as long as the pointer stays
         // over the shimmering block — matching the clip-chip hover — rather than
         // self-dismissing once the pointer has been briefly still.
@@ -23944,18 +23944,18 @@ mod tests {
         app.selection = Selection::Session("s1".into());
 
         let markdown = "Building the PR @{session:s3}";
-        let mut program = program_popup_for_test("s1", markdown, 0);
-        program.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        app.program_popup = Some(program);
+        let mut playbook = playbook_popup_for_test("s1", markdown, 0);
+        playbook.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+        app.playbook_popup = Some(playbook);
 
-        let block_id = construct_protocol::program_block_spans(markdown)
+        let block_id = construct_protocol::playbook_block_spans(markdown)
             .into_iter()
             .next()
             .expect("one block")
             .id;
-        app.program_runs.insert(
+        app.playbook_runs.insert(
             "s1".into(),
-            ProgramRun {
+            PlaybookRun {
                 started_at: Instant::now(),
                 pending: HashSet::from([block_id.clone()]),
                 pending_tooltips: HashMap::from([(block_id, "Building PR".into())]),
@@ -23963,7 +23963,7 @@ mod tests {
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
-                stage: construct_protocol::ProgramRunStage::FirstOutput,
+                stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
                 daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
@@ -23974,12 +23974,12 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(160, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
         let modal = app.layout.modal_area.expect("modal area");
         let inner = modal.inner(ratatui::layout::Margin {
-            horizontal: 1 + PROGRAM_CONTENT_PADDING_X,
-            vertical: 1 + PROGRAM_CONTENT_PADDING_Y,
+            horizontal: 1 + PLAYBOOK_CONTENT_PADDING_X,
+            vertical: 1 + PLAYBOOK_CONTENT_PADDING_Y,
         });
         app.mouse_pos = Some((inner.x, inner.y));
 
@@ -24006,9 +24006,9 @@ mod tests {
     }
 
     /// Seed `app` with one selected session that owns a single sticky widget,
-    /// plus a fully-revealed program popup over it. Returns the keep-alive dir
+    /// plus a fully-revealed playbook popup over it. Returns the keep-alive dir
     /// and mock-daemon handle.
-    async fn program_with_widget_app() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+    async fn playbook_with_widget_app() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
         use construct_protocol::{UiPanel, UiPlacement};
         let (mut app, dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
@@ -24029,20 +24029,20 @@ mod tests {
                 },
             )]),
         );
-        app.program_popup = Some(program_popup_for_test("s1", "alpha", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         (app, dir, server)
     }
 
     #[tokio::test]
-    async fn program_title_renders_action_button_and_widget_icons() {
-        let (mut app, _dir, server) = program_with_widget_app().await;
+    async fn playbook_title_renders_action_button_and_widget_icons() {
+        let (mut app, _dir, server) = playbook_with_widget_app().await;
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let buf = term.backend().buffer();
         let modal = app.layout.modal_area.expect("modal area");
 
@@ -24050,12 +24050,12 @@ mod tests {
         // glyph paints inside that range.
         let close = app
             .layout
-            .program_title_close_hit
+            .playbook_title_close_hit
             .expect("actions hit registered");
         assert_eq!(
             close,
             crate::ui::view_close_button_range(modal),
-            "program actions must reuse the session-view action geometry"
+            "playbook actions must reuse the session-view action geometry"
         );
         let close_text: String = (close.0..close.1)
             .filter_map(|x| buf.cell((x, close.2)).map(|c| c.symbol().to_string()))
@@ -24068,7 +24068,7 @@ mod tests {
         // The sticky widget registers a title-bar indicator via the SHARED
         // `render_session_widget_title` helper, so it lands in
         // `dynamic_ui_widget_hits` — the same list the pane title bar uses. The
-        // session view and the program both render it at identical geometry.
+        // session view and the playbook both render it at identical geometry.
         let widget_hits: Vec<_> = app
             .layout
             .dynamic_ui_widget_hits
@@ -24109,7 +24109,7 @@ mod tests {
         // widget icon sits left of the rightmost actions button.
         let run = app
             .layout
-            .program_title_run_hit
+            .playbook_title_run_hit
             .expect("run hit registered");
         assert!(
             run.1 <= w.start_col,
@@ -24130,21 +24130,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_title_action_button_click_opens_session_menu() {
+    async fn playbook_title_action_button_click_opens_session_menu() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        let (mut app, _dir, server) = program_with_widget_app().await;
+        let (mut app, _dir, server) = playbook_with_widget_app().await;
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let close = app
             .layout
-            .program_title_close_hit
+            .playbook_title_close_hit
             .expect("actions hit registered");
 
         // Clicking the hamburger opens the same session actions menu as the
-        // normal session view; it no longer dismisses the program.
+        // normal session view; it no longer dismisses the playbook.
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: close.0 + 1,
@@ -24154,8 +24154,8 @@ mod tests {
         .await;
 
         assert!(
-            app.program_popup.as_ref().is_some_and(|p| !p.closing),
-            "clicking the actions button should leave the program open"
+            app.playbook_popup.as_ref().is_some_and(|p| !p.closing),
+            "clicking the actions button should leave the playbook open"
         );
         assert!(
             app.session_title_menu
@@ -24167,14 +24167,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_title_widget_icon_click_toggles_pin() {
+    async fn playbook_title_widget_icon_click_toggles_pin() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        let (mut app, _dir, server) = program_with_widget_app().await;
+        let (mut app, _dir, server) = playbook_with_widget_app().await;
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let hit = app
             .layout
             .dynamic_ui_widget_hits
@@ -24200,7 +24200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_title_run_button_click_runs_program() {
+    async fn playbook_title_run_button_click_runs_playbook() {
         use construct_protocol::ipc_method;
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use serde_json::Value;
@@ -24235,7 +24235,7 @@ mod tests {
                     .to_string();
                 let params = req.get("params").cloned().unwrap_or(Value::Null);
                 let _ = seen_tx.send((method.clone(), params.clone()));
-                let program = serde_json::json!({
+                let playbook = serde_json::json!({
                     "session_id": "s1",
                     "markdown": "alpha",
                     "version": 2,
@@ -24243,10 +24243,10 @@ mod tests {
                     "template_id": null,
                 });
                 let result = match method.as_str() {
-                    ipc_method::PROGRAM_EXECUTE => {
-                        serde_json::json!({ "program": program, "prompt": "sent", "active_run": null })
+                    ipc_method::PLAYBOOK_EXECUTE => {
+                        serde_json::json!({ "playbook": playbook, "prompt": "sent", "active_run": null })
                     }
-                    ipc_method::PROGRAM_UPDATE => serde_json::json!({ "program": program }),
+                    ipc_method::PLAYBOOK_UPDATE => serde_json::json!({ "playbook": playbook }),
                     _ => Value::Null,
                 };
                 let resp = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
@@ -24265,22 +24265,22 @@ mod tests {
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
 
         let run = app
             .layout
-            .program_title_run_hit
+            .playbook_title_run_hit
             .expect("run hit registered");
         let close = app
             .layout
-            .program_title_close_hit
+            .playbook_title_close_hit
             .expect("close hit registered");
         // Run sits left of the close button (the rightmost control).
         assert!(
@@ -24296,21 +24296,21 @@ mod tests {
         })
         .await;
 
-        let (method, params) = seen_rx.recv().await.expect("program execute request");
+        let (method, params) = seen_rx.recv().await.expect("playbook execute request");
         assert_eq!(
             method,
-            ipc_method::PROGRAM_EXECUTE,
-            "clicking the title Run button should execute the program"
+            ipc_method::PLAYBOOK_EXECUTE,
+            "clicking the title Run button should execute the playbook"
         );
         assert!(
             params.get("selection").map(Value::is_null).unwrap_or(true),
-            "the title Run button runs the whole program, not a selection: {params:?}"
+            "the title Run button runs the whole playbook, not a selection: {params:?}"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_selection_run_click_clears_menu_and_runs_selection() {
+    async fn playbook_selection_run_click_clears_menu_and_runs_selection() {
         use construct_protocol::ipc_method;
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use serde_json::Value;
@@ -24345,7 +24345,7 @@ mod tests {
                     .to_string();
                 let params = req.get("params").cloned().unwrap_or(Value::Null);
                 let _ = seen_tx.send((method.clone(), params.clone()));
-                let program = serde_json::json!({
+                let playbook = serde_json::json!({
                     "session_id": "s1",
                     "markdown": "alpha beta",
                     "version": 1,
@@ -24353,8 +24353,8 @@ mod tests {
                     "template_id": null,
                 });
                 let result = match method.as_str() {
-                    ipc_method::PROGRAM_EXECUTE => {
-                        serde_json::json!({ "program": program, "prompt": "sent", "active_run": null })
+                    ipc_method::PLAYBOOK_EXECUTE => {
+                        serde_json::json!({ "playbook": playbook, "prompt": "sent", "active_run": null })
                     }
                     _ => Value::Null,
                 };
@@ -24374,16 +24374,16 @@ mod tests {
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        app.begin_program_selection();
-        app.move_program_cursor(5);
-        app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
+        app.playbook_popup.as_mut().unwrap().selection_menu = Some(PlaybookSelectionMenu {
             focused: false,
             comment: "focus tests".to_string(),
             cursor: "focus tests".chars().count(),
-            selected_action: ProgramSelectionAction::Comment,
+            selected_action: PlaybookSelectionAction::Comment,
 
             ..Default::default()
         });
@@ -24391,10 +24391,10 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let run = app
             .layout
-            .program_selection_run_hit
+            .playbook_selection_run_hit
             .expect("selection run hit registered");
 
         app.on_mouse(MouseEvent {
@@ -24406,17 +24406,17 @@ mod tests {
         .await;
 
         assert!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .is_some_and(|popup| popup.selection.is_none()),
             "selection Run click should clear selection so the context menu disappears"
         );
         assert!(
-            app.layout.program_selection_run_hit.is_none(),
+            app.layout.playbook_selection_run_hit.is_none(),
             "selection Run hitbox should clear with the context menu"
         );
-        let (method, params) = seen_rx.recv().await.expect("program execute request");
-        assert_eq!(method, ipc_method::PROGRAM_EXECUTE);
+        let (method, params) = seen_rx.recv().await.expect("playbook execute request");
+        assert_eq!(method, ipc_method::PLAYBOOK_EXECUTE);
         assert_eq!(
             params.get("selection").and_then(Value::as_str),
             Some("alpha")
@@ -24429,13 +24429,13 @@ mod tests {
         assert_eq!(
             params.get("fork").and_then(Value::as_bool),
             Some(false),
-            "plain selection Run click should run on the Program-owning session"
+            "plain selection Run click should run on the Playbook-owning session"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_selection_run_ctrl_x_ctrl_r_clears_menu_and_runs_selection() {
+    async fn playbook_selection_run_ctrl_x_ctrl_r_clears_menu_and_runs_selection() {
         use construct_protocol::ipc_method;
         use serde_json::Value;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -24469,7 +24469,7 @@ mod tests {
                     .to_string();
                 let params = req.get("params").cloned().unwrap_or(Value::Null);
                 let _ = seen_tx.send((method.clone(), params.clone()));
-                let program = serde_json::json!({
+                let playbook = serde_json::json!({
                     "session_id": "s1",
                     "markdown": "alpha beta",
                     "version": 1,
@@ -24477,8 +24477,8 @@ mod tests {
                     "template_id": null,
                 });
                 let result = match method.as_str() {
-                    ipc_method::PROGRAM_EXECUTE => {
-                        serde_json::json!({ "program": program, "prompt": "sent", "active_run": null })
+                    ipc_method::PLAYBOOK_EXECUTE => {
+                        serde_json::json!({ "playbook": playbook, "prompt": "sent", "active_run": null })
                     }
                     _ => Value::Null,
                 };
@@ -24498,34 +24498,34 @@ mod tests {
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        app.begin_program_selection();
-        app.move_program_cursor(5);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         app.layout
-            .program_selection_run_hit
+            .playbook_selection_run_hit
             .expect("selection run hit registered");
 
-        app.run_action(KeyAction::RunProgram).await;
+        app.run_action(KeyAction::RunPlaybook).await;
 
         assert!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .is_some_and(|popup| popup.selection.is_none()),
             "C-x C-r on a selection should clear selection so the context menu disappears"
         );
         assert!(
-            app.layout.program_selection_run_hit.is_none(),
+            app.layout.playbook_selection_run_hit.is_none(),
             "selection Run hitbox should clear with the context menu"
         );
-        let (method, params) = seen_rx.recv().await.expect("program execute request");
-        assert_eq!(method, ipc_method::PROGRAM_EXECUTE);
+        let (method, params) = seen_rx.recv().await.expect("playbook execute request");
+        assert_eq!(method, ipc_method::PLAYBOOK_EXECUTE);
         assert_eq!(
             params.get("selection").and_then(Value::as_str),
             Some("alpha")
@@ -24534,10 +24534,10 @@ mod tests {
     }
 
     /// spec 0137/0089: a verb picked from the selection menu runs on the
-    /// Program-owning session, and Shift diverts it into a fork — the same
+    /// Playbook-owning session, and Shift diverts it into a fork — the same
     /// destination rule selection Run follows.
     #[tokio::test]
-    async fn program_selection_verb_runs_on_owner_unless_shift_held() {
+    async fn playbook_selection_verb_runs_on_owner_unless_shift_held() {
         use construct_protocol::ipc_method;
         use serde_json::Value;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -24571,7 +24571,7 @@ mod tests {
                     .to_string();
                 let params = req.get("params").cloned().unwrap_or(Value::Null);
                 let _ = seen_tx.send((method.clone(), params.clone()));
-                let program = serde_json::json!({
+                let playbook = serde_json::json!({
                     "session_id": "s1",
                     "markdown": "alpha beta",
                     "version": 1,
@@ -24579,8 +24579,8 @@ mod tests {
                     "template_id": null,
                 });
                 let result = match method.as_str() {
-                    ipc_method::PROGRAM_VERB_EXECUTE => serde_json::json!({
-                        "program": program,
+                    ipc_method::PLAYBOOK_VERB_EXECUTE => serde_json::json!({
+                        "playbook": playbook,
                         "subagent_session_id": "s1",
                         "verb": "simplify",
                         "blocks": [],
@@ -24603,20 +24603,20 @@ mod tests {
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_verbs = vec![test_verb_with_description(
+        app.playbook_verbs = vec![test_verb_with_description(
             "simplify",
             "Simplify",
-            construct_protocol::ProgramVerbEffect::Rewrite,
+            construct_protocol::PlaybookVerbEffect::Rewrite,
             "reduce to the minimum that preserves intent.",
         )];
 
         for (shift, expect_owner) in [(false, true), (true, false)] {
-            app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
-            app.begin_program_selection();
-            app.move_program_cursor(5);
-            app.program_popup.as_mut().unwrap().selection_menu = Some(ProgramSelectionMenu {
+            app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
+            app.begin_playbook_selection();
+            app.move_playbook_cursor(5);
+            app.playbook_popup.as_mut().unwrap().selection_menu = Some(PlaybookSelectionMenu {
                 focused: true,
-                selected_action: ProgramSelectionAction::Verb(0),
+                selected_action: PlaybookSelectionAction::Verb(0),
                 ..Default::default()
             });
             let modifiers = if shift {
@@ -24624,11 +24624,11 @@ mod tests {
             } else {
                 KeyModifiers::NONE
             };
-            app.handle_program_key(KeyEvent::new(KeyCode::Enter, modifiers))
+            app.handle_playbook_key(KeyEvent::new(KeyCode::Enter, modifiers))
                 .await;
 
-            let (method, params) = seen_rx.recv().await.expect("program verb execute request");
-            assert_eq!(method, ipc_method::PROGRAM_VERB_EXECUTE);
+            let (method, params) = seen_rx.recv().await.expect("playbook verb execute request");
+            assert_eq!(method, ipc_method::PLAYBOOK_VERB_EXECUTE);
             assert_eq!(params.get("verb").and_then(Value::as_str), Some("simplify"));
             assert_eq!(
                 params.get("run_on_owner").and_then(Value::as_bool),
@@ -24641,7 +24641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_selection_run_menu_comment_runs_selection_with_comment() {
+    async fn playbook_selection_run_menu_comment_runs_selection_with_comment() {
         use construct_protocol::ipc_method;
         use serde_json::Value;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -24675,7 +24675,7 @@ mod tests {
                     .to_string();
                 let params = req.get("params").cloned().unwrap_or(Value::Null);
                 let _ = seen_tx.send((method.clone(), params.clone()));
-                let program = serde_json::json!({
+                let playbook = serde_json::json!({
                     "session_id": "s1",
                     "markdown": "alpha beta",
                     "version": 1,
@@ -24683,8 +24683,8 @@ mod tests {
                     "template_id": null,
                 });
                 let result = match method.as_str() {
-                    ipc_method::PROGRAM_EXECUTE => {
-                        serde_json::json!({ "program": program, "prompt": "sent", "active_run": null })
+                    ipc_method::PLAYBOOK_EXECUTE => {
+                        serde_json::json!({ "playbook": playbook, "prompt": "sent", "active_run": null })
                     }
                     _ => Value::Null,
                 };
@@ -24704,27 +24704,27 @@ mod tests {
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
-        app.begin_program_selection();
-        app.move_program_cursor(5);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
         for ch in "focus tests".chars() {
-            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+            app.handle_playbook_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
                 .await;
         }
-        app.handle_program_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))
             .await;
 
         assert!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .is_some_and(|popup| popup.selection.is_none() && popup.selection_menu.is_none()),
             "comment Run should clear selection/menu after dispatch"
         );
-        let (method, params) = seen_rx.recv().await.expect("program execute request");
-        assert_eq!(method, ipc_method::PROGRAM_EXECUTE);
+        let (method, params) = seen_rx.recv().await.expect("playbook execute request");
+        assert_eq!(method, ipc_method::PLAYBOOK_EXECUTE);
         assert_eq!(
             params.get("selection").and_then(Value::as_str),
             Some("alpha")
@@ -24742,45 +24742,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_selection_comment_editor_supports_emacs_keys() {
+    async fn playbook_selection_comment_editor_supports_emacs_keys() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
-        app.begin_program_selection();
-        app.move_program_cursor(5);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
         for ch in "abcd".chars() {
-            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+            app.handle_playbook_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
                 .await;
         }
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
             .await;
 
         let menu = app
-            .program_popup
+            .playbook_popup
             .as_ref()
             .and_then(|popup| popup.selection_menu.as_ref())
             .expect("selection menu remains open");
         assert_eq!(menu.comment, "ac");
         assert_eq!(menu.cursor, 2);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
             .await;
         let menu = app
-            .program_popup
+            .playbook_popup
             .as_ref()
             .and_then(|popup| popup.selection_menu.as_ref())
             .expect("selection menu remains open");
@@ -24794,77 +24794,77 @@ mod tests {
     /// row through Comment, Run, then each advertised verb in order, wrapping
     /// at both ends. Only Comment accepts typed/editing keys.
     #[tokio::test]
-    async fn program_selection_up_down_cycle_actions_instead_of_comment_cursor() {
+    async fn playbook_selection_up_down_cycle_actions_instead_of_comment_cursor() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
-        app.program_verbs = vec![
-            construct_protocol::ProgramVerb {
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_verbs = vec![
+            construct_protocol::PlaybookVerb {
                 name: "simplify".to_string(),
                 label: "Simplify".to_string(),
                 description: None,
-                effect: construct_protocol::ProgramVerbEffect::Rewrite,
-                interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+                effect: construct_protocol::PlaybookVerbEffect::Rewrite,
+                interaction: construct_protocol::PlaybookVerbInteraction::SingleShot,
                 order: 0,
                 built_in: true,
                 prompt: "test".to_string(),
             },
-            construct_protocol::ProgramVerb {
+            construct_protocol::PlaybookVerb {
                 name: "crystallize".to_string(),
                 label: "Crystallize spec".to_string(),
                 description: None,
-                effect: construct_protocol::ProgramVerbEffect::Rewrite,
-                interaction: construct_protocol::ProgramVerbInteraction::SingleShot,
+                effect: construct_protocol::PlaybookVerbEffect::Rewrite,
+                interaction: construct_protocol::PlaybookVerbInteraction::SingleShot,
                 order: 1,
                 built_in: true,
                 prompt: "test".to_string(),
             },
         ];
-        app.begin_program_selection();
-        app.move_program_cursor(5);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5);
 
         let selected_action = |app: &App| {
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .and_then(|popup| popup.selection_menu.as_ref())
                 .expect("selection menu remains open")
                 .selected_action
         };
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
         assert_eq!(
             selected_action(&app),
-            ProgramSelectionAction::Comment,
+            PlaybookSelectionAction::Comment,
             "Tab focuses the menu with Comment selected by default"
         );
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
-        assert_eq!(selected_action(&app), ProgramSelectionAction::Run);
+        assert_eq!(selected_action(&app), PlaybookSelectionAction::Run);
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
-        assert_eq!(selected_action(&app), ProgramSelectionAction::Verb(0));
+        assert_eq!(selected_action(&app), PlaybookSelectionAction::Verb(0));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
-        assert_eq!(selected_action(&app), ProgramSelectionAction::Verb(1));
+        assert_eq!(selected_action(&app), PlaybookSelectionAction::Verb(1));
 
         // Past the last verb, Down wraps back around to Comment.
-        app.handle_program_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
-        assert_eq!(selected_action(&app), ProgramSelectionAction::Comment);
+        assert_eq!(selected_action(&app), PlaybookSelectionAction::Comment);
 
         // And Up/C-p from Comment wraps to the last verb.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
-        assert_eq!(selected_action(&app), ProgramSelectionAction::Verb(1));
+        assert_eq!(selected_action(&app), PlaybookSelectionAction::Verb(1));
 
         // Typing only edits the comment while Comment itself is selected.
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .await;
         let menu = app
-            .program_popup
+            .playbook_popup
             .as_ref()
             .and_then(|popup| popup.selection_menu.as_ref())
             .expect("selection menu remains open");
@@ -24877,18 +24877,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_selection_run_ctrl_x_ctrl_r_preserves_other_pending_shimmer() {
+    async fn playbook_selection_run_ctrl_x_ctrl_r_preserves_other_pending_shimmer() {
         // Regression: C-x C-r on a fresh selection while other blocks are
         // already shimmering from an earlier run must keep that shimmer and
         // optimistically add the newly-run block, not replace the whole
         // pending set with just the new selection (mirrors the mouse-click
         // regression above — both gestures funnel into the same
-        // `execute_program_popup` call and must behave identically).
+        // `execute_playbook_popup` call and must behave identically).
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("construct.sock");
-        // No accept loop: the action handler awaits the program/execute
+        // No accept loop: the action handler awaits the playbook/execute
         // round trip, which we deliberately never let complete so a single
         // poll observes only the synchronous optimistic shimmer update.
         let _listener = UnixListener::bind(&sock).expect("bind mock daemon");
@@ -24899,45 +24899,45 @@ mod tests {
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha\n\nbeta\n", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha\n\nbeta\n", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
 
         // "beta" is already shimmering from an earlier, separate run.
-        app.start_program_run("s1", "alpha\n\nbeta\n", false, "");
-        app.program_runs.get_mut("s1").expect("run").pending =
-            HashSet::from([construct_protocol::program_block_id("beta")]);
+        app.start_playbook_run("s1", "alpha\n\nbeta\n", false, "");
+        app.playbook_runs.get_mut("s1").expect("run").pending =
+            HashSet::from([construct_protocol::playbook_block_id("beta")]);
 
-        app.begin_program_selection();
-        app.move_program_cursor(5); // selects "alpha"
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5); // selects "alpha"
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         app.layout
-            .program_selection_run_hit
+            .playbook_selection_run_hit
             .expect("selection run hit registered");
 
-        let fut = app.run_action(KeyAction::RunProgram);
+        let fut = app.run_action(KeyAction::RunPlaybook);
         assert!(
             fut.now_or_never().is_none(),
             "action handling should still be awaiting the daemon response"
         );
 
-        let pending = &app.program_runs["s1"].pending;
+        let pending = &app.playbook_runs["s1"].pending;
         assert!(
-            pending.contains(&construct_protocol::program_block_id("beta")),
+            pending.contains(&construct_protocol::playbook_block_id("beta")),
             "C-x C-r on a new selection must not clear another block's existing shimmer"
         );
         assert!(
-            pending.contains(&construct_protocol::program_block_id("alpha")),
+            pending.contains(&construct_protocol::playbook_block_id("alpha")),
             "the freshly-run selection should be optimistically shimmered too"
         );
     }
 
     #[tokio::test]
-    async fn program_selection_run_click_preserves_other_pending_shimmer() {
+    async fn playbook_selection_run_click_preserves_other_pending_shimmer() {
         // Regression: clicking "Run" on a fresh selection while other blocks
         // are already shimmering from an earlier run must keep that shimmer
         // and optimistically add the newly-run block, not replace the whole
@@ -24947,7 +24947,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("construct.sock");
-        // No accept loop: the click handler awaits the program/execute round
+        // No accept loop: the click handler awaits the playbook/execute round
         // trip, which we deliberately never let complete so a single poll
         // observes only the synchronous optimistic shimmer update.
         let _listener = UnixListener::bind(&sock).expect("bind mock daemon");
@@ -24958,25 +24958,25 @@ mod tests {
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha\n\nbeta\n", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha\n\nbeta\n", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
 
         // "beta" is already shimmering from an earlier, separate run.
-        app.start_program_run("s1", "alpha\n\nbeta\n", false, "");
-        app.program_runs.get_mut("s1").expect("run").pending =
-            HashSet::from([construct_protocol::program_block_id("beta")]);
+        app.start_playbook_run("s1", "alpha\n\nbeta\n", false, "");
+        app.playbook_runs.get_mut("s1").expect("run").pending =
+            HashSet::from([construct_protocol::playbook_block_id("beta")]);
 
-        app.begin_program_selection();
-        app.move_program_cursor(5); // selects "alpha"
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5); // selects "alpha"
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
+            .expect("playbook should render");
         let run = app
             .layout
-            .program_selection_run_hit
+            .playbook_selection_run_hit
             .expect("selection run hit registered");
 
         let click = MouseEvent {
@@ -24985,25 +24985,25 @@ mod tests {
             row: run.2,
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
-        let fut = app.handle_program_mouse(&click);
+        let fut = app.handle_playbook_mouse(&click);
         assert!(
             fut.now_or_never().is_none(),
             "click handling should still be awaiting the daemon response"
         );
 
-        let pending = &app.program_runs["s1"].pending;
+        let pending = &app.playbook_runs["s1"].pending;
         assert!(
-            pending.contains(&construct_protocol::program_block_id("beta")),
+            pending.contains(&construct_protocol::playbook_block_id("beta")),
             "clicking Run on a new selection must not clear another block's existing shimmer"
         );
         assert!(
-            pending.contains(&construct_protocol::program_block_id("alpha")),
+            pending.contains(&construct_protocol::playbook_block_id("alpha")),
             "the freshly-run selection should be optimistically shimmered too"
         );
     }
 
     #[tokio::test]
-    async fn program_selection_run_click_shimmer_tooltip_requires_pointer_enter() {
+    async fn playbook_selection_run_click_shimmer_tooltip_requires_pointer_enter() {
         // Regression: the selection-Run context menu sits adjacent to the
         // selection, so after the click resolves the mouse pointer is left
         // resting on the block that just started shimmering. The shimmer
@@ -25025,7 +25025,7 @@ mod tests {
         // the exact "menu adjacent to selection" geometry from the bug report.
         let markdown =
             "Block one line one\nBlock one line two\nBlock one line three\n\nOther block\n";
-        let block_id = construct_protocol::program_block_spans(markdown)
+        let block_id = construct_protocol::playbook_block_spans(markdown)
             .into_iter()
             .next()
             .expect("first block")
@@ -25061,7 +25061,7 @@ mod tests {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as i64;
-                let program = serde_json::json!({
+                let playbook = serde_json::json!({
                     "session_id": "s1",
                     "markdown": markdown,
                     "version": 2,
@@ -25073,8 +25073,8 @@ mod tests {
                 // hardcoded label (spec 0057) — the point of this test is
                 // *whether* it shows, not its exact text.
                 let result = match method.as_str() {
-                    ipc_method::PROGRAM_EXECUTE => serde_json::json!({
-                        "program": program,
+                    ipc_method::PLAYBOOK_EXECUTE => serde_json::json!({
+                        "playbook": playbook,
                         "prompt": "run",
                         "blocks": [],
                         "active_run": {
@@ -25113,20 +25113,20 @@ mod tests {
         session.id = "s1".into();
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", markdown, 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
-        app.begin_program_selection();
-        app.move_program_cursor(5); // selects "Block" on block 1's first line
+        app.playbook_popup = Some(playbook_popup_for_test("s1", markdown, 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(5); // selects "Block" on block 1's first line
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program should render");
-        let inner = app.layout.program_inner_area.expect("program inner area");
+            .expect("playbook should render");
+        let inner = app.layout.playbook_inner_area.expect("playbook inner area");
         let run = app
             .layout
-            .program_selection_run_hit
+            .playbook_selection_run_hit
             .expect("selection run hit registered");
         // The menu (and its Run button) opens below the selection's cursor —
         // confirm the click lands on block 1's own third line, not somewhere
@@ -25145,7 +25145,7 @@ mod tests {
         })
         .await;
         assert!(
-            app.program_runs
+            app.playbook_runs
                 .get("s1")
                 .is_some_and(|run| run.pending.contains(&block_id)),
             "daemon-confirmed active_run should mark block 1 pending"
@@ -25157,7 +25157,7 @@ mod tests {
             .expect("post-click frame should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
-            !text.contains(construct_protocol::PROGRAM_SHIMMER_FALLBACK_TOOLTIP),
+            !text.contains(construct_protocol::PLAYBOOK_SHIMMER_FALLBACK_TOOLTIP),
             "a stationary pointer under a newly-started shimmer must not reveal the tooltip"
         );
         let clicked_row_text = text
@@ -25190,7 +25190,7 @@ mod tests {
             .expect("hover-after-enter frame should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
-            text.contains(construct_protocol::PROGRAM_SHIMMER_FALLBACK_TOOLTIP),
+            text.contains(construct_protocol::PLAYBOOK_SHIMMER_FALLBACK_TOOLTIP),
             "a pointer that genuinely moves onto the shimmering block should reveal its tooltip"
         );
         for block_row in [inner.y, inner.y + 1, inner.y + 2] {
@@ -25199,7 +25199,7 @@ mod tests {
                 .nth(block_row as usize)
                 .expect("block row exists");
             assert!(
-                !row_text.contains(construct_protocol::PROGRAM_SHIMMER_FALLBACK_TOOLTIP),
+                !row_text.contains(construct_protocol::PLAYBOOK_SHIMMER_FALLBACK_TOOLTIP),
                 "the tooltip must anchor on an adjacent row, not over the hovered block's own \
                  row {block_row}, got: {row_text:?}"
             );
@@ -25217,13 +25217,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_run_for_orchestrator_does_not_panic_and_submit_does_not_clear_other_shimmers()
+    async fn playbook_run_for_orchestrator_does_not_panic_and_submit_does_not_clear_other_shimmers()
     {
         // TDD for the reported panic (screenshot 2026-06-27 9.43.19),
-        // "Program click 'run' on smith session does type the prompt, but not submit",
-        // and "On smith session program, when submit the prompt, all shimmer animation clears".
+        // "Playbook click 'run' on smith session does type the prompt, but not submit",
+        // and "On smith session playbook, when submit the prompt, all shimmer animation clears".
         // Orchestrator (smith minibuffer) sessions must not participate in normal
-        // program run shimmer, and activity on them must not wipe User/Subagent shimmers.
+        // playbook run shimmer, and activity on them must not wipe User/Subagent shimmers.
         let (mut app, _dir, server) = empty_app().await;
 
         let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
@@ -25235,25 +25235,25 @@ mod tests {
 
         // Exercise the run start path that could panic or set bad state for orchestrator.
         let body = "# do the task\nImplement the thing".to_string();
-        app.start_program_run("orch1", &body, false, "");
+        app.start_playbook_run("orch1", &body, false, "");
 
-        // Normal user session program run must still be tracked.
-        app.start_program_run("user1", "# user program task", false, "");
+        // Normal user session playbook run must still be tracked.
+        app.start_playbook_run("user1", "# user playbook task", false, "");
         assert!(
-            app.program_runs.contains_key("user1"),
-            "user program run must be tracked"
+            app.playbook_runs.contains_key("user1"),
+            "user playbook run must be tracked"
         );
 
         // Simulate orchestrator submit / state update clearing only its own entry
-        // (the unconditional removes in on_program_state / result paths).
-        app.program_runs.remove("orch1");
+        // (the unconditional removes in on_playbook_state / result paths).
+        app.playbook_runs.remove("orch1");
         assert!(
-            app.program_runs.contains_key("user1"),
+            app.playbook_runs.contains_key("user1"),
             "user shimmer must survive orchestrator activity/submit"
         );
 
         // Orchestrator should not have left a popup in normal flows.
-        if let Some(p) = app.program_popup.as_ref() {
+        if let Some(p) = app.playbook_popup.as_ref() {
             assert_ne!(p.saved_markdown, "should not be here for orchestrator");
         }
 
@@ -25261,7 +25261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_title_program_toggle_opens_program_from_chat_mode() {
+    async fn session_title_playbook_toggle_opens_playbook_from_chat_mode() {
         use construct_protocol::ipc_method;
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use serde_json::Value;
@@ -25293,7 +25293,7 @@ mod tests {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let program = serde_json::json!({
+                let playbook = serde_json::json!({
                     "session_id": "s1",
                     "markdown": "draft",
                     "version": 1,
@@ -25301,7 +25301,7 @@ mod tests {
                     "template_id": null,
                 });
                 let result = match method.as_str() {
-                    ipc_method::PROGRAM_GET => serde_json::json!({ "program": program }),
+                    ipc_method::PLAYBOOK_GET => serde_json::json!({ "playbook": playbook }),
                     _ => Value::Null,
                 };
                 let resp = serde_json::json!({
@@ -25334,7 +25334,7 @@ mod tests {
             "chat mode should keep the status glyph: {text:?}"
         );
         let view = app.layout.view_area.expect("view area");
-        let (x_start, _x_end, y) = crate::ui::view_program_toggle_button_range(view);
+        let (x_start, _x_end, y) = crate::ui::view_playbook_toggle_button_range(view);
 
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -25351,21 +25351,21 @@ mod tests {
         })
         .await;
         assert!(
-            app.program_popup.is_some(),
-            "clicking the title toggle should open program"
+            app.playbook_popup.is_some(),
+            "clicking the title toggle should open playbook"
         );
         server.abort();
     }
 
     // Regression: in a `Below` (stacked) split the resize divider's grab zone is
     // two rows tall — the upper pane's bottom border *and* the lower pane's top
-    // border. That lower row is the lower pane's title bar, where its program
+    // border. That lower row is the lower pane's title bar, where its playbook
     // status-glyph toggle sits. The mouse-down hit-test used to start a window
-    // resize and swallow the click, so "show program" silently failed on every
-    // non-top split pane (hide kept working because the active program's own
+    // resize and swallow the click, so "show playbook" silently failed on every
+    // non-top split pane (hide kept working because the active playbook's own
     // mouse handler intercepts that click earlier).
     #[tokio::test]
-    async fn split_below_nontop_toggle_opens_program() {
+    async fn split_below_nontop_toggle_opens_playbook() {
         use construct_protocol::ipc_method;
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use serde_json::Value;
@@ -25405,7 +25405,7 @@ mod tests {
                     .and_then(Value::as_str)
                     .unwrap_or("s2")
                     .to_string();
-                let program = serde_json::json!({
+                let playbook = serde_json::json!({
                     "session_id": session_id,
                     "markdown": "draft",
                     "version": 1,
@@ -25413,7 +25413,7 @@ mod tests {
                     "template_id": null,
                 });
                 let result = match method.as_str() {
-                    ipc_method::PROGRAM_GET => serde_json::json!({ "program": program }),
+                    ipc_method::PLAYBOOK_GET => serde_json::json!({ "playbook": playbook }),
                     _ => Value::Null,
                 };
                 let resp = serde_json::json!({
@@ -25468,7 +25468,7 @@ mod tests {
             .find(|h| h.id == 2)
             .copied()
             .expect("bottom split pane registered");
-        let (x_start, _x_end, y) = crate::ui::view_program_toggle_button_range(bottom.area);
+        let (x_start, _x_end, y) = crate::ui::view_playbook_toggle_button_range(bottom.area);
 
         // Precondition: the toggle row really does sit inside a resize divider —
         // otherwise this test would not exercise the bug it guards against.
@@ -25505,12 +25505,12 @@ mod tests {
             "clicking the bottom pane focuses it"
         );
         let popup = app
-            .program_popup
+            .playbook_popup
             .as_ref()
-            .expect("showing the program should open a popup on the non-top pane");
+            .expect("showing the playbook should open a popup on the non-top pane");
         assert_eq!(
-            popup.program.session_id, "s2",
-            "the clicked pane's own program opened"
+            popup.playbook.session_id, "s2",
+            "the clicked pane's own playbook opened"
         );
         server.abort();
     }
@@ -25544,7 +25544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_title_uses_left_edge_status_spinner_with_program_color() {
+    async fn playbook_title_uses_left_edge_status_spinner_with_playbook_color() {
         use construct_protocol::AgentStatus;
 
         let (mut app, _dir, server) = two_session_app().await;
@@ -25557,16 +25557,16 @@ mod tests {
                 status: "working".into(),
             },
         );
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
-        app.program_popup.as_mut().unwrap().revealed_at =
-            Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
 
         let backend = ratatui::backend::TestBackend::new(100, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("program render");
+            .expect("playbook render");
 
-        let popup = app.layout.modal_area.expect("program area");
+        let popup = app.layout.modal_area.expect("playbook area");
         let glyph = term
             .backend()
             .buffer()
@@ -25574,18 +25574,18 @@ mod tests {
             .expect("left title glyph");
         assert!(
             SPINNER_FRAMES.contains(&glyph.symbol()),
-            "active session should replace the Program rectangle with its status spinner"
+            "active session should replace the Playbook rectangle with its status spinner"
         );
         assert_eq!(
             glyph.style().fg,
-            Some(app.theme.program_border),
-            "the status spinner should retain the Program border color"
+            Some(app.theme.playbook_border),
+            "the status spinner should retain the Playbook border color"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_execute_selection_saves_then_runs_selected_text() {
+    async fn playbook_execute_selection_saves_then_runs_selected_text() {
         use construct_protocol::ipc_method;
         use serde_json::Value;
         use tempfile::tempdir;
@@ -25620,7 +25620,7 @@ mod tests {
                     .to_string();
                 let params = req.get("params").cloned().unwrap_or(Value::Null);
                 let _ = seen_tx.send((method.clone(), params.clone()));
-                let program = serde_json::json!({
+                let playbook = serde_json::json!({
                     "session_id": "s1",
                     "markdown": params
                         .get("markdown")
@@ -25631,9 +25631,9 @@ mod tests {
                     "template_id": null,
                 });
                 let result = match method.as_str() {
-                    ipc_method::PROGRAM_UPDATE => serde_json::json!({ "program": program }),
-                    ipc_method::PROGRAM_EXECUTE => {
-                        serde_json::json!({ "program": program, "prompt": "sent" })
+                    ipc_method::PLAYBOOK_UPDATE => serde_json::json!({ "playbook": playbook }),
+                    ipc_method::PLAYBOOK_EXECUTE => {
+                        serde_json::json!({ "playbook": playbook, "prompt": "sent" })
                     }
                     _ => Value::Null,
                 };
@@ -25653,22 +25653,22 @@ mod tests {
         });
         let client = Client::connect(&sock).await.expect("client connects");
         let mut app = test_app(client, Vec::new());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
-        app.program_popup.as_mut().unwrap().buffer = "alpha beta changed".to_string();
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup.as_mut().unwrap().buffer = "alpha beta changed".to_string();
 
         assert!(
-            app.execute_program_popup(Some("beta".to_string()), None, None)
+            app.execute_playbook_popup(Some("beta".to_string()), None, None)
                 .await
         );
 
-        let (first_method, first_params) = seen_rx.recv().await.expect("program update request");
-        let (second_method, second_params) = seen_rx.recv().await.expect("program execute request");
-        assert_eq!(first_method, ipc_method::PROGRAM_UPDATE);
+        let (first_method, first_params) = seen_rx.recv().await.expect("playbook update request");
+        let (second_method, second_params) = seen_rx.recv().await.expect("playbook execute request");
+        assert_eq!(first_method, ipc_method::PLAYBOOK_UPDATE);
         assert_eq!(
             first_params.get("markdown").and_then(Value::as_str),
             Some("alpha beta changed")
         );
-        assert_eq!(second_method, ipc_method::PROGRAM_EXECUTE);
+        assert_eq!(second_method, ipc_method::PLAYBOOK_EXECUTE);
         assert_eq!(
             second_params.get("selection").and_then(Value::as_str),
             Some("beta")
@@ -25683,23 +25683,23 @@ mod tests {
     // The bug this fix addresses: selecting a strict SUBSTRING of a
     // single-line block (not the whole line) and pressing Run. The TUI
     // already computes the real enclosing block's id via
-    // `App::selected_program_block_ids` (overlap of the selection's char
+    // `App::selected_playbook_block_ids` (overlap of the selection's char
     // range with each block's line range, not by re-hashing the selected
     // substring's own text) for its own optimistic shimmer — this asserts
-    // that same id is also threaded into the outgoing `program.execute`
+    // that same id is also threaded into the outgoing `playbook.execute`
     // request as `selection_block_ids`, and that adopting a daemon response
     // whose `active_run.pending_block_refs` echoes that real id lights the
     // block's shimmer (the fixed daemon's authoritative response no longer
     // overwrites the correct optimistic state with a phantom).
     #[tokio::test]
-    async fn program_execute_partial_line_selection_sends_and_adopts_real_block_id() {
+    async fn playbook_execute_partial_line_selection_sends_and_adopts_real_block_id() {
         use construct_protocol::ipc_method;
         use serde_json::Value;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
 
         let markdown = "Some long text here";
-        let real_block_id = construct_protocol::program_block_spans(markdown)
+        let real_block_id = construct_protocol::playbook_block_spans(markdown)
             .into_iter()
             .next()
             .expect("one block")
@@ -25738,7 +25738,7 @@ mod tests {
                     .duration_since(std::time::UNIX_EPOCH)
                     .expect("time")
                     .as_millis() as i64;
-                let program = serde_json::json!({
+                let playbook = serde_json::json!({
                     "session_id": "s1",
                     "markdown": markdown,
                     "version": 1,
@@ -25746,8 +25746,8 @@ mod tests {
                     "template_id": null,
                 });
                 let result = match method.as_str() {
-                    ipc_method::PROGRAM_EXECUTE => serde_json::json!({
-                        "program": program,
+                    ipc_method::PLAYBOOK_EXECUTE => serde_json::json!({
+                        "playbook": playbook,
                         "prompt": "run",
                         // Simulates the FIXED daemon: it trusted the
                         // request's `selection_block_ids` and resolved the
@@ -25774,23 +25774,23 @@ mod tests {
         });
         let client = Client::connect(&sock).await.expect("client connects");
         let mut app = test_app(client, Vec::new());
-        app.program_popup = Some(program_popup_for_test("s1", markdown, 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", markdown, 0));
         // "long text" out of "Some long text here" — a strict substring of
         // the single line/block, not the whole line.
-        app.program_popup.as_mut().unwrap().selection = Some(ProgramSelection {
+        app.playbook_popup.as_mut().unwrap().selection = Some(PlaybookSelection {
             anchor: 5,
             head: 14,
             dragged: false,
         });
 
         assert!(
-            app.execute_program_popup(Some("long text".to_string()), None, None)
+            app.execute_playbook_popup(Some("long text".to_string()), None, None)
                 .await,
             "run should dispatch"
         );
 
-        let (method, params) = seen_rx.recv().await.expect("program execute request");
-        assert_eq!(method, ipc_method::PROGRAM_EXECUTE);
+        let (method, params) = seen_rx.recv().await.expect("playbook execute request");
+        assert_eq!(method, ipc_method::PLAYBOOK_EXECUTE);
         assert_eq!(
             params.get("selection").and_then(Value::as_str),
             Some("long text")
@@ -25809,15 +25809,15 @@ mod tests {
         );
 
         // Adopting the response lights the block's shimmer: replicate the
-        // exact check `ui::program_run_shimmer` performs for a popup whose
+        // exact check `ui::playbook_run_shimmer` performs for a popup whose
         // `blocks` projection is empty (dirty/never-synced fallback) — match
         // by recomputing the same content-hash id from the buffer.
         let run = app
-            .program_runs
+            .playbook_runs
             .get("s1")
             .expect("run adopted from daemon response");
-        let popup = app.program_popup.as_ref().expect("popup");
-        let shimmers = crate::app::program_blocks(&popup.buffer)
+        let popup = app.playbook_popup.as_ref().expect("popup");
+        let shimmers = crate::app::playbook_blocks(&popup.buffer)
             .iter()
             .any(|block| run.pending.contains(&block.id));
         assert!(
@@ -25829,11 +25829,11 @@ mod tests {
     }
 
     /// Mock daemon for the Run overlap/idempotency guard tests below: accepts
-    /// a single connection, echoes `program.update`/`program.execute` bodies
+    /// a single connection, echoes `playbook.update`/`playbook.execute` bodies
     /// back at an incrementing version, and reports every method name it
     /// receives on the returned channel so tests can assert exactly how many
-    /// `program.execute` requests actually went out.
-    async fn program_run_dispatch_mock_daemon(
+    /// `playbook.execute` requests actually went out.
+    async fn playbook_run_dispatch_mock_daemon(
         session_id: &str,
     ) -> (
         Arc<Client>,
@@ -25877,7 +25877,7 @@ mod tests {
                 let params = req.get("params").cloned().unwrap_or(Value::Null);
                 let _ = methods_tx.send(method.clone());
                 let result = match method.as_str() {
-                    ipc_method::PROGRAM_UPDATE | ipc_method::PROGRAM_EXECUTE => {
+                    ipc_method::PLAYBOOK_UPDATE | ipc_method::PLAYBOOK_EXECUTE => {
                         version += 1;
                         let markdown = params
                             .get("markdown")
@@ -25885,17 +25885,17 @@ mod tests {
                             .or_else(|| params.get("selection").and_then(Value::as_str))
                             .unwrap_or_default()
                             .to_string();
-                        let program = serde_json::json!({
+                        let playbook = serde_json::json!({
                             "session_id": session_id,
                             "markdown": markdown,
                             "version": version,
                             "updated_at_ms": 0,
                             "template_id": null,
                         });
-                        if method == ipc_method::PROGRAM_EXECUTE {
-                            serde_json::json!({ "program": program, "prompt": "run" })
+                        if method == ipc_method::PLAYBOOK_EXECUTE {
+                            serde_json::json!({ "playbook": playbook, "prompt": "run" })
                         } else {
-                            serde_json::json!({ "program": program })
+                            serde_json::json!({ "playbook": playbook })
                         }
                     }
                     _ => Value::Null,
@@ -25915,7 +25915,7 @@ mod tests {
     }
 
     /// Drain every method name the mock daemon has recorded so far. Safe to
-    /// call right after an awaited `execute_program_popup` call: its RPCs
+    /// call right after an awaited `execute_playbook_popup` call: its RPCs
     /// have already completed (and so already reported themselves) by the
     /// time the call returns.
     fn drain_methods(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
@@ -25927,23 +25927,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_run_double_dispatch_is_coalesced_into_one_execute() {
+    async fn playbook_run_double_dispatch_is_coalesced_into_one_execute() {
         // Two immediate identical Run gestures (double `C-x C-r`, a
         // double-clicked Run button) must not dispatch two execute turns to
         // the owning agent — the second is coalesced into the first's
         // dispatch and only sets a status message (spec 0042 consequence).
         use construct_protocol::ipc_method;
 
-        let (client, _dir, server, mut methods) = program_run_dispatch_mock_daemon("s1").await;
+        let (client, _dir, server, mut methods) = playbook_run_dispatch_mock_daemon("s1").await;
         let mut app = test_app(client, Vec::new());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
 
         assert!(
-            app.execute_program_popup(None, None, None).await,
+            app.execute_playbook_popup(None, None, None).await,
             "first run dispatches"
         );
         assert!(
-            !app.execute_program_popup(None, None, None).await,
+            !app.execute_playbook_popup(None, None, None).await,
             "identical immediate re-Run must be suppressed"
         );
         assert!(
@@ -25958,28 +25958,28 @@ mod tests {
         assert_eq!(
             methods
                 .iter()
-                .filter(|m| *m == ipc_method::PROGRAM_EXECUTE)
+                .filter(|m| *m == ipc_method::PLAYBOOK_EXECUTE)
                 .count(),
             1,
-            "exactly one program.execute request, got: {methods:?}"
+            "exactly one playbook.execute request, got: {methods:?}"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_run_different_body_dispatches_again() {
-        // A full re-Run whose body changed (the user edited the program
+    async fn playbook_run_different_body_dispatches_again() {
+        // A full re-Run whose body changed (the user edited the playbook
         // between the two Runs) must not be suppressed by the dedup guard.
         use construct_protocol::ipc_method;
 
-        let (client, _dir, server, mut methods) = program_run_dispatch_mock_daemon("s1").await;
+        let (client, _dir, server, mut methods) = playbook_run_dispatch_mock_daemon("s1").await;
         let mut app = test_app(client, Vec::new());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
 
-        assert!(app.execute_program_popup(None, None, None).await);
-        app.program_popup.as_mut().unwrap().buffer = "alpha beta changed".to_string();
+        assert!(app.execute_playbook_popup(None, None, None).await);
+        app.playbook_popup.as_mut().unwrap().buffer = "alpha beta changed".to_string();
         assert!(
-            app.execute_program_popup(None, None, None).await,
+            app.execute_playbook_popup(None, None, None).await,
             "a re-Run with a changed body must dispatch again"
         );
 
@@ -25987,37 +25987,37 @@ mod tests {
         assert_eq!(
             methods
                 .iter()
-                .filter(|m| *m == ipc_method::PROGRAM_EXECUTE)
+                .filter(|m| *m == ipc_method::PLAYBOOK_EXECUTE)
                 .count(),
             2,
-            "both dispatches should have sent program.execute, got: {methods:?}"
+            "both dispatches should have sent playbook.execute, got: {methods:?}"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_run_repeat_after_debounce_window_dispatches() {
+    async fn playbook_run_repeat_after_debounce_window_dispatches() {
         // Once the dedup window has elapsed, an identical Run is a
         // deliberate re-Run (spec 0042 intentionally supports this) and must
         // dispatch again.
         use construct_protocol::ipc_method;
 
-        let (client, _dir, server, mut methods) = program_run_dispatch_mock_daemon("s1").await;
+        let (client, _dir, server, mut methods) = playbook_run_dispatch_mock_daemon("s1").await;
         let mut app = test_app(client, Vec::new());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
 
-        assert!(app.execute_program_popup(None, None, None).await);
+        assert!(app.execute_playbook_popup(None, None, None).await);
         // Simulate the debounce window having already elapsed by backdating
         // its recorded instant, matching this file's existing convention for
         // testing time-based expiry without sleeping (see e.g. `revealed_at`
         // in the popup-slide tests above).
-        for state in app.program_run_dispatch.values_mut() {
-            if let ProgramRunDispatchState::Dispatched(at) = state {
-                *at = Instant::now() - Duration::from_millis(PROGRAM_RUN_DEDUP_WINDOW_MS + 50);
+        for state in app.playbook_run_dispatch.values_mut() {
+            if let PlaybookRunDispatchState::Dispatched(at) = state {
+                *at = Instant::now() - Duration::from_millis(PLAYBOOK_RUN_DEDUP_WINDOW_MS + 50);
             }
         }
         assert!(
-            app.execute_program_popup(None, None, None).await,
+            app.execute_playbook_popup(None, None, None).await,
             "an identical re-Run after the debounce window must dispatch"
         );
 
@@ -26025,31 +26025,31 @@ mod tests {
         assert_eq!(
             methods
                 .iter()
-                .filter(|m| *m == ipc_method::PROGRAM_EXECUTE)
+                .filter(|m| *m == ipc_method::PLAYBOOK_EXECUTE)
                 .count(),
             2,
-            "both dispatches should have sent program.execute, got: {methods:?}"
+            "both dispatches should have sent playbook.execute, got: {methods:?}"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_run_selection_not_suppressed_by_just_dispatched_full_run() {
+    async fn playbook_run_selection_not_suppressed_by_just_dispatched_full_run() {
         // Spec 0042 lets a selection Run proceed while a full run is in
-        // flight elsewhere in the program; the dedup guard must not treat
+        // flight elsewhere in the playbook; the dedup guard must not treat
         // that as a duplicate of the full run that was just dispatched.
         use construct_protocol::ipc_method;
 
-        let (client, _dir, server, mut methods) = program_run_dispatch_mock_daemon("s1").await;
+        let (client, _dir, server, mut methods) = playbook_run_dispatch_mock_daemon("s1").await;
         let mut app = test_app(client, Vec::new());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
 
         assert!(
-            app.execute_program_popup(None, None, None).await,
+            app.execute_playbook_popup(None, None, None).await,
             "full run dispatches"
         );
         assert!(
-            app.execute_program_popup(Some("beta".to_string()), None, None)
+            app.execute_playbook_popup(Some("beta".to_string()), None, None)
                 .await,
             "a selection run must not be suppressed by a just-dispatched full run"
         );
@@ -26058,7 +26058,7 @@ mod tests {
         assert_eq!(
             methods
                 .iter()
-                .filter(|m| *m == ipc_method::PROGRAM_EXECUTE)
+                .filter(|m| *m == ipc_method::PLAYBOOK_EXECUTE)
                 .count(),
             2,
             "both the full run and the selection run should have dispatched, got: {methods:?}"
@@ -26067,12 +26067,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_state_notification_adopts_latest_when_clean() {
+    async fn playbook_state_notification_adopts_latest_when_clean() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "# Todo\n- a\n", 0));
-        // The owning agent edited the program on the daemon.
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "# Todo\n- a\n", 0));
+        // The owning agent edited the playbook on the daemon.
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "# Todo\n- a\n- agent added\n".into(),
                 version: 2,
@@ -26082,28 +26082,28 @@ mod tests {
             None,
             Vec::new(),
         );
-        let popup = app.program_popup.as_ref().unwrap();
-        assert_eq!(popup.program.version, 2);
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(popup.playbook.version, 2);
         assert_eq!(popup.buffer, "# Todo\n- a\n- agent added\n");
         assert_eq!(popup.saved_markdown, "# Todo\n- a\n- agent added\n");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_state_notification_adopts_update_when_untouched_clip_lacks_id() {
+    async fn playbook_state_notification_adopts_update_when_untouched_clip_lacks_id() {
         // Regression: an agent-written document can carry a smart clip without
         // a clip_id (the daemon stores it as-is). The popup's buffer and
         // saved_markdown are both that raw content, but its *normalized* form
         // differs — an untouched popup must not read as dirty, or every live
-        // agent update is skipped until the program is hidden and reopened.
+        // agent update is skipped until the playbook is hidden and reopened.
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s1",
             "# In progress\n- task @{session:sub1}\n",
             0,
         ));
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "# In progress\n\n# Done\n- task @{session:sub1}\n".into(),
                 version: 2,
@@ -26113,8 +26113,8 @@ mod tests {
             None,
             Vec::new(),
         );
-        let popup = app.program_popup.as_ref().unwrap();
-        assert_eq!(popup.program.version, 2);
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(popup.playbook.version, 2);
         assert_eq!(
             popup.buffer,
             "# In progress\n\n# Done\n- task @{session:sub1}\n"
@@ -26123,19 +26123,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_state_notification_preserves_real_edits_when_clip_lacks_id() {
+    async fn playbook_state_notification_preserves_real_edits_when_clip_lacks_id() {
         // Real unsaved edits must still be preserved even when the last synced
         // content is not in normalized form.
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s1",
             "# In progress\n- task @{session:sub1}\n",
             0,
         ));
-        app.program_popup.as_mut().unwrap().buffer =
+        app.playbook_popup.as_mut().unwrap().buffer =
             "# In progress\n- task @{session:sub1}\n- human typing\n".into();
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "# Done\n- task @{session:sub1}\n".into(),
                 version: 2,
@@ -26145,25 +26145,25 @@ mod tests {
             None,
             Vec::new(),
         );
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.buffer,
             "# In progress\n- task @{session:sub1}\n- human typing\n"
         );
-        assert_eq!(popup.program.version, 1);
+        assert_eq!(popup.playbook.version, 1);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_state_notification_rebases_caret_past_insertion_before_it() {
+    async fn playbook_state_notification_rebases_caret_past_insertion_before_it() {
         // Spec 0065: adopt must remap the local caret through the content
         // change, not merely clamp it. Insertion lands before the caret
         // (after "alpha "), so the caret must shift by the insertion length
         // rather than stay pinned mid-text.
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 10));
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 10));
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "alpha INSERTED beta".into(),
                 version: 2,
@@ -26173,7 +26173,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.cursor, 19,
             "caret should shift by the 9-char insertion"
@@ -26182,11 +26182,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_state_notification_leaves_caret_unchanged_for_change_after_it() {
+    async fn playbook_state_notification_leaves_caret_unchanged_for_change_after_it() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 5));
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 5));
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "alpha zzz".into(),
                 version: 2,
@@ -26196,19 +26196,19 @@ mod tests {
             None,
             Vec::new(),
         );
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 5, "change is entirely after the caret");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_state_notification_shifts_caret_for_change_before_it() {
+    async fn playbook_state_notification_shifts_caret_for_change_before_it() {
         let (mut app, _dir, server) = empty_app().await;
         // Caret at 8 sits after "alpha be" (inside "beta"). Replacing "alpha"
         // (5 chars) with "A" (1 char) shifts everything after it by -4.
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 8));
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 8));
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "A beta".into(),
                 version: 2,
@@ -26218,18 +26218,18 @@ mod tests {
             None,
             Vec::new(),
         );
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.cursor, 4, "caret shifts by the -4 length delta");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_state_notification_clamps_caret_inside_replaced_span() {
+    async fn playbook_state_notification_clamps_caret_inside_replaced_span() {
         let (mut app, _dir, server) = empty_app().await;
         // Caret at 2 sits inside "alpha" (the replaced span itself).
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 2));
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 2));
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "X beta".into(),
                 version: 2,
@@ -26239,7 +26239,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.cursor, 1,
             "caret inside the replaced span clamps to the new span's end"
@@ -26248,17 +26248,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_state_notification_rebases_selection_anchor_and_head() {
+    async fn playbook_state_notification_rebases_selection_anchor_and_head() {
         let (mut app, _dir, server) = empty_app().await;
-        let mut popup = program_popup_for_test("s1", "alpha beta", 0);
-        popup.selection = Some(ProgramSelection {
+        let mut popup = playbook_popup_for_test("s1", "alpha beta", 0);
+        popup.selection = Some(PlaybookSelection {
             anchor: 7,
             head: 9,
             dragged: false,
         });
-        app.program_popup = Some(popup);
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.playbook_popup = Some(popup);
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "A beta".into(),
                 version: 2,
@@ -26268,25 +26268,25 @@ mod tests {
             None,
             Vec::new(),
         );
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let selection = popup.selection.as_ref().expect("selection survives adopt");
         assert_eq!((selection.anchor, selection.head), (3, 5));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_state_notification_rebases_search_anchor() {
+    async fn playbook_state_notification_rebases_search_anchor() {
         let (mut app, _dir, server) = empty_app().await;
-        let mut popup = program_popup_for_test("s1", "alpha beta", 0);
-        popup.search = Some(ProgramSearch {
+        let mut popup = playbook_popup_for_test("s1", "alpha beta", 0);
+        popup.search = Some(PlaybookSearch {
             anchor_cursor: 6,
             query: "beta".into(),
             matches: Vec::new(),
             selected: 0,
         });
-        app.program_popup = Some(popup);
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.playbook_popup = Some(popup);
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "A beta".into(),
                 version: 2,
@@ -26296,14 +26296,14 @@ mod tests {
             None,
             Vec::new(),
         );
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup.search.as_ref().expect("search survives adopt");
         assert_eq!(search.anchor_cursor, 2);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_state_notification_rebases_caret_across_clip_id_renormalization() {
+    async fn playbook_state_notification_rebases_caret_across_clip_id_renormalization() {
         // The amplifier defect: a broadcast whose only difference is a
         // re-minted `clip_id=` value still adopts (clean check normalizes
         // instance ids), but the ids have different lengths (clip_9 vs
@@ -26311,9 +26311,9 @@ mod tests {
         let (mut app, _dir, server) = empty_app().await;
         let old_markdown = "before @{session:sub1 clip_id=9} after";
         let cursor = old_markdown.chars().count();
-        app.program_popup = Some(program_popup_for_test("s1", old_markdown, cursor));
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.playbook_popup = Some(playbook_popup_for_test("s1", old_markdown, cursor));
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "before @{session:sub1 clip_id=10} after".into(),
                 version: 2,
@@ -26323,7 +26323,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.cursor,
             cursor + 1,
@@ -26333,18 +26333,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_state_notification_recomputes_active_search_when_clean() {
+    async fn playbook_state_notification_recomputes_active_search_when_clean() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .await;
         for ch in "alpha".chars() {
-            app.handle_program_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+            app.handle_playbook_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
                 .await;
         }
         assert_eq!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .unwrap()
                 .search
@@ -26354,8 +26354,8 @@ mod tests {
             vec![(0, 5)]
         );
 
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "zero alpha".into(),
                 version: 2,
@@ -26366,7 +26366,7 @@ mod tests {
             Vec::new(),
         );
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup.search.as_ref().expect("search remains active");
         assert_eq!(search.query, "alpha");
         assert_eq!(search.matches, vec![(5, 10)]);
@@ -26376,17 +26376,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_state_notification_clamps_active_search_anchor_when_clean() {
+    async fn playbook_state_notification_clamps_active_search_anchor_when_clean() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 10));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 10));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .await;
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))
             .await;
 
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "tiny".into(),
                 version: 2,
@@ -26397,7 +26397,7 @@ mod tests {
             Vec::new(),
         );
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup.search.as_ref().expect("search remains active");
         assert_eq!(search.query, "z");
         assert_eq!(search.anchor_cursor, 4);
@@ -26407,49 +26407,49 @@ mod tests {
     }
 
     #[test]
-    fn program_blocks_split_heading_and_each_item() {
+    fn playbook_blocks_split_heading_and_each_item() {
         // Heading + two consecutive items + a second heading → four blocks, so
         // each item shimmers independently of its siblings and the heading.
         let md = "# Todo\n- a\n- b\n\n# Done\n";
-        let blocks = program_blocks(md);
+        let blocks = playbook_blocks(md);
         assert_eq!(blocks.len(), 4);
         assert_eq!((blocks[0].start_line, blocks[0].end_line), (0, 1)); // # Todo
         assert_eq!((blocks[1].start_line, blocks[1].end_line), (1, 2)); // - a
         assert_eq!((blocks[2].start_line, blocks[2].end_line), (2, 3)); // - b
         assert_eq!(blocks[3].start_line, 4); // # Done after blank line
-        let spans = construct_protocol::program_block_spans(md);
+        let spans = construct_protocol::playbook_block_spans(md);
         assert_eq!(spans[0].signature, "# Todo");
         assert_eq!(spans[1].signature, "- a");
-        assert_eq!(blocks[3].id, construct_protocol::program_block_id("# Done"));
+        assert_eq!(blocks[3].id, construct_protocol::playbook_block_id("# Done"));
     }
 
     #[test]
-    fn program_blocks_normalize_indentation_in_signature() {
+    fn playbook_blocks_normalize_indentation_in_signature() {
         // Each item is its own block; signatures trim each line so cosmetic
         // indentation does not change identity (stable shimmer across re-indent).
-        let spans = construct_protocol::program_block_spans("  - a\n    - b\n");
+        let spans = construct_protocol::playbook_block_spans("  - a\n    - b\n");
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].signature, "- a");
         assert_eq!(spans[1].signature, "- b");
     }
 
     #[test]
-    fn program_run_pending_ids_cover_each_block() {
-        let ids = program_run_pending_ids("# Todo\n- a\n\n# Done\n");
+    fn playbook_run_pending_ids_cover_each_block() {
+        let ids = playbook_run_pending_ids("# Todo\n- a\n\n# Done\n");
         assert_eq!(ids.len(), 3);
-        assert!(ids.contains(&construct_protocol::program_block_id("# Todo")));
-        assert!(ids.contains(&construct_protocol::program_block_id("- a")));
-        assert!(ids.contains(&construct_protocol::program_block_id("# Done")));
+        assert!(ids.contains(&construct_protocol::playbook_block_id("# Todo")));
+        assert!(ids.contains(&construct_protocol::playbook_block_id("- a")));
+        assert!(ids.contains(&construct_protocol::playbook_block_id("# Done")));
         // An empty body has nothing to shimmer.
-        assert!(program_run_pending_ids("   \n").is_empty());
+        assert!(playbook_run_pending_ids("   \n").is_empty());
     }
 
-    fn program_doc_for_test(
+    fn playbook_doc_for_test(
         session_id: &str,
         markdown: &str,
         version: u64,
-    ) -> construct_protocol::ProgramDocument {
-        construct_protocol::ProgramDocument {
+    ) -> construct_protocol::PlaybookDocument {
+        construct_protocol::PlaybookDocument {
             session_id: session_id.into(),
             markdown: markdown.into(),
             version,
@@ -26458,15 +26458,15 @@ mod tests {
         }
     }
 
-    fn program_progress_for_test(
+    fn playbook_progress_for_test(
         run_id: &str,
         pending: Vec<String>,
-    ) -> construct_protocol::ProgramRunProgress {
+    ) -> construct_protocol::PlaybookRunProgress {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        construct_protocol::ProgramRunProgress {
+        construct_protocol::PlaybookRunProgress {
             run_id: run_id.into(),
             started_at_ms: now_ms - 1000,
             expires_at_ms: now_ms + 60_000,
@@ -26478,21 +26478,21 @@ mod tests {
             first_output_seen: false,
             queued_behind_current_turn: false,
             agent_managed: false,
-            stage: construct_protocol::ProgramRunStage::Delivered,
+            stage: construct_protocol::PlaybookRunStage::Delivered,
             settled_block_count: 0,
             total_block_count: 1,
         }
     }
 
     #[tokio::test]
-    async fn program_optimistic_run_lights_every_block_immediately() {
+    async fn playbook_optimistic_run_lights_every_block_immediately() {
         let (mut app, _dir, server) = empty_app().await;
-        let id = construct_protocol::program_block_id;
+        let id = construct_protocol::playbook_block_id;
         let body = "# Todo\n\n- alpha\n\n- beta\n";
 
-        app.start_program_run("s1", body, false, "");
+        app.start_playbook_run("s1", body, false, "");
 
-        let run = app.program_runs.get("s1").expect("optimistic run exists");
+        let run = app.playbook_runs.get("s1").expect("optimistic run exists");
         assert!(run.pending.contains(&id("# Todo")));
         assert!(run.pending.contains(&id("- alpha")));
         assert!(run.pending.contains(&id("- beta")));
@@ -26503,122 +26503,122 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_state_empty_run_keeps_unconfirmed_optimistic_run_then_clears_confirmed_run() {
+    async fn playbook_state_empty_run_keeps_unconfirmed_optimistic_run_then_clears_confirmed_run() {
         let (mut app, _dir, server) = empty_app().await;
-        let id = construct_protocol::program_block_id;
+        let id = construct_protocol::playbook_block_id;
         let body = "# Todo\n\n- alpha\n";
 
-        app.start_program_run("s1", body, false, "");
-        let optimistic_pending = app.program_runs["s1"].pending.clone();
-        app.on_program_state(program_doc_for_test("s1", body, 2), None, Vec::new());
+        app.start_playbook_run("s1", body, false, "");
+        let optimistic_pending = app.playbook_runs["s1"].pending.clone();
+        app.on_playbook_state(playbook_doc_for_test("s1", body, 2), None, Vec::new());
 
         let run = app
-            .program_runs
+            .playbook_runs
             .get("s1")
             .expect("empty daemon state must not clear an unconfirmed optimistic run");
         assert_eq!(run.pending, optimistic_pending);
         assert!(
-            app.program_settle_flourishes.get("s1").is_none(),
+            app.playbook_settle_flourishes.get("s1").is_none(),
             "keeping the optimistic run must not flash blocks as settled"
         );
 
-        app.on_program_state(
-            program_doc_for_test("s1", body, 2),
-            Some(program_progress_for_test("run-1", vec![id("- alpha")])),
+        app.on_playbook_state(
+            playbook_doc_for_test("s1", body, 2),
+            Some(playbook_progress_for_test("run-1", vec![id("- alpha")])),
             Vec::new(),
         );
         let run = app
-            .program_runs
+            .playbook_runs
             .get("s1")
             .expect("daemon progress should be adopted");
         assert!(run.pending.contains(&id("- alpha")));
 
-        app.program_runs
+        app.playbook_runs
             .get_mut("s1")
             .expect("confirmed run")
             .daemon_adopted_at =
-            Some(Instant::now() - Duration::from_millis(PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS + 1));
-        app.on_program_state(program_doc_for_test("s1", body, 2), None, Vec::new());
+            Some(Instant::now() - Duration::from_millis(PLAYBOOK_RUN_ADOPT_CLEAR_GRACE_MS + 1));
+        app.on_playbook_state(playbook_doc_for_test("s1", body, 2), None, Vec::new());
         assert!(
-            !app.program_runs.contains_key("s1"),
+            !app.playbook_runs.contains_key("s1"),
             "empty daemon state must still clear a daemon-confirmed run"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_state_stale_empty_run_respects_confirmed_adopt_grace() {
+    async fn playbook_state_stale_empty_run_respects_confirmed_adopt_grace() {
         let (mut app, _dir, server) = empty_app().await;
-        let id = construct_protocol::program_block_id;
+        let id = construct_protocol::playbook_block_id;
         let body = "# Todo\n\n- alpha\n";
 
-        app.adopt_daemon_program_run(
+        app.adopt_daemon_playbook_run(
             "s1",
-            Some(program_progress_for_test("run-1", vec![id("- alpha")])),
+            Some(playbook_progress_for_test("run-1", vec![id("- alpha")])),
         );
         assert!(
-            app.program_runs
+            app.playbook_runs
                 .get("s1")
                 .is_some_and(|run| run.daemon_confirmed && run.pending.contains(&id("- alpha"))),
             "execute response should adopt a confirmed run"
         );
 
-        app.on_program_state(program_doc_for_test("s1", body, 2), None, Vec::new());
+        app.on_playbook_state(playbook_doc_for_test("s1", body, 2), None, Vec::new());
         assert!(
-            app.program_runs.contains_key("s1"),
+            app.playbook_runs.contains_key("s1"),
             "a stale empty save broadcast inside the adopt grace window must not clear the run"
         );
 
-        app.program_runs
+        app.playbook_runs
             .get_mut("s1")
             .expect("confirmed run")
             .daemon_adopted_at =
-            Some(Instant::now() - Duration::from_millis(PROGRAM_RUN_ADOPT_CLEAR_GRACE_MS + 1));
-        app.on_program_state(program_doc_for_test("s1", body, 2), None, Vec::new());
+            Some(Instant::now() - Duration::from_millis(PLAYBOOK_RUN_ADOPT_CLEAR_GRACE_MS + 1));
+        app.on_playbook_state(playbook_doc_for_test("s1", body, 2), None, Vec::new());
         assert!(
-            !app.program_runs.contains_key("s1"),
+            !app.playbook_runs.contains_key("s1"),
             "a later empty daemon state still clears the confirmed run"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_state_empty_run_does_not_record_settle_flourish_for_kept_optimistic_run() {
+    async fn playbook_state_empty_run_does_not_record_settle_flourish_for_kept_optimistic_run() {
         let (mut app, _dir, server) = empty_app().await;
-        app.start_program_run("s1", "- pending\n", false, "");
-        assert!(app.program_runs["s1"]
+        app.start_playbook_run("s1", "- pending\n", false, "");
+        assert!(app.playbook_runs["s1"]
             .pending
-            .contains(&construct_protocol::program_block_id("- pending")));
+            .contains(&construct_protocol::playbook_block_id("- pending")));
 
-        app.on_program_state(
-            program_doc_for_test("s1", "- pending\n", 42),
+        app.on_playbook_state(
+            playbook_doc_for_test("s1", "- pending\n", 42),
             None,
             Vec::new(),
         );
 
         assert!(
-            app.program_runs.contains_key("s1"),
+            app.playbook_runs.contains_key("s1"),
             "the optimistic run should survive the empty broadcast"
         );
         assert!(
-            app.program_settle_flourishes.get("s1").is_none(),
+            app.playbook_settle_flourishes.get("s1").is_none(),
             "a skipped optimistic removal must not look like a settled block"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_optimistic_rerun_without_edits_preserves_existing_shimmer_only() {
+    async fn playbook_optimistic_rerun_without_edits_preserves_existing_shimmer_only() {
         let (mut app, _dir, server) = empty_app().await;
-        let id = construct_protocol::program_block_id;
+        let id = construct_protocol::playbook_block_id;
         let body = "# Todo\n\n- settled\n\n- pending\n\n- also settled\n";
 
-        app.start_program_run("s1", body, false, "");
-        app.program_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- pending")]);
+        app.start_playbook_run("s1", body, false, "");
+        app.playbook_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- pending")]);
 
-        app.start_program_run("s1", body, false, body);
+        app.start_playbook_run("s1", body, false, body);
 
-        let pending = &app.program_runs["s1"].pending;
+        let pending = &app.playbook_runs["s1"].pending;
         assert_eq!(pending.len(), 1);
         assert!(pending.contains(&id("- pending")));
         assert!(!pending.contains(&id("- settled")));
@@ -26627,7 +26627,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_optimistic_rerun_falls_back_to_full_body_when_prior_pending_shares_nothing() {
+    async fn playbook_optimistic_rerun_falls_back_to_full_body_when_prior_pending_shares_nothing() {
         // "Shimmer block already exists" but shares no blocks with the fresh
         // press — e.g. its pending set transiently emptied mid-turn (spec
         // 0042) without the run record being reaped yet, or it was scoped to
@@ -26635,20 +26635,20 @@ mod tests {
         // immediate optimistic feedback for the new request instead of
         // silently going dark.
         let (mut app, _dir, server) = empty_app().await;
-        let id = construct_protocol::program_block_id;
+        let id = construct_protocol::playbook_block_id;
         let body = "# Todo\n\n- alpha\n\n- beta\n";
 
-        app.start_program_run("s1", body, false, "");
-        app.program_runs.get_mut("s1").expect("run").pending = HashSet::new();
+        app.start_playbook_run("s1", body, false, "");
+        app.playbook_runs.get_mut("s1").expect("run").pending = HashSet::new();
 
-        app.start_program_run("s1", body, false, body);
+        app.start_playbook_run("s1", body, false, body);
 
         assert!(
-            app.program_runs.contains_key("s1"),
+            app.playbook_runs.contains_key("s1"),
             "re-Run must not clear the optimistic shimmer just because the \
              prior run's pending set had nothing in common with the fresh body"
         );
-        let run = &app.program_runs["s1"];
+        let run = &app.playbook_runs["s1"];
         assert!(run.pending.contains(&id("# Todo")));
         assert!(run.pending.contains(&id("- alpha")));
         assert!(run.pending.contains(&id("- beta")));
@@ -26660,18 +26660,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_optimistic_rerun_adds_user_edit_to_existing_shimmer() {
+    async fn playbook_optimistic_rerun_adds_user_edit_to_existing_shimmer() {
         let (mut app, _dir, server) = empty_app().await;
-        let id = construct_protocol::program_block_id;
+        let id = construct_protocol::playbook_block_id;
         let synced = "# Todo\n\n- settled\n\n- pending\n\n- untouched\n";
         let edited = "# Todo\n\n- settled\n\n- pending\n\n- user changed\n";
 
-        app.start_program_run("s1", synced, false, "");
-        app.program_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- pending")]);
+        app.start_playbook_run("s1", synced, false, "");
+        app.playbook_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- pending")]);
 
-        app.start_program_run("s1", edited, false, synced);
+        app.start_playbook_run("s1", edited, false, synced);
 
-        let pending = &app.program_runs["s1"].pending;
+        let pending = &app.playbook_runs["s1"].pending;
         assert_eq!(pending.len(), 2);
         assert!(pending.contains(&id("- pending")));
         assert!(pending.contains(&id("- user changed")));
@@ -26681,19 +26681,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_dirty_run_seeds_optimistic_pending_before_save_response() {
+    async fn playbook_dirty_run_seeds_optimistic_pending_before_save_response() {
         let (mut app, _dir, server) = empty_app().await;
-        let id = construct_protocol::program_block_id;
+        let id = construct_protocol::playbook_block_id;
         let saved = "# Todo\n\n- settled\n\n- pending\n\n- untouched\n";
         let edited = "# Todo\n\n- settled\n\n- pending\n\n- user changed\n";
 
-        app.program_popup = Some(program_popup_for_test("s1", saved, 0));
-        app.program_popup.as_mut().unwrap().buffer = edited.to_string();
-        app.start_program_run("s1", saved, false, "");
-        app.program_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- pending")]);
-        app.start_program_run("s1", edited, false, saved);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", saved, 0));
+        app.playbook_popup.as_mut().unwrap().buffer = edited.to_string();
+        app.start_playbook_run("s1", saved, false, "");
+        app.playbook_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- pending")]);
+        app.start_playbook_run("s1", edited, false, saved);
 
-        let pending = &app.program_runs["s1"].pending;
+        let pending = &app.playbook_runs["s1"].pending;
         assert_eq!(pending.len(), 2);
         assert!(pending.contains(&id("- pending")));
         assert!(
@@ -26706,7 +26706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_execute_sends_explicit_shimmer_for_edited_and_pending_blocks() {
+    async fn playbook_execute_sends_explicit_shimmer_for_edited_and_pending_blocks() {
         use construct_protocol::ipc_method;
         use serde_json::Value;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -26753,8 +26753,8 @@ mod tests {
                             .and_then(Value::as_str)
                             .unwrap_or("# Todo\n\n- settled\n\n- pending\n\n- user changed\n");
                         let result = match method.as_str() {
-                            ipc_method::PROGRAM_UPDATE => serde_json::json!({
-                                "program": {
+                            ipc_method::PLAYBOOK_UPDATE => serde_json::json!({
+                                "playbook": {
                                     "session_id": session_id,
                                     "markdown": markdown,
                                     "version": 2,
@@ -26763,8 +26763,8 @@ mod tests {
                                 },
                                 "blocks": []
                             }),
-                            ipc_method::PROGRAM_EXECUTE => serde_json::json!({
-                                "program": {
+                            ipc_method::PLAYBOOK_EXECUTE => serde_json::json!({
+                                "playbook": {
                                     "session_id": session_id,
                                     "markdown": "# Todo\n\n- settled\n\n- pending\n\n- user changed\n",
                                     "version": 2,
@@ -26795,24 +26795,24 @@ mod tests {
         let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
         summary.id = "s1".into();
         let mut app = test_app(client, vec![summary]);
-        let id = construct_protocol::program_block_id;
+        let id = construct_protocol::playbook_block_id;
         let saved = "# Todo\n\n- settled\n\n- pending\n\n- untouched\n";
         let edited = "# Todo\n\n- settled\n\n- pending\n\n- user changed\n";
-        app.program_popup = Some(program_popup_for_test("s1", saved, 0));
-        app.program_popup.as_mut().unwrap().buffer = edited.to_string();
-        app.start_program_run("s1", saved, false, "");
-        app.program_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- pending")]);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", saved, 0));
+        app.playbook_popup.as_mut().unwrap().buffer = edited.to_string();
+        app.start_playbook_run("s1", saved, false, "");
+        app.playbook_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- pending")]);
 
-        assert!(app.execute_program_popup(None, None, None).await);
+        assert!(app.execute_playbook_popup(None, None, None).await);
 
         let mut execute_params = None;
         while let Some((method, params)) = rx.recv().await {
-            if method == ipc_method::PROGRAM_EXECUTE {
+            if method == ipc_method::PLAYBOOK_EXECUTE {
                 execute_params = Some(params);
                 break;
             }
         }
-        let params = execute_params.expect("program.execute params");
+        let params = execute_params.expect("playbook.execute params");
         assert_eq!(params.get("base_version").and_then(Value::as_u64), Some(2));
         assert_eq!(
             params.get("shimmer").cloned(),
@@ -26823,7 +26823,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_dirty_run_survives_empty_save_broadcast_before_execute_response() {
+    async fn playbook_dirty_run_survives_empty_save_broadcast_before_execute_response() {
         use construct_protocol::ipc_method;
         use serde_json::Value;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -26860,14 +26860,14 @@ mod tests {
                             .get("markdown")
                             .and_then(Value::as_str)
                             .unwrap_or("# Todo\n\n- settled\n\n- pending\n\n- user changed\n");
-                        let pending_id = construct_protocol::program_block_id("- user changed");
+                        let pending_id = construct_protocol::playbook_block_id("- user changed");
                         let now_ms = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
                             .as_millis() as i64;
                         let result = match method {
-                            ipc_method::PROGRAM_UPDATE => serde_json::json!({
-                                "program": {
+                            ipc_method::PLAYBOOK_UPDATE => serde_json::json!({
+                                "playbook": {
                                     "session_id": "s1",
                                     "markdown": markdown,
                                     "version": 2,
@@ -26877,8 +26877,8 @@ mod tests {
                                 "blocks": [],
                                 "active_run": null
                             }),
-                            ipc_method::PROGRAM_EXECUTE => serde_json::json!({
-                                "program": {
+                            ipc_method::PLAYBOOK_EXECUTE => serde_json::json!({
+                                "playbook": {
                                     "session_id": "s1",
                                     "markdown": "# Todo\n\n- settled\n\n- pending\n\n- user changed\n",
                                     "version": 2,
@@ -26926,18 +26926,18 @@ mod tests {
         let mut app = test_app(client, vec![summary]);
         let saved = "# Todo\n\n- settled\n\n- pending\n\n- untouched\n";
         let edited = "# Todo\n\n- settled\n\n- pending\n\n- user changed\n";
-        app.program_popup = Some(program_popup_for_test("s1", saved, 0));
-        app.program_popup.as_mut().unwrap().buffer = edited.to_string();
-        app.start_program_run("s1", edited, false, saved);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", saved, 0));
+        app.playbook_popup.as_mut().unwrap().buffer = edited.to_string();
+        app.start_playbook_run("s1", edited, false, saved);
         assert!(
-            !app.program_runs["s1"].pending.is_empty(),
+            !app.playbook_runs["s1"].pending.is_empty(),
             "dirty run should start with optimistic pending blocks"
         );
 
-        assert!(app.save_program_popup().await);
-        app.on_program_state(program_doc_for_test("s1", edited, 2), None, Vec::new());
+        assert!(app.save_playbook_popup().await);
+        app.on_playbook_state(playbook_doc_for_test("s1", edited, 2), None, Vec::new());
         assert!(
-            app.program_runs
+            app.playbook_runs
                 .get("s1")
                 .is_some_and(|run| !run.pending.is_empty()),
             "the save's stale empty broadcast must not kill the optimistic run"
@@ -26945,7 +26945,7 @@ mod tests {
 
         let result = app
             .client
-            .program_execute(construct_protocol::ProgramExecuteParams {
+            .playbook_execute(construct_protocol::PlaybookExecuteParams {
                 session_id: "s1".into(),
                 selection: None,
                 base_version: Some(2),
@@ -26956,28 +26956,28 @@ mod tests {
             })
             .await
             .expect("execute response");
-        app.adopt_daemon_program_run("s1", result.active_run);
-        let run = app.program_runs.get("s1").expect("execute confirms run");
+        app.adopt_daemon_playbook_run("s1", result.active_run);
+        let run = app.playbook_runs.get("s1").expect("execute confirms run");
         assert!(run.daemon_confirmed);
         assert!(!run.pending.is_empty());
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_optimistic_selection_run_adds_to_existing_shimmer_scope() {
+    async fn playbook_optimistic_selection_run_adds_to_existing_shimmer_scope() {
         // A selection run must not clear shimmer another in-flight run
-        // already declared elsewhere in the program — it optimistically adds
+        // already declared elsewhere in the playbook — it optimistically adds
         // its own scope on top of whatever is already pending.
         let (mut app, _dir, server) = empty_app().await;
-        let id = construct_protocol::program_block_id;
+        let id = construct_protocol::playbook_block_id;
         let body = "# Todo\n\n- alpha\n\n- beta\n\n- gamma\n";
 
-        app.start_program_run("s1", body, false, "");
-        app.program_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- alpha")]);
+        app.start_playbook_run("s1", body, false, "");
+        app.playbook_runs.get_mut("s1").expect("run").pending = HashSet::from([id("- alpha")]);
 
-        app.start_program_run("s1", "- beta\n\n- gamma\n", true, body);
+        app.start_playbook_run("s1", "- beta\n\n- gamma\n", true, body);
 
-        let pending = &app.program_runs["s1"].pending;
+        let pending = &app.playbook_runs["s1"].pending;
         assert_eq!(pending.len(), 3);
         assert!(pending.contains(&id("- alpha")), "prior shimmer preserved");
         assert!(pending.contains(&id("- beta")));
@@ -26986,26 +26986,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_optimistic_empty_run_clears_existing_shimmer() {
+    async fn playbook_optimistic_empty_run_clears_existing_shimmer() {
         let (mut app, _dir, server) = empty_app().await;
-        app.start_program_run("s1", "- pending\n", false, "");
-        assert!(app.program_runs.contains_key("s1"));
+        app.start_playbook_run("s1", "- pending\n", false, "");
+        assert!(app.playbook_runs.contains_key("s1"));
 
-        app.start_program_run("s1", "   \n", false, "- pending\n");
+        app.start_playbook_run("s1", "   \n", false, "- pending\n");
 
-        assert!(!app.program_runs.contains_key("s1"));
+        assert!(!app.playbook_runs.contains_key("s1"));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_run_waits_for_daemon_clear_state() {
+    async fn playbook_run_waits_for_daemon_clear_state() {
         let (mut app, _dir, server) = empty_app().await;
-        app.start_program_run("s1", "# Todo\n- a\n", false, "");
-        app.program_runs
+        app.start_playbook_run("s1", "# Todo\n- a\n", false, "");
+        app.playbook_runs
             .get_mut("s1")
             .expect("run")
             .daemon_confirmed = true;
-        assert!(app.program_runs.contains_key("s1"));
+        assert!(app.playbook_runs.contains_key("s1"));
 
         async fn feed(app: &mut App, session: &str, event: SessionEvent) {
             app.on_notification(Notification {
@@ -27034,11 +27034,11 @@ mod tests {
             },
         )
         .await;
-        assert!(app.program_runs.contains_key("s1"));
+        assert!(app.playbook_runs.contains_key("s1"));
 
         // Raw session output is not authoritative in the TUI: for PTY-backed
         // runs it may be prompt echo from delivery. The daemon owns the shared
-        // lifecycle and reports clears through program/state.
+        // lifecycle and reports clears through playbook/state.
         feed(
             &mut app,
             "s1",
@@ -27047,14 +27047,14 @@ mod tests {
             },
         )
         .await;
-        assert!(app.program_runs.contains_key("s1"));
+        assert!(app.playbook_runs.contains_key("s1"));
 
         app.on_notification(Notification {
             jsonrpc: "2.0".into(),
-            method: construct_protocol::ipc_notif::PROGRAM_STATE.into(),
+            method: construct_protocol::ipc_notif::PLAYBOOK_STATE.into(),
             params: Some(
-                serde_json::to_value(construct_protocol::ProgramStateNotificationPayload {
-                    program: construct_protocol::ProgramDocument {
+                serde_json::to_value(construct_protocol::PlaybookStateNotificationPayload {
+                    playbook: construct_protocol::PlaybookDocument {
                         session_id: "s1".into(),
                         markdown: "# Todo\n- a\n".into(),
                         version: 1,
@@ -27069,26 +27069,26 @@ mod tests {
         })
         .await;
         assert!(
-            !app.program_runs.contains_key("s1"),
-            "shimmer should clear when daemon program state reports no active run"
+            !app.playbook_runs.contains_key("s1"),
+            "shimmer should clear when daemon playbook state reports no active run"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_run_expires_at_deadline() {
+    async fn playbook_run_expires_at_deadline() {
         let (mut app, _dir, server) = empty_app().await;
-        app.start_program_run("s1", "# Todo\n", false, "");
+        app.start_playbook_run("s1", "# Todo\n", false, "");
         // A missed first-output signal must never strand the animation.
-        app.program_runs.get_mut("s1").unwrap().deadline =
+        app.playbook_runs.get_mut("s1").unwrap().deadline =
             Instant::now() - Duration::from_millis(1);
-        app.expire_program_runs(Instant::now());
-        assert!(!app.program_runs.contains_key("s1"));
+        app.expire_playbook_runs(Instant::now());
+        assert!(!app.playbook_runs.contains_key("s1"));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_settle_flourish_tracks_pending_diff_and_expires() {
+    async fn playbook_settle_flourish_tracks_pending_diff_and_expires() {
         let (mut app, _dir, server) = empty_app().await;
         let now = Instant::now();
         let previous = HashSet::from([
@@ -27098,37 +27098,37 @@ mod tests {
         ]);
         let next = HashSet::from(["block-b:1".to_string()]);
 
-        app.record_program_settle_flourishes("s1", &previous, &next, now);
+        app.record_playbook_settle_flourishes("s1", &previous, &next, now);
 
-        let flourishes = app.program_settle_flourishes.get("s1").unwrap();
+        let flourishes = app.playbook_settle_flourishes.get("s1").unwrap();
         assert_eq!(flourishes.len(), 2);
         assert_eq!(flourishes.get("block-a:1"), Some(&now));
         assert_eq!(flourishes.get("block-c:1"), Some(&now));
         assert!(!flourishes.contains_key("block-b:1"));
 
-        app.expire_program_runs(
-            now + Duration::from_millis(crate::app::PROGRAM_SETTLE_FLASH_MS - 1),
+        app.expire_playbook_runs(
+            now + Duration::from_millis(crate::app::PLAYBOOK_SETTLE_FLASH_MS - 1),
         );
         assert!(app
-            .program_settle_flourishes
+            .playbook_settle_flourishes
             .get("s1")
             .is_some_and(|flourishes| flourishes.contains_key("block-a:1")));
 
-        app.expire_program_runs(now + Duration::from_millis(crate::app::PROGRAM_SETTLE_FLASH_MS));
-        assert!(!app.program_settle_flourishes.contains_key("s1"));
+        app.expire_playbook_runs(now + Duration::from_millis(crate::app::PLAYBOOK_SETTLE_FLASH_MS));
+        assert!(!app.playbook_settle_flourishes.contains_key("s1"));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_state_empty_pending_progress_flashes_final_settled_refs() {
+    async fn playbook_state_empty_pending_progress_flashes_final_settled_refs() {
         let (mut app, _dir, server) = empty_app().await;
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        app.program_runs.insert(
+        app.playbook_runs.insert(
             "s1".into(),
-            ProgramRun {
+            PlaybookRun {
                 started_at: Instant::now(),
                 pending: HashSet::from(["block-a:1".into(), "block-b:1".into()]),
                 pending_tooltips: HashMap::new(),
@@ -27136,7 +27136,7 @@ mod tests {
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
                 first_output_seen: true,
-                stage: construct_protocol::ProgramRunStage::default(),
+                stage: construct_protocol::PlaybookRunStage::default(),
                 daemon_confirmed: true,
                 daemon_adopted_at: Some(Instant::now()),
                 settled_block_count: 0,
@@ -27144,15 +27144,15 @@ mod tests {
             },
         );
 
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "- a\n- b\n".into(),
                 version: 2,
                 updated_at_ms: 0,
                 template_id: None,
             },
-            Some(construct_protocol::ProgramRunProgress {
+            Some(construct_protocol::PlaybookRunProgress {
                 run_id: "run-1".into(),
                 started_at_ms: now_ms - 1000,
                 expires_at_ms: now_ms + 60_000,
@@ -27164,29 +27164,29 @@ mod tests {
                 first_output_seen: true,
                 queued_behind_current_turn: false,
                 agent_managed: true,
-                stage: construct_protocol::ProgramRunStage::default(),
+                stage: construct_protocol::PlaybookRunStage::default(),
                 settled_block_count: 2,
                 total_block_count: 2,
             }),
             Vec::new(),
         );
 
-        assert!(!app.program_runs.contains_key("s1"));
-        let flourishes = app.program_settle_flourishes.get("s1").unwrap();
+        assert!(!app.playbook_runs.contains_key("s1"));
+        let flourishes = app.playbook_settle_flourishes.get("s1").unwrap();
         assert!(flourishes.contains_key("block-a:1"));
         assert!(flourishes.contains_key("block-b:1"));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_rerun_preserves_agent_progress() {
+    async fn playbook_rerun_preserves_agent_progress() {
         let (mut app, _dir, server) = empty_app().await;
         // Run 1 over a list where each item is its own block (blank-separated):
         // every block shimmers.
-        let id = construct_protocol::program_block_id;
+        let id = construct_protocol::playbook_block_id;
         let original = "# Todo\n\n- alpha\n\n- beta\n\n- gamma\n";
-        app.start_program_run("s1", original, false, "");
-        let pending1 = &app.program_runs["s1"].pending;
+        app.start_playbook_run("s1", original, false, "");
+        let pending1 = &app.playbook_runs["s1"].pending;
         assert!(pending1.contains(&id("- alpha")));
         assert!(pending1.contains(&id("- beta")));
         assert!(pending1.contains(&id("- gamma")));
@@ -27195,9 +27195,9 @@ mod tests {
         // last daemon-synced content. The user then edits "gamma" and re-Runs.
         let after_agent = "# Todo\n\n- alpha done\n\n- beta\n\n- gamma\n";
         let after_user_edit = "# Todo\n\n- alpha done\n\n- beta\n\n- gamma rework\n";
-        app.start_program_run("s1", after_user_edit, false, after_agent);
+        app.start_playbook_run("s1", after_user_edit, false, after_agent);
 
-        let pending2 = &app.program_runs["s1"].pending;
+        let pending2 = &app.playbook_runs["s1"].pending;
         // The agent's settled block does NOT re-shimmer.
         assert!(
             !pending2.contains(&id("- alpha done")),
@@ -27211,26 +27211,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_selection_run_shimmers_whole_selection() {
+    async fn playbook_selection_run_shimmers_whole_selection() {
         // A selection run is explicitly scoped by the user, so even mid-flight
         // it shimmers its whole region rather than preserving prior narrowing.
         let (mut app, _dir, server) = empty_app().await;
-        app.start_program_run("s1", "# Todo\n\n- alpha\n", false, "");
-        app.start_program_run("s1", "- alpha\n\n- beta\n", true, "- alpha\n");
-        let pending = &app.program_runs["s1"].pending;
-        assert!(pending.contains(&construct_protocol::program_block_id("- alpha")));
-        assert!(pending.contains(&construct_protocol::program_block_id("- beta")));
+        app.start_playbook_run("s1", "# Todo\n\n- alpha\n", false, "");
+        app.start_playbook_run("s1", "- alpha\n\n- beta\n", true, "- alpha\n");
+        let pending = &app.playbook_runs["s1"].pending;
+        assert!(pending.contains(&construct_protocol::playbook_block_id("- alpha")));
+        assert!(pending.contains(&construct_protocol::playbook_block_id("- beta")));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_state_notification_preserves_unsaved_edits() {
+    async fn playbook_state_notification_preserves_unsaved_edits() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "# Todo\n- a\n", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "# Todo\n- a\n", 0));
         // The user is mid-edit (buffer diverges from the saved content).
-        app.program_popup.as_mut().unwrap().buffer = "# Todo\n- a\n- human typing\n".into();
-        app.on_program_state(
-            construct_protocol::ProgramDocument {
+        app.playbook_popup.as_mut().unwrap().buffer = "# Todo\n- a\n- human typing\n".into();
+        app.on_playbook_state(
+            construct_protocol::PlaybookDocument {
                 session_id: "s1".into(),
                 markdown: "# Todo\n- a\n- agent added\n".into(),
                 version: 2,
@@ -27240,16 +27240,16 @@ mod tests {
             None,
             Vec::new(),
         );
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         // Unsaved edits are untouched and the base version stays stale, so the
         // save path detects the conflict and merges both sides.
         assert_eq!(popup.buffer, "# Todo\n- a\n- human typing\n");
-        assert_eq!(popup.program.version, 1);
+        assert_eq!(popup.playbook.version, 1);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_save_merges_disjoint_edits_on_conflict() {
+    async fn playbook_save_merges_disjoint_edits_on_conflict() {
         use construct_protocol::ipc_method;
         use serde_json::Value;
         use tempfile::tempdir;
@@ -27286,7 +27286,7 @@ mod tests {
                 let params = req.get("params").cloned().unwrap_or(Value::Null);
                 let _ = seen_tx.send((method.clone(), params.clone()));
                 let resp = match method.as_str() {
-                    m if m == ipc_method::PROGRAM_UPDATE => {
+                    m if m == ipc_method::PLAYBOOK_UPDATE => {
                         update_calls += 1;
                         if update_calls == 1 {
                             // The human's base version is stale → conflict.
@@ -27295,7 +27295,7 @@ mod tests {
                                 "id": id,
                                 "error": {
                                     "code": -32603,
-                                    "message": "program conflict: current version is 2, attempted base version is 1"
+                                    "message": "playbook conflict: current version is 2, attempted base version is 1"
                                 }
                             })
                         } else {
@@ -27306,7 +27306,7 @@ mod tests {
                             serde_json::json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
-                                "result": { "program": {
+                                "result": { "playbook": {
                                     "session_id": "s1",
                                     "markdown": md,
                                     "version": 3,
@@ -27316,11 +27316,11 @@ mod tests {
                             })
                         }
                     }
-                    m if m == ipc_method::PROGRAM_GET => serde_json::json!({
+                    m if m == ipc_method::PLAYBOOK_GET => serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
                         "result": {
-                            "program": {
+                            "playbook": {
                                 "session_id": "s1",
                                 "markdown": "alpha\nbeta\ngamma\n",
                                 "version": 2,
@@ -27346,46 +27346,46 @@ mod tests {
         let mut app = test_app(client, Vec::new());
         // Ancestor "alpha\nbeta\n"; the human edits line 1 while the agent
         // appended "gamma" (a disjoint region) → a clean 3-way merge.
-        app.program_popup = Some(program_popup_for_test("s1", "alpha\nbeta\n", 0));
-        app.program_popup.as_mut().unwrap().buffer = "alpha CHANGED\nbeta\n".to_string();
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha\nbeta\n", 0));
+        app.playbook_popup.as_mut().unwrap().buffer = "alpha CHANGED\nbeta\n".to_string();
 
-        assert!(app.save_program_popup().await);
+        assert!(app.save_playbook_popup().await);
 
         let (m1, p1) = seen_rx.recv().await.expect("first update");
-        assert_eq!(m1, ipc_method::PROGRAM_UPDATE);
+        assert_eq!(m1, ipc_method::PLAYBOOK_UPDATE);
         assert_eq!(p1.get("base_version").and_then(Value::as_u64), Some(1));
-        let (m2, _p2) = seen_rx.recv().await.expect("program get");
-        assert_eq!(m2, ipc_method::PROGRAM_GET);
+        let (m2, _p2) = seen_rx.recv().await.expect("playbook get");
+        assert_eq!(m2, ipc_method::PLAYBOOK_GET);
         let (m3, p3) = seen_rx.recv().await.expect("second update");
-        assert_eq!(m3, ipc_method::PROGRAM_UPDATE);
+        assert_eq!(m3, ipc_method::PLAYBOOK_UPDATE);
         assert_eq!(p3.get("base_version").and_then(Value::as_u64), Some(2));
         assert_eq!(
             p3.get("markdown").and_then(Value::as_str),
             Some("alpha CHANGED\nbeta\ngamma\n")
         );
 
-        let popup = app.program_popup.as_ref().unwrap();
-        assert_eq!(popup.program.version, 3);
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(popup.playbook.version, 3);
         assert_eq!(popup.saved_markdown, "alpha CHANGED\nbeta\ngamma\n");
         server.abort();
     }
 
     #[tokio::test]
-    async fn open_program_session_ids_include_active_and_cached_programes() {
+    async fn open_playbook_session_ids_include_active_and_cached_playbookes() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s2", "active", 0));
-        app.program_popups
-            .insert("s1".into(), program_popup_for_test("s1", "cached", 0));
-        let mut closing = program_popup_for_test("s3", "closing", 0);
+        app.playbook_popup = Some(playbook_popup_for_test("s2", "active", 0));
+        app.playbook_popups
+            .insert("s1".into(), playbook_popup_for_test("s1", "cached", 0));
+        let mut closing = playbook_popup_for_test("s3", "closing", 0);
         closing.closing = true;
-        app.program_popups.insert("s3".into(), closing);
+        app.playbook_popups.insert("s3".into(), closing);
 
-        assert_eq!(app.open_program_session_ids(), vec!["s1", "s2"]);
+        assert_eq!(app.open_playbook_session_ids(), vec!["s1", "s2"]);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_at_trigger_filters_and_accepts_harness_smart_clip() {
+    async fn playbook_at_trigger_filters_and_accepts_harness_smart_clip() {
         let (mut app, _dir, server) = empty_app().await;
         app.harnesses = vec![construct_protocol::HarnessInfo {
             name: "codex".to_string(),
@@ -27395,18 +27395,18 @@ mod tests {
             description: Some("coding agent".to_string()),
             capabilities: Default::default(),
         }];
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
 
-        app.insert_program_text("@");
-        assert!(app.program_popup.as_ref().unwrap().smart_clip.is_some());
-        app.insert_program_text("co");
-        let candidates = app.program_smart_clip_candidates(app.program_popup.as_ref().unwrap());
+        app.insert_playbook_text("@");
+        assert!(app.playbook_popup.as_ref().unwrap().smart_clip.is_some());
+        app.insert_playbook_text("co");
+        let candidates = app.playbook_smart_clip_candidates(app.playbook_popup.as_ref().unwrap());
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].clip, "@{harness:codex}");
 
-        app.accept_program_smart_clip();
+        app.accept_playbook_smart_clip();
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "@{harness:codex clip_id=clip_1}");
         assert_eq!(
             popup.cursor,
@@ -27417,7 +27417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_program_smart_clips_get_unique_instance_ids() {
+    async fn accepted_playbook_smart_clips_get_unique_instance_ids() {
         let (mut app, _dir, server) = empty_app().await;
         app.harnesses = vec![construct_protocol::HarnessInfo {
             name: "codex".to_string(),
@@ -27427,17 +27427,17 @@ mod tests {
             description: Some("coding agent".to_string()),
             capabilities: Default::default(),
         }];
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s1",
             "@{harness:codex clip_id=clip_1} ",
             "@{harness:codex clip_id=clip_1} ".chars().count(),
         ));
 
-        app.insert_program_text("@");
-        app.insert_program_text("co");
-        app.accept_program_smart_clip();
+        app.insert_playbook_text("@");
+        app.insert_playbook_text("co");
+        app.accept_playbook_smart_clip();
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.buffer,
             "@{harness:codex clip_id=clip_1} @{harness:codex clip_id=clip_2}"
@@ -27446,7 +27446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_smart_clip_candidates_are_grouped_by_type() {
+    async fn playbook_smart_clip_candidates_are_grouped_by_type() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.title = Some("issue 132".to_string());
@@ -27459,32 +27459,32 @@ mod tests {
             description: Some("coding agent".to_string()),
             capabilities: Default::default(),
         }];
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
 
-        app.insert_program_text("@");
-        let candidates = app.program_smart_clip_candidates(app.program_popup.as_ref().unwrap());
+        app.insert_playbook_text("@");
+        let candidates = app.playbook_smart_clip_candidates(app.playbook_popup.as_ref().unwrap());
 
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0].group, ProgramSmartClipGroup::Session);
+        assert_eq!(candidates[0].group, PlaybookSmartClipGroup::Session);
         assert_eq!(candidates[0].label, "issue 132");
         assert_eq!(candidates[0].detail, "shell · running");
-        assert_eq!(candidates[1].group, ProgramSmartClipGroup::Harness);
+        assert_eq!(candidates[1].group, PlaybookSmartClipGroup::Harness);
         assert_eq!(candidates[1].label, "codex");
         assert_eq!(candidates[1].detail, "");
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_smart_clip_search_cancels_on_separator() {
+    async fn playbook_smart_clip_search_cancels_on_separator() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
 
-        app.insert_program_text("@");
-        app.insert_program_text("abc");
-        assert!(app.program_popup.as_ref().unwrap().smart_clip.is_some());
-        app.insert_program_text(" ");
+        app.insert_playbook_text("@");
+        app.insert_playbook_text("abc");
+        assert!(app.playbook_popup.as_ref().unwrap().smart_clip.is_some());
+        app.insert_playbook_text(" ");
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "@abc ");
         assert!(popup.smart_clip.is_none());
         server.abort();
@@ -27502,32 +27502,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_smart_clip_root_shows_top_then_separator_then_categories() {
+    async fn playbook_smart_clip_root_shows_top_then_separator_then_categories() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.title = Some("issue 132".to_string());
         app.sessions = vec![session];
         app.harnesses = vec![harness_info("codex", true)];
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
-        app.insert_program_text("@");
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
+        app.insert_playbook_text("@");
 
-        let popup = app.program_popup.as_ref().unwrap();
-        let rows = app.program_smart_clip_rows(popup);
+        let popup = app.playbook_popup.as_ref().unwrap();
+        let rows = app.playbook_smart_clip_rows(popup);
         // 2 top clips, a separator, then a category per non-empty type.
-        assert!(matches!(rows[0], ProgramSmartClipRow::Clip { .. }));
-        assert!(matches!(rows[1], ProgramSmartClipRow::Clip { .. }));
-        assert!(matches!(rows[2], ProgramSmartClipRow::Separator));
+        assert!(matches!(rows[0], PlaybookSmartClipRow::Clip { .. }));
+        assert!(matches!(rows[1], PlaybookSmartClipRow::Clip { .. }));
+        assert!(matches!(rows[2], PlaybookSmartClipRow::Separator));
         assert!(matches!(
             rows[3],
-            ProgramSmartClipRow::Category {
-                group: ProgramSmartClipGroup::Session,
+            PlaybookSmartClipRow::Category {
+                group: PlaybookSmartClipGroup::Session,
                 count: 1
             }
         ));
         assert!(matches!(
             rows[4],
-            ProgramSmartClipRow::Category {
-                group: ProgramSmartClipGroup::Harness,
+            PlaybookSmartClipRow::Category {
+                group: PlaybookSmartClipGroup::Harness,
                 count: 1
             }
         ));
@@ -27535,25 +27535,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_smart_clip_top_section_ranks_across_types_by_query() {
+    async fn playbook_smart_clip_top_section_ranks_across_types_by_query() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.title = Some("codex helper".to_string());
         app.sessions = vec![session];
         app.harnesses = vec![harness_info("codex", true)];
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
 
-        app.insert_program_text("@");
-        app.insert_program_text("codex");
-        let top = app.program_smart_clip_candidates(app.program_popup.as_ref().unwrap());
+        app.insert_playbook_text("@");
+        app.insert_playbook_text("codex");
+        let top = app.playbook_smart_clip_candidates(app.playbook_popup.as_ref().unwrap());
         // Exact harness-name match outranks the session's prefix match.
         assert_eq!(top[0].clip, "@{harness:codex}");
-        assert_eq!(top[1].group, ProgramSmartClipGroup::Session);
+        assert_eq!(top[1].group, PlaybookSmartClipGroup::Session);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_smart_clip_session_category_opens_picker_dialog() {
+    async fn playbook_smart_clip_session_category_opens_picker_dialog() {
         let (mut app, _dir, server) = empty_app().await;
         let mut alpha = summary_with_kind(construct_protocol::SessionKind::User);
         alpha.id = "a".into();
@@ -27564,18 +27564,18 @@ mod tests {
         beta.title = Some("beta".into());
         beta.position = 1;
         app.sessions = vec![alpha, beta];
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
-        app.insert_program_text("@");
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
+        app.insert_playbook_text("@");
 
         // Root selectables: clip, clip, then the session category at position 2.
-        app.program_popup
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .smart_clip
             .as_mut()
             .unwrap()
             .selected = 2;
-        app.accept_program_smart_clip();
+        app.accept_playbook_smart_clip();
 
         // The session category now opens the richer picker dialog (spec 0063)
         // rather than the inline submenu. The underlying `@` smart-clip search
@@ -27584,16 +27584,16 @@ mod tests {
         assert!(app.session_picker_active());
         assert_eq!(
             app.session_picker.as_ref().unwrap().purpose,
-            SessionPickerPurpose::InsertProgramClip
+            SessionPickerPurpose::InsertPlaybookClip
         );
-        assert!(app.program_popup.as_ref().unwrap().smart_clip.is_some());
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "@");
+        assert!(app.playbook_popup.as_ref().unwrap().smart_clip.is_some());
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "@");
 
         // Confirming the highlighted session (alpha) replaces the `@` token with
         // its clip and dismisses both the dialog and the smart-clip search.
         app.handle_session_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.session_picker.is_none());
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert!(
             popup.buffer.starts_with("@{session:a"),
             "inserted alpha's clip, got {:?}",
@@ -27607,7 +27607,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_picker_left_returns_to_program_menu() {
+    async fn session_picker_left_returns_to_playbook_menu() {
         let (mut app, _dir, server) = empty_app().await;
         let mut alpha = summary_with_kind(construct_protocol::SessionKind::User);
         alpha.id = "a".into();
@@ -27618,18 +27618,18 @@ mod tests {
         beta.title = Some("beta".into());
         beta.position = 1;
         app.sessions = vec![alpha, beta];
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
-        app.insert_program_text("@");
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
+        app.insert_playbook_text("@");
 
         // Open the `@`→session dialog from the session category (root position 2).
-        app.program_popup
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .smart_clip
             .as_mut()
             .unwrap()
             .selected = 2;
-        app.accept_program_smart_clip();
+        app.accept_playbook_smart_clip();
         assert!(app.session_picker_active());
 
         // Left backs out of the dialog to the inline `@` menu it was opened from
@@ -27639,26 +27639,26 @@ mod tests {
         // The dialog is gone, but the `@` smart-clip menu is live again, the
         // buffer is untouched, and the "session" category is re-highlighted.
         assert!(!app.session_picker_active(), "Left closes the dialog");
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "@");
-        let popup = app.program_popup.as_ref().unwrap();
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "@");
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup
             .smart_clip
             .as_ref()
             .expect("the inline `@` menu is live again");
-        assert!(matches!(search.view, ProgramSmartClipView::Root));
-        let rows = app.program_smart_clip_rows(popup);
-        let selectable: Vec<&ProgramSmartClipRow> =
+        assert!(matches!(search.view, PlaybookSmartClipView::Root));
+        let rows = app.playbook_smart_clip_rows(popup);
+        let selectable: Vec<&PlaybookSmartClipRow> =
             rows.iter().filter(|r| r.is_selectable()).collect();
         assert!(matches!(
             selectable[search.selected],
-            ProgramSmartClipRow::Category {
-                group: ProgramSmartClipGroup::Session,
+            PlaybookSmartClipRow::Category {
+                group: PlaybookSmartClipGroup::Session,
                 ..
             }
         ));
 
         // Right re-opens the dialog: the back-navigation is fully reversible.
-        app.program_smart_clip_expand();
+        app.playbook_smart_clip_expand();
         assert!(app.session_picker_active(), "Right re-opens the dialog");
         server.abort();
     }
@@ -27675,21 +27675,21 @@ mod tests {
         beta.title = Some("beta".into());
         beta.position = 1;
         app.sessions = vec![alpha, beta];
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
-        app.insert_program_text("@");
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
+        app.insert_playbook_text("@");
 
         // Open the `@`→session dialog (session category sits at root position 2).
-        app.program_popup
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .smart_clip
             .as_mut()
             .unwrap()
             .selected = 2;
-        app.accept_program_smart_clip();
+        app.accept_playbook_smart_clip();
         assert_eq!(
             app.session_picker.as_ref().unwrap().purpose,
-            SessionPickerPurpose::InsertProgramClip
+            SessionPickerPurpose::InsertPlaybookClip
         );
         // Empty `@` query: both sessions are bright.
         assert_eq!(
@@ -27700,7 +27700,7 @@ mod tests {
         // Typing routes into the buffer's `@<typeahead>` token — not a separate
         // dialog search line — and the dialog re-filters from it.
         picker_type(&mut app, "alph");
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "@alph");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "@alph");
         assert!(
             app.session_picker.as_ref().unwrap().query.is_empty(),
             "the dialog keeps no search line of its own for the `@` variant"
@@ -27711,7 +27711,7 @@ mod tests {
         for _ in 0..4 {
             app.handle_session_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         }
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "@");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "@");
         assert!(app.session_picker_active(), "still open at the bare `@`");
         assert_eq!(
             picker_bright(&app.session_picker_rows()),
@@ -27721,8 +27721,8 @@ mod tests {
         // Backspacing over the `@` itself removes it and dismisses the picker.
         app.handle_session_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert!(!app.session_picker_active());
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "");
-        assert!(app.program_popup.as_ref().unwrap().smart_clip.is_none());
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "");
+        assert!(app.playbook_popup.as_ref().unwrap().smart_clip.is_none());
         server.abort();
     }
 
@@ -27737,19 +27737,19 @@ mod tests {
         alpha.id = "a".into();
         alpha.title = Some("alpha".into());
         app.sessions = vec![alpha];
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
-        app.insert_program_text("@");
-        app.program_popup
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
+        app.insert_playbook_text("@");
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .smart_clip
             .as_mut()
             .unwrap()
             .selected = 2;
-        app.accept_program_smart_clip();
+        app.accept_playbook_smart_clip();
         assert_eq!(
             app.session_picker.as_ref().unwrap().purpose,
-            SessionPickerPurpose::InsertProgramClip
+            SessionPickerPurpose::InsertPlaybookClip
         );
 
         // Below the min-chars threshold nothing is armed…
@@ -27764,7 +27764,7 @@ mod tests {
         // …and the third typeahead char arms the debounce off the *buffer*
         // token — the dialog's own (unused) search line stays empty.
         picker_type(&mut app, "p");
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "@alp");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "@alp");
         let dialog = app.session_picker.as_ref().unwrap();
         assert!(dialog.query.is_empty());
         assert!(dialog.content_search_deadline.is_some());
@@ -27811,18 +27811,18 @@ mod tests {
         target.title = Some("needle notes".into());
         target.position = 1;
         app.sessions = vec![alpha, target];
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
-        app.insert_program_text("@");
-        app.program_popup
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
+        app.insert_playbook_text("@");
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .smart_clip
             .as_mut()
             .unwrap()
             .selected = 2;
-        app.accept_program_smart_clip();
+        app.accept_playbook_smart_clip();
         picker_type(&mut app, "needle");
-        assert_eq!(app.program_popup.as_ref().unwrap().buffer, "@needle");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "@needle");
 
         // A landed tier-2 search matched `target`'s transcript.
         if let Some(dialog) = app.session_picker.as_mut() {
@@ -27853,7 +27853,7 @@ mod tests {
         app.handle_session_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(app.session_picker.is_none(), "confirm closes the dialog");
-        let popup = app.program_popup.as_ref().expect("program stays open");
+        let popup = app.playbook_popup.as_ref().expect("playbook stays open");
         assert!(
             popup.buffer.starts_with("@{session:target"),
             "the `@<typeahead>` token is replaced by the hit session's clip, got {:?}",
@@ -27867,7 +27867,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_smart_clip_session_submenu_groups_and_dims() {
+    async fn playbook_smart_clip_session_submenu_groups_and_dims() {
         let (mut app, _dir, server) = empty_app().await;
         let mut alpha = summary_with_kind(construct_protocol::SessionKind::User);
         alpha.id = "a".into();
@@ -27886,30 +27886,30 @@ mod tests {
             position: 0,
             collapsed: false,
         }];
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
-        app.insert_program_text("@");
-        app.insert_program_text("al");
-        app.program_popup
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
+        app.insert_playbook_text("@");
+        app.insert_playbook_text("al");
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .smart_clip
             .as_mut()
             .unwrap()
-            .view = ProgramSmartClipView::Submenu(ProgramSmartClipGroup::Session);
+            .view = PlaybookSmartClipView::Submenu(PlaybookSmartClipGroup::Session);
 
-        let popup = app.program_popup.as_ref().unwrap();
-        let rows = app.program_smart_clip_rows(popup);
+        let popup = app.playbook_popup.as_ref().unwrap();
+        let rows = app.playbook_smart_clip_rows(popup);
         // Ungrouped "alpha" first, then the "Proj" group header, then "beta".
         match &rows[0] {
-            ProgramSmartClipRow::Clip { candidate, dimmed } => {
+            PlaybookSmartClipRow::Clip { candidate, dimmed } => {
                 assert_eq!(candidate.label, "alpha");
                 assert!(!dimmed, "query 'al' matches alpha");
             }
             other => panic!("expected alpha clip, got {other:?}"),
         }
-        assert!(matches!(&rows[1], ProgramSmartClipRow::Header(h) if h == "Proj"));
+        assert!(matches!(&rows[1], PlaybookSmartClipRow::Header(h) if h == "Proj"));
         match &rows[2] {
-            ProgramSmartClipRow::Clip { candidate, dimmed } => {
+            PlaybookSmartClipRow::Clip { candidate, dimmed } => {
                 assert_eq!(candidate.label, "beta");
                 assert!(
                     dimmed,
@@ -27922,35 +27922,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_smart_clip_collapse_returns_to_root_on_category() {
+    async fn playbook_smart_clip_collapse_returns_to_root_on_category() {
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.title = Some("alpha".into());
         app.sessions = vec![session];
         app.harnesses = vec![harness_info("codex", true)];
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
-        app.insert_program_text("@");
-        app.program_popup
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
+        app.insert_playbook_text("@");
+        app.playbook_popup
             .as_mut()
             .unwrap()
             .smart_clip
             .as_mut()
             .unwrap()
-            .view = ProgramSmartClipView::Submenu(ProgramSmartClipGroup::Harness);
+            .view = PlaybookSmartClipView::Submenu(PlaybookSmartClipGroup::Harness);
 
-        app.program_smart_clip_collapse();
+        app.playbook_smart_clip_collapse();
 
-        let popup = app.program_popup.as_ref().unwrap();
+        let popup = app.playbook_popup.as_ref().unwrap();
         let search = popup.smart_clip.as_ref().unwrap();
-        assert!(matches!(search.view, ProgramSmartClipView::Root));
+        assert!(matches!(search.view, PlaybookSmartClipView::Root));
         // Re-highlights the harness category we backed out of.
-        let rows = app.program_smart_clip_rows(popup);
-        let selectable: Vec<&ProgramSmartClipRow> =
+        let rows = app.playbook_smart_clip_rows(popup);
+        let selectable: Vec<&PlaybookSmartClipRow> =
             rows.iter().filter(|r| r.is_selectable()).collect();
         assert!(matches!(
             selectable[search.selected],
-            ProgramSmartClipRow::Category {
-                group: ProgramSmartClipGroup::Harness,
+            PlaybookSmartClipRow::Category {
+                group: PlaybookSmartClipGroup::Harness,
                 ..
             }
         ));
@@ -27958,75 +27958,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_cursor_moves_over_smart_clip_as_one_unit() {
+    async fn playbook_cursor_moves_over_smart_clip_as_one_unit() {
         let (mut app, _dir, server) = empty_app().await;
         let clip = "@{harness:codex}";
         let before = "a ";
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s1",
             &format!("{before}{clip} z"),
             before.chars().count(),
         ));
 
-        app.move_program_cursor(1);
+        app.move_playbook_cursor(1);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             before.chars().count() + clip.chars().count()
         );
 
-        app.move_program_cursor(-1);
+        app.move_playbook_cursor(-1);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             before.chars().count()
         );
 
-        app.program_popup.as_mut().unwrap().cursor = before.chars().count() + 3;
-        app.move_program_cursor(1);
+        app.playbook_popup.as_mut().unwrap().cursor = before.chars().count() + 3;
+        app.move_playbook_cursor(1);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             before.chars().count() + clip.chars().count()
         );
         server.abort();
     }
 
     // Vertical cursor navigation and mouse hit-testing must move through the
-    // *visual* (word-wrapped) rows the program body paints, not jump over a whole
+    // *visual* (word-wrapped) rows the playbook body paints, not jump over a whole
     // logical line. With an inner content width of 5 the single-word line
     // "abcdefghij" wraps into two visual rows: "abcde" (offsets 0–4) and "fghij"
     // (offsets 5–9). Nav reads the width from the inner area captured at the last
     // render; hit-testing derives it from the modal rect.
 
     #[tokio::test]
-    async fn program_down_moves_to_next_visual_row_within_logical_line() {
+    async fn playbook_down_moves_to_next_visual_row_within_logical_line() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abcdefghij", 2));
-        app.layout.program_inner_area = Some(Rect::new(2, 2, 5, 20));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdefghij", 2));
+        app.layout.playbook_inner_area = Some(Rect::new(2, 2, 5, 20));
 
-        app.move_program_cursor_vertical(1);
+        app.move_playbook_cursor_vertical(1);
 
         // Down lands on the wrapped continuation row at the same column (offset
         // 5 + 2 = 7), staying inside the one logical line — not at its end.
-        assert_eq!(app.program_popup.as_ref().unwrap().cursor, 7);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 7);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_up_from_continuation_row_stays_in_logical_line() {
+    async fn playbook_up_from_continuation_row_stays_in_logical_line() {
         let (mut app, _dir, server) = empty_app().await;
         // Cursor on the second visual row ("fghij") at column 2 → offset 7.
-        app.program_popup = Some(program_popup_for_test("s1", "abcdefghij", 7));
-        app.layout.program_inner_area = Some(Rect::new(2, 2, 5, 20));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdefghij", 7));
+        app.layout.playbook_inner_area = Some(Rect::new(2, 2, 5, 20));
 
-        app.move_program_cursor_vertical(-1);
+        app.move_playbook_cursor_vertical(-1);
 
         // Up moves to the first visual row of the *same* logical line (offset 2),
         // rather than doing nothing because there is no logical line above.
-        assert_eq!(app.program_popup.as_ref().unwrap().cursor, 2);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 2);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_down_from_line_start_with_clip_does_not_land_on_at_sign() {
+    async fn playbook_down_from_line_start_with_clip_does_not_land_on_at_sign() {
         // "hello @{session:s1}" renders as "hello  session s1 " (18 visible
         // chars with chip padding). At width 7 the chip's rendering wraps
         // across visual rows 1 and 2 of the logical line. The cursor starts
@@ -28038,15 +28038,15 @@ mod tests {
         let clip = "@{session:s1}";
         let markdown = format!("hello {clip}\nnext");
         // cursor starts at 0: beginning of the first line (before "hello")
-        app.program_popup = Some(program_popup_for_test("s1", &markdown, 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", &markdown, 0));
         // width 7 forces "hello  session s1 " to wrap across 3 visual rows
-        app.layout.program_inner_area = Some(Rect::new(2, 2, 7, 20));
+        app.layout.playbook_inner_area = Some(Rect::new(2, 2, 7, 20));
 
-        app.move_program_cursor_vertical(1);
+        app.move_playbook_cursor_vertical(1);
 
         let at_sign_offset = "hello ".chars().count(); // 6
         assert_ne!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             at_sign_offset,
             "Down from line start must not land on the '@' of a clip (cursor would not have moved down)"
         );
@@ -28054,31 +28054,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_ctrl_a_then_ctrl_f_does_not_skip_list_marker() {
+    async fn playbook_ctrl_a_then_ctrl_f_does_not_skip_list_marker() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "* alpha beta gamma", 0));
-        app.layout.program_inner_area = Some(Rect::new(2, 2, 5, 12));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "* alpha beta gamma", 0));
+        app.layout.playbook_inner_area = Some(Rect::new(2, 2, 5, 12));
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             2,
             "Ctrl-A must jump to list content, not the list marker"
         );
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             3,
             "first Ctrl-F must move to the first content char, not jump over it"
         );
 
-        app.handle_program_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             4,
             "single-step right should behave like Ctrl-F from list content start"
         );
@@ -28087,28 +28087,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_horizontal_motion_skips_hidden_list_marker_offsets() {
+    async fn playbook_horizontal_motion_skips_hidden_list_marker_offsets() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "* alpha", 0));
-        app.layout.program_inner_area = Some(Rect::new(2, 2, 6, 12));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "* alpha", 0));
+        app.layout.playbook_inner_area = Some(Rect::new(2, 2, 6, 12));
 
-        app.move_program_cursor(1);
+        app.move_playbook_cursor(1);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             3,
             "right from the rendered list start should not stop inside hidden '* '"
         );
 
-        app.move_program_cursor(-1);
+        app.move_playbook_cursor(-1);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             2,
             "left from the first content char should land on content start, not hidden marker"
         );
 
-        app.move_program_cursor(-1);
+        app.move_playbook_cursor(-1);
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             2,
             "left at list content start should stay visible instead of entering '* '"
         );
@@ -28116,18 +28116,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_click_on_list_prefix_normalizes_to_content_start() {
+    async fn playbook_click_on_list_prefix_normalizes_to_content_start() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "* alpha beta gamma", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "* alpha beta gamma", 0));
         let modal = Rect::new(0, 0, 9, 20);
 
         // Click leftmost painted column on the first row. Without normalization
         // this resolves to cursor 0 (inside the hidden '* ' marker), then
         // moves with the next keypress.
-        app.place_program_cursor(modal, 1, 2);
+        app.place_playbook_cursor(modal, 1, 2);
 
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             2,
             "clicking list marker area should land on list content start"
         );
@@ -28135,34 +28135,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_click_on_wrapped_list_continuation_row_maps_to_offset() {
+    async fn playbook_click_on_wrapped_list_continuation_row_maps_to_offset() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "* alpha beta gamma", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "* alpha beta gamma", 0));
         let modal = Rect::new(0, 0, 9, 20);
 
         // inner width = 9 - 2 border - 2 pad = 6.
         // This line wraps and places continuation rows; clicking continuation
         // row 2 must stay inside the list content, not land before marker.
-        app.place_program_cursor(modal, 2, 3);
+        app.place_playbook_cursor(modal, 2, 3);
         assert!(
-            app.program_popup.as_ref().unwrap().cursor >= 2,
+            app.playbook_popup.as_ref().unwrap().cursor >= 2,
             "wrapped list hit-testing should remain within list content"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_ctrl_a_from_wrapped_list_continuation_row_preserves_content_start() {
+    async fn playbook_ctrl_a_from_wrapped_list_continuation_row_preserves_content_start() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "* alpha beta gamma", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "* alpha beta gamma", 0));
         let modal = Rect::new(0, 0, 9, 20);
 
-        app.place_program_cursor(modal, 2, 3);
-        app.handle_program_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        app.place_playbook_cursor(modal, 2, 3);
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
             .await;
 
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             2,
             "Ctrl-A must land on list content even when cursor starts on wrapped row"
         );
@@ -28170,15 +28170,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_down_moves_between_wrapped_rows_inside_list_content() {
+    async fn playbook_down_moves_between_wrapped_rows_inside_list_content() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "* abcdefghij", 4));
-        app.layout.program_inner_area = Some(Rect::new(2, 2, 5, 20));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "* abcdefghij", 4));
+        app.layout.playbook_inner_area = Some(Rect::new(2, 2, 5, 20));
 
-        app.move_program_cursor_vertical(1);
+        app.move_playbook_cursor_vertical(1);
 
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             9,
             "Down should preserve the content column across wrapped bullet rows"
         );
@@ -28186,15 +28186,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_right_skips_collapsed_wrap_space() {
+    async fn playbook_right_skips_collapsed_wrap_space() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abcd efgh", 4));
-        app.layout.program_inner_area = Some(Rect::new(2, 2, 4, 20));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcd efgh", 4));
+        app.layout.playbook_inner_area = Some(Rect::new(2, 2, 4, 20));
 
-        app.move_program_cursor(1);
+        app.move_playbook_cursor(1);
 
         assert_eq!(
-            app.program_popup.as_ref().unwrap().cursor,
+            app.playbook_popup.as_ref().unwrap().cursor,
             6,
             "Right should skip word-wrap break whitespace that does not occupy a painted cell"
         );
@@ -28202,18 +28202,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_cursor_position_matches_painted_wrapped_list_content() {
+    async fn playbook_cursor_position_matches_painted_wrapped_list_content() {
         let (app, _dir, server) = empty_app().await;
         let markdown = "* alpha beta gamma";
         let cursor = "* alpha ".chars().count();
         let width = 6u16;
         let (row, col) =
-            crate::ui::program_cursor_visual_pos(Some(&app), markdown, cursor, width as usize);
+            crate::ui::playbook_cursor_visual_pos(Some(&app), markdown, cursor, width as usize);
 
         let backend = ratatui::backend::TestBackend::new(width, 6);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| {
-            let lines = crate::ui::render_program_markdown_lines_for_test(&app, markdown);
+            let lines = crate::ui::render_playbook_markdown_lines_for_test(&app, markdown);
             let para = ratatui::widgets::Paragraph::new(lines)
                 .wrap(ratatui::widgets::Wrap { trim: false });
             f.render_widget(para, Rect::new(0, 0, width, 6));
@@ -28234,7 +28234,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_cursor_advances_when_space_appended_to_list_item() {
+    async fn playbook_cursor_advances_when_space_appended_to_list_item() {
         let (app, _dir, server) = empty_app().await;
         let width = 40u16;
 
@@ -28243,13 +28243,13 @@ mod tests {
         // must move by one too — otherwise the caret desyncs from the edit point.
         let before = "* foo";
         let after = "* foo ";
-        let (_, col_before) = crate::ui::program_cursor_visual_pos(
+        let (_, col_before) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             before,
             before.chars().count(),
             width as usize,
         );
-        let (_, col_after) = crate::ui::program_cursor_visual_pos(
+        let (_, col_after) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             after,
             after.chars().count(),
@@ -28278,10 +28278,10 @@ mod tests {
     /// first content char lands — and the cursor sits right after the
     /// rendered `  • ` prefix.
     #[tokio::test]
-    async fn program_lone_list_marker_renders_as_bullet() {
+    async fn playbook_lone_list_marker_renders_as_bullet() {
         let (app, _dir, server) = empty_app().await;
         for marker in ["- ", "* "] {
-            let lines = crate::ui::render_program_markdown_lines_for_test(&app, marker);
+            let lines = crate::ui::render_playbook_markdown_lines_for_test(&app, marker);
             let painted: String = lines[0]
                 .spans
                 .iter()
@@ -28291,7 +28291,7 @@ mod tests {
                 painted, "  • ",
                 "a lone {marker:?} should render as an empty bullet"
             );
-            let (row, col) = crate::ui::program_cursor_visual_pos(Some(&app), marker, 2, 40);
+            let (row, col) = crate::ui::playbook_cursor_visual_pos(Some(&app), marker, 2, 40);
             assert_eq!(
                 (row, col),
                 (0, 4),
@@ -28305,39 +28305,39 @@ mod tests {
     /// line — continue with the same indent/marker (checklists restart with
     /// an unchecked box), dissolve empty items, plain newline elsewhere.
     #[test]
-    fn program_newline_action_classifies_list_lines() {
-        assert_eq!(program_newline_action("hello", 5), ProgramNewline::Plain);
+    fn playbook_newline_action_classifies_list_lines() {
+        assert_eq!(playbook_newline_action("hello", 5), PlaybookNewline::Plain);
         assert_eq!(
-            program_newline_action("- foo", 5),
-            ProgramNewline::Continue("- ".into())
+            playbook_newline_action("- foo", 5),
+            PlaybookNewline::Continue("- ".into())
         );
         assert_eq!(
-            program_newline_action("  * item", 8),
-            ProgramNewline::Continue("  * ".into())
+            playbook_newline_action("  * item", 8),
+            PlaybookNewline::Continue("  * ".into())
         );
         assert_eq!(
-            program_newline_action("- [x] done", 10),
-            ProgramNewline::Continue("- [ ] ".into())
+            playbook_newline_action("- [x] done", 10),
+            PlaybookNewline::Continue("- [ ] ".into())
         );
         // Splitting mid-content still continues the list.
         assert_eq!(
-            program_newline_action("- foobar", 5),
-            ProgramNewline::Continue("- ".into())
+            playbook_newline_action("- foobar", 5),
+            PlaybookNewline::Continue("- ".into())
         );
         // A caret inside the indent/marker pushes the bullet down instead.
-        assert_eq!(program_newline_action("- foo", 0), ProgramNewline::Plain);
+        assert_eq!(playbook_newline_action("- foo", 0), PlaybookNewline::Plain);
         // Empty items dissolve — marker-only, whitespace-only, and empty
         // checklist boxes alike; bounds are line-local within the buffer.
         assert_eq!(
-            program_newline_action("- ", 2),
-            ProgramNewline::ClearItem {
+            playbook_newline_action("- ", 2),
+            PlaybookNewline::ClearItem {
                 line_start: 0,
                 line_end: 2
             }
         );
         assert_eq!(
-            program_newline_action("a\n- [ ] \nb", 8),
-            ProgramNewline::ClearItem {
+            playbook_newline_action("a\n- [ ] \nb", 8),
+            PlaybookNewline::ClearItem {
                 line_start: 2,
                 line_end: 8
             }
@@ -28345,11 +28345,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_enter_continues_and_splits_bullet() {
+    async fn playbook_enter_continues_and_splits_bullet() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "- foobar", 5));
-        app.insert_program_newline();
-        let popup = app.program_popup.as_ref().unwrap();
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "- foobar", 5));
+        app.insert_playbook_newline();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.buffer, "- foo\n- bar",
             "Enter mid-item should split it into two bullets"
@@ -28362,11 +28362,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_enter_continues_checklist_with_fresh_box() {
+    async fn playbook_enter_continues_checklist_with_fresh_box() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "- [x] done", 10));
-        app.insert_program_newline();
-        let popup = app.program_popup.as_ref().unwrap();
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "- [x] done", 10));
+        app.insert_playbook_newline();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.buffer, "- [x] done\n- [ ] ",
             "a checklist item should continue with an unchecked box"
@@ -28376,20 +28376,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_enter_dissolves_empty_bullet_and_undo_restores_it() {
+    async fn playbook_enter_dissolves_empty_bullet_and_undo_restores_it() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "- foo\n- ", 8));
-        app.insert_program_newline();
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "- foo\n- ", 8));
+        app.insert_playbook_newline();
         {
-            let popup = app.program_popup.as_ref().unwrap();
+            let popup = app.playbook_popup.as_ref().unwrap();
             assert_eq!(
                 popup.buffer, "- foo\n",
                 "Enter on an empty item should dissolve the marker, not add another bullet"
             );
             assert_eq!(popup.cursor, 6, "the caret stays on the now-plain line");
         }
-        app.undo_program_edit();
-        let popup = app.program_popup.as_ref().unwrap();
+        app.undo_playbook_edit();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.buffer, "- foo\n- ",
             "undo restores the dissolved item"
@@ -28403,12 +28403,12 @@ mod tests {
     /// is plain text — deleting at the end of `* [ ]` removes only the `]`,
     /// never the box, the marker, or the line.
     #[tokio::test]
-    async fn program_backspace_on_checklist_deletes_single_char() {
+    async fn playbook_backspace_on_checklist_deletes_single_char() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "* [ ]", 5));
-        app.delete_program_back();
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "* [ ]", 5));
+        app.delete_playbook_back();
         {
-            let popup = app.program_popup.as_ref().unwrap();
+            let popup = app.playbook_popup.as_ref().unwrap();
             assert_eq!(
                 popup.buffer, "* [ ",
                 "backspace at the end of a checklist box should delete only the ']'"
@@ -28417,9 +28417,9 @@ mod tests {
         }
         // An empty marker-only item deletes char-wise too — no Enter-style
         // dissolve on Backspace.
-        app.program_popup = Some(program_popup_for_test("s1", "- ", 2));
-        app.delete_program_back();
-        let popup = app.program_popup.as_ref().unwrap();
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "- ", 2));
+        app.delete_playbook_back();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.buffer, "-",
             "backspace on an empty item should delete only the marker space"
@@ -28444,7 +28444,7 @@ mod tests {
 
     /// Select `anchor..head` in a fresh popup over `doc`, arm the
     /// optimistic run exactly the way Run/verb dispatch does
-    /// (`selected_program_block_ids` → `start_program_run_with_pending`), and
+    /// (`selected_playbook_block_ids` → `start_playbook_run_with_pending`), and
     /// return the shimmer's per-source-line activity mask. `daemon_blocks`
     /// picks the shimmer path: the clean-buffer daemon-projection path
     /// (stable refs with content-id fallback) or the dirty-buffer
@@ -28457,17 +28457,17 @@ mod tests {
         head: usize,
         daemon_blocks: bool,
     ) -> Vec<bool> {
-        let mut popup = program_popup_for_test(session, doc, head);
-        popup.selection = Some(ProgramSelection {
+        let mut popup = playbook_popup_for_test(session, doc, head);
+        popup.selection = Some(PlaybookSelection {
             anchor,
             head,
             dragged: true,
         });
         if daemon_blocks {
-            popup.blocks = construct_protocol::program_block_spans(doc)
+            popup.blocks = construct_protocol::playbook_block_spans(doc)
                 .into_iter()
                 .enumerate()
-                .map(|(i, span)| construct_protocol::ProgramBlockView {
+                .map(|(i, span)| construct_protocol::PlaybookBlockView {
                     id: format!("blk-{i}:1"),
                     block_id: format!("blk-{i}"),
                     content_epoch: 1,
@@ -28481,13 +28481,13 @@ mod tests {
                 })
                 .collect();
         }
-        let ids = App::selected_program_block_ids(&popup).expect("selection yields block ids");
+        let ids = App::selected_playbook_block_ids(&popup).expect("selection yields block ids");
         assert!(!ids.is_empty(), "selection should cover at least one block");
-        let pending = app.program_run_pending_with_existing(session, ids);
-        app.start_program_run_with_pending(session, pending);
-        app.program_popup = Some(popup);
-        let popup_ref = app.program_popup.as_ref().unwrap();
-        crate::ui::program_run_shimmer_active_lines_for_test(app, popup_ref, Instant::now())
+        let pending = app.playbook_run_pending_with_existing(session, ids);
+        app.start_playbook_run_with_pending(session, pending);
+        app.playbook_popup = Some(popup);
+        let popup_ref = app.playbook_popup.as_ref().unwrap();
+        crate::ui::playbook_run_shimmer_active_lines_for_test(app, popup_ref, Instant::now())
             .expect("optimistic run should produce a shimmer")
     }
 
@@ -28499,7 +28499,7 @@ mod tests {
     /// reparse) for selections inside one item, across items, across a blank
     /// line into a paragraph, and for the drag-to-line-start boundary.
     #[tokio::test]
-    async fn program_selection_shimmer_covers_selected_blocks_exactly() {
+    async fn playbook_selection_shimmer_covers_selected_blocks_exactly() {
         let (mut app, _dir, server) = empty_app().await;
         let cases: Vec<(&str, usize, usize, Vec<usize>)> = vec![
             (
@@ -28556,7 +28556,7 @@ mod tests {
     /// end-exclusive overlap still contains the second item because the
     /// selection reaches past its first char.
     #[tokio::test]
-    async fn program_selection_shimmer_covers_trailing_item_without_newline() {
+    async fn playbook_selection_shimmer_covers_trailing_item_without_newline() {
         let (mut app, _dir, server) = empty_app().await;
         let doc = "* item1\n* item2";
         for daemon_blocks in [false, true] {
@@ -28586,9 +28586,9 @@ mod tests {
     /// before ratatui word-wraps it (the paint-vs-math differential test
     /// above pins that mapping).
     #[tokio::test]
-    async fn program_shimmer_overlay_restyles_only_active_lines() {
+    async fn playbook_shimmer_overlay_restyles_only_active_lines() {
         let (app, _dir, server) = empty_app().await;
-        let mut lines = crate::ui::render_program_markdown_lines_for_test(&app, SHIMMER_DOC);
+        let mut lines = crate::ui::render_playbook_markdown_lines_for_test(&app, SHIMMER_DOC);
         let before_text: Vec<String> = lines
             .iter()
             .map(|line| {
@@ -28600,7 +28600,7 @@ mod tests {
             .collect();
         let before_span_counts: Vec<usize> = lines.iter().map(|line| line.spans.len()).collect();
         let active = vec![false, true, true, false, false, false, false];
-        crate::ui::apply_program_shimmer_for_test(&mut lines, active.clone(), &app.theme);
+        crate::ui::apply_playbook_shimmer_for_test(&mut lines, active.clone(), &app.theme);
         for (i, line) in lines.iter().enumerate() {
             let after_text: String = line
                 .spans
@@ -28628,11 +28628,11 @@ mod tests {
         server.abort();
     }
 
-    /// Differential regression harness for program-editor cursor/selection
+    /// Differential regression harness for playbook-editor cursor/selection
     /// drift: for every alphanumeric char in each corpus doc, paint the real
-    /// pipeline (`render_program_markdown_lines` + ratatui
+    /// pipeline (`render_playbook_markdown_lines` + ratatui
     /// `Wrap { trim: false }`) into a TestBackend and assert the glyph at the
-    /// cell where `program_cursor_visual_pos` places that char's cursor is the
+    /// cell where `playbook_cursor_visual_pos` places that char's cursor is the
     /// char itself. Any divergence between the wrap/cursor math and what
     /// ratatui actually paints — the drift the user sees as "the caret is not
     /// where edits land" — shows up as a mismatch. The corpus deliberately
@@ -28640,7 +28640,7 @@ mod tests {
     /// NBSP, CJK at wrap boundaries, `:::` clip fences, and smart-clip chips
     /// in heading/bullet/plain lines.
     #[tokio::test]
-    async fn program_cursor_math_matches_painted_buffer_differential() {
+    async fn playbook_cursor_math_matches_painted_buffer_differential() {
         let (app, _dir, server) = empty_app().await;
 
         let cases: Vec<(&str, &str)> = vec![
@@ -28743,12 +28743,12 @@ mod tests {
                 i += 1;
             }
             for &width in &widths {
-                let total = crate::ui::program_total_visual_rows(Some(&app), doc, width);
+                let total = crate::ui::playbook_total_visual_rows(Some(&app), doc, width);
                 let height = (total + 8).min(400) as u16;
                 let backend = ratatui::backend::TestBackend::new(width as u16, height);
                 let mut term = ratatui::Terminal::new(backend).expect("terminal");
                 term.draw(|f| {
-                    let lines = crate::ui::render_program_markdown_lines_for_test(&app, doc);
+                    let lines = crate::ui::render_playbook_markdown_lines_for_test(&app, doc);
                     let para = ratatui::widgets::Paragraph::new(lines)
                         .wrap(ratatui::widgets::Wrap { trim: false });
                     f.render_widget(para, Rect::new(0, 0, width as u16, height));
@@ -28761,7 +28761,7 @@ mod tests {
                         continue;
                     }
                     let (row, col) =
-                        crate::ui::program_cursor_visual_pos(Some(&app), doc, offset, width);
+                        crate::ui::playbook_cursor_visual_pos(Some(&app), doc, offset, width);
                     let glyph = buffer
                         .cell((col as u16, row as u16))
                         .map(|c| c.symbol().to_string())
@@ -28808,7 +28808,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_cursor_advances_when_space_appended_to_heading() {
+    async fn playbook_cursor_advances_when_space_appended_to_heading() {
         let (app, _dir, server) = empty_app().await;
         let width = 40u16;
 
@@ -28818,13 +28818,13 @@ mod tests {
         // Headings paint their `#` markers literally, so "## foo" renders 6 wide.
         let before = "## foo";
         let after = "## foo ";
-        let (_, col_before) = crate::ui::program_cursor_visual_pos(
+        let (_, col_before) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             before,
             before.chars().count(),
             width as usize,
         );
-        let (_, col_after) = crate::ui::program_cursor_visual_pos(
+        let (_, col_after) = crate::ui::playbook_cursor_visual_pos(
             Some(&app),
             after,
             after.chars().count(),
@@ -28849,67 +28849,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_vertical_nav_preserves_preferred_column_across_wrap() {
+    async fn playbook_vertical_nav_preserves_preferred_column_across_wrap() {
         let (mut app, _dir, server) = empty_app().await;
         // "abcdefghij" wraps to two visual rows; "XY" is a short line below it.
-        app.program_popup = Some(program_popup_for_test("s1", "abcdefghij\nXY", 3));
-        app.layout.program_inner_area = Some(Rect::new(2, 2, 5, 20));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdefghij\nXY", 3));
+        app.layout.playbook_inner_area = Some(Rect::new(2, 2, 5, 20));
 
         // Down crosses the wrapped boundary: row 1 of the logical line, col 3.
-        app.move_program_cursor_vertical(1);
-        assert_eq!(app.program_popup.as_ref().unwrap().cursor, 8);
-        assert_eq!(app.program_popup.as_ref().unwrap().preferred_col, Some(3));
+        app.move_playbook_cursor_vertical(1);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 8);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().preferred_col, Some(3));
 
         // Down again onto the short "XY" line clamps to its end (offset 13) but
         // the preferred column is remembered, not overwritten by the clamp.
-        app.move_program_cursor_vertical(1);
-        assert_eq!(app.program_popup.as_ref().unwrap().cursor, 13);
-        assert_eq!(app.program_popup.as_ref().unwrap().preferred_col, Some(3));
+        app.move_playbook_cursor_vertical(1);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 13);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().preferred_col, Some(3));
 
         // Up returns to the long row and restores column 3 (offset 8).
-        app.move_program_cursor_vertical(-1);
-        assert_eq!(app.program_popup.as_ref().unwrap().cursor, 8);
-        assert_eq!(app.program_popup.as_ref().unwrap().preferred_col, Some(3));
+        app.move_playbook_cursor_vertical(-1);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 8);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().preferred_col, Some(3));
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_click_on_wrapped_continuation_row_maps_to_offset() {
+    async fn playbook_click_on_wrapped_continuation_row_maps_to_offset() {
         let (mut app, _dir, server) = empty_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "abcdefghij", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdefghij", 0));
         // inner content origin = (modal.x + 1 + pad, modal.y + 1 + pad) = (2, 2);
         // inner width = 9 - 2 border - 2 pad = 5. "fghij" paints at y = 3.
         let modal = Rect::new(0, 0, 9, 20);
 
         // Click column 2 of the continuation row (screen col 4, row 3) → offset 7.
-        app.place_program_cursor(modal, 4, 3);
+        app.place_playbook_cursor(modal, 4, 3);
 
-        assert_eq!(app.program_popup.as_ref().unwrap().cursor, 7);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 7);
         server.abort();
     }
 
     #[tokio::test]
-    async fn program_click_maps_through_scroll_offset_on_wrapped_row() {
+    async fn playbook_click_maps_through_scroll_offset_on_wrapped_row() {
         let (mut app, _dir, server) = empty_app().await;
         // Three logical lines; the first wraps to two visual rows (0,1), then
         // "second" is row 2 and "third" is row 3. Scroll one wrapped row off the
         // top so the viewport starts at visual row 1.
         let markdown = "abcdefghij\nsecond\nthird";
-        app.program_popup = Some(program_popup_for_test("s1", markdown, 0));
-        app.program_popup.as_mut().unwrap().scroll_offset = 1;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", markdown, 0));
+        app.playbook_popup.as_mut().unwrap().scroll_offset = 1;
         let modal = Rect::new(0, 0, 9, 20);
 
         // Click the top visible screen row (y = 2). With scroll 1 that is visual
         // row 1 = "fghij" col 0 → offset 5, not the unscrolled row 0.
-        app.place_program_cursor(modal, 2, 2);
+        app.place_playbook_cursor(modal, 2, 2);
 
-        assert_eq!(app.program_popup.as_ref().unwrap().cursor, 5);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 5);
         server.abort();
     }
 
     #[test]
-    fn program_normalizes_missing_and_duplicate_smart_clip_instance_ids() {
-        let normalized = program_normalize_smart_clip_instance_ids(
+    fn playbook_normalizes_missing_and_duplicate_smart_clip_instance_ids() {
+        let normalized = playbook_normalize_smart_clip_instance_ids(
             "a @{harness:codex} b @{harness:claude clip_id=clip_7} c @{harness:codex clip_id=clip_7}",
         );
 
@@ -28920,48 +28920,48 @@ mod tests {
     }
 
     #[test]
-    fn program_line_start_skips_list_markers_for_cursor_commands() {
-        assert_eq!(program_line_start("- alpha", 0), 2);
-        assert_eq!(program_line_start("* alpha", 4), 2);
-        assert_eq!(program_line_start("  - alpha", 0), 4);
-        assert_eq!(program_line_start("- alpha", 7), 2);
-        assert_eq!(program_line_start("plain", 0), 0);
+    fn playbook_line_start_skips_list_markers_for_cursor_commands() {
+        assert_eq!(playbook_line_start("- alpha", 0), 2);
+        assert_eq!(playbook_line_start("* alpha", 4), 2);
+        assert_eq!(playbook_line_start("  - alpha", 0), 4);
+        assert_eq!(playbook_line_start("- alpha", 7), 2);
+        assert_eq!(playbook_line_start("plain", 0), 0);
     }
 
     #[tokio::test]
-    async fn program_delete_removes_smart_clip_as_one_unit() {
+    async fn playbook_delete_removes_smart_clip_as_one_unit() {
         let (mut app, _dir, server) = empty_app().await;
         let clip = "@{harness:codex}";
         let before = "a ";
         let initial = format!("{before}{clip} z");
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s1",
             &initial,
             before.chars().count() + clip.chars().count(),
         ));
 
-        app.delete_program_back();
-        let popup = app.program_popup.as_ref().unwrap();
+        app.delete_playbook_back();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "a  z");
         assert_eq!(popup.cursor, before.chars().count());
 
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s1",
             &initial,
             before.chars().count(),
         ));
-        app.delete_program_forward();
-        let popup = app.program_popup.as_ref().unwrap();
+        app.delete_playbook_forward();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "a  z");
         assert_eq!(popup.cursor, before.chars().count());
 
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s1",
             &initial,
             before.chars().count() + 3,
         ));
-        app.delete_program_forward();
-        let popup = app.program_popup.as_ref().unwrap();
+        app.delete_playbook_forward();
+        let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(popup.buffer, "a  z");
         assert_eq!(popup.cursor, before.chars().count());
         server.abort();
@@ -29036,23 +29036,23 @@ mod tests {
     }
 
     #[test]
-    fn program_referenced_session_ids_extracts_session_clips_only() {
+    fn playbook_referenced_session_ids_extracts_session_clips_only() {
         // Session clips are collected (deduped, in order); harness clips and
         // other kinds are ignored, and a `clip_id=` suffix does not split the id.
         let md = "Build @{session:s3} then @{harness:codex} and @{session:s3 clip_id=4} \
                   finally @{session:s7}";
         assert_eq!(
-            program_referenced_session_ids(md),
+            playbook_referenced_session_ids(md),
             vec!["s3".to_string(), "s7".to_string()]
         );
-        assert!(program_referenced_session_ids("no clips here").is_empty());
+        assert!(playbook_referenced_session_ids("no clips here").is_empty());
     }
 
     #[tokio::test]
-    async fn program_referenced_sessions_need_hydration_for_hover_preview() {
-        // A program shown in a main-window leaf references a worker session that
+    async fn playbook_referenced_sessions_need_hydration_for_hover_preview() {
+        // A playbook shown in a main-window leaf references a worker session that
         // is neither selected, pinned, nor the orchestrator. Its PTY history
-        // must be hydrated so the program hover preview (spec 0060) can paint a
+        // must be hydrated so the playbook hover preview (spec 0060) can paint a
         // live terminal tail instead of degrading to the bare text tooltip.
         let (mut app, _dir, server) = empty_app().await;
         let mut owner = summary_with_kind(construct_protocol::SessionKind::User);
@@ -29071,9 +29071,9 @@ mod tests {
             id: 1,
             selection: Selection::Session("s1".into()),
         };
-        app.program_popups.insert(
+        app.playbook_popups.insert(
             "s1".into(),
-            program_popup_for_test(
+            playbook_popup_for_test(
                 "s1",
                 "Build the PR @{session:s3}\nDocs @{session:s4}\nUnknown @{session:s9}",
                 0,
@@ -29083,7 +29083,7 @@ mod tests {
         // s3 has a previewable PTY and no warm history yet → queue it. s4 has no
         // PTY and s9 is unknown → skip both.
         assert_eq!(
-            app.program_referenced_sessions_needing_hydration(),
+            app.playbook_referenced_sessions_needing_hydration(),
             vec!["s3".to_string()]
         );
 
@@ -29091,7 +29091,7 @@ mod tests {
         app.histories
             .insert("s3".into(), crate::pty_render::ItemHistory::new());
         assert!(app
-            .program_referenced_sessions_needing_hydration()
+            .playbook_referenced_sessions_needing_hydration()
             .is_empty());
         server.abort();
     }
@@ -29414,7 +29414,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_title_rename_enter_commits_via_set_title() {
-        let (client, _dir, server) = program_flow_mock_daemon().await;
+        let (client, _dir, server) = playbook_flow_mock_daemon().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.title = Some("old-name".into());
         let mut app = test_app(client, vec![session]);
@@ -29440,7 +29440,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_title_rename_enter_with_empty_buffer_clears_title() {
-        let (client, _dir, server) = program_flow_mock_daemon().await;
+        let (client, _dir, server) = playbook_flow_mock_daemon().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.title = Some("old-name".into());
         let mut app = test_app(client, vec![session]);
@@ -29532,7 +29532,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_popup_title_name_click_starts_inline_rename() {
+    async fn playbook_popup_title_name_click_starts_inline_rename() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, server) = empty_app().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
@@ -29540,10 +29540,10 @@ mod tests {
         session.title = Some("old-name".into());
         app.sessions = vec![session];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
         {
-            let popup = app.program_popup.as_mut().unwrap();
-            popup.revealed_at = Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS);
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.revealed_at = Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
         }
 
         let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -29553,8 +29553,8 @@ mod tests {
 
         let (xs, _xe, y) = app
             .layout
-            .program_title_name_hit
-            .expect("program title name hit registered");
+            .playbook_title_name_hit
+            .expect("playbook title name hit registered");
         let click = |kind, col, row| MouseEvent {
             kind,
             column: col,
@@ -29569,9 +29569,9 @@ mod tests {
         let rename = app
             .session_title_rename
             .clone()
-            .expect("clicking the program title name starts an inline rename");
+            .expect("clicking the playbook title name starts an inline rename");
         assert_eq!(rename.session_id, "s1");
-        assert_eq!(rename.origin, TitleRenameOrigin::Program);
+        assert_eq!(rename.origin, TitleRenameOrigin::Playbook);
         assert_eq!(rename.buffer, "old-name");
         assert_eq!(rename.cursor, 0, "click on the first char lands there");
         server.abort();
@@ -29604,7 +29604,7 @@ mod tests {
     #[tokio::test]
     async fn title_rename_click_outside_commits_like_enter() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        let (client, _dir, server) = program_flow_mock_daemon().await;
+        let (client, _dir, server) = playbook_flow_mock_daemon().await;
         let mut session = summary_with_kind(construct_protocol::SessionKind::User);
         session.title = Some("old-name".into());
         let mut app = test_app(client, vec![session]);
@@ -30363,7 +30363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_open_state_survives_split_focus_changes() {
+    async fn playbook_open_state_survives_split_focus_changes() {
         let (mut app, _dir, server) = captured_app().await;
         let mut second = summary_with_kind(construct_protocol::SessionKind::User);
         second.id = "s2".into();
@@ -30397,55 +30397,55 @@ mod tests {
             },
         ];
         app.layout.modal_area = Some(Rect::new(20, 0, 40, 20));
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 3));
-        app.set_program_terminal_focus(true);
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 3));
+        app.set_playbook_terminal_focus(true);
         {
-            let popup = app.program_popup.as_mut().expect("active s1 program");
+            let popup = app.playbook_popup.as_mut().expect("active s1 playbook");
             popup.slide_from = 1.0;
             popup.slide_changed_at =
-                Some(Instant::now() - Duration::from_millis(PROGRAM_REVEAL_MS));
+                Some(Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS));
         }
 
         app.handle_left_click(65, 5).await;
 
         assert_eq!(app.active_window_id, 2);
         assert_eq!(app.selection, Selection::Session("s2".into()));
-        assert!(app.program_popup.is_none());
+        assert!(app.playbook_popup.is_none());
         assert!(
-            app.program_popups.contains_key("s1"),
-            "clicking another split should stash, not close, the open program"
+            app.playbook_popups.contains_key("s1"),
+            "clicking another split should stash, not close, the open playbook"
         );
-        let stashed = app.program_popups.get("s1").expect("stashed s1 program");
+        let stashed = app.playbook_popups.get("s1").expect("stashed s1 playbook");
         assert!(
             stashed.terminal_focus,
-            "focusing another split must not unslide split 1's Program"
+            "focusing another split must not unslide split 1's Playbook"
         );
         assert_eq!(
             stashed.slide_fraction(Instant::now()),
             1.0,
-            "stashed Program should keep its slid position"
+            "stashed Playbook should keep its slid position"
         );
 
         app.active_window_id = 1;
         app.selection = Selection::Session("s1".into());
-        app.sync_program_popup_with_selection();
-        let restored = app.program_popup.as_ref().expect("restored s1 program");
+        app.sync_playbook_popup_with_selection();
+        let restored = app.playbook_popup.as_ref().expect("restored s1 playbook");
         assert!(
             restored.terminal_focus,
-            "returning to split 1 should restore the slid Program state"
+            "returning to split 1 should restore the slid Playbook state"
         );
 
         app.run_action(KeyAction::SwitchFocus).await;
-        app.sync_program_popup_with_selection();
+        app.sync_playbook_popup_with_selection();
 
         assert_eq!(app.active_window_id, 2);
         assert_eq!(app.selection, Selection::Session("s2".into()));
-        assert!(app.program_popup.is_none());
+        assert!(app.playbook_popup.is_none());
         assert!(
-            app.program_popups.contains_key("s1"),
-            "C-x o should keep split 1's program attached to split 1's session"
+            app.playbook_popups.contains_key("s1"),
+            "C-x o should keep split 1's playbook attached to split 1's session"
         );
-        let stashed = app.program_popups.get("s1").expect("stashed s1 program");
+        let stashed = app.playbook_popups.get("s1").expect("stashed s1 playbook");
         assert!(
             stashed.terminal_focus,
             "C-x o to another split must not reset split 1's slide state"
@@ -30492,7 +30492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn program_stays_open_when_clicking_selected_session_in_list() {
+    async fn playbook_stays_open_when_clicking_selected_session_in_list() {
         let (mut app, _dir, server) = empty_app().await;
         let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
         s1.id = "s1".into();
@@ -30502,32 +30502,32 @@ mod tests {
         s2.position = 1;
         app.sessions = vec![s1, s2];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 3));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 3));
         app.layout = test_layout();
         app.layout.list_row_count = app.list_items().len();
         app.layout.list_items_area = Some(Rect::new(1, 1, 18, 8));
-        // The program modal sits over the view pane; the click lands in the list.
+        // The playbook modal sits over the view pane; the click lands in the list.
         app.layout.modal_area = Some(Rect::new(20, 0, 40, 20));
 
         // Click the already-selected session's row in the list.
         app.handle_left_click(10, 1).await;
 
-        // A list click neither closes nor hides the program of the selected
+        // A list click neither closes nor hides the playbook of the selected
         // session — only the title-glyph toggle / C-x Space do.
         let popup = app
-            .program_popup
+            .playbook_popup
             .as_ref()
-            .expect("program stays open after a list click");
+            .expect("playbook stays open after a list click");
         assert!(
             !popup.closing,
-            "list click must not start closing the program"
+            "list click must not start closing the playbook"
         );
         assert_eq!(popup.buffer, "draft");
         server.abort();
     }
 
     #[tokio::test]
-    async fn clicking_another_session_in_list_stashes_program_not_closes() {
+    async fn clicking_another_session_in_list_stashes_playbook_not_closes() {
         let (mut app, _dir, server) = empty_app().await;
         let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
         s1.id = "s1".into();
@@ -30537,7 +30537,7 @@ mod tests {
         s2.position = 1;
         app.sessions = vec![s1, s2];
         app.selection = Selection::Session("s1".into());
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 3));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 3));
         app.layout = test_layout();
         app.layout.list_row_count = app.list_items().len();
         app.layout.list_items_area = Some(Rect::new(1, 1, 18, 8));
@@ -30547,31 +30547,31 @@ mod tests {
         app.handle_left_click(10, 2).await;
 
         assert_eq!(app.selection, Selection::Session("s2".into()));
-        // The prior session's program is preserved (stashed), not destroyed —
+        // The prior session's playbook is preserved (stashed), not destroyed —
         // it reappears on return. A list click is never a close gesture.
         let stashed = app
-            .program_popups
+            .playbook_popups
             .get("s1")
-            .expect("the prior session's program is stashed, not closed");
+            .expect("the prior session's playbook is stashed, not closed");
         assert!(
             !stashed.closing,
-            "a list click must never close the program"
+            "a list click must never close the playbook"
         );
         assert_eq!(stashed.buffer, "draft");
         server.abort();
     }
 
-    // End-to-end guard for the #488 fix: a session-list click while a program
+    // End-to-end guard for the #488 fix: a session-list click while a playbook
     // is open must switch sessions. The sibling tests
-    // (`clicking_another_session_in_list_stashes_program_not_closes`, …) call
+    // (`clicking_another_session_in_list_stashes_playbook_not_closes`, …) call
     // `handle_left_click` directly, which skips the `on_mouse` →
-    // `handle_program_mouse` dispatch that decides whether the program swallows
+    // `handle_playbook_mouse` dispatch that decides whether the playbook swallows
     // the click. This drives a real render (so `modal_area` / `list_items_area`
     // are live geometry, not hand-set) and the full Down/Up mouse path, so a
     // regression that re-swallows outside clicks would be caught here even if
     // `handle_left_click` stayed correct in isolation.
     #[tokio::test]
-    async fn on_mouse_list_click_switches_session_with_program_open() {
+    async fn on_mouse_list_click_switches_session_with_playbook_open() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, server) = empty_app().await;
         let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
@@ -30584,7 +30584,7 @@ mod tests {
         app.selection = Selection::Session("s1".into());
         app.main_windows = MainWindowTree::single(1, Selection::Session("s1".into()));
         app.active_window_id = 1;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 3));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 3));
 
         // Render the real layout so modal_area / list_items_area reflect the
         // live geometry the mouse handler will see.
@@ -30618,13 +30618,13 @@ mod tests {
         assert_eq!(
             app.selection,
             Selection::Session("s2".into()),
-            "clicking s2 in the list while a program is open must switch to s2"
+            "clicking s2 in the list while a playbook is open must switch to s2"
         );
-        // ...and stashed s1's program rather than destroying it (navigation
-        // never closes a program; only the toggle / C-x Space do).
+        // ...and stashed s1's playbook rather than destroying it (navigation
+        // never closes a playbook; only the toggle / C-x Space do).
         assert!(
-            app.program_popups.contains_key("s1"),
-            "s1's program must be stashed, not discarded, when the click switches away"
+            app.playbook_popups.contains_key("s1"),
+            "s1's playbook must be stashed, not discarded, when the click switches away"
         );
         server.abort();
     }
@@ -31544,27 +31544,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_transition_glitches_the_visible_program_surface() {
+    async fn session_transition_glitches_the_visible_playbook_surface() {
         let (mut app, _dir, server) = captured_app().await;
-        let mut popup = program_popup_for_test(
+        let mut popup = playbook_popup_for_test(
             "s1",
-            "# Program surface\n\nalpha beta gamma\n\ndelta epsilon zeta\n",
+            "# Playbook surface\n\nalpha beta gamma\n\ndelta epsilon zeta\n",
             0,
         );
         popup.revealed_at = Instant::now() - Duration::from_secs(1);
         popup.hide_after = Instant::now() + Duration::from_secs(60);
         popup.cover_percent = 100;
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
 
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| crate::ui::render(frame, &mut app))
             .expect("baseline draw");
-        let program_area = app
+        let playbook_area = app
             .layout
-            .program_inner_area
-            .expect("program content is visible");
+            .playbook_inner_area
+            .expect("playbook content is visible");
         let before = terminal.backend().buffer().clone();
 
         app.start_session_transition();
@@ -31578,7 +31578,7 @@ mod tests {
             app.theme.accent,
             app.theme.matrix_glow,
         ];
-        let program_was_glitched = program_area.rows().any(|row| {
+        let playbook_was_glitched = playbook_area.rows().any(|row| {
             row.columns().any(|pos| {
                 let Some(before_cell) = before.cell(pos) else {
                     return false;
@@ -31595,8 +31595,8 @@ mod tests {
         });
 
         assert!(
-            program_was_glitched,
-            "the pane-level transition must be composited after the Program document"
+            playbook_was_glitched,
+            "the pane-level transition must be composited after the Playbook document"
         );
         server.abort();
     }
@@ -31908,56 +31908,56 @@ mod tests {
         server.abort();
     }
 
-    fn picker_program_block_texts(rows: &[SessionPickerRow]) -> Vec<&str> {
+    fn picker_playbook_block_texts(rows: &[SessionPickerRow]) -> Vec<&str> {
         rows.iter()
             .filter_map(|r| match r {
-                SessionPickerRow::ProgramBlock { text, .. } => Some(text.as_str()),
+                SessionPickerRow::PlaybookBlock { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect()
     }
 
     #[tokio::test]
-    async fn session_picker_lists_program_blocks_for_switch_purpose() {
+    async fn session_picker_lists_playbook_blocks_for_switch_purpose() {
         let (mut app, _dir, server) = session_picker_app().await;
         let markdown = "# Heading\n\nblock two\n\nblock three\n";
-        app.program_popup = Some(program_popup_for_test("s1", markdown, 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", markdown, 0));
 
         app.open_session_picker(SessionPickerPurpose::Switch);
         let rows = app.session_picker_rows();
         assert!(
             rows.iter()
-                .any(|r| matches!(r, SessionPickerRow::ProgramHeader)),
-            "a Program separator row is shown"
+                .any(|r| matches!(r, SessionPickerRow::PlaybookHeader)),
+            "a Playbook separator row is shown"
         );
         assert_eq!(
-            picker_program_block_texts(&rows),
+            picker_playbook_block_texts(&rows),
             vec!["# Heading", "block two", "block three"]
         );
         assert!(
             rows.iter()
-                .any(|r| r.is_selectable() && matches!(r, SessionPickerRow::ProgramBlock { .. })),
+                .any(|r| r.is_selectable() && matches!(r, SessionPickerRow::PlaybookBlock { .. })),
             "blocks are navigable alongside sessions"
         );
 
         // A query narrows blocks to first-line matches, same as sessions.
         let filtered = app.session_picker_rows_for_query("two");
-        assert_eq!(picker_program_block_texts(&filtered), vec!["block two"]);
+        assert_eq!(picker_playbook_block_texts(&filtered), vec!["block two"]);
         server.abort();
     }
 
     #[tokio::test]
-    async fn session_picker_clip_variant_excludes_program_blocks() {
+    async fn session_picker_clip_variant_excludes_playbook_blocks() {
         let (mut app, _dir, server) = session_picker_app().await;
         let markdown = "# Heading\n\nblock two\n";
-        app.program_popup = Some(program_popup_for_test("s1", markdown, 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", markdown, 0));
 
-        app.open_session_picker(SessionPickerPurpose::InsertProgramClip);
+        app.open_session_picker(SessionPickerPurpose::InsertPlaybookClip);
         let rows = app.session_picker_rows_for_query("");
         assert!(
             !rows.iter().any(|r| matches!(
                 r,
-                SessionPickerRow::ProgramHeader | SessionPickerRow::ProgramBlock { .. }
+                SessionPickerRow::PlaybookHeader | SessionPickerRow::PlaybookBlock { .. }
             )),
             "the `@`→session clip picker only lists sessions"
         );
@@ -31965,50 +31965,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_picker_hides_blocks_for_a_closing_program() {
+    async fn session_picker_hides_blocks_for_a_closing_playbook() {
         let (mut app, _dir, server) = session_picker_app().await;
         let markdown = "# Heading\n\nblock two\n";
-        let mut popup = program_popup_for_test("s1", markdown, 0);
+        let mut popup = playbook_popup_for_test("s1", markdown, 0);
         popup.closing = true;
-        app.program_popup = Some(popup);
+        app.playbook_popup = Some(popup);
 
         app.open_session_picker(SessionPickerPurpose::Switch);
         let rows = app.session_picker_rows();
         assert!(
             !rows.iter().any(|r| matches!(
                 r,
-                SessionPickerRow::ProgramHeader | SessionPickerRow::ProgramBlock { .. }
+                SessionPickerRow::PlaybookHeader | SessionPickerRow::PlaybookBlock { .. }
             )),
-            "a program mid-close animation shouldn't offer stale blocks"
+            "a playbook mid-close animation shouldn't offer stale blocks"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn session_picker_caps_program_blocks_at_ten() {
+    async fn session_picker_caps_playbook_blocks_at_ten() {
         let (mut app, _dir, server) = session_picker_app().await;
         let markdown = (0..15)
             .map(|i| format!("block {i}"))
             .collect::<Vec<_>>()
             .join("\n\n");
-        app.program_popup = Some(program_popup_for_test("s1", &markdown, 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", &markdown, 0));
 
         app.open_session_picker(SessionPickerPurpose::Switch);
         let rows = app.session_picker_rows();
-        assert_eq!(picker_program_block_texts(&rows).len(), 10);
+        assert_eq!(picker_playbook_block_texts(&rows).len(), 10);
         server.abort();
     }
 
     #[tokio::test]
-    async fn session_picker_confirm_program_block_scrolls_to_it() {
+    async fn session_picker_confirm_playbook_block_scrolls_to_it() {
         let (mut app, _dir, server) = session_picker_app().await;
         let markdown = "# Heading\n\nblock two\n\nblock three\n";
-        app.program_popup = Some(program_popup_for_test("s1", markdown, 0));
-        app.program_popup.as_mut().unwrap().terminal_focus = true; // slid aside
-        app.layout.program_inner_area = Some(ratatui::layout::Rect::new(0, 0, 40, 5));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", markdown, 0));
+        app.playbook_popup.as_mut().unwrap().terminal_focus = true; // slid aside
+        app.layout.playbook_inner_area = Some(ratatui::layout::Rect::new(0, 0, 40, 5));
 
         app.open_session_picker(SessionPickerPurpose::Switch);
-        // Selectable rows: alpha, beta, gamma, then the three program blocks —
+        // Selectable rows: alpha, beta, gamma, then the three playbook blocks —
         // five Downs from the initial `alpha` selection lands on "block three".
         for _ in 0..5 {
             app.handle_session_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -32017,7 +32017,7 @@ mod tests {
 
         assert!(app.session_picker.is_none(), "confirm closes the dialog");
         assert_eq!(app.focus, PaneFocus::View);
-        let popup = app.program_popup.as_ref().expect("program stays open");
+        let popup = app.playbook_popup.as_ref().expect("playbook stays open");
         assert!(
             !popup.terminal_focus,
             "confirm undoes a terminal-focus slide so the buffer is visible"
@@ -33910,7 +33910,7 @@ mod tests {
     }
 
     /// Spec 0074: a `@{session:…}` chip in a widget resolves live status from
-    /// the same `app.sessions` lookup the program surface uses — a running
+    /// the same `app.sessions` lookup the playbook surface uses — a running
     /// worker paints the running chip color on both surfaces.
     #[tokio::test]
     async fn widget_session_clip_chip_reflects_live_session_status() {
@@ -33940,13 +33940,13 @@ mod tests {
         );
     }
 
-    /// A widget `:::clip program` block with the program cached projects the
+    /// A widget `:::clip playbook` block with the playbook cached projects the
     /// named section live: heading plus content, stopping at the next
     /// same-level heading, with no fetch requested.
     #[tokio::test]
-    async fn widget_program_clip_projects_cached_program_section() {
+    async fn widget_playbook_clip_projects_cached_playbook_section() {
         let (mut app, _dir, _server) = two_session_app().await;
-        app.program_markdown_cache.insert(
+        app.playbook_markdown_cache.insert(
             "s1".into(),
             "# Plan\nintro\n## Progress\n- [x] step one\n## Next\nrest".into(),
         );
@@ -33954,7 +33954,7 @@ mod tests {
         let mut wanted = Vec::new();
         let lines = crate::ui::render_agentd_markdown_lines_for_test(
             Some(&app),
-            ":::clip program\nsection=\"progress\"\n:::",
+            ":::clip playbook\nsection=\"progress\"\n:::",
             &theme,
             Rect::new(0, 0, 80, 20),
             Some("s1"),
@@ -33969,7 +33969,7 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert!(wanted.is_empty(), "cached program must not request a fetch");
+        assert!(wanted.is_empty(), "cached playbook must not request a fetch");
         assert!(
             rendered.iter().any(|l| l.contains("Progress")),
             "{rendered:?}"
@@ -33984,17 +33984,17 @@ mod tests {
         );
     }
 
-    /// The first render of a program projection without a cached document
+    /// The first render of a playbook projection without a cached document
     /// shows the loading line and reports the owning session so the caller
     /// can start a background fetch.
     #[tokio::test]
-    async fn widget_program_clip_without_cache_reports_wanted_program() {
+    async fn widget_playbook_clip_without_cache_reports_wanted_playbook() {
         let (app, _dir, _server) = two_session_app().await;
         let theme = app.theme.clone();
         let mut wanted = Vec::new();
         let lines = crate::ui::render_agentd_markdown_lines_for_test(
             Some(&app),
-            ":::clip program\n:::",
+            ":::clip playbook\n:::",
             &theme,
             Rect::new(0, 0, 80, 10),
             Some("s1"),
@@ -34011,26 +34011,26 @@ mod tests {
             })
             .collect();
         assert!(
-            rendered.iter().any(|l| l.contains("loading program…")),
+            rendered.iter().any(|l| l.contains("loading playbook…")),
             "{rendered:?}"
         );
     }
 
-    /// Recursion guard, end to end: a cached program that itself contains a
-    /// `:::clip program` block projects once — the nested clip renders as an
+    /// Recursion guard, end to end: a cached playbook that itself contains a
+    /// `:::clip playbook` block projects once — the nested clip renders as an
     /// inert chip instead of projecting again.
     #[tokio::test]
-    async fn widget_program_projection_never_recurses() {
+    async fn widget_playbook_projection_never_recurses() {
         let (mut app, _dir, _server) = two_session_app().await;
-        app.program_markdown_cache.insert(
+        app.playbook_markdown_cache.insert(
             "s1".into(),
-            "## Progress\n:::clip program\n:::\n- [~] active step".into(),
+            "## Progress\n:::clip playbook\n:::\n- [~] active step".into(),
         );
         let theme = app.theme.clone();
         let mut wanted = Vec::new();
         let lines = crate::ui::render_agentd_markdown_lines_for_test(
             Some(&app),
-            ":::clip program\n:::",
+            ":::clip playbook\n:::",
             &theme,
             Rect::new(0, 0, 80, 20),
             Some("s1"),
@@ -34053,22 +34053,22 @@ mod tests {
         assert_eq!(
             rendered
                 .iter()
-                .filter(|l| l.contains("clip program"))
+                .filter(|l| l.contains("clip playbook"))
                 .count(),
             2,
             "outer chip + one inert nested chip, no deeper projection: {rendered:?}"
         );
     }
 
-    /// Spec 0074 display extensions on the program surface, editor-style:
+    /// Spec 0074 display extensions on the playbook surface, editor-style:
     /// timeline fences and table delimiter rows render dim with their source
     /// text literal, checklist items get the shared glyph colors, and every
     /// source line stays exactly one visual line (no connector rows).
     #[tokio::test]
-    async fn program_markdown_renders_display_extensions_editor_conservatively() {
+    async fn playbook_markdown_renders_display_extensions_editor_conservatively() {
         let (app, _dir, _server) = two_session_app().await;
         let md = ":::timeline\n- [x] done step\n- [!] blocked step\n:::\n| a | b |\n| --- | --- |\n| 1 | 2 |";
-        let lines = crate::ui::render_program_markdown_lines_for_test(&app, md);
+        let lines = crate::ui::render_playbook_markdown_lines_for_test(&app, md);
         assert_eq!(
             lines.len(),
             md.lines().count(),
@@ -34108,20 +34108,20 @@ mod tests {
         assert_eq!(rendered[6], "| 1 | 2 |");
     }
 
-    /// `program/state` notifications refresh the projection cache for every
-    /// session — the same update channel that keeps open program views fresh
-    /// (spec 0074's liveness consequence) — even with no program view open.
+    /// `playbook/state` notifications refresh the projection cache for every
+    /// session — the same update channel that keeps open playbook views fresh
+    /// (spec 0074's liveness consequence) — even with no playbook view open.
     #[tokio::test]
-    async fn program_state_notification_refreshes_projection_cache() {
+    async fn playbook_state_notification_refreshes_projection_cache() {
         let (mut app, _dir, _server) = two_session_app().await;
-        assert!(app.program_markdown_cache.is_empty());
-        app.on_program_state(
-            program_doc_for_test("s2", "# Doc\nbody", 1),
+        assert!(app.playbook_markdown_cache.is_empty());
+        app.on_playbook_state(
+            playbook_doc_for_test("s2", "# Doc\nbody", 1),
             None,
             Vec::new(),
         );
         assert_eq!(
-            app.program_markdown_cache.get("s2").map(String::as_str),
+            app.playbook_markdown_cache.get("s2").map(String::as_str),
             Some("# Doc\nbody")
         );
     }
@@ -36569,16 +36569,16 @@ mod tests {
         server.abort();
     }
 
-    // Item: the tour card must own clicks over the PROGRAM view exactly as
-    // it does over a mouse-grabbing PTY. An open program sets
-    // `layout.modal_area`, and `handle_program_mouse` used to consume the
+    // Item: the tour card must own clicks over the PLAYBOOK view exactly as
+    // it does over a mouse-grabbing PTY. An open playbook sets
+    // `layout.modal_area`, and `handle_playbook_mouse` used to consume the
     // Down (cursor placement / focus) before the click pipeline ever saw
     // the card's zones.
     #[tokio::test]
-    async fn tour_card_click_over_program_dispatches_card_zone() {
+    async fn tour_card_click_over_playbook_dispatches_card_zone() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, server) = captured_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 3));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 3));
         app.tutorial_start();
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
@@ -36587,11 +36587,11 @@ mod tests {
         let card = app.layout.tutorial_card_area.expect("card rect");
         assert!(
             app.layout.modal_area.is_some(),
-            "fixture: the open program must be registered as the modal"
+            "fixture: the open playbook must be registered as the modal"
         );
 
         // A card BODY click (inside the card, on no zone) is consumed: the
-        // program's cursor must not move and its popup must stay open.
+        // playbook's cursor must not move and its popup must stay open.
         let body = (card.x + 1, card.y);
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -36608,14 +36608,14 @@ mod tests {
         })
         .await;
         assert!(app.tutorial.is_some(), "body click is not an action");
-        let popup = app.program_popup.as_ref().expect("program stays open");
+        let popup = app.playbook_popup.as_ref().expect("playbook stays open");
         assert_eq!(
             popup.cursor, 3,
-            "a card-body click must not place the program cursor"
+            "a card-body click must not place the playbook cursor"
         );
 
         // A card ZONE click dispatches the card's action through the full
-        // on_mouse path even with the program modal underneath.
+        // on_mouse path even with the playbook modal underneath.
         let hit = *app
             .layout
             .shortcut_hints
@@ -36638,11 +36638,11 @@ mod tests {
         .await;
         assert!(
             app.tutorial.is_none(),
-            "[end tour] must dispatch even with the program modal underneath"
+            "[end tour] must dispatch even with the playbook modal underneath"
         );
         assert!(
-            app.program_popup.is_some(),
-            "the card click must not disturb the program popup"
+            app.playbook_popup.is_some(),
+            "the card click must not disturb the playbook popup"
         );
         server.abort();
     }
@@ -36691,9 +36691,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn help_modal_key_closes_before_focused_program_consumes_it() {
+    async fn help_modal_key_closes_before_focused_playbook_consumes_it() {
         let (mut app, _dir, server) = captured_app().await;
-        app.program_popup = Some(program_popup_for_test("s1", "draft", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
         app.focus = PaneFocus::View;
         app.help_visible = true;
 
@@ -36702,11 +36702,11 @@ mod tests {
 
         assert!(!app.help_visible, "any key must close help");
         assert_eq!(
-            app.program_popup
+            app.playbook_popup
                 .as_ref()
                 .map(|popup| popup.buffer.as_str()),
             Some("draft"),
-            "the dismissing key must not leak into the focused program"
+            "the dismissing key must not leak into the focused playbook"
         );
         server.abort();
     }
@@ -37030,11 +37030,11 @@ mod tests {
 
     // Regression for the step-6 user report: the agent's task-to-## Done
     // move was never detected. That edit reaches the TUI ONLY through the
-    // daemon's program/state event (an open popup deliberately does not
+    // daemon's playbook/state event (an open popup deliberately does not
     // absorb daemon updates into a locally-edited buffer), so the event
     // path must tick the gate even while the popup shows a stale buffer.
     #[tokio::test]
-    async fn program_state_event_ticks_done_with_stale_popup_buffer() {
+    async fn playbook_state_event_ticks_done_with_stale_popup_buffer() {
         let (mut app, _dir, server) = captured_app().await;
         app.tutorial_start();
         {
@@ -37044,7 +37044,7 @@ mod tests {
         }
         // The user's popup still shows the task under Todo (stale view of
         // the agent's edit).
-        app.program_popup = Some(program_popup_for_test(
+        app.playbook_popup = Some(playbook_popup_for_test(
             "s1",
             "# Rule\n\n## Todo\n\n- Test task\n\n## In Progress\n\n## Done\n",
             0,
@@ -37052,10 +37052,10 @@ mod tests {
 
         app.on_notification(Notification {
             jsonrpc: "2.0".into(),
-            method: construct_protocol::ipc_notif::PROGRAM_STATE.into(),
+            method: construct_protocol::ipc_notif::PLAYBOOK_STATE.into(),
             params: Some(
-                serde_json::to_value(construct_protocol::ProgramStateNotificationPayload {
-                    program: construct_protocol::ProgramDocument {
+                serde_json::to_value(construct_protocol::PlaybookStateNotificationPayload {
+                    playbook: construct_protocol::PlaybookDocument {
                         session_id: "s1".into(),
                         markdown: "# Rule\n\n## Todo\n\n## In Progress\n\n## Done\n\n- Test task\n"
                             .into(),
@@ -37072,7 +37072,7 @@ mod tests {
         .await;
         assert!(
             app.tutorial.as_ref().unwrap().task_done,
-            "the daemon program/state event must tick the Done gate even \
+            "the daemon playbook/state event must tick the Done gate even \
              while the popup buffer is stale"
         );
         server.abort();
@@ -37080,9 +37080,9 @@ mod tests {
 
     // The practice session is unknown after a tour resume or [next step]
     // navigation past step 2 (`practice_session_id` is never persisted) —
-    // the old strict scoping then silently dropped every program event and
+    // the old strict scoping then silently dropped every playbook event and
     // subagent creation, which is how the step-6 detections died in the
-    // user's flow. Unknown-practice events for the program/session the
+    // user's flow. Unknown-practice events for the playbook/session the
     // user is actually working with must tick AND adopt.
     #[tokio::test]
     async fn step6_detections_adopt_practice_when_unknown() {
@@ -37114,17 +37114,17 @@ mod tests {
             "the subagent's parent is adopted as the practice session"
         );
 
-        // Program events: unknown practice + program for the SELECTED
+        // Playbook events: unknown practice + playbook for the SELECTED
         // session ticks and adopts too.
         let (mut app2, _dir2, server2) = captured_app().await;
         app2.tutorial_start();
         app2.tutorial.as_mut().unwrap().step = 7;
         app2.on_notification(Notification {
             jsonrpc: "2.0".into(),
-            method: construct_protocol::ipc_notif::PROGRAM_STATE.into(),
+            method: construct_protocol::ipc_notif::PLAYBOOK_STATE.into(),
             params: Some(
-                serde_json::to_value(construct_protocol::ProgramStateNotificationPayload {
-                    program: construct_protocol::ProgramDocument {
+                serde_json::to_value(construct_protocol::PlaybookStateNotificationPayload {
+                    playbook: construct_protocol::PlaybookDocument {
                         session_id: "s1".into(), // selected in captured_app
                         markdown: "## Todo\n\n## In Progress\n\n## Done\n\n- Test task\n".into(),
                         version: 1,
@@ -37139,20 +37139,20 @@ mod tests {
         })
         .await;
         let t2 = app2.tutorial.as_ref().unwrap();
-        assert!(t2.task_done, "selected session's program event must tick");
+        assert!(t2.task_done, "selected session's playbook event must tick");
         assert_eq!(t2.practice_session_id.as_deref(), Some("s1"));
 
-        // Negative: a program for some unrelated session (not displayed,
+        // Negative: a playbook for some unrelated session (not displayed,
         // not selected) never ticks an unknown-practice tour.
         let (mut app3, _dir3, server3) = captured_app().await;
         app3.tutorial_start();
         app3.tutorial.as_mut().unwrap().step = 7;
         app3.on_notification(Notification {
             jsonrpc: "2.0".into(),
-            method: construct_protocol::ipc_notif::PROGRAM_STATE.into(),
+            method: construct_protocol::ipc_notif::PLAYBOOK_STATE.into(),
             params: Some(
-                serde_json::to_value(construct_protocol::ProgramStateNotificationPayload {
-                    program: construct_protocol::ProgramDocument {
+                serde_json::to_value(construct_protocol::PlaybookStateNotificationPayload {
+                    playbook: construct_protocol::PlaybookDocument {
                         session_id: "unrelated".into(),
                         markdown: "## Done\n\n- Test task\n".into(),
                         version: 1,
@@ -37167,7 +37167,7 @@ mod tests {
         })
         .await;
         let t3 = app3.tutorial.as_ref().unwrap();
-        assert!(!t3.task_done, "unrelated programs must not tick");
+        assert!(!t3.task_done, "unrelated playbooks must not tick");
         assert!(t3.practice_session_id.is_none());
         server.abort();
         server2.abort();
@@ -37277,8 +37277,8 @@ mod tests {
 
     // Regression for the step-5 user report: "apply the Tasks template" and
     // "add a task under Todo" never ticked. Both are LOCAL edits to the
-    // program popup's buffer — `apply_program_template` and typing mutate
-    // only client state, and the daemon (whose PROGRAM_STATE event was the
+    // playbook popup's buffer — `apply_playbook_template` and typing mutate
+    // only client state, and the daemon (whose PLAYBOOK_STATE event was the
     // only detector) learns about them on save/run. The checkmarks must
     // appear as the user acts, before any save, via the render tick's
     // buffer observation.
@@ -37293,17 +37293,17 @@ mod tests {
         }
         let board = "# Rule\n\n## Todo\n\n## In Progress\n\n## Done\n";
 
-        // A program on some OTHER session never ticks the practice checks.
-        app.program_popup = Some(program_popup_for_test("other", board, 0));
+        // A playbook on some OTHER session never ticks the practice checks.
+        app.playbook_popup = Some(playbook_popup_for_test("other", board, 0));
         app.tutorial_tick(Instant::now());
         let t = app.tutorial.as_ref().unwrap();
         assert!(
             !t.template_applied && !t.task_line_present,
-            "another session's program must not tick the sub-checks"
+            "another session's playbook must not tick the sub-checks"
         );
 
-        // Blank program on the practice session: still nothing.
-        app.program_popup = Some(program_popup_for_test("s1", "", 0));
+        // Blank playbook on the practice session: still nothing.
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
         app.tutorial_tick(Instant::now());
         let t = app.tutorial.as_ref().unwrap();
         assert!(!t.template_applied && !t.task_line_present);
@@ -37311,7 +37311,7 @@ mod tests {
         // Apply the Tasks template — a purely client-side buffer swap, no
         // daemon event. The template box ticks; the (empty) Todo must not
         // tick the task box.
-        app.apply_program_template("tasks".into(), board.into());
+        app.apply_playbook_template("tasks".into(), board.into());
         app.tutorial_tick(Instant::now());
         let t = app.tutorial.as_ref().unwrap();
         assert!(
@@ -37324,7 +37324,7 @@ mod tests {
         );
 
         // Type a task line under ## Todo (still local, still unsaved).
-        app.program_popup.as_mut().unwrap().buffer =
+        app.playbook_popup.as_mut().unwrap().buffer =
             "# Rule\n\n## Todo\n\n- Test task\n\n## In Progress\n\n## Done\n".into();
         app.tutorial_tick(Instant::now());
         let t = app.tutorial.as_ref().unwrap();
@@ -37335,7 +37335,7 @@ mod tests {
         assert_eq!(t.step, 6, "non-degraded step 6 still waits for the run");
 
         // Sticky: wiping the buffer afterwards never unticks.
-        app.program_popup.as_mut().unwrap().buffer = String::new();
+        app.playbook_popup.as_mut().unwrap().buffer = String::new();
         app.tutorial_tick(Instant::now());
         let t = app.tutorial.as_ref().unwrap();
         assert!(
@@ -37357,7 +37357,7 @@ mod tests {
         // Sections present (template box ticks on content), but the only
         // task line sits under ## Done — the Todo box must stay unticked.
         let md = "# Rule\n\n## Todo\n\n## In Progress\n\n## Done\n\n- Test task\n";
-        app.program_popup = Some(program_popup_for_test("s1", md, 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", md, 0));
         app.tutorial_tick(Instant::now());
         let t = app.tutorial.as_ref().unwrap();
         assert!(t.template_applied, "board sections tick the template box");

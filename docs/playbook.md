@@ -1,38 +1,38 @@
-# Program
+# Playbook
 
-Every construct session owns a **Program**: a durable Markdown document that you
+Every construct session owns a **Playbook**: a durable Markdown document that you
 and the session's agent edit together and run. Use it as a task board, an
 investigation log, or any orchestration state you want to survive across turns,
 restarts, and clients. The Markdown is the source of truth — everything you see
-in the Program view is a projection of a plain `program.md` you could edit with
+in the Playbook view is a projection of a plain `playbook.md` you could edit with
 any tool.
 
-Running a Program does not start a separate workflow engine. Run submits the
+Running a Playbook does not start a separate workflow engine. Run submits the
 document (or your selection) to the owning session's agent as one autonomous
 instruction turn: the agent infers the objective from your prose, keeps working
 while there is actionable work, delegates independent subtasks to subagents, and
 writes results back into the document.
 
-## Opening the Program
+## Opening the Playbook
 
 | Surface | How |
 |---|---|
-| TUI | `C-x Space` toggles the Program for the selected session, or click the `▣` glyph on the session title bar. |
-| Web client | Switch the session's view mode to **Program** (peer to Terminal and Chat). |
+| TUI | `C-x Space` toggles the Playbook for the selected session, or click the `▣` glyph on the session title bar. |
+| Web client | Switch the session's view mode to **Playbook** (peer to Terminal and Chat). |
 
-In the TUI the Program renders as a resizable roll-down over the top of the
+In the TUI the Playbook renders as a resizable roll-down over the top of the
 session pane — drag the bottom border to resize; the terminal stays visible
 underneath. Only the explicit toggle closes it: `Esc` and clicking elsewhere
-never discard your Program. Selecting another session swaps to that session's
-Program and stashes the current one, caret and scroll position included. Open
-Programs are restored when the TUI restarts.
+never discard your Playbook. Selecting another session swaps to that session's
+Playbook and stashes the current one, caret and scroll position included. Open
+Playbooks are restored when the TUI restarts.
 
-An empty Program shows the available templates as one-click starting points,
+An empty Playbook shows the available templates as one-click starting points,
 plus a smart-clip syntax reference.
 
 ## Editing
 
-The Program is a full Markdown editor with Emacs-style bindings. Human and
+The Playbook is a full Markdown editor with Emacs-style bindings. Human and
 agent edits merge automatically (see [Collaboration](#collaboration)).
 
 | Keys | Action |
@@ -112,24 +112,24 @@ adds to existing shimmer instead of replacing it.
 
 ## Templates
 
-An empty Program offers templates as one-click buttons. Built-ins: **Tasks**
+An empty Playbook offers templates as one-click buttons. Built-ins: **Tasks**
 (a Todo / In progress / Done board), **Investigation** (question, context,
 plan, findings), and **Goal** (goal, context, requirements, verification, and
 done).
 Add your own by dropping `*.md` files into the template directory — the
 filename becomes the template id, the contents are inserted
-verbatim, and edits are picked up the next time a Program opens (no restart):
+verbatim, and edits are picked up the next time a Playbook opens (no restart):
 
-1. `CONSTRUCT_PROGRAM_TEMPLATES_DIR` (environment), else
-2. `[program].templates_dir` in `config.toml`, else
-3. `<data_dir>/program/templates` (default).
+1. `CONSTRUCT_PLAYBOOK_TEMPLATES_DIR` (environment), else
+2. `[playbook].templates_dir` in `config.toml`, else
+3. `<data_dir>/playbook/templates` (default).
 
-Selecting a template copies its Markdown into the Program; it is not
+Selecting a template copies its Markdown into the Playbook; it is not
 live-linked afterwards.
 
 ## Collaboration
 
-Programs are co-edited live. Agents write with **anchored edits** (targeted
+Playbooks are co-edited live. Agents write with **anchored edits** (targeted
 find/replace against the latest document), so agent and human edits to
 different regions merge with no conflict and no locking. Whole-document saves
 carry a version; if the document moved underneath you, the save reconciles by
@@ -143,26 +143,26 @@ real time; idle cursors expire after a minute.
 ## CLI and MCP
 
 ```
-construct program get <session-id>            # print metadata + markdown
-construct program set <session-id> --file …   # replace (also --stdin, --template <id>)
-construct program edit <session-id>           # open in $EDITOR, save back
-construct program execute <session-id>        # run (optionally --selection <md>)
-construct program templates                   # list available templates
+construct playbook get <session-id>            # print metadata + markdown
+construct playbook set <session-id> --file …   # replace (also --stdin, --template <id>)
+construct playbook edit <session-id>           # open in $EDITOR, save back
+construct playbook execute <session-id>        # run (optionally --selection <md>)
+construct playbook templates                   # list available templates
 ```
 
-Agents use the MCP tools `construct_program_get`, `construct_program_edit`
-(anchored edits — preferred), `construct_program_update` (wholesale replace),
-`construct_program_execute`, and `construct_program_list_templates`.
+Agents use the MCP tools `construct_playbook_get`, `construct_playbook_edit`
+(anchored edits — preferred), `construct_playbook_update` (wholesale replace),
+`construct_playbook_execute`, and `construct_playbook_list_templates`.
 
 ## Persistence
 
-The document lives at `program.md` inside the session's data directory, with
-versioned metadata alongside; recent agent revisions are retained. Programs
-survive daemon restarts, and forking a session copies its Program to the fork.
+The document lives at `playbook.md` inside the session's data directory, with
+versioned metadata alongside; recent agent revisions are retained. Playbooks
+survive daemon restarts, and forking a session copies its Playbook to the fork.
 
 ## Design references
 
 Normative design records live in `specs/` — start with
-`0041-session-program-is-orchestration-state.md` (core model),
-`0042-program-run-progress-affordance.md` (run shimmer lifecycle), and
-`0065-program-live-collaboration.md` (live cursors).
+`0041-session-playbook-is-orchestration-state.md` (core model),
+`0042-playbook-run-progress-affordance.md` (run shimmer lifecycle), and
+`0065-playbook-live-collaboration.md` (live cursors).

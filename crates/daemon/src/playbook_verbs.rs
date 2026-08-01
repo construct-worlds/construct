@@ -1,9 +1,9 @@
-//! Program selection verbs (spec 0089): typed refinement actions on a
-//! Program selection, loaded from markdown definition files. Built-ins ship
+//! Playbook selection verbs (spec 0089): typed refinement actions on a
+//! Playbook selection, loaded from markdown definition files. Built-ins ship
 //! embedded here; user files under a `verbs/` config directory add to, or by
 //! matching `name`, override them.
 
-use construct_protocol::{ProgramVerb, ProgramVerbEffect, ProgramVerbInteraction};
+use construct_protocol::{PlaybookVerb, PlaybookVerbEffect, PlaybookVerbInteraction};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -17,11 +17,11 @@ use std::path::Path;
 const BUILT_INS: &[(&str, &str)] = &[
     (
         "challenge-assumptions",
-        include_str!("program_verbs/challenge-assumptions.md"),
+        include_str!("playbook_verbs/challenge-assumptions.md"),
     ),
-    ("simplify", include_str!("program_verbs/simplify.md")),
-    ("crystallize", include_str!("program_verbs/crystallize.md")),
-    ("interview", include_str!("program_verbs/interview.md")),
+    ("simplify", include_str!("playbook_verbs/simplify.md")),
+    ("crystallize", include_str!("playbook_verbs/crystallize.md")),
+    ("interview", include_str!("playbook_verbs/interview.md")),
 ];
 
 /// Template variables a verb prompt body may reference as `{{ var }}`
@@ -29,9 +29,9 @@ const BUILT_INS: &[(&str, &str)] = &[
 /// prompt-build time, and its presence suppresses the corresponding
 /// auto-appended framing (document context, jurisdiction block, additional
 /// instruction) so an author who places a value never gets it twice.
-pub const TEMPLATE_VAR_CONTENT: &str = "program.content";
-pub const TEMPLATE_VAR_SELECTED_TEXT: &str = "program.selected_text";
-pub const TEMPLATE_VAR_ADDITIONAL_INSTRUCTION: &str = "program.additional_instruction";
+pub const TEMPLATE_VAR_CONTENT: &str = "playbook.content";
+pub const TEMPLATE_VAR_SELECTED_TEXT: &str = "playbook.selected_text";
+pub const TEMPLATE_VAR_ADDITIONAL_INSTRUCTION: &str = "playbook.additional_instruction";
 const TEMPLATE_VARS: &[&str] = &[
     TEMPLATE_VAR_CONTENT,
     TEMPLATE_VAR_SELECTED_TEXT,
@@ -84,7 +84,7 @@ pub fn render_verb_prompt(prompt: &str, vars: &[(&str, &str)]) -> String {
     }
 }
 
-/// Parse one verb definition file (frontmatter + body) into a [`ProgramVerb`].
+/// Parse one verb definition file (frontmatter + body) into a [`PlaybookVerb`].
 /// `default_name` is used as the verb's `name` when the frontmatter omits
 /// the field — the file's own stem for a user file, the built-in's fixed
 /// key for a built-in (see [`load_verbs`]) — so authoring a verb typically
@@ -99,13 +99,13 @@ pub fn render_verb_prompt(prompt: &str, vars: &[(&str, &str)]) -> String {
 /// The optional `comment` frontmatter field is deliberately not read: it is
 /// documentation for people reading the file (provenance, attribution,
 /// notes) and never becomes part of the verb or its prompt.
-fn parse_verb_definition(raw: &str, built_in: bool, default_name: &str) -> Option<ProgramVerb> {
+fn parse_verb_definition(raw: &str, built_in: bool, default_name: &str) -> Option<PlaybookVerb> {
     let (frontmatter, body) = split_frontmatter(raw);
     if let Some(unknown) = template_placeholders(&body)
         .iter()
         .find(|token| !TEMPLATE_VARS.contains(token))
     {
-        tracing::warn!(placeholder = %unknown, "program verb references unknown template variable");
+        tracing::warn!(placeholder = %unknown, "playbook verb references unknown template variable");
         return None;
     }
     let fields = parse_frontmatter_fields(&frontmatter);
@@ -114,13 +114,13 @@ fn parse_verb_definition(raw: &str, built_in: bool, default_name: &str) -> Optio
         .cloned()
         .unwrap_or_else(|| default_name.to_string());
     let effect = match fields.get("effect")?.as_str() {
-        "annotate" => ProgramVerbEffect::Annotate,
-        "rewrite" => ProgramVerbEffect::Rewrite,
+        "annotate" => PlaybookVerbEffect::Annotate,
+        "rewrite" => PlaybookVerbEffect::Rewrite,
         _ => return None,
     };
     let interaction = match fields.get("interaction")?.as_str() {
-        "single-shot" => ProgramVerbInteraction::SingleShot,
-        "interactive" => ProgramVerbInteraction::Interactive,
+        "single-shot" => PlaybookVerbInteraction::SingleShot,
+        "interactive" => PlaybookVerbInteraction::Interactive,
         _ => return None,
     };
     let label = fields.get("label").cloned().unwrap_or_else(|| name.clone());
@@ -128,7 +128,7 @@ fn parse_verb_definition(raw: &str, built_in: bool, default_name: &str) -> Optio
         .get("order")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0);
-    Some(ProgramVerb {
+    Some(PlaybookVerb {
         name,
         label,
         description: fields.get("description").cloned(),
@@ -193,7 +193,7 @@ fn parse_frontmatter_fields(frontmatter: &str) -> BTreeMap<String, String> {
 /// `tracing::warn!`, never a hard failure — one broken user file must not
 /// take down the whole list.
 #[cfg(test)]
-pub fn load_verbs(dir: &Path) -> Vec<ProgramVerb> {
+pub fn load_verbs(dir: &Path) -> Vec<PlaybookVerb> {
     load_verbs_with_plugins(dir, &[])
 }
 
@@ -204,21 +204,21 @@ pub fn load_verbs(dir: &Path) -> Vec<ProgramVerb> {
 pub fn load_verbs_with_plugins(
     dir: &Path,
     plugin_dirs: &[(String, std::path::PathBuf)],
-) -> Vec<ProgramVerb> {
-    let mut by_name: BTreeMap<String, ProgramVerb> = BTreeMap::new();
+) -> Vec<PlaybookVerb> {
+    let mut by_name: BTreeMap<String, PlaybookVerb> = BTreeMap::new();
     for (name, raw) in BUILT_INS {
         match parse_verb_definition(raw, true, name) {
             Some(verb) => {
                 by_name.insert(verb.name.clone(), verb);
             }
-            None => tracing::warn!(verb = %name, "built-in program verb failed to parse"),
+            None => tracing::warn!(verb = %name, "built-in playbook verb failed to parse"),
         }
     }
     load_verb_dir(dir, None, &mut by_name);
     for (namespace, plugin_dir) in plugin_dirs {
         load_verb_dir(plugin_dir, Some(namespace), &mut by_name);
     }
-    let mut verbs: Vec<ProgramVerb> = by_name.into_values().collect();
+    let mut verbs: Vec<PlaybookVerb> = by_name.into_values().collect();
     verbs.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.label.cmp(&b.label)));
     verbs
 }
@@ -228,7 +228,7 @@ pub fn load_verbs_with_plugins(
 fn load_verb_dir(
     dir: &Path,
     namespace: Option<&str>,
-    by_name: &mut BTreeMap<String, ProgramVerb>,
+    by_name: &mut BTreeMap<String, PlaybookVerb>,
 ) {
     if !dir.exists() {
         return;
@@ -241,13 +241,13 @@ fn load_verb_dir(
                     continue;
                 }
                 let Some(default_name) = path.file_stem().and_then(|s| s.to_str()) else {
-                    tracing::warn!(path = %path.display(), "skip program verb with non-UTF-8 filename");
+                    tracing::warn!(path = %path.display(), "skip playbook verb with non-UTF-8 filename");
                     continue;
                 };
                 let raw = match std::fs::read_to_string(&path) {
                     Ok(raw) => raw,
                     Err(e) => {
-                        tracing::warn!(path = %path.display(), error = ?e, "skip unreadable program verb");
+                        tracing::warn!(path = %path.display(), error = ?e, "skip unreadable playbook verb");
                         continue;
                     }
                 };
@@ -259,13 +259,13 @@ fn load_verb_dir(
                         by_name.insert(verb.name.clone(), verb);
                     }
                     None => {
-                        tracing::warn!(path = %path.display(), "skip malformed program verb (missing/unrecognized effect or interaction)")
+                        tracing::warn!(path = %path.display(), "skip malformed playbook verb (missing/unrecognized effect or interaction)")
                     }
                 }
             }
         }
         Err(e) => {
-            tracing::warn!(dir = %dir.display(), error = ?e, "read program verbs dir failed")
+            tracing::warn!(dir = %dir.display(), error = ?e, "read playbook verbs dir failed")
         }
     }
 }
@@ -356,7 +356,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("typo.md"),
-            "---\nname: typo\neffect: annotate\ninteraction: single-shot\n---\n\nLook at {{ program.selected_txt }} closely.\n",
+            "---\nname: typo\neffect: annotate\ninteraction: single-shot\n---\n\nLook at {{ playbook.selected_txt }} closely.\n",
         )
         .unwrap();
         let verbs = load_verbs(&dir);
@@ -375,7 +375,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("tpl.md"),
-            "---\nname: tpl\neffect: rewrite\ninteraction: single-shot\n---\n\nDoc: {{ program.content }}\nSel: {{program.selected_text}}\nExtra: {{ program.additional_instruction }}\n",
+            "---\nname: tpl\neffect: rewrite\ninteraction: single-shot\n---\n\nDoc: {{ playbook.content }}\nSel: {{playbook.selected_text}}\nExtra: {{ playbook.additional_instruction }}\n",
         )
         .unwrap();
         let verbs = load_verbs(&dir);

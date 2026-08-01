@@ -32,4 +32,4 @@ Missing or ignoring the Matrix-rain widget viewport must not block any user jour
 
 ## Non-Goals
 
-This does not introduce widget TTLs, dismissed states, or guaranteed notification delivery. It does not make the panel an arbitrary model-drawn program independent of session widgets: modes are a fixed, named set the client ships, not a surface sessions can draw into directly.
+This does not introduce widget TTLs, dismissed states, or guaranteed notification delivery. It does not make the panel an arbitrary model-drawn playbook independent of session widgets: modes are a fixed, named set the client ships, not a surface sessions can draw into directly.

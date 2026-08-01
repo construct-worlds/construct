@@ -1,6 +1,6 @@
 //! Drives the real web client in headless Chromium and asserts the
-//! spec-0074 shared-dialect behavior — widget smart clips, program
-//! projections, action chips in the Program editor, and the serialization
+//! spec-0074 shared-dialect behavior — widget smart clips, playbook
+//! projections, action chips in the Playbook editor, and the serialization
 //! round-trip invariant.
 
 use std::time::{Duration, Instant};
@@ -86,7 +86,7 @@ async fn shared_dialect_web_surfaces() {
                 state.widgetTemporaryUntilById.set('s-owner', performance.now() + 60000);
                 state.widgetsDropdownOpen = true;
                 renderWidgets();
-                const chip = sessionWidgetsEl.querySelector('.program-clip[data-raw]');
+                const chip = sessionWidgetsEl.querySelector('.playbook-clip[data-raw]');
                 const out = {
                   chipMounted: !!chip,
                   chipRaw: chip?.dataset?.raw || '',
@@ -97,7 +97,7 @@ async fn shared_dialect_web_surfaces() {
                 // Live repaint: the worker errors; the widget chip must flip
                 // without a re-render call.
                 handleNotification('session/state', { session: { id: 's-work', title: 'Worker', harness: 'shell', state: 'errored', kind: 'user' } });
-                const chip2 = sessionWidgetsEl.querySelector('.program-clip[data-raw]');
+                const chip2 = sessionWidgetsEl.querySelector('.playbook-clip[data-raw]');
                 out.statusAfterPush = chip2?.dataset?.status || '';
                 return out;
               } finally {
@@ -129,8 +129,8 @@ async fn shared_dialect_web_surfaces() {
         "widget chip must repaint on session/state push: {widget_chip:?}"
     );
 
-    // --- 2. Widget :::clip program projection: loading placeholder, fetch,
-    //        section extraction, program/state refresh. ---------------------
+    // --- 2. Widget :::clip playbook projection: loading placeholder, fetch,
+    //        section extraction, playbook/state refresh. ---------------------
     let projection: serde_json::Value = page
         .evaluate(
             r#"
@@ -147,9 +147,9 @@ async fn shared_dialect_web_surfaces() {
                 state.mode = 'chat';
                 state.sessions = [{ id: 's-proj', title: 'Owner', harness: 'smith', state: 'running', kind: 'user' }];
                 state.currentId = 's-proj';
-                state.widgetProgramById.clear();
+                state.widgetPlaybookById.clear();
                 state.widgetsById = new Map([['s-proj', [
-                  { id: 'progress', markdown: '# Progress\n:::clip program section="Progress"\n:::' },
+                  { id: 'progress', markdown: '# Progress\n:::clip playbook section="Progress"\n:::' },
                 ]]]);
                 state.widgetTemporaryUntilById.set('s-proj', performance.now() + 60000);
                 state.widgetsDropdownOpen = true;
@@ -161,8 +161,8 @@ async fn shared_dialect_web_surfaces() {
                     const pending = state.pending.get(msg.id);
                     state.pending.delete(msg.id);
                     let result = {};
-                    if (msg.method === 'program.get') {
-                      result = { program: { session_id: 's-proj', markdown: '# Plan\n## Progress\n- [x] step one\n## Next\n- [ ] later', version: 2, template_id: null }, blocks: [], active_run: null, revisions: [] };
+                    if (msg.method === 'playbook.get') {
+                      result = { playbook: { session_id: 's-proj', markdown: '# Plan\n## Progress\n- [x] step one\n## Next\n- [ ] later', version: 2, template_id: null }, blocks: [], active_run: null, revisions: [] };
                     }
                     queueMicrotask(() => pending.resolve(result));
                   },
@@ -175,11 +175,11 @@ async fn shared_dialect_web_surfaces() {
                 const proj = sessionWidgetsEl.querySelector('.widget-projection:not(.is-loading)');
                 const out = {
                   loadingFirst: loading,
-                  fetches: calls.filter((c) => c.method === 'program.get').length,
+                  fetches: calls.filter((c) => c.method === 'playbook.get').length,
                   projected: proj ? proj.textContent : '',
                 };
-                // A program/state push refreshes the projection.
-                handleNotification('program/state', { program: { session_id: 's-proj', markdown: '# Plan\n## Progress\n- [x] step one\n- [~] step two live\n## Next\n- [ ] later', version: 3, template_id: null }, blocks: [], active_run: null });
+                // A playbook/state push refreshes the projection.
+                handleNotification('playbook/state', { playbook: { session_id: 's-proj', markdown: '# Plan\n## Progress\n- [x] step one\n- [~] step two live\n## Next\n- [ ] later', version: 3, template_id: null }, blocks: [], active_run: null });
                 await new Promise((resolve) => requestAnimationFrame(resolve));
                 const proj2 = sessionWidgetsEl.querySelector('.widget-projection:not(.is-loading)');
                 out.projectedAfterPush = proj2 ? proj2.textContent : '';
@@ -190,7 +190,7 @@ async fn shared_dialect_web_surfaces() {
                 state.widgetsById = saved.widgetsById;
                 state.mode = saved.mode;
                 state.ws = saved.ws;
-                state.widgetProgramById.clear();
+                state.widgetPlaybookById.clear();
                 state.widgetTemporaryUntilById.delete('s-proj');
                 state.widgetsDropdownOpen = false;
                 renderWidgets();
@@ -215,10 +215,10 @@ async fn shared_dialect_web_surfaces() {
         projection["projectedAfterPush"]
             .as_str()
             .is_some_and(|t| t.contains("step two live")),
-        "projection must follow program/state pushes: {projection:?}"
+        "projection must follow playbook/state pushes: {projection:?}"
     );
 
-    // --- 3. Program editor: action chips render atomically, serialize
+    // --- 3. Playbook editor: action chips render atomically, serialize
     //        byte-identically, dim fence classes applied, click dispatches
     //        ui.action with no panel_id. --------------------------------------
     let editor: serde_json::Value = page
@@ -229,10 +229,10 @@ async fn shared_dialect_web_surfaces() {
                 sessions: state.sessions,
                 currentId: state.currentId,
                 mode: state.mode,
-                mountedId: state.program.mountedId,
+                mountedId: state.playbook.mountedId,
                 ws: state.ws,
-                html: programInputEl.innerHTML,
-                wrapHidden: programWrapEl.hidden,
+                html: playbookInputEl.innerHTML,
+                wrapHidden: playbookWrapEl.hidden,
               };
               const calls = [];
               try {
@@ -242,8 +242,8 @@ async fn shared_dialect_web_surfaces() {
                   { id: 's-w1', title: 'W1', harness: 'shell', state: 'running', kind: 'user' },
                 ];
                 state.currentId = 's-owner2';
-                state.mode = 'program';
-                state.program.mountedId = 's-owner2';
+                state.mode = 'playbook';
+                state.playbook.mountedId = 's-owner2';
                 state.ws = {
                   readyState: 1,
                   send(raw) {
@@ -254,20 +254,20 @@ async fn shared_dialect_web_surfaces() {
                     queueMicrotask(() => pending.resolve({}));
                   },
                 };
-                programWrapEl.hidden = false;
-                programRenderDoc(markdown);
-                const roundTrip = programSerialize();
-                const chip = programInputEl.querySelector('.program-action[data-action-id]');
+                playbookWrapEl.hidden = false;
+                playbookRenderDoc(markdown);
+                const roundTrip = playbookSerialize();
+                const chip = playbookInputEl.querySelector('.playbook-action[data-action-id]');
                 const out = {
                   roundTripIdentical: roundTrip === markdown,
                   roundTrip,
                   actionChipMounted: !!chip,
                   actionChipAtomic: chip?.getAttribute('contenteditable') === 'false',
                   actionChipLabel: chip?.textContent || '',
-                  fenceDimCount: programInputEl.querySelectorAll('.program-line.pl-fence').length,
-                  tableDelimDim: programInputEl.querySelectorAll('.program-line.pl-table-delim').length,
-                  checkMarkers: Array.from(programInputEl.querySelectorAll('.program-check')).map((el) => [el.textContent, el.className]),
-                  sessionChip: !!programInputEl.querySelector('.program-clip[data-session-id="s-w1"]'),
+                  fenceDimCount: playbookInputEl.querySelectorAll('.playbook-line.pl-fence').length,
+                  tableDelimDim: playbookInputEl.querySelectorAll('.playbook-line.pl-table-delim').length,
+                  checkMarkers: Array.from(playbookInputEl.querySelectorAll('.playbook-check')).map((el) => [el.textContent, el.className]),
+                  sessionChip: !!playbookInputEl.querySelector('.playbook-clip[data-session-id="s-w1"]'),
                 };
                 chip.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                 for (let i = 0; i < 20 && !calls.some((c) => c.method === 'session.input'); i++) {
@@ -281,10 +281,10 @@ async fn shared_dialect_web_surfaces() {
                 state.sessions = saved.sessions;
                 state.currentId = saved.currentId;
                 state.mode = saved.mode;
-                state.program.mountedId = saved.mountedId;
+                state.playbook.mountedId = saved.mountedId;
                 state.ws = saved.ws;
-                programInputEl.innerHTML = saved.html;
-                programWrapEl.hidden = saved.wrapHidden;
+                playbookInputEl.innerHTML = saved.html;
+                playbookWrapEl.hidden = saved.wrapHidden;
               }
             })()
             "#,
@@ -295,7 +295,7 @@ async fn shared_dialect_web_surfaces() {
         .expect("json");
     assert_eq!(
         editor["roundTripIdentical"], true,
-        "program serialization must be byte-identical: {editor:?}"
+        "playbook serialization must be byte-identical: {editor:?}"
     );
     assert_eq!(editor["actionChipMounted"], true, "{editor:?}");
     assert_eq!(editor["actionChipAtomic"], true, "{editor:?}");

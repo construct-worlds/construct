@@ -27,27 +27,27 @@ harnesses`, and `construct new aider` like any built-in; availability is
 (`construct daemon restart` — sessions are preserved) after editing the
 config.
 
-### Program verbs
+### Playbook verbs
 
 Drop a markdown file in `~/.config/construct/verbs/` to add a typed
-refinement action to every Program selection menu. One file per verb,
+refinement action to every Playbook selection menu. One file per verb,
 frontmatter for policy, body is the prompt; a file whose `name` matches a
 built-in replaces it. No restart needed — verbs reload on every menu open.
-See [Program selection verbs](program-verbs.md).
+See [Playbook selection verbs](playbook-verbs.md).
 
-### Program templates
+### Playbook templates
 
 Drop `<name>.md` files into the templates directory (default
-`~/.local/share/construct/program/templates`, relocatable via
-`[program].templates_dir` or `CONSTRUCT_PROGRAM_TEMPLATES_DIR`). The filename
+`~/.local/share/construct/playbook/templates`, relocatable via
+`[playbook].templates_dir` or `CONSTRUCT_PLAYBOOK_TEMPLATES_DIR`). The filename
 is the template id; templates reload on every list. See
-[Program](program.md).
+[Playbook](playbook.md).
 
 ### IPC clients (automation, remote UIs, observers)
 
 Everything the TUI and web UI do goes through the daemon's Unix-socket
 JSON-RPC API — create/drive sessions, subscribe to fleet events, read
-transcripts and diffs, edit programs, inject events. An external tool that
+transcripts and diffs, edit playbooks, inject events. An external tool that
 connects to `$XDG_RUNTIME_DIR/construct/construct.sock` (or shells out to the
 `construct` CLI) is a first-class participant: notification bridges,
 dashboards, schedulers, and navigation tools all fit here with zero
@@ -112,10 +112,10 @@ name = "reviewer"                   # exposed as harness diff-review:reviewer
 binary = "target/release/reviewer-adapter"
 description = "Headless review harness"
 
-[verbs]                             # program verbs, namespaced diff-review:<name>
+[verbs]                             # playbook verbs, namespaced diff-review:<name>
 dir = "verbs"
 
-[templates]                         # program templates, id diff-review:<stem>
+[templates]                         # playbook templates, id diff-review:<stem>
 dir = "templates"
 
 [[mcp_servers]]                     # injected into every harness session

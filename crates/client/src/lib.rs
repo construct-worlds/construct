@@ -5,10 +5,10 @@ use construct_protocol::jsonrpc::{self, MessageKind};
 use construct_protocol::{
     ipc_method, transport, ChatViewerActiveResult, ClientView, CreateSessionParams, DiffResult,
     ErrorObject, FeaturesStatusResult, HarnessInfo, LayoutDocument, LayoutNode, LayoutSetParams,
-    MoveDirection, Notification, PingResult, ProgramCursorParams, ProgramCursorResult,
-    ProgramEditParams, ProgramExecuteParams, ProgramExecuteResult, ProgramGetParams,
-    ProgramGetResult, ProgramListTemplatesResult, ProgramListVerbsResult, ProgramUpdateActor,
-    ProgramUpdateParams, ProgramUpdateResult, ProgramVerbExecuteParams, ProgramVerbExecuteResult,
+    MoveDirection, Notification, PingResult, PlaybookCursorParams, PlaybookCursorResult,
+    PlaybookEditParams, PlaybookExecuteParams, PlaybookExecuteResult, PlaybookGetParams,
+    PlaybookGetResult, PlaybookListTemplatesResult, PlaybookListVerbsResult, PlaybookUpdateActor,
+    PlaybookUpdateParams, PlaybookUpdateResult, PlaybookVerbExecuteParams, PlaybookVerbExecuteResult,
     ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams, ProjectMoveParams,
     ProjectRenameParams, ProjectSetCollapsedParams, ProjectSummary, PtyReplayResult, PtySize,
     Request, Response, SearchParams, SearchResult, SessionAttachClipboardParams,
@@ -297,43 +297,43 @@ impl Client {
         )
         .await
     }
-    pub async fn program_get(&self, id: &str) -> Result<ProgramGetResult> {
+    pub async fn playbook_get(&self, id: &str) -> Result<PlaybookGetResult> {
         self.request(
-            ipc_method::PROGRAM_GET,
-            &ProgramGetParams {
+            ipc_method::PLAYBOOK_GET,
+            &PlaybookGetParams {
                 session_id: id.to_string(),
             },
         )
         .await
     }
-    pub async fn program_update(&self, params: ProgramUpdateParams) -> Result<ProgramUpdateResult> {
-        self.request(ipc_method::PROGRAM_UPDATE, &params).await
+    pub async fn playbook_update(&self, params: PlaybookUpdateParams) -> Result<PlaybookUpdateResult> {
+        self.request(ipc_method::PLAYBOOK_UPDATE, &params).await
     }
-    pub async fn program_edit(&self, params: ProgramEditParams) -> Result<ProgramUpdateResult> {
-        self.request(ipc_method::PROGRAM_EDIT, &params).await
+    pub async fn playbook_edit(&self, params: PlaybookEditParams) -> Result<PlaybookUpdateResult> {
+        self.request(ipc_method::PLAYBOOK_EDIT, &params).await
     }
-    pub async fn program_cursor(&self, params: ProgramCursorParams) -> Result<ProgramCursorResult> {
-        self.request(ipc_method::PROGRAM_CURSOR, &params).await
+    pub async fn playbook_cursor(&self, params: PlaybookCursorParams) -> Result<PlaybookCursorResult> {
+        self.request(ipc_method::PLAYBOOK_CURSOR, &params).await
     }
-    pub async fn program_execute(
+    pub async fn playbook_execute(
         &self,
-        params: ProgramExecuteParams,
-    ) -> Result<ProgramExecuteResult> {
-        self.request(ipc_method::PROGRAM_EXECUTE, &params).await
+        params: PlaybookExecuteParams,
+    ) -> Result<PlaybookExecuteResult> {
+        self.request(ipc_method::PLAYBOOK_EXECUTE, &params).await
     }
-    pub async fn program_templates(&self) -> Result<ProgramListTemplatesResult> {
-        self.request(ipc_method::PROGRAM_LIST_TEMPLATES, &serde_json::Value::Null)
+    pub async fn playbook_templates(&self) -> Result<PlaybookListTemplatesResult> {
+        self.request(ipc_method::PLAYBOOK_LIST_TEMPLATES, &serde_json::Value::Null)
             .await
     }
-    pub async fn program_verbs(&self) -> Result<ProgramListVerbsResult> {
-        self.request(ipc_method::PROGRAM_LIST_VERBS, &serde_json::Value::Null)
+    pub async fn playbook_verbs(&self) -> Result<PlaybookListVerbsResult> {
+        self.request(ipc_method::PLAYBOOK_LIST_VERBS, &serde_json::Value::Null)
             .await
     }
-    pub async fn program_verb_execute(
+    pub async fn playbook_verb_execute(
         &self,
-        params: ProgramVerbExecuteParams,
-    ) -> Result<ProgramVerbExecuteResult> {
-        self.request(ipc_method::PROGRAM_VERB_EXECUTE, &params)
+        params: PlaybookVerbExecuteParams,
+    ) -> Result<PlaybookVerbExecuteResult> {
+        self.request(ipc_method::PLAYBOOK_VERB_EXECUTE, &params)
             .await
     }
     /// Start (or look up) the daemon's remote WS listener and
@@ -489,7 +489,7 @@ impl Client {
     /// (spec 0078), so the rendered transcript would be redundant context —
     /// delivered, worse, as a noisy "read the initial prompt file" first
     /// turn. A typed fork prompt still flows through either way.
-    /// The source's Program document is copied to the fork as durable
+    /// The source's Playbook document is copied to the fork as durable
     /// orchestration state; active execution/run state is not copied.
     /// Returns the new session id.
     pub async fn fork_session(
@@ -636,14 +636,14 @@ impl Client {
             })
             .await?;
 
-        let source_program = self.program_get(source_id).await?.program;
-        if !source_program.markdown.is_empty() || source_program.template_id.is_some() {
-            self.program_update(ProgramUpdateParams {
+        let source_playbook = self.playbook_get(source_id).await?.playbook;
+        if !source_playbook.markdown.is_empty() || source_playbook.template_id.is_some() {
+            self.playbook_update(PlaybookUpdateParams {
                 session_id: new_id.clone(),
-                markdown: source_program.markdown,
+                markdown: source_playbook.markdown,
                 base_version: None,
-                actor: ProgramUpdateActor::Human,
-                template_id: source_program.template_id,
+                actor: PlaybookUpdateActor::Human,
+                template_id: source_playbook.template_id,
                 note: Some(format!("copied from fork source {}", short_id(source_id))),
                 shimmer: None,
                 shimmer_tooltips: None,
@@ -1345,7 +1345,7 @@ impl Client {
         )
         .await
     }
-    /// Substring search across session name/metadata, stored program
+    /// Substring search across session name/metadata, stored playbook
     /// contents, and transcript history (spec 0076).
     pub async fn search(&self, params: SearchParams) -> Result<SearchResult> {
         self.request(ipc_method::SESSION_SEARCH, &params).await
@@ -1798,9 +1798,9 @@ mod fork_lineage_tests {
                     ipc_method::SESSION_TRANSCRIPT => serde_json::json!({
                         "jsonrpc": "2.0", "id": id, "result": { "events": [], "total": 0 }
                     }),
-                    ipc_method::PROGRAM_GET => serde_json::json!({
+                    ipc_method::PLAYBOOK_GET => serde_json::json!({
                         "jsonrpc": "2.0", "id": id, "result": {
-                            "program": {
+                            "playbook": {
                                 "session_id": "src-1",
                                 "markdown": "",
                                 "version": 0,
@@ -1947,9 +1947,9 @@ mod fork_lineage_tests {
                             }}
                         ], "total": 1 }
                     }),
-                    ipc_method::PROGRAM_GET => serde_json::json!({
+                    ipc_method::PLAYBOOK_GET => serde_json::json!({
                         "jsonrpc": "2.0", "id": id, "result": {
-                            "program": {
+                            "playbook": {
                                 "session_id": "src-1",
                                 "markdown": "",
                                 "version": 0,
@@ -2191,9 +2191,9 @@ mod fork_lineage_tests {
                             }}
                         ], "total": 8 }
                     }),
-                    ipc_method::PROGRAM_GET => serde_json::json!({
+                    ipc_method::PLAYBOOK_GET => serde_json::json!({
                         "jsonrpc": "2.0", "id": id, "result": {
-                            "program": {
+                            "playbook": {
                                 "session_id": "src-1",
                                 "markdown": "",
                                 "version": 0,

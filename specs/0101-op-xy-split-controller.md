@@ -116,11 +116,11 @@ position without producing an action. Subsequent messages produce one action
 in the shortest direction around the 0–127 range, so boundary crossings do not
 reverse the control unexpectedly.
 
-OP-XY Bank Select and Program Change provide the same focus-sensitive
+OP-XY Bank Select and Playbook Change provide the same focus-sensitive
 navigation on session channels 1–8 and Auxiliary 3 channel 10. Bank Select CC
-0 maps increasing/decreasing values to Down/Up. Program Change maps
-increasing/decreasing program numbers to focused-surface scroll down/up. Bank
-and Program positions calibrate independently per channel, so the first message
+0 maps increasing/decreasing values to Down/Up. Playbook Change maps
+increasing/decreasing playbook numbers to focused-surface scroll down/up. Bank
+and Playbook positions calibrate independently per channel, so the first message
 for either control on a track establishes its baseline without acting. The
 participating channels and Bank Select CC are configurable; changes retain the
 shortest-direction boundary behavior used by the Aux 3 encoders.

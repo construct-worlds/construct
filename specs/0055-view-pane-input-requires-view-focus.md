@@ -7,7 +7,7 @@ Scope: Keystroke-capturing surfaces drawn in the view pane only consume input wh
 
 ## Decision
 
-A surface rendered in the right-hand view pane (the program editor, a session
+A surface rendered in the right-hand view pane (the playbook editor, a session
 PTY, a transcript, future view-pane editors) may capture keystrokes only when
 focus is on the view pane. When focus is on the session list, navigation keys
 (Up/Down, next/prev-session, and the list's own bindings) must reach the list,
@@ -27,8 +27,8 @@ shadows); the list-focused state is for navigation only.
 The view pane and the session list are two focus targets toggled by other-window.
 A view-pane surface that grabs every keystroke whenever it merely exists — not
 when it is focused — defeats other-window: the list looks focused but its arrow
-keys still drive the surface underneath. This was observed with the program
-view: after `C-x o` to the list, Up/Down and next/prev still moved the program
+keys still drive the surface underneath. This was observed with the playbook
+view: after `C-x o` to the list, Up/Down and next/prev still moved the playbook
 cursor instead of the list selection.
 
 ## Consequences
@@ -38,7 +38,7 @@ cursor instead of the list selection.
   key the capture solely off "is this surface open".
 - The focus indicator and the input routing must agree: if the status line says
   focus is on the list, list keys win.
-- Surfaces that shadow a focusable child (e.g. a program drawn over a PTY) must
+- Surfaces that shadow a focusable child (e.g. a playbook drawn over a PTY) must
   also suppress auto-focus-on-typing while the list is focused, so a stray key
   cannot route to the shadowed child.
 
@@ -51,9 +51,9 @@ cursor instead of the list selection.
 
 ## Examples
 
-- Program visible in the view pane, focus on the list: Up/Down change the
-  selected session; `C-x o` back to the view, and Up/Down edit the program
+- Playbook visible in the view pane, focus on the list: Up/Down change the
+  selected session; `C-x o` back to the view, and Up/Down edit the playbook
   again.
-- Opening a program focuses the view pane so typing immediately edits it.
+- Opening a playbook focuses the view pane so typing immediately edits it.
 - A live PTY session focused in the view pane keeps receiving typed keys; moving
   focus to the list stops forwarding them and resumes list navigation.

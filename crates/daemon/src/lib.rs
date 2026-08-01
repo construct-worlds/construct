@@ -22,7 +22,7 @@ mod cost_history;
 pub mod doctor;
 mod loops;
 pub mod plugins;
-mod program_verbs;
+mod playbook_verbs;
 mod remote;
 mod remote_supervisor;
 mod router;
@@ -152,14 +152,14 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
         "loaded config"
     );
 
-    let program_templates_dir = config.program_templates_dir_override();
-    if let Some(dir) = program_templates_dir.as_ref() {
-        tracing::info!(dir = %dir.display(), "program templates dir override");
+    let playbook_templates_dir = config.playbook_templates_dir_override();
+    if let Some(dir) = playbook_templates_dir.as_ref() {
+        tracing::info!(dir = %dir.display(), "playbook templates dir override");
     }
     let storage = Arc::new(
         storage::Storage::new(paths.data_dir.clone())?
-            .with_program_templates_dir(program_templates_dir)
-            .with_program_verbs_dir(paths.config_dir.join("verbs"))
+            .with_playbook_templates_dir(playbook_templates_dir)
+            .with_playbook_verbs_dir(paths.config_dir.join("verbs"))
             .with_plugin_verb_dirs(plugin_set.verb_dirs())
             .with_plugin_template_dirs(plugin_set.template_dirs()),
     );
