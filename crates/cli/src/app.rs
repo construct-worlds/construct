@@ -40484,7 +40484,7 @@ mod tests {
         app.services.push(service_summary_for_test("assistant"));
         app.select_service("assistant".into());
 
-        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let backend = ratatui::backend::TestBackend::new(120, 60);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
 
@@ -40495,7 +40495,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("channel: http"));
+        assert!(text.contains("channel: http"), "rendered service view:\n{text}");
         assert!(text.contains("demo-conversation"));
 
         let hit = app

@@ -2945,6 +2945,10 @@ pub(crate) fn fleet_status_buckets(items: &[AppListItem]) -> FleetStatusBuckets 
                 }
             }
             AppListItem::ArchivedRow { .. } => {}
+            // Services are navigable list rows, but their aggregate state is
+            // represented by the routed-session rows rather than the fleet
+            // tally itself.
+            AppListItem::Service { .. } => {}
         }
     }
     buckets
@@ -3449,6 +3453,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
             AppListItem::Session { summary, .. } => summary.id == target,
             AppListItem::GroupHeader { group, .. } => group.id == target,
             AppListItem::ArchivedRow { .. } => false,
+            AppListItem::Service { .. } => false,
         }) {
             app.list_scroll_offset = app.list_scroll_offset_for_visible(
                 &app_items,
