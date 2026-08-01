@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-07-08
 Area: ux
-Scope: an in-TUI guided tour that teaches the core keybindings and the program board to non-emacs users.
+Scope: an in-TUI guided tour that teaches the core keybindings and the playbook board to non-emacs users.
 
 ## Decision
 
@@ -28,7 +28,7 @@ without ever pressing a chord.
 The tour covers, in order: how to read chord notation and back out with
 `C-g` or `Esc`; creating a practice session; sending it a message; finding the session
 title-bar menu to fork a parallel conversation and then merge or discard its
-result; moving focus and selection around the list/view; opening the program board, applying the
+result; moving focus and selection around the list/view; opening the playbook board, applying the
 built-in "Tasks" template, and running it so the board's own rule delegates
 the task to a live subagent; splitting the screen to watch the subagent
 work; the two panic-button keys (help, quit); and
@@ -52,7 +52,7 @@ without completing the current one's condition, go back to the previous
 step, or end the tour — labeled as navigation ("next"/"prev"), not as
 skipping. Backward navigation is purely presentational: it re-arms the
 target step's transient progress checks so the step can be demonstrated
-again, but it never undoes real-world effects (sessions stay alive, program
+again, but it never undoes real-world effects (sessions stay alive, playbook
 contents stay put, already-observed facts stay acknowledged). Steps must
 therefore tolerate being re-entered when their real-world condition already
 holds — the step either acknowledges the existing state or completes again
@@ -61,7 +61,7 @@ navigation can never wedge the tour. Backward navigation is hidden on the
 first step and on the completed card.
 
 Because the card floats over live surfaces (a session's terminal, the
-program board), it owns pointer clicks inside its own footprint: a click on
+playbook board), it owns pointer clicks inside its own footprint: a click on
 one of its controls must dispatch that control no matter what is painted
 underneath, and a click on its body must not act on the covered surface.
 Scroll gestures pass through (the card has nothing to scroll), in-flight
@@ -70,7 +70,7 @@ close-on-interaction semantics take precedence over the card.
 
 When no agent harness is configured, the tour degrades gracefully instead of
 stalling on a step it cannot complete: session creation and the first
-message fall back to a shell session, the program-board step becomes
+message fall back to a shell session, the playbook-board step becomes
 editing-only (open the board, apply the template, type a task line — no
 run), and the split-screen step becomes a plain split-and-navigate exercise
 with no subagent to watch. The card says so explicitly and points at
@@ -96,7 +96,7 @@ action has no distinct vim form, the shared binding is shown as-is.
 
 New users unfamiliar with emacs-style chord notation have no way to learn
 what "C-x C-f" means or how the fleet-of-agents model (sessions, the
-program board, subagent delegation) fits together, short of reading docs
+playbook board, subagent delegation) fits together, short of reading docs
 outside the tool. A tour that only ever *describes* actions risks drifting
 from reality as keybindings change, and a tour that *simulates* a fake
 screen teaches muscle memory for a UI that doesn't actually respond that
@@ -129,8 +129,8 @@ thing, not that they clicked past a slide.
   feature.
 - The tour does not attempt to teach every keybinding or every harness's
   behavior; it demonstrates one full example (create → message → move
-  around → delegate via the program board → split-screen watch → clean up).
-- The tour does not gate any other feature. Sessions, the program board, and
+  around → delegate via the playbook board → split-screen watch → clean up).
+- The tour does not gate any other feature. Sessions, the playbook board, and
   delegation all work identically whether or not the tour has ever been
   run.
 
@@ -140,11 +140,11 @@ thing, not that they clicked past a slide.
   sees the welcome card's highlighted tour line, and presses the suggested
   key. The card explains chord notation with a live micro-exercise before
   ever asking the user to create anything.
-- A user quits mid-tour (say, partway through the program-board step). On
+- A user quits mid-tour (say, partway through the playbook-board step). On
   the next launch, the tour resumes at that same step rather than restarting
   from the chord-notation lesson.
 - A user on a machine with no agent harness installed runs the tour anyway;
-  the program-board step becomes an editing-only exercise with a note
+  the playbook-board step becomes an editing-only exercise with a note
   pointing at harness setup, and the tour still reaches its final "tour
   complete" card.
 - A mouse-only user runs the whole tour (after the first, keystroke-only

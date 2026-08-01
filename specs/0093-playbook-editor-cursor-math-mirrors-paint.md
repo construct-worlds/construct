@@ -1,13 +1,13 @@
-# 0093-program-editor-cursor-math-mirrors-paint
+# 0093-playbook-editor-cursor-math-mirrors-paint
 
 Status: accepted
 Date: 2026-07-13
 Area: tui
-Scope: the program editor's cursor/selection/hit-test geometry must be derived from exactly the glyphs the renderer paints, at grapheme granularity.
+Scope: the playbook editor's cursor/selection/hit-test geometry must be derived from exactly the glyphs the renderer paints, at grapheme granularity.
 
 ## Decision
 
-The program editor maps buffer offsets to screen cells (caret placement,
+The playbook editor maps buffer offsets to screen cells (caret placement,
 click hit-testing, vertical navigation, scroll follow, clip/link hitboxes)
 through its own re-implementation of the paint-side word wrap. That math must
 mirror the paint layer's behavior exactly, at the granularity the paint layer
@@ -49,7 +49,7 @@ caret for the entire rest of the document.
 - Upgrading or replacing the TUI rendering library requires re-verifying the
   wrap math against its actual output (the differential test does this
   mechanically).
-- New markdown line transformations in the program renderer must land
+- New markdown line transformations in the playbook renderer must land
   together with their cursor-math model and a corpus entry exercising them.
 - Text measurement anywhere in the editor's geometry path must use
   grapheme-cluster segmentation with sequence-aware width, never per-char

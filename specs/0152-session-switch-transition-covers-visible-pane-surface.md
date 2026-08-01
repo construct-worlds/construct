@@ -9,7 +9,7 @@ Scope: Session-switch transitions in TUI session panes.
 
 A session-switch transition is applied to the final composited content surface
 of the split pane that changed sessions. It is painted after the pane's visible
-surface and pane-anchored overlays, including Program documents, terminal or
+surface and pane-anchored overlays, including Playbook documents, terminal or
 chat content, widgets, previews, and hover cards.
 
 Pane chrome remains stable, and other split panes do not participate in the
@@ -17,10 +17,10 @@ transition.
 
 ## Reason
 
-The Program is a peer surface within a session pane, not a layer outside the
-session-switch interaction. Applying the transition before the Program is
-composited lets the Program clear and hide the effect, so switching to a
-session with its Program open appears to glitch only the terminal exposed
+The Playbook is a peer surface within a session pane, not a layer outside the
+session-switch interaction. Applying the transition before the Playbook is
+composited lets the Playbook clear and hide the effect, so switching to a
+session with its Playbook open appears to glitch only the terminal exposed
 underneath it.
 
 ## Consequences

@@ -1,13 +1,13 @@
-# 0105-program-fork-prompt-delivery
+# 0105-playbook-fork-prompt-delivery
 
 Status: accepted
 Date: 2026-07-21
 Area: architecture
-Scope: How the first prompt reaches a freshly forked Program-execution session.
+Scope: How the first prompt reaches a freshly forked Playbook-execution session.
 
 ## Decision
 
-When a Program Run or verb executes in a newly created fork, the daemon
+When a Playbook Run or verb executes in a newly created fork, the daemon
 delivers the fork's first prompt asynchronously, after the fork's harness
 is observably ready — not inline in the execute request:
 
@@ -42,7 +42,7 @@ Enter so both arrive in one read — the Enter then parses as part of the
 paste burst instead of a submit keypress, and the prompt sits visibly
 typed but never submitted. Either way the fork idles forever. This is the
 same race the harness usage probe hit and solved (see the usage-probe
-spec); Program forks need the same treatment.
+spec); Playbook forks need the same treatment.
 
 The wait can last as long as the harness takes to boot (seconds), and
 execute requests run on an IPC dispatch loop that serves a connection's

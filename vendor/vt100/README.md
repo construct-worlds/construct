@@ -9,7 +9,7 @@ This is essentially the terminal parser component of a graphical terminal
 emulator pulled out into a separate crate. Although you can use this crate
 to build a graphical terminal emulator, it also contains functionality
 necessary for implementing terminal applications that want to run other
-terminal applications - programs like `screen` or `tmux` for example.
+terminal applications - playbooks like `screen` or `tmux` for example.
 
 ## Synopsis
 

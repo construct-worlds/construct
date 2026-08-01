@@ -1,13 +1,13 @@
-# 0099-program-attachments
+# 0099-playbook-attachments
 
 Status: accepted
 Date: 2026-07-16
 Area: ux
-Scope: Image and file attachments referenced from a session's program document, and how clients render them.
+Scope: Image and file attachments referenced from a session's playbook document, and how clients render them.
 
 ## Decision
 
-- The program document stores attachments as **standard Markdown links**:
+- The playbook document stores attachments as **standard Markdown links**:
   `![name](path)` for images, `[name](path)` for other files — never a
   bespoke token format. The path points at a file the daemon host can
   read (typically under the session's attachments directory, written by
@@ -53,7 +53,7 @@ Scope: Image and file attachments referenced from a session's program document, 
 
 ## Reason
 
-The program is a shared surface edited by humans and agents. Standard
+The playbook is a shared surface edited by humans and agents. Standard
 Markdown keeps it legible to every consumer (agents act on the path
 directly), portable across renderers, and free of invented syntax that
 would go stale (a stored `#N` breaks the moment content is inserted above
@@ -68,7 +68,7 @@ edits.
   contract: wrap math, cursor mapping, and painting all measure the same
   rendered text, chips included.
 - Attachments live under the session's attachment storage; deleting a
-  session can dangle program references. Accepted for now — the chip
+  session can dangle playbook references. Accepted for now — the chip
   renders its info card with a missing-file note.
 - No remote-URL previews means a document can contain image links that
   render as chips but never preview; that is intentional (no network
@@ -82,10 +82,10 @@ edits.
 
 ## Examples
 
-- Pasting an image into the program surface uploads it as a session
+- Pasting an image into the playbook surface uploads it as a session
   attachment and inserts `![screenshot](…/attachments/screenshot-….png)`
   on its own line; the editor shows `[Image #1]`.
-- An agent writes `![diagram](/tmp/diagram.png)` into the program; every
+- An agent writes `![diagram](/tmp/diagram.png)` into the playbook; every
   client renders `[Image #2]` (or whatever its render-time ordinal is)
   with the same hover and expansion affordances.
 - Clicking `[Image #1]` in a client that reflows text shows the image as

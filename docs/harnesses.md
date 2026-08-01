@@ -148,7 +148,7 @@ and `construct new <harness>` both create interactive sessions unless you pass
 - A non-empty prompt is recorded as the first user turn and run immediately. For
   headless clients this is the structured-output path (for example, `shell`
   runs `$SHELL -lc "<prompt>"` once and exits).
-- An empty prompt launches the harness's interactive program (for example,
+- An empty prompt launches the harness's interactive playbook (for example,
   `shell` runs `$SHELL -il`), which you can attach to and type into.
 
 Pass `--mode` to choose explicitly (optionally alongside a seed prompt):

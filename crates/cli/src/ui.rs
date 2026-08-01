@@ -6,9 +6,9 @@ use crate::app::{
     MinibufferChoiceAction, MinibufferChoiceHit, MinibufferIntent, PaneFocus, RemoteControlHit,
     RemoteControlHitAction, ScreenPoint, Selection, SessionTitleMenuAction, TextSelectionRange,
     TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit, WindowSplitDirection, ZoomMode,
-    CONFIGURE_TABS, PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS, PROGRAM_CLIP_HOVER_PREVIEW_COLS,
-    PROGRAM_CLIP_HOVER_PREVIEW_ROWS, PROGRAM_COLLAB_CURSOR_TTL_MS, PROGRAM_CONTENT_PADDING_X,
-    PROGRAM_CONTENT_PADDING_Y, PROGRAM_REVEAL_MS,
+    CONFIGURE_TABS, PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS, PLAYBOOK_CLIP_HOVER_PREVIEW_COLS,
+    PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS, PLAYBOOK_COLLAB_CURSOR_TTL_MS, PLAYBOOK_CONTENT_PADDING_X,
+    PLAYBOOK_CONTENT_PADDING_Y, PLAYBOOK_REVEAL_MS,
 };
 use crate::keymap::{KeyAction, Profile};
 use crate::text_util::wrap_to_width;
@@ -33,29 +33,29 @@ const MATRIX_RAIN_DECAY_SECS: f32 = 20.0;
 /// appear, and the top-to-bottom erase on disappear. Applies to both the
 /// terminal-view overlay and the matrix-rain wallpaper.
 const PREVIEW_REVEAL_SECS: f32 = 1.0;
-const PROGRAM_REVEAL_SECS: f32 = PROGRAM_REVEAL_MS as f32 / 1000.0;
-const PROGRAM_RUN_BUTTON: &str = " ▶ ";
-const PROGRAM_TERMINAL_FOCUS_SLIDE_PERCENT: u16 = 20;
+const PLAYBOOK_REVEAL_SECS: f32 = PLAYBOOK_REVEAL_MS as f32 / 1000.0;
+const PLAYBOOK_RUN_BUTTON: &str = " ▶ ";
+const PLAYBOOK_TERMINAL_FOCUS_SLIDE_PERCENT: u16 = 20;
 /// Size of the session clip hover terminal preview. COLS caps the card's
 /// outer width and ROWS is the replayed content height, so the tooltip paints
 /// 64x24 cells; terminal cells are roughly twice as tall as they are wide, so
 /// on screen that reads as a 4:3 tile instead of a letterboxed strip.
-const PROGRAM_COLLAB_CURSOR_LABEL_MAX_WIDTH: usize = 12;
-/// How long a just-landed agent-authored Program edit keeps its brief reveal
+const PLAYBOOK_COLLAB_CURSOR_LABEL_MAX_WIDTH: usize = 12;
+/// How long a just-landed agent-authored Playbook edit keeps its brief reveal
 /// highlight (spec 0065 agent presence) before fading back to plain text.
-/// Measured from the local receipt clock (`App::program_agent_reveal_elapsed`),
+/// Measured from the local receipt clock (`App::playbook_agent_reveal_elapsed`),
 /// not the daemon's `updated_at_ms` — broadcast transit plus the render tick
 /// can eat most of a shorter window before the first paint ever happens.
-pub(crate) const PROGRAM_AGENT_REVEAL_MS: i64 = 800;
+pub(crate) const PLAYBOOK_AGENT_REVEAL_MS: i64 = 800;
 /// How long a fresh agent cursor keeps pointing at itself with the GAP E
 /// off-viewport edge indicator, once its edit has scrolled out of view. Looser
-/// than `PROGRAM_AGENT_REVEAL_MS` on purpose: an edit that lands off-screen is
+/// than `PLAYBOOK_AGENT_REVEAL_MS` on purpose: an edit that lands off-screen is
 /// still worth pointing at for a bit after its own reveal tint has faded.
-pub(crate) const PROGRAM_AGENT_RECENT_ACTIVITY_MS: i64 = 3000;
-pub(crate) const PROGRAM_SELECTION_RUN_MENU_W: u16 = 46;
-const PROGRAM_SELECTION_RUN_BUTTON: &str = "▸ Run";
-const PROGRAM_SELECTION_RUN_FORK_BUTTON: &str = "▸ Run in fork";
-const PROGRAM_SELECTION_RUN_MENU_PAD_X: u16 = 1;
+pub(crate) const PLAYBOOK_AGENT_RECENT_ACTIVITY_MS: i64 = 3000;
+pub(crate) const PLAYBOOK_SELECTION_RUN_MENU_W: u16 = 46;
+const PLAYBOOK_SELECTION_RUN_BUTTON: &str = "▸ Run";
+const PLAYBOOK_SELECTION_RUN_FORK_BUTTON: &str = "▸ Run in fork";
+const PLAYBOOK_SELECTION_RUN_MENU_PAD_X: u16 = 1;
 
 /// Row-fraction range `[start, end)` of a preview image to paint this
 /// frame. On appear the image fills from the top over `PREVIEW_REVEAL_SECS`
@@ -127,7 +127,7 @@ const MODELINE_H: u16 = 1;
 /// How one frame splits between the sliding main block and the pinned footer
 /// (spec 0112).
 ///
-/// The block — session list, split panes, lineage, pin strip, program popups —
+/// The block — session list, split panes, lineage, pin strip, playbook popups —
 /// is laid out at `main`, the size it has when the footer is a single row, no
 /// matter how tall the footer actually gets. A taller footer slides the block
 /// up by `shift.delta` rows and crops what leaves the viewport, so panes keep
@@ -273,7 +273,7 @@ fn apply_main_block_slide(f: &mut Frame, app: &mut App, slide: &FrameSlide) {
 pub fn render(f: &mut Frame, app: &mut App) {
     // Re-attach image-expansion state to edited lines before any layout
     // math runs this frame (spec 0099); no-op while the buffer is unchanged.
-    app.reconcile_program_expanded();
+    app.reconcile_playbook_expanded();
     app.layout.browser_preview_area = None;
     app.layout.browser_preview_close = None;
     app.layout.terminal_scrollbar = None;
@@ -449,14 +449,14 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if effective_collapsed {
         render_view_uncollapse_glyph(f, app, detail_area);
     }
-    app.sync_program_popup_with_selection();
-    render_program_popup(f, app);
+    app.sync_playbook_popup_with_selection();
+    render_playbook_popup(f, app);
 
     // Tooltips anchored to the block (spec 0081) travel with it, so they are
     // painted while the block still owns its own coordinates.
     render_diamond_tooltip(f, app);
     render_pin_diamond_tooltip(f, app, &pinned_ids);
-    render_view_program_toggle_tooltip(f, app);
+    render_view_playbook_toggle_tooltip(f, app);
     render_view_close_tooltip(f, app);
     render_browser_preview_close_tooltip(f, app);
     render_list_title_button_tooltips(f, app);
@@ -465,7 +465,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_matrix_token_tooltip(f, app);
     render_harness_hover_tooltip(f, app);
     // A session switch affects the pane's final composited surface, not just
-    // the terminal/chat layer underneath it. Paint transitions after Program
+    // the terminal/chat layer underneath it. Paint transitions after Playbook
     // documents and every pane-anchored overlay so whichever surface is
     // actually visible participates in the same glitch.
     render_main_transitions(f, app);
@@ -564,7 +564,7 @@ fn capture_frame_text(f: &mut Frame, app: &mut App) {
     app.frame_text = rows;
 }
 
-fn is_program_doc_selection(app: &App, bounds: Option<Rect>) -> bool {
+fn is_playbook_doc_selection(app: &App, bounds: Option<Rect>) -> bool {
     let Some(bounds) = bounds else {
         return false;
     };
@@ -573,7 +573,7 @@ fn is_program_doc_selection(app: &App, bounds: Option<Rect>) -> bool {
             if let Some(crate::app::Selection::Session(session_id)) =
                 app.selection_for_window(hit.id)
             {
-                return app.program_popups.contains_key(&session_id);
+                return app.playbook_popups.contains_key(&session_id);
             }
         }
     }
@@ -585,7 +585,7 @@ fn is_program_doc_selection(app: &App, bounds: Option<Rect>) -> bool {
             height: view.height.saturating_sub(2),
         };
         if bounds == inner {
-            return app.program_popup.is_some();
+            return app.playbook_popup.is_some();
         }
     }
     false
@@ -602,7 +602,7 @@ fn render_text_selection(f: &mut Frame, app: &App) {
     if let Some(sel) = &app.text_selection {
         if sel.dragged {
             let (start, end) = normalized_points(sel.anchor, sel.head);
-            let use_reversed = is_program_doc_selection(app, sel.bounds);
+            let use_reversed = is_playbook_doc_selection(app, sel.bounds);
             render_selection_rect(
                 f,
                 sel.bounds.unwrap_or(area),
@@ -615,7 +615,7 @@ fn render_text_selection(f: &mut Frame, app: &App) {
         return;
     }
     if let Some(text) = &app.selected_text {
-        let use_reversed = is_program_doc_selection(app, app.selected_text_bounds);
+        let use_reversed = is_playbook_doc_selection(app, app.selected_text_bounds);
         for (row, start_col, end_col) in find_text_ranges(
             &app.frame_text,
             text,
@@ -1129,7 +1129,7 @@ pub fn view_close_button_range(view_area: Rect) -> (u16, u16, u16) {
     (x_start, x_end, view_area.y)
 }
 
-pub fn view_program_toggle_button_range(view_area: Rect) -> (u16, u16, u16) {
+pub fn view_playbook_toggle_button_range(view_area: Rect) -> (u16, u16, u16) {
     let x_start = view_area.x + 2;
     let x_end = view_area.x + 3;
     (x_start, x_end, view_area.y)
@@ -1226,9 +1226,9 @@ fn render_session_widget_title(
         dynamic_ui_trigger_range(view_area, close_width, label_width, reserved_right_width);
     // The leading "─ " stitches the indicator into the top border, so it must
     // carry the pane's own border color (the session view's focus-aware border,
-    // the program's accent border). Passing the style in keeps the two title bars
+    // the playbook's accent border). Passing the style in keeps the two title bars
     // from drifting — a hardcoded `pane_border_style` here painted a green dash
-    // on the program's accent border.
+    // on the playbook's accent border.
     let mut spans = vec![Span::styled("─ ", border_style)];
     // `x_start` is the on-screen column of the cluster's leading `─` (see
     // `dynamic_ui_trigger_range`, which reproduces ratatui's right-aligned
@@ -1295,11 +1295,11 @@ fn hovered_view_close_button(app: &App, view_area: Rect) -> bool {
     my == y && mx >= x_start && mx < x_end
 }
 
-fn hovered_view_program_toggle_button(app: &App, view_area: Rect) -> bool {
+fn hovered_view_playbook_toggle_button(app: &App, view_area: Rect) -> bool {
     let Some((mx, my)) = app.mouse_pos else {
         return false;
     };
-    let (x_start, x_end, y) = view_program_toggle_button_range(view_area);
+    let (x_start, x_end, y) = view_playbook_toggle_button_range(view_area);
     my == y && mx >= x_start && mx < x_end
 }
 
@@ -1388,31 +1388,31 @@ fn render_view_close_tooltip(f: &mut Frame, app: &App) {
     );
 }
 
-fn render_view_program_toggle_tooltip(f: &mut Frame, app: &App) {
+fn render_view_playbook_toggle_tooltip(f: &mut Frame, app: &App) {
     let Some(view_area) = app.layout.view_area else {
         return;
     };
-    if !hovered_view_program_toggle_button(app, view_area) {
+    if !hovered_view_playbook_toggle_button(app, view_area) {
         return;
     }
     let Some(s) = app.selected_session() else {
         return;
     };
-    let program_open = app.open_program_session_ids().iter().any(|id| id == &s.id);
-    let (cx, _, cy) = view_program_toggle_button_range(view_area);
-    let label = if program_open {
-        " Program mode: click to return to chat "
+    let playbook_open = app.open_playbook_session_ids().iter().any(|id| id == &s.id);
+    let (cx, _, cy) = view_playbook_toggle_button_range(view_area);
+    let label = if playbook_open {
+        " Playbook mode: click to return to chat "
     } else {
-        " Chat mode: click to open program "
+        " Chat mode: click to open playbook "
     };
     let inner_w = UnicodeWidthStr::width(label) as u16;
     let w = inner_w + 2;
     let h: u16 = 3;
-    let rect = view_program_toggle_tooltip_rect(view_area, f.area(), cx, cy, w, h);
+    let rect = view_playbook_toggle_tooltip_rect(view_area, f.area(), cx, cy, w, h);
     render_tooltip_rect(f, &app.theme, label, rect);
 }
 
-fn view_program_toggle_tooltip_rect(
+fn view_playbook_toggle_tooltip_rect(
     view_area: Rect,
     total: Rect,
     anchor_x: u16,
@@ -4598,7 +4598,7 @@ fn render_matrix_widget_viewport(f: &mut Frame, rain_area: Rect, app: &mut App, 
     let suppress_first_heading = leading_markdown_heading(&panel.markdown).is_some();
     let mut hits = Vec::new();
     let mut url_hits = Vec::new();
-    let mut wanted_programs = Vec::new();
+    let mut wanted_playbooks = Vec::new();
     let mut lines = render_agentd_markdown_lines(
         Some(app),
         &panel.markdown,
@@ -4610,12 +4610,12 @@ fn render_matrix_widget_viewport(f: &mut Frame, rain_area: Rect, app: &mut App, 
         &mut hits,
         &mut url_hits,
         suppress_first_heading,
-        &mut wanted_programs,
+        &mut wanted_playbooks,
     );
     app.layout.dynamic_ui_action_hits.extend(hits);
     app.layout.dynamic_ui_url_hits.extend(url_hits);
-    for owner in wanted_programs {
-        app.request_program_projection(owner);
+    for owner in wanted_playbooks {
+        app.request_playbook_projection(owner);
     }
     let viewport_rows = inner.height as usize;
     let padding_rows = viewport_rows.saturating_sub(lines.len());
@@ -5527,7 +5527,7 @@ fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// Build the shared right-side cluster of a pane title bar — session widget
 /// indicators, the harness label, and the close (` x `) button — and add them to
-/// `block` as right-aligned titles. Both the normal session view and the program
+/// `block` as right-aligned titles. Both the normal session view and the playbook
 /// popup call this so their right clusters can't drift in layout, styling, or
 /// geometry.
 ///
@@ -5593,7 +5593,7 @@ fn apply_pane_title_right_cluster<'a>(
     // `view_close_button_range` geometry. When the pane is unfocused the glyph
     // dims to match the unfocused title-bar border, so an inactive pane's menu
     // icon no longer reads at full brightness. `menu_icon_color` sets the base
-    // hue (program view passes its border color so the ☰ matches the frame).
+    // hue (playbook view passes its border color so the ☰ matches the frame).
     let close_hovered = show_close && hovered_view_close_button(app, area);
     let close_style = session_menu_icon_style(&app.theme, menu_icon_color, close_hovered, focused);
     let close = Line::from(Span::styled(close_label, close_style))
@@ -5612,12 +5612,12 @@ fn apply_pane_title_right_cluster<'a>(
 
 /// Style for the session-title actions glyph (the ` ☰ ` / ` x ` button at the
 /// right edge of a pane title bar, shared by the chat/PTY session view and the
-/// program view via `apply_pane_title_right_cluster`).
+/// playbook view via `apply_pane_title_right_cluster`).
 ///
 /// Hover wins: the glyph bolds in themed text color when the cursor is over it.
 /// Otherwise it paints in `base` — the chat/PTY session view passes
-/// `matrix_close`; the program view passes its border color so the icon reads as
-/// part of the program frame instead of as a separately-hued badge. Either way it
+/// `matrix_close`; the playbook view passes its border color so the icon reads as
+/// part of the playbook frame instead of as a separately-hued badge. Either way it
 /// dims (`Modifier::DIM`) when the pane is unfocused so it tracks the unfocused
 /// title-bar border instead of staying at full brightness on an inactive pane.
 fn session_menu_icon_style(theme: &Theme, base: Color, hovered: bool, focused: bool) -> Style {
@@ -6951,14 +6951,14 @@ fn render_session_title_menu(f: &mut Frame, app: &App) {
     let Some(menu) = &app.session_title_menu else {
         return;
     };
-    let program_open = app
-        .program_popup
+    let playbook_open = app
+        .playbook_popup
         .as_ref()
-        .is_some_and(|popup| popup.program.session_id == menu.session_id && !popup.closing);
+        .is_some_and(|popup| popup.playbook.session_id == menu.session_id && !popup.closing);
     let terminal_focus = app
-        .program_popup
+        .playbook_popup
         .as_ref()
-        .is_some_and(|popup| popup.program.session_id == menu.session_id && popup.terminal_focus);
+        .is_some_and(|popup| popup.playbook.session_id == menu.session_id && popup.terminal_focus);
 
     let area = menu.area;
     if area.width < 4 || area.height < 3 {
@@ -7003,7 +7003,7 @@ fn render_session_title_menu(f: &mut Frame, app: &App) {
             app,
             action,
             menu.session_id.as_str(),
-            program_open,
+            playbook_open,
             terminal_focus,
         );
         render_session_title_menu_row(f, area, row, label_text, binding, style);
@@ -7050,7 +7050,7 @@ fn session_title_menu_action_label(
     app: &App,
     action: SessionTitleMenuAction,
     session_id: &str,
-    program_open: bool,
+    playbook_open: bool,
     terminal_focus: bool,
 ) -> (&'static str, Option<&'static str>) {
     let archived = app
@@ -7060,10 +7060,10 @@ fn session_title_menu_action_label(
         .is_some_and(|s| s.archived);
     let label = match action {
         SessionTitleMenuAction::Archive if archived => "unarchive",
-        SessionTitleMenuAction::ProgramTerminalMode if program_open && terminal_focus => {
-            "program mode"
+        SessionTitleMenuAction::PlaybookTerminalMode if playbook_open && terminal_focus => {
+            "playbook mode"
         }
-        SessionTitleMenuAction::ProgramTerminalMode if program_open => "terminal mode",
+        SessionTitleMenuAction::PlaybookTerminalMode if playbook_open => "terminal mode",
         _ => action.label(),
     };
     let binding = match (action, app.profile) {
@@ -7071,7 +7071,7 @@ fn session_title_menu_action_label(
         (SessionTitleMenuAction::Rename, Profile::Vim) => Some("r"),
         (SessionTitleMenuAction::Fork, Profile::Emacs) => Some("C-x f"),
         (SessionTitleMenuAction::Fork, Profile::Vim) => Some("f"),
-        (SessionTitleMenuAction::ProgramTerminalMode, _) => Some("C-x Space"),
+        (SessionTitleMenuAction::PlaybookTerminalMode, _) => Some("C-x Space"),
         (SessionTitleMenuAction::SplitHorizontal, Profile::Emacs) => Some("C-x 3"),
         (SessionTitleMenuAction::SplitHorizontal, Profile::Vim) => Some("C-w v"),
         (SessionTitleMenuAction::SplitVertical, Profile::Emacs) => Some("C-x 2"),
@@ -7132,9 +7132,9 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
                 y,
             });
     }
-    // The exposed session pane remains a session pane even when its Program
-    // is slid aside. Keep its ordinary lifecycle glyph/color; the Program
-    // popup owns the distinct square, program-colored glyph.
+    // The exposed session pane remains a session pane even when its Playbook
+    // is slid aside. Keep its ordinary lifecycle glyph/color; the Playbook
+    // popup owns the distinct square, playbook-colored glyph.
     let mode_glyph = summary.as_ref().map(|s| session_status_glyph(app, s));
     // Label budget = total − 2 corners − right-side blocks − fixed
     // title scaffolding (` <glyph> <label> ` is 3 spaces + glyph
@@ -7167,7 +7167,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
             };
             // Name hit-rect: right after ` <glyph> ` (border + leading space +
             // glyph + the label span's own leading space) — mirrors
-            // `program_title_left_layout`'s identical offset for the program
+            // `playbook_title_left_layout`'s identical offset for the playbook
             // popup's title bar.
             let name_x_start = area.x.saturating_add(3).saturating_add(glyph_w as u16);
             let label_w = UnicodeWidthStr::width(rendered_label.as_str()) as u16;
@@ -7194,7 +7194,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         (None, None) => Line::from(Span::styled(" no session ", name_style)),
     };
     // Right-side cluster (widget indicators, harness label, close button) is
-    // shared with the program popup so the two title bars can't drift. Close is
+    // shared with the playbook popup so the two title bars can't drift. Close is
     // only shown when a session is actually selected (groups, "no session", and
     // the diff-overlay branch don't need it).
     let show_close = summary.is_some();
@@ -7864,15 +7864,15 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
     app.set_scrollback_for_window(window_id, clamped_scrollback);
     app.layout.terminal_scrollbar = terminal_scrollbar;
     render_turn_mark_affordances(f, app, &id);
-    // If this session has an open Program view, the Program renderer owns the
+    // If this session has an open Playbook view, the Playbook renderer owns the
     // sticky-widget body at the top layer. Rendering it here too paints the
-    // same widget underneath the Program over the terminal, so skip the
-    // session-view copy and let the Program draw the single visible instance.
-    let program_open_for_session = app
-        .open_program_session_ids()
+    // same widget underneath the Playbook over the terminal, so skip the
+    // session-view copy and let the Playbook draw the single visible instance.
+    let playbook_open_for_session = app
+        .open_playbook_session_ids()
         .iter()
         .any(|open_id| open_id == &id);
-    if !program_open_for_session {
+    if !playbook_open_for_session {
         render_visible_dynamic_ui_panels(f, area, app, &id, &sticky_panels);
     }
     if app.dynamic_ui_popover_open.as_deref() == Some(id.as_str()) && !sticky_panels.is_empty() {
@@ -7964,7 +7964,7 @@ fn inline_widget_rows(
     let mut throwaway_url_hits = Vec::new();
     let mut throwaway_wanted = Vec::new();
     // `app` + the owning session id keep the measured chip labels and any
-    // program projection identical to what the real render below paints, so
+    // playbook projection identical to what the real render below paints, so
     // the measured height matches the painted height.
     let lines = render_agentd_markdown_lines(
         app,
@@ -8022,7 +8022,7 @@ fn render_inline_dynamic_ui_panel(
     let suppress_first_heading = leading_markdown_heading(&panel.markdown).is_some();
     let mut hits = Vec::new();
     let mut url_hits = Vec::new();
-    let mut wanted_programs = Vec::new();
+    let mut wanted_playbooks = Vec::new();
     let lines = render_agentd_markdown_lines(
         Some(app),
         &panel.markdown,
@@ -8034,12 +8034,12 @@ fn render_inline_dynamic_ui_panel(
         &mut hits,
         &mut url_hits,
         suppress_first_heading,
-        &mut wanted_programs,
+        &mut wanted_playbooks,
     );
     app.layout.dynamic_ui_action_hits.extend(hits);
     app.layout.dynamic_ui_url_hits.extend(url_hits);
-    for owner in wanted_programs {
-        app.request_program_projection(owner);
+    for owner in wanted_playbooks {
+        app.request_playbook_projection(owner);
     }
     f.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }),
@@ -8363,7 +8363,7 @@ fn render_dynamic_ui_stack_lines(
         let suppress_first_heading = leading_markdown_heading(&panel.markdown).is_some();
         let mut hits = Vec::new();
         let mut url_hits = Vec::new();
-        let mut wanted_programs = Vec::new();
+        let mut wanted_playbooks = Vec::new();
         let lines = render_agentd_markdown_lines(
             Some(app),
             &panel.markdown,
@@ -8375,12 +8375,12 @@ fn render_dynamic_ui_stack_lines(
             &mut hits,
             &mut url_hits,
             suppress_first_heading,
-            &mut wanted_programs,
+            &mut wanted_playbooks,
         );
         app.layout.dynamic_ui_action_hits.extend(hits);
         app.layout.dynamic_ui_url_hits.extend(url_hits);
-        for owner in wanted_programs {
-            app.request_program_projection(owner);
+        for owner in wanted_playbooks {
+            app.request_playbook_projection(owner);
         }
         rows.extend(lines);
         rows.push(Line::raw(""));
@@ -8482,10 +8482,10 @@ fn surface_allows_extension(surface: &str, name: &str) -> bool {
 
 /// Render widget-surface construct Markdown (spec 0074: one shared dialect).
 /// `app` powers the shared smart-clip chips (live session status from
-/// `app.sessions`, same lookup the program surface uses) and the
-/// `:::clip program` projection cache; `None` (measuring paths, tests)
-/// degrades to static clip labels and a "loading program…" placeholder.
-/// `wanted_programs` collects owning-session ids whose program document is
+/// `app.sessions`, same lookup the playbook surface uses) and the
+/// `:::clip playbook` projection cache; `None` (measuring paths, tests)
+/// degrades to static clip labels and a "loading playbook…" placeholder.
+/// `wanted_playbooks` collects owning-session ids whose playbook document is
 /// needed for a projection but not cached yet — callers kick off a
 /// non-blocking fetch for each so the render loop never stalls.
 fn render_agentd_markdown_lines(
@@ -8499,7 +8499,7 @@ fn render_agentd_markdown_lines(
     hits: &mut Vec<crate::app::DynamicUiActionHit>,
     url_hits: &mut Vec<crate::app::DynamicUiUrlHit>,
     suppress_first_heading: bool,
-    wanted_programs: &mut Vec<String>,
+    wanted_playbooks: &mut Vec<String>,
 ) -> Vec<Line<'static>> {
     render_agentd_markdown_lines_at_depth(
         app,
@@ -8512,15 +8512,15 @@ fn render_agentd_markdown_lines(
         hits,
         url_hits,
         suppress_first_heading,
-        wanted_programs,
+        wanted_playbooks,
         0,
     )
 }
 
 /// The recursive body of [`render_agentd_markdown_lines`]. `depth` is the
-/// projection nesting level: a `:::clip program` block projects the owning
-/// session's program document only at depth 0 — inside a projection it
-/// renders as an inert chip, so a program that embeds a program clip can
+/// projection nesting level: a `:::clip playbook` block projects the owning
+/// session's playbook document only at depth 0 — inside a projection it
+/// renders as an inert chip, so a playbook that embeds a playbook clip can
 /// never recurse.
 fn render_agentd_markdown_lines_at_depth(
     app: Option<&App>,
@@ -8533,7 +8533,7 @@ fn render_agentd_markdown_lines_at_depth(
     hits: &mut Vec<crate::app::DynamicUiActionHit>,
     url_hits: &mut Vec<crate::app::DynamicUiUrlHit>,
     suppress_first_heading: bool,
-    wanted_programs: &mut Vec<String>,
+    wanted_playbooks: &mut Vec<String>,
     depth: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -8600,8 +8600,8 @@ fn render_agentd_markdown_lines_at_depth(
             continue;
         }
         // Construct clip blocks (spec 0074): the fence line renders as the
-        // same chip the program surface paints. `:::clip program` in a widget
-        // additionally projects the owning session's program document (or one
+        // same chip the playbook surface paints. `:::clip playbook` in a widget
+        // additionally projects the owning session's playbook document (or one
         // section of it) live — the dialect registry restricts that
         // projection to the widget surface, so the gate consults the registry
         // rather than a local boolean. Any other clip type stays inert: chip
@@ -8615,32 +8615,32 @@ fn render_agentd_markdown_lines_at_depth(
             }
             let chip_label = format!("clip {}", rest.trim());
             let clip_type = rest.trim().split_whitespace().next().unwrap_or("");
-            let project_program = clip_type == "program"
+            let project_playbook = clip_type == "playbook"
                 && depth == 0
                 && surface_allows_extension(
                     construct_protocol::dialect::SURFACE_WIDGET,
-                    "program-section",
+                    "playbook-section",
                 );
-            if project_program {
+            if project_playbook {
                 let (section, consumed) = parse_widget_clip_block(&src_lines, cur);
                 let mut block_lines = vec![Line::from(vec![
                     Span::raw("  "),
-                    program_chip_span(chip_label.trim(), theme.highlight_fg, theme.info),
+                    playbook_chip_span(chip_label.trim(), theme.highlight_fg, theme.info),
                 ])];
-                let cached_program = match (app, session_id) {
+                let cached_playbook = match (app, session_id) {
                     (Some(app), Some(owner)) => {
-                        let cached = app.program_markdown_cache.get(owner).cloned();
+                        let cached = app.playbook_markdown_cache.get(owner).cloned();
                         if cached.is_none() {
-                            wanted_programs.push(owner.to_string());
+                            wanted_playbooks.push(owner.to_string());
                         }
                         cached
                     }
                     _ => None,
                 };
-                match cached_program {
-                    None => block_lines.push(widget_dim_note_line(theme, "loading program…")),
-                    Some(program_md) => {
-                        match program_section_projection(&program_md, section.as_deref()) {
+                match cached_playbook {
+                    None => block_lines.push(widget_dim_note_line(theme, "loading playbook…")),
+                    Some(playbook_md) => {
+                        match playbook_section_projection(&playbook_md, section.as_deref()) {
                             None => block_lines.push(widget_dim_note_line(
                                 theme,
                                 &format!(
@@ -8672,7 +8672,7 @@ fn render_agentd_markdown_lines_at_depth(
                                     hits,
                                     url_hits,
                                     false,
-                                    wanted_programs,
+                                    wanted_playbooks,
                                     depth + 1,
                                 ));
                             }
@@ -8687,7 +8687,7 @@ fn render_agentd_markdown_lines_at_depth(
             }
             let chip = Line::from(vec![
                 Span::raw("  "),
-                program_chip_span(chip_label.trim(), theme.highlight_fg, theme.info),
+                playbook_chip_span(chip_label.trim(), theme.highlight_fg, theme.info),
             ]);
             rendered_rows += visual_line_count(std::iter::once(&chip), panel_area.width);
             lines.push(chip);
@@ -8852,8 +8852,8 @@ fn render_agentd_markdown_lines_at_depth(
 }
 
 /// A dim informational line inside a widget clip block ("end clip",
-/// "loading program…", "section not found: …"), indented to match the
-/// program surface's clip end line.
+/// "loading playbook…", "section not found: …"), indented to match the
+/// playbook surface's clip end line.
 fn widget_dim_note_line(theme: &Theme, text: &str) -> Line<'static> {
     Line::from(Span::styled(
         format!("  {text}"),
@@ -8884,13 +8884,13 @@ fn parse_widget_clip_block(lines: &[&str], start: usize) -> (Option<String>, usi
     (section, i - start)
 }
 
-/// Project one section out of a program document for a widget `:::clip
-/// program` block (spec 0074: compose by reference, not by copying). With no
+/// Project one section out of a playbook document for a widget `:::clip
+/// playbook` block (spec 0074: compose by reference, not by copying). With no
 /// `section` the whole document projects. With one, the heading line whose
 /// text matches case-insensitively (at any level) projects together with its
 /// content, up to the next heading of the same or higher level. `None` when
 /// the named section does not exist.
-fn program_section_projection(markdown: &str, section: Option<&str>) -> Option<String> {
+fn playbook_section_projection(markdown: &str, section: Option<&str>) -> Option<String> {
     let Some(section) = section else {
         return Some(markdown.to_string());
     };
@@ -9352,7 +9352,7 @@ fn nested_indent_cols(line: &str) -> usize {
 
 /// One `[x]`/`[~]`/`[!]`/`[ ]` checklist marker. The classification and its
 /// glyph/color treatment are shared between the widget renderer (checklists,
-/// timeline items) and the program renderer (checklist line coloring), per
+/// timeline items) and the playbook renderer (checklist line coloring), per
 /// spec 0074's one-dialect rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChecklistMark {
@@ -9477,7 +9477,7 @@ fn parse_checkline(
 
 /// Inline widget-surface span renderer: splits `text` on `@{…}` typed
 /// references, rendering each as the shared smart-clip chip (the very same
-/// span builder the program surface uses, so a session chip means the same
+/// span builder the playbook surface uses, so a session chip means the same
 /// thing on both surfaces per spec 0074), and routes the text between chips
 /// through [`render_inline_action_spans`] for action/URL links. Chip labels
 /// and live status come from `app`; without one the chips render inertly with
@@ -9513,8 +9513,8 @@ fn render_inline_widget_spans(
             spans.extend(segment);
         }
         let raw_clip = &after_marker[..end];
-        spans.push(program_smart_clip_span(app, theme, raw_clip, false, false));
-        col = col.saturating_add(program_smart_clip_visual_width(app, raw_clip) as u16);
+        spans.push(playbook_smart_clip_span(app, theme, raw_clip, false, false));
+        col = col.saturating_add(playbook_smart_clip_visual_width(app, raw_clip) as u16);
         rest = &after_marker[end + 1..];
     }
     if !rest.is_empty() {
@@ -9686,7 +9686,7 @@ fn parse_action_target(target: &str) -> (String, Option<String>, bool) {
 
 /// One `[label](agentd:action/…)` occurrence in a line of construct
 /// Markdown. `start..end` is the byte range of the whole link construct, so
-/// the program surface (which renders the source literally) can style and
+/// the playbook surface (which renders the source literally) can style and
 /// hit-test it in place; the widget surface consumes the parsed fields via
 /// [`parse_agentd_action_links`]. One scanner serves both surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10380,14 +10380,14 @@ fn render_editor_cursor(f: &mut Frame, pos: Position, theme: &Theme) {
     );
 }
 
-fn program_collab_cursor_label_style(theme: &Theme, color_index: u8) -> Style {
+fn playbook_collab_cursor_label_style(theme: &Theme, color_index: u8) -> Style {
     Style::default()
         .fg(theme.highlight_fg)
-        .bg(program_collab_cursor_color(theme, color_index))
+        .bg(playbook_collab_cursor_color(theme, color_index))
         .add_modifier(Modifier::BOLD)
 }
 
-fn program_collab_cursor_color(theme: &Theme, color_index: u8) -> Color {
+fn playbook_collab_cursor_color(theme: &Theme, color_index: u8) -> Color {
     let fg = match color_index % 4 {
         1 => theme.accent,
         2 => Color::Yellow,
@@ -10656,7 +10656,7 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         s.and_then(|s| modeline_context_usage_text(s.context_used, s.context_window));
     let mut search_status = None;
     if let Some(search) = app
-        .program_popup
+        .playbook_popup
         .as_ref()
         .and_then(|popup| popup.search.as_ref())
     {
@@ -11648,7 +11648,7 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
                     minibuffer_hint_label(KeyAction::OpenCommandPalette, profile),
                     KeyAction::OpenCommandPalette,
                 ),
-                ("C-x Space program", KeyAction::OpenProgram),
+                ("C-x Space playbook", KeyAction::OpenPlaybook),
                 (zoom_hint_label(profile, true), KeyAction::ToggleZoom),
                 ("C-x o list", KeyAction::SwitchFocus),
             ],
@@ -11660,7 +11660,7 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
                     minibuffer_hint_label(KeyAction::OpenCommandPalette, profile),
                     KeyAction::OpenCommandPalette,
                 ),
-                ("C-x Space program", KeyAction::OpenProgram),
+                ("C-x Space playbook", KeyAction::OpenPlaybook),
                 (zoom_hint_label(profile, true), KeyAction::ToggleZoom),
                 ("C-x o view", KeyAction::SwitchFocus),
             ],
@@ -11672,7 +11672,7 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
                     minibuffer_hint_label(KeyAction::OpenCommandPalette, profile),
                     KeyAction::OpenCommandPalette,
                 ),
-                ("C-x Space program", KeyAction::OpenProgram),
+                ("C-x Space playbook", KeyAction::OpenPlaybook),
                 (zoom_hint_label(profile, false), KeyAction::ToggleZoom),
             ],
         ),
@@ -11781,7 +11781,7 @@ fn render_help(f: &mut Frame, area: Rect, app: &mut App) -> Rect {
     let inner_width = width.saturating_sub(6).max(1) as usize;
     let total_rows: usize = help_text
         .lines()
-        .map(|line| program_wrap_row_starts(line, inner_width).len())
+        .map(|line| playbook_wrap_row_starts(line, inner_width).len())
         .sum();
     // Content height = rows + 2 borders + 2 vertical padding, capped to fit
     // the terminal — when it doesn't fit, the dialog scrolls (see below)
@@ -11828,10 +11828,10 @@ fn render_help(f: &mut Frame, area: Rect, app: &mut App) -> Rect {
         .wrap(Wrap { trim: false })
         .scroll((scroll_offset.min(u16::MAX as usize) as u16, 0));
     f.render_widget(para, popup);
-    // Reuses the program popup's scroll-thumb painter — it only takes rects
-    // and offsets, nothing program-specific — so both dialogs share one
+    // Reuses the playbook popup's scroll-thumb painter — it only takes rects
+    // and offsets, nothing playbook-specific — so both dialogs share one
     // scrollbar indicator instead of drawing two.
-    render_program_scroll_indicator(
+    render_playbook_scroll_indicator(
         f,
         &app.theme,
         popup,
@@ -12166,8 +12166,8 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     C-x b           switch session (picker dialog: type to filter, ↑↓ move)
     C-x i           send input to selected session
     C-x k           delete selected session (confirms; kills if running)
-    C-x Space       open selected session's program
-    C-x C-o         focus session terminal / refocus Program
+    C-x Space       open selected session's playbook
+    C-x C-o         focus session terminal / refocus Playbook
     C-x d           show diff
     C-x r           rename selected session (clears title on empty submit)
     C-x f           fork selected session (pick a turn or now, then harness)
@@ -12199,7 +12199,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
 
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
-                    palette commands: new fork send delete rename program diff border
+                    palette commands: new fork send delete rename playbook diff border
                                       theme zoom interrupt refresh harnesses configure
                                       paste help
     ?               toggle this help
@@ -12241,8 +12241,8 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
     / / C-x b       switch session (picker dialog: type to filter, ↑↓ move)
     I               send input to selected session
     d d             delete selected session (confirms; kills if running)
-    C-x Space       open selected session's program
-    C-x C-o         focus session terminal / refocus Program
+    C-x Space       open selected session's playbook
+    C-x C-o         focus session terminal / refocus Playbook
     g d             show diff
     r               rename selected session (clears title on empty submit)
     f               fork selected session (pick a turn or now, then harness)
@@ -12274,7 +12274,7 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
 
   global
     :               command palette
-                    palette commands: new fork send delete rename program diff border
+                    palette commands: new fork send delete rename playbook diff border
                                       theme zoom interrupt refresh harnesses configure
                                       paste help
     A               cycle approval mode
@@ -13473,7 +13473,7 @@ fn session_status_glyph(app: &App, s: &SessionSummary) -> &'static str {
 }
 
 /// Same animation gate as `session_status_glyph`, but with a caller-supplied
-/// static fallback glyph instead of the lifecycle glyph. Lets the Program-open
+/// static fallback glyph instead of the lifecycle glyph. Lets the Playbook-open
 /// indicator (a static `▣` otherwise) animate exactly like the normal status
 /// dot while the session is actively working.
 fn session_mode_glyph(app: &App, s: &SessionSummary, static_glyph: &'static str) -> &'static str {
@@ -13521,14 +13521,14 @@ fn session_should_animate_status(s: &SessionSummary, pty_active: bool, agent_act
     }
 }
 
-/// Style for the session pane title's mode glyph. When the Program view is
-/// open for this session, the glyph takes the program border color instead
+/// Style for the session pane title's mode glyph. When the Playbook view is
+/// open for this session, the glyph takes the playbook border color instead
 /// of the title's default (uncolored) text, so it reads as part of the
-/// Program frame it toggles into (spec 0045) rather than the plain session
+/// Playbook frame it toggles into (spec 0045) rather than the plain session
 /// status dot.
-fn session_title_glyph_style(theme: &Theme, program_open: bool, focused: bool) -> Style {
-    if program_open {
-        program_border_style(theme, focused)
+fn session_title_glyph_style(theme: &Theme, playbook_open: bool, focused: bool) -> Style {
+    if playbook_open {
+        playbook_border_style(theme, focused)
     } else {
         Style::default()
     }
@@ -14310,50 +14310,50 @@ fn clip_line_left(line: Line<'static>, cols: usize) -> Line<'static> {
     Line::from(out)
 }
 
-struct ProgramPopupHoverOverlay {
-    popup: crate::app::ProgramPopup,
+struct PlaybookPopupHoverOverlay {
+    popup: crate::app::PlaybookPopup,
     clip_bounds: Rect,
-    clip_hits: Vec<crate::app::ProgramClipHit>,
+    clip_hits: Vec<crate::app::PlaybookClipHit>,
     scroll_offset: usize,
     inner: Rect,
 }
 
-fn render_program_popup(f: &mut Frame, app: &mut App) {
+fn render_playbook_popup(f: &mut Frame, app: &mut App) {
     let now = Instant::now();
-    app.layout.program_title_run_hit = None;
-    app.layout.program_title_toggle_hit = None;
-    app.layout.program_title_close_hit = None;
-    app.layout.program_title_name_hit = None;
-    app.layout.program_title_name_window_start = 0;
-    app.layout.program_selection_run_hit = None;
-    app.layout.program_inner_area = None;
-    app.layout.program_base_area = None;
-    app.layout.program_resize_hit = None;
-    app.layout.program_smart_clip_anchor = None;
-    app.layout.program_clip_hits.clear();
-    app.layout.program_attachment_hits.clear();
-    app.layout.program_attachment_image_rects.clear();
-    app.layout.program_attachment_resize_zones.clear();
-    app.layout.program_pinned_card_rect = None;
-    app.layout.program_action_link_hits.clear();
+    app.layout.playbook_title_run_hit = None;
+    app.layout.playbook_title_toggle_hit = None;
+    app.layout.playbook_title_close_hit = None;
+    app.layout.playbook_title_name_hit = None;
+    app.layout.playbook_title_name_window_start = 0;
+    app.layout.playbook_selection_run_hit = None;
+    app.layout.playbook_inner_area = None;
+    app.layout.playbook_base_area = None;
+    app.layout.playbook_resize_hit = None;
+    app.layout.playbook_smart_clip_anchor = None;
+    app.layout.playbook_clip_hits.clear();
+    app.layout.playbook_attachment_hits.clear();
+    app.layout.playbook_attachment_image_rects.clear();
+    app.layout.playbook_attachment_resize_zones.clear();
+    app.layout.playbook_pinned_card_rect = None;
+    app.layout.playbook_action_link_hits.clear();
     if app
-        .program_popup
+        .playbook_popup
         .as_ref()
         .is_some_and(|popup| popup.closing && now >= popup.hide_after)
     {
-        app.program_popup = None;
+        app.playbook_popup = None;
     }
 
     let active_session_id = app
-        .program_popup
+        .playbook_popup
         .as_ref()
-        .map(|popup| popup.program.session_id.clone());
+        .map(|popup| popup.playbook.session_id.clone());
     // (popup, base_rect, active, focused): `active` marks the popup that owns
     // interaction state (hitboxes, cursor, scroll persistence) — that stays
-    // with `app.program_popup` even while the list holds focus. `focused`
-    // drives border brightness only, so the program frame dims on focus-out
+    // with `app.playbook_popup` even while the list holds focus. `focused`
+    // drives border brightness only, so the playbook frame dims on focus-out
     // like any other split pane.
-    let mut popups: Vec<(crate::app::ProgramPopup, Rect, bool, bool)> = Vec::new();
+    let mut popups: Vec<(crate::app::PlaybookPopup, Rect, bool, bool)> = Vec::new();
     for hit in &app.layout.main_window_areas {
         let Some(crate::app::Selection::Session(session_id)) = app.selection_for_window(hit.id)
         else {
@@ -14362,50 +14362,50 @@ fn render_program_popup(f: &mut Frame, app: &mut App) {
         if active_session_id.as_deref() == Some(session_id.as_str()) {
             continue;
         }
-        if let Some(popup) = app.program_popups.get(&session_id) {
+        if let Some(popup) = app.playbook_popups.get(&session_id) {
             popups.push((popup.clone(), hit.area, false, false));
         }
     }
-    if let Some(popup) = app.program_popup.as_ref() {
-        let base_rect = program_popup_base_rect(
+    if let Some(popup) = app.playbook_popup.as_ref() {
+        let base_rect = playbook_popup_base_rect(
             &app.layout.main_window_areas,
             app.active_window_id,
             app.layout.view_area,
-            &popup.program.session_id,
+            &popup.playbook.session_id,
             |id| app.selection_for_window(id),
             f.area(),
         );
-        // Tutorial pane highlight (spec 0077, steps 5/6 "program board" /
+        // Tutorial pane highlight (spec 0077, steps 5/6 "playbook board" /
         // "split screen"): reuses the popup's normal focused-border styling.
-        let popup_focused = app.focus == PaneFocus::View || app.tutorial_wants_program_highlight();
+        let popup_focused = app.focus == PaneFocus::View || app.tutorial_wants_playbook_highlight();
         popups.push((popup.clone(), base_rect, true, popup_focused));
     }
     let mut hover_overlays = Vec::new();
     for (popup, base_rect, active, popup_focused) in popups {
         if let Some(overlay) =
-            render_program_popup_at(f, app, &popup, base_rect, active, popup_focused, now)
+            render_playbook_popup_at(f, app, &popup, base_rect, active, popup_focused, now)
         {
             hover_overlays.push(overlay);
         }
     }
-    render_program_hover_overlays(f, app, &hover_overlays, now);
+    render_playbook_hover_overlays(f, app, &hover_overlays, now);
 }
 
-fn render_program_hover_overlays(
+fn render_playbook_hover_overlays(
     f: &mut Frame,
     app: &mut App,
-    hover_overlays: &[ProgramPopupHoverOverlay],
+    hover_overlays: &[PlaybookPopupHoverOverlay],
     now: Instant,
 ) {
     for overlay in hover_overlays {
-        render_program_clip_hover(
+        render_playbook_clip_hover(
             f,
             app,
             overlay.clip_bounds,
             &overlay.clip_hits,
             &overlay.popup,
         );
-        render_program_shimmer_hover(
+        render_playbook_shimmer_hover(
             f,
             app,
             &overlay.popup,
@@ -14416,13 +14416,13 @@ fn render_program_hover_overlays(
             now,
         );
     }
-    render_program_attachment_hover(f, app);
+    render_playbook_attachment_hover(f, app);
 }
 
-/// Decoded RGBA for a program attachment image, memoized by path + mtime so
+/// Decoded RGBA for a playbook attachment image, memoized by path + mtime so
 /// an overwritten file re-decodes and a broken/huge one isn't re-read every
 /// frame. Files above the cap are treated as undecodable.
-fn program_attachment_decoded(
+fn playbook_attachment_decoded(
     app: &mut App,
     path: &str,
 ) -> Option<std::sync::Arc<image::RgbaImage>> {
@@ -14446,17 +14446,17 @@ fn program_attachment_decoded(
 
 /// Blit expanded inline attachment images (spec 0099) over the blank rows
 /// their padding reserved, and register their on-screen rects (active
-/// program only) for click-to-collapse and bottom-edge drag-resize.
-fn render_program_attachment_images(
+/// playbook only) for click-to-collapse and bottom-edge drag-resize.
+fn render_playbook_attachment_images(
     f: &mut Frame,
     app: &mut App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     scroll_offset: usize,
     inner: Rect,
     active: bool,
 ) {
     if app
-        .program_popup
+        .playbook_popup
         .as_ref()
         .is_none_or(|p| p.expanded_attachments.is_empty())
         || inner.width == 0
@@ -14475,9 +14475,9 @@ fn render_program_attachment_images(
         if row_base >= viewport_end {
             break;
         }
-        let li = program_line_instance(&mut dups, raw);
-        let (rendered, clips) = program_rendered_line_with_clips(Some(app), raw, width, li);
-        let starts = program_wrap_row_starts(&rendered, width);
+        let li = playbook_line_instance(&mut dups, raw);
+        let (rendered, clips) = playbook_rendered_line_with_clips(Some(app), raw, width, li);
+        let starts = playbook_wrap_row_starts(&rendered, width);
         for clip in &clips {
             let LineClipKind::Attachment {
                 path,
@@ -14490,7 +14490,7 @@ fn render_program_attachment_images(
             };
             // The block's first braille char sits one past the unit's
             // leading break space; its wrap row is the block's first row.
-            let (row_in_line, _) = program_wrap_locate(&starts, clip.visual_start + 1, width);
+            let (row_in_line, _) = playbook_wrap_locate(&starts, clip.visual_start + 1, width);
             blocks.push((*key, path.clone(), row_base + row_in_line, *rows));
         }
         row_base = row_base.saturating_add(starts.len().max(1));
@@ -14508,9 +14508,9 @@ fn render_program_attachment_images(
             width: inner.width,
             height: (vis_last + 1 - vis_first) as u16,
         };
-        let draw = match program_attachment_decoded(app, &path) {
+        let draw = match playbook_attachment_decoded(app, &path) {
             Some(img) => {
-                let draw = program_attachment_draw_rect(img.dimensions(), rect);
+                let draw = playbook_attachment_draw_rect(img.dimensions(), rect);
                 let (ow, oh) = blit_scale_dims(img.dimensions(), draw, false);
                 let resized = resized_image(&mut app.image_resize_cache, &img, ow * 2, oh);
                 paint_resized_quadrants(f, draw, &resized, 1.0, (0.0, 1.0));
@@ -14542,10 +14542,10 @@ fn render_program_attachment_images(
                 },
             };
             app.layout
-                .program_attachment_resize_zones
+                .playbook_attachment_resize_zones
                 .push((zone, key, draw.y));
             app.layout
-                .program_attachment_image_rects
+                .playbook_attachment_image_rects
                 .push((draw, key, path));
         }
     }
@@ -14555,7 +14555,7 @@ fn render_program_attachment_images(
 /// filename, path, and size · type — or a missing-file note when the path no
 /// longer resolves. Image attachments add a half-block preview under the
 /// info lines. Anchored above the chip (below when there's no room).
-fn render_program_attachment_hover(f: &mut Frame, app: &mut App) {
+fn render_playbook_attachment_hover(f: &mut Frame, app: &mut App) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
@@ -14564,7 +14564,7 @@ fn render_program_attachment_hover(f: &mut Frame, app: &mut App) {
     // itself is already on screen.
     let (hit, over_expanded_image) = match app
         .layout
-        .program_attachment_hits
+        .playbook_attachment_hits
         .iter()
         .find(|h| h.contains(mx, my))
         .cloned()
@@ -14573,7 +14573,7 @@ fn render_program_attachment_hover(f: &mut Frame, app: &mut App) {
         None => {
             let Some((_, key, path)) = app
                 .layout
-                .program_attachment_image_rects
+                .playbook_attachment_image_rects
                 .iter()
                 .find(|(r, _, _)| {
                     mx >= r.x && mx < r.x + r.width && my >= r.y && my < r.y + r.height
@@ -14587,7 +14587,7 @@ fn render_program_attachment_hover(f: &mut Frame, app: &mut App) {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.clone());
             (
-                crate::app::ProgramAttachmentHit {
+                crate::app::PlaybookAttachmentHit {
                     col_start: mx,
                     col_end: mx + 1,
                     row: my,
@@ -14601,14 +14601,14 @@ fn render_program_attachment_hover(f: &mut Frame, app: &mut App) {
         }
     };
     let preview = if hit.is_image && !over_expanded_image {
-        program_attachment_decoded(app, &hit.path)
+        playbook_attachment_decoded(app, &hit.path)
     } else {
         None
     };
     let detail = match std::fs::metadata(&hit.path) {
         Ok(meta) => format!(
             "{} · {}",
-            program_attachment_size_label(meta.len()),
+            playbook_attachment_size_label(meta.len()),
             crate::clipboard_bridge::mime_for_path(std::path::Path::new(&hit.path)),
         ),
         Err(_) => "missing file".to_string(),
@@ -14695,7 +14695,7 @@ fn render_program_attachment_hover(f: &mut Frame, app: &mut App) {
 
 /// `1023 B` / `4 KiB` / `2.3 MiB` — compact size label for the attachment
 /// hover card.
-fn program_attachment_size_label(bytes: u64) -> String {
+fn playbook_attachment_size_label(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
     } else if bytes < 1024 * 1024 {
@@ -14705,7 +14705,7 @@ fn program_attachment_size_label(bytes: u64) -> String {
     }
 }
 
-fn program_popup_base_rect(
+fn playbook_popup_base_rect(
     main_window_areas: &[crate::app::WindowPaneHit],
     active_window_id: u64,
     view_area: Option<Rect>,
@@ -14742,50 +14742,50 @@ fn program_popup_base_rect(
         .unwrap_or(fallback)
 }
 
-/// Temporal speed of the program Run shimmer wave, in radians/sec.
-const PROGRAM_SHIMMER_SPEED: f32 = 4.2;
+/// Temporal speed of the playbook Run shimmer wave, in radians/sec.
+const PLAYBOOK_SHIMMER_SPEED: f32 = 4.2;
 /// Spatial frequency of the shimmer wave, in radians per character. The bright
 /// band spans roughly `2π / DENSITY` characters, so ~0.18 gives a highlight
 /// band ~35 chars wide travelling through the running region.
-const PROGRAM_SHIMMER_DENSITY: f32 = 0.18;
+const PLAYBOOK_SHIMMER_DENSITY: f32 = 0.18;
 
-fn program_roll_down_height(base_height: u16, cover_percent: u16) -> u16 {
+fn playbook_roll_down_height(base_height: u16, cover_percent: u16) -> u16 {
     let percent = cover_percent.clamp(
-        crate::app::PROGRAM_COVER_PERCENT_MIN,
-        crate::app::PROGRAM_COVER_PERCENT_MAX,
+        crate::app::PLAYBOOK_COVER_PERCENT_MIN,
+        crate::app::PLAYBOOK_COVER_PERCENT_MAX,
     );
     let wanted = ((base_height as u32 * percent as u32) + 50) / 100;
     let min_height = base_height.min(8).max(1) as u32;
     wanted.clamp(min_height, base_height.max(1) as u32) as u16
 }
 
-pub(crate) fn program_terminal_focus_slide_offset(width: u16) -> u16 {
+pub(crate) fn playbook_terminal_focus_slide_offset(width: u16) -> u16 {
     if width <= 1 {
         return 0;
     }
-    let offset = ((width as u32 * PROGRAM_TERMINAL_FOCUS_SLIDE_PERCENT as u32) + 50) / 100;
+    let offset = ((width as u32 * PLAYBOOK_TERMINAL_FOCUS_SLIDE_PERCENT as u32) + 50) / 100;
     (offset as u16).clamp(1, width.saturating_sub(1))
 }
 
-fn program_popup_visible_rect(base_rect: Rect, visible_h: u16, slide: f32) -> Rect {
+fn playbook_popup_visible_rect(base_rect: Rect, visible_h: u16, slide: f32) -> Rect {
     let mut rect = Rect {
         height: visible_h,
         ..base_rect
     };
-    let max_offset = program_terminal_focus_slide_offset(base_rect.width);
+    let max_offset = playbook_terminal_focus_slide_offset(base_rect.width);
     let offset = ((max_offset as f32) * slide.clamp(0.0, 1.0)).round() as u16;
     rect.x = rect.x.saturating_add(offset.min(max_offset));
     rect
 }
 
-/// Strip of the frame buffer a slid Program popup may bleed into, right of its
+/// Strip of the frame buffer a slid Playbook popup may bleed into, right of its
 /// owning pane. The popup keeps its full layout width while slid so the
 /// content doesn't reflow, which pushes its right side past the pane edge;
 /// everything painted there gets cropped by restoring the pre-paint cells.
 /// Spans the pane's full row range (not just the popup's) so title tooltips
 /// and popovers hanging below the popup are cropped too. `None` when the
 /// popup stays inside the pane.
-fn program_popup_crop_region(base_rect: Rect, popup_rect: Rect, buffer_area: Rect) -> Option<Rect> {
+fn playbook_popup_crop_region(base_rect: Rect, popup_rect: Rect, buffer_area: Rect) -> Option<Rect> {
     if popup_rect.right() <= base_rect.right() {
         return None;
     }
@@ -14799,7 +14799,7 @@ fn program_popup_crop_region(base_rect: Rect, popup_rect: Rect, buffer_area: Rec
     (region.width > 0 && region.height > 0).then_some(region)
 }
 
-fn program_popup_paint_rect(popup_rect: Rect, buffer_area: Rect) -> Option<Rect> {
+fn playbook_popup_paint_rect(popup_rect: Rect, buffer_area: Rect) -> Option<Rect> {
     let rect = popup_rect.intersection(buffer_area);
     (rect.width > 0 && rect.height > 0).then_some(rect)
 }
@@ -14858,16 +14858,16 @@ fn clamp_title_hit_to_pane(
     (xs < xe).then_some((xs, xe, y))
 }
 
-/// Which source lines of a program are shimmering, plus the wave phase (spec
-/// 0042). Derived from the session's `ProgramRun` at render time.
-struct ProgramShimmer {
+/// Which source lines of a playbook are shimmering, plus the wave phase (spec
+/// 0042). Derived from the session's `PlaybookRun` at render time.
+struct PlaybookShimmer {
     /// Indexed by source-line; `true` => the line is in a still-running block.
     active_lines: Vec<bool>,
     /// Phase of the travelling highlight wave, in radians.
     phase: f32,
 }
 
-fn format_program_run_elapsed(started_at: Instant, now: Instant) -> String {
+fn format_playbook_run_elapsed(started_at: Instant, now: Instant) -> String {
     let secs = now.saturating_duration_since(started_at).as_secs();
     let minutes = secs / 60;
     let seconds = secs % 60;
@@ -14878,33 +14878,33 @@ fn format_program_run_elapsed(started_at: Instant, now: Instant) -> String {
     }
 }
 
-fn program_system_status_tooltip(run: &crate::app::ProgramRun, now: Instant) -> Option<String> {
+fn playbook_system_status_tooltip(run: &crate::app::PlaybookRun, now: Instant) -> Option<String> {
     let status = run.system_status.as_deref().map(str::trim)?;
     if status.is_empty() {
         return None;
     }
     Some(format!(
         "{status} — {}",
-        format_program_run_elapsed(run.started_at, now)
+        format_playbook_run_elapsed(run.started_at, now)
     ))
 }
 
 /// One-shot settle flourish lines. `started_at` is per source line so multiple
 /// blocks can settle in separate notifications and animate independently.
-struct ProgramSettleFlourish {
+struct PlaybookSettleFlourish {
     started_at_by_line: Vec<Option<Instant>>,
 }
 
-/// Build the shimmer overlay for a popup from its session's `ProgramRun`, or
+/// Build the shimmer overlay for a popup from its session's `PlaybookRun`, or
 /// `None` if no run is active, it has lapsed, or every block has settled. A
 /// block shimmers while its stable ref is in the run's pending set (spec 0053);
 /// editing a block advances its epoch, taking stale shimmer out by default.
-fn program_run_shimmer(
+fn playbook_run_shimmer(
     app: &App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     now: Instant,
-) -> Option<ProgramShimmer> {
-    let run = app.program_runs.get(&popup.program.session_id)?;
+) -> Option<PlaybookShimmer> {
+    let run = app.playbook_runs.get(&popup.playbook.session_id)?;
     if now >= run.deadline {
         return None;
     }
@@ -14934,7 +14934,7 @@ fn program_run_shimmer(
             }
         }
     } else {
-        for block in crate::app::program_blocks(&popup.buffer) {
+        for block in crate::app::playbook_blocks(&popup.buffer) {
             if !run.pending.contains(&block.id) {
                 continue;
             }
@@ -14951,21 +14951,21 @@ fn program_run_shimmer(
     if !any {
         return None;
     }
-    let phase = now.saturating_duration_since(run.started_at).as_secs_f32() * PROGRAM_SHIMMER_SPEED;
-    Some(ProgramShimmer {
+    let phase = now.saturating_duration_since(run.started_at).as_secs_f32() * PLAYBOOK_SHIMMER_SPEED;
+    Some(PlaybookShimmer {
         active_lines,
         phase,
     })
 }
 
-fn program_settle_flourish(
+fn playbook_settle_flourish(
     app: &App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     now: Instant,
-) -> Option<ProgramSettleFlourish> {
+) -> Option<PlaybookSettleFlourish> {
     let flourishes = app
-        .program_settle_flourishes
-        .get(&popup.program.session_id)?;
+        .playbook_settle_flourishes
+        .get(&popup.playbook.session_id)?;
     if flourishes.is_empty() {
         return None;
     }
@@ -14973,7 +14973,7 @@ fn program_settle_flourish(
     if !clean {
         return None;
     }
-    let ttl = Duration::from_millis(crate::app::PROGRAM_SETTLE_FLASH_MS);
+    let ttl = Duration::from_millis(crate::app::PLAYBOOK_SETTLE_FLASH_MS);
     let mut started_at_by_line = vec![None; popup.buffer.lines().count()];
     let mut any = false;
     let has_stable_match = popup
@@ -15003,16 +15003,16 @@ fn program_settle_flourish(
             any = true;
         }
     }
-    any.then_some(ProgramSettleFlourish { started_at_by_line })
+    any.then_some(PlaybookSettleFlourish { started_at_by_line })
 }
 
-/// Overlay the Run shimmer onto already-rendered program lines: for each active
+/// Overlay the Run shimmer onto already-rendered playbook lines: for each active
 /// line, re-emit its text character-by-character with a brightness drawn from a
 /// travelling wave, so a highlight band sweeps through the running region. The
 /// global character index advances across active lines so the band is
 /// continuous down the document. Spans carrying a background (smart-clip chips,
 /// selection) are left intact but still advance the wave so its spacing holds.
-fn apply_program_shimmer(lines: &mut [Line], shimmer: &ProgramShimmer, theme: &Theme) {
+fn apply_playbook_shimmer(lines: &mut [Line], shimmer: &PlaybookShimmer, theme: &Theme) {
     let mut gidx: usize = 0;
     for (i, line) in lines.iter_mut().enumerate() {
         if !shimmer.active_lines.get(i).copied().unwrap_or(false) {
@@ -15027,7 +15027,7 @@ fn apply_program_shimmer(lines: &mut [Line], shimmer: &ProgramShimmer, theme: &T
             }
             let style = span.style;
             for ch in span.content.chars() {
-                let w = (shimmer.phase - gidx as f32 * PROGRAM_SHIMMER_DENSITY).sin();
+                let w = (shimmer.phase - gidx as f32 * PLAYBOOK_SHIMMER_DENSITY).sin();
                 // 0..1, eased so most of the region rests dim and the crest pops.
                 let t = (0.5 + 0.5 * w).clamp(0.0, 1.0);
                 let eased = t * t * (3.0 - 2.0 * t);
@@ -15043,29 +15043,29 @@ fn apply_program_shimmer(lines: &mut [Line], shimmer: &ProgramShimmer, theme: &T
     }
 }
 
-/// Test hook: the source-line activity mask `program_run_shimmer` derives for
+/// Test hook: the source-line activity mask `playbook_run_shimmer` derives for
 /// the popup's current run, so tests can assert the shimmer covers exactly the
 /// pending blocks' lines without reaching into the private wave state.
 #[cfg(test)]
-pub(crate) fn program_run_shimmer_active_lines_for_test(
+pub(crate) fn playbook_run_shimmer_active_lines_for_test(
     app: &App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     now: Instant,
 ) -> Option<Vec<bool>> {
-    program_run_shimmer(app, popup, now).map(|shimmer| shimmer.active_lines)
+    playbook_run_shimmer(app, popup, now).map(|shimmer| shimmer.active_lines)
 }
 
 /// Test hook: run the shimmer overlay with an explicit line mask so tests can
 /// assert which rendered chars it re-styles.
 #[cfg(test)]
-pub(crate) fn apply_program_shimmer_for_test(
+pub(crate) fn apply_playbook_shimmer_for_test(
     lines: &mut [Line],
     active_lines: Vec<bool>,
     theme: &Theme,
 ) {
-    apply_program_shimmer(
+    apply_playbook_shimmer(
         lines,
-        &ProgramShimmer {
+        &PlaybookShimmer {
             active_lines,
             phase: 1.0,
         },
@@ -15073,13 +15073,13 @@ pub(crate) fn apply_program_shimmer_for_test(
     );
 }
 
-fn apply_program_settle_flourish(
+fn apply_playbook_settle_flourish(
     lines: &mut [Line],
-    flourish: &ProgramSettleFlourish,
+    flourish: &PlaybookSettleFlourish,
     theme: &Theme,
     now: Instant,
 ) {
-    let ttl = Duration::from_millis(crate::app::PROGRAM_SETTLE_FLASH_MS).as_secs_f32();
+    let ttl = Duration::from_millis(crate::app::PLAYBOOK_SETTLE_FLASH_MS).as_secs_f32();
     for (i, line) in lines.iter_mut().enumerate() {
         let Some(started_at) = flourish
             .started_at_by_line
@@ -15124,37 +15124,37 @@ fn apply_program_settle_flourish(
     }
 }
 
-/// Build the empty-program onboarding placeholder: a one-line description of what
-/// the program is, a "Templates" header followed by every non-blank template as
+/// Build the empty-playbook onboarding placeholder: a one-line description of what
+/// the playbook is, a "Templates" header followed by every non-blank template as
 /// a plain (borderless) list row — hovering a row highlights it so it reads as
 /// clickable — a tip about adding custom templates when none are configured, a
 /// divider, and a smart-clip syntax reference. Returns the lines to render plus
 /// the row hitboxes. Coordinates are absolute screen cells — safe because an
-/// empty program never scrolls (offset is always 0) and every line is kept
+/// empty playbook never scrolls (offset is always 0) and every line is kept
 /// within `inner.width`, so no wrapping shifts the rows. Templates that don't
 /// fit the available height collapse into a trailing "+N more" row. Falls back
-/// to a plain description+syntax when the program is too narrow/short for any
+/// to a plain description+syntax when the playbook is too narrow/short for any
 /// row or no templates are available.
-fn program_empty_placeholder(
+fn playbook_empty_placeholder(
     theme: &crate::theme::Theme,
-    templates: &[construct_protocol::ProgramTemplate],
+    templates: &[construct_protocol::PlaybookTemplate],
     mouse_pos: Option<(u16, u16)>,
     inner: Rect,
-) -> (Vec<Line<'static>>, Vec<crate::app::ProgramTemplateHit>) {
+) -> (Vec<Line<'static>>, Vec<crate::app::PlaybookTemplateHit>) {
     let dim = Style::default().fg(theme.dim);
     let width = inner.width as usize;
     const DESC: &str =
-        "Program — a shared Markdown space you and your agents edit and run together.";
+        "Playbook — a shared Markdown space you and your agents edit and run together.";
     // The syntax cheat mirrors what built-in templates demonstrate: harness
     // clips delegate, session clips embed, selection+Run dispatches, and `:::clip`
     // fences group output.
     const SYNTAX: &str =
         "Syntax: @{session:id} embeds a session · @{harness:name} delegates · select + Run dispatches · :::clip … ::: groups output.";
     const HEADER: &str = "Templates";
-    // Default location custom templates are read from (see `[program]` in the
+    // Default location custom templates are read from (see `[playbook]` in the
     // daemon config); a short nudge for when no custom templates are configured.
     const CUSTOM_TIP: &str =
-        "Tip: drop a .md file in ~/.local/share/construct/program/templates to add a custom template.";
+        "Tip: drop a .md file in ~/.local/share/construct/playbook/templates to add a custom template.";
 
     let desc_line = Line::from(Span::styled(truncate_to_width(DESC, width), dim));
     let syntax_line = Line::from(Span::styled(truncate_to_width(SYNTAX, width), dim));
@@ -15178,7 +15178,7 @@ fn program_empty_placeholder(
 
     // Every non-blank template becomes a list row — "blank" *is* the empty state,
     // so offering it would be a no-op. Order by name (case-insensitive).
-    let mut ordered: Vec<&construct_protocol::ProgramTemplate> =
+    let mut ordered: Vec<&construct_protocol::PlaybookTemplate> =
         templates.iter().filter(|t| t.id != "blank").collect();
     ordered.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     let total = ordered.len();
@@ -15279,7 +15279,7 @@ fn program_empty_placeholder(
             Span::styled(BULLET, if hovered { label_style } else { bullet_style }),
             Span::styled(label, label_style),
         ]));
-        hits.push(crate::app::ProgramTemplateHit {
+        hits.push(crate::app::PlaybookTemplateHit {
             col_start: row_left,
             col_end: row_left + row_w,
             row_start: row,
@@ -15308,15 +15308,15 @@ fn program_empty_placeholder(
     (lines, hits)
 }
 
-fn render_program_popup_at(
+fn render_playbook_popup_at(
     f: &mut Frame,
     app: &mut App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     base_rect: Rect,
     active: bool,
     focused: bool,
     now: Instant,
-) -> Option<ProgramPopupHoverOverlay> {
+) -> Option<PlaybookPopupHoverOverlay> {
     if base_rect.width < 40 || base_rect.height < 8 {
         return None;
     }
@@ -15326,28 +15326,28 @@ fn render_program_popup_at(
             .hide_after
             .saturating_duration_since(now)
             .as_secs_f32()
-            / PROGRAM_REVEAL_SECS
+            / PLAYBOOK_REVEAL_SECS
     } else {
         now.saturating_duration_since(popup.revealed_at)
             .as_secs_f32()
-            / PROGRAM_REVEAL_SECS
+            / PLAYBOOK_REVEAL_SECS
     }
     .clamp(0.0, 1.0);
     if progress <= 0.0 {
         return None;
     }
-    let target_h = program_roll_down_height(base_rect.height, popup.cover_percent);
+    let target_h = playbook_roll_down_height(base_rect.height, popup.cover_percent);
     let visible_h = ((target_h as f32 * progress).ceil() as u16).clamp(1, target_h);
     if visible_h == 0 {
         return None;
     }
-    // Each popup carries its own slide state, so a Program left slid aside in
+    // Each popup carries its own slide state, so a Playbook left slid aside in
     // an unfocused split pane stays slid there — focusing another window must
     // not snap it back to the pane's left edge.
     let slide = popup.slide_fraction(now);
-    let rect = program_popup_visible_rect(base_rect, visible_h, slide);
+    let rect = playbook_popup_visible_rect(base_rect, visible_h, slide);
     let buffer_area = f.buffer_mut().area;
-    let Some(paint_rect) = program_popup_paint_rect(rect, buffer_area) else {
+    let Some(paint_rect) = playbook_popup_paint_rect(rect, buffer_area) else {
         return None;
     };
     let clipped_by_frame_edge = paint_rect != rect;
@@ -15356,13 +15356,13 @@ fn render_program_popup_at(
     // bar, contents, tooltips) has been drawn — the popup must never bleed
     // into a neighboring pane. If the overhang is beyond the terminal's right
     // edge, `paint_rect` below clips drawing to the frame buffer instead.
-    let crop = program_popup_crop_region(base_rect, rect, buffer_area);
+    let crop = playbook_popup_crop_region(base_rect, rect, buffer_area);
     let crop_snapshot = crop.map(|region| snapshot_buffer_region(f.buffer_mut(), region));
 
     let summary = app
         .sessions
         .iter()
-        .find(|s| s.id == popup.program.session_id)
+        .find(|s| s.id == popup.playbook.session_id)
         .cloned();
     let summary_ref = summary.as_ref();
 
@@ -15370,43 +15370,43 @@ fn render_program_popup_at(
     // between the name and the dirty marker). Right cluster (widgets, harness,
     // close) is shared with the normal session view via
     // `apply_pane_title_right_cluster`, so the two title bars can't drift in
-    // layout, styling, or geometry. The program can always be dismissed, so it
+    // layout, styling, or geometry. The playbook can always be dismissed, so it
     // always offers a close button.
     let show_close = true;
     let dirty = popup.buffer != popup.saved_markdown;
-    let stage_label = program_run_stage_label(app, popup, now);
+    let stage_label = playbook_run_stage_label(app, popup, now);
     let rename = app
         .session_title_rename
         .as_ref()
         .filter(|r| {
-            r.session_id == popup.program.session_id
-                && r.origin == crate::app::TitleRenameOrigin::Program
+            r.session_id == popup.playbook.session_id
+                && r.origin == crate::app::TitleRenameOrigin::Playbook
         })
         .map(|r| (r.buffer.as_str(), r.cursor));
-    let left = program_title_left_layout(
+    let left = playbook_title_left_layout(
         summary_ref,
-        short_id(&popup.program.session_id),
+        short_id(&popup.playbook.session_id),
         rect,
         dirty,
         show_close,
         stage_label.as_deref(),
         rename,
     );
-    let title = program_title_line(app, popup, active, focused, now, &left);
-    let title_toggle_hit = program_title_toggle_button_range(summary_ref, rect);
+    let title = playbook_title_line(app, popup, active, focused, now, &left);
+    let title_toggle_hit = playbook_title_toggle_button_range(summary_ref, rect);
 
-    // The frame keeps the program's own border color even while the popup is
+    // The frame keeps the playbook's own border color even while the popup is
     // slid aside because the exposed terminal holds keyboard focus — the slide
     // itself is the focus cue, not a hue change. Brightness tracks `focused`,
-    // not `active`: the active program's border still dims when focus moves
+    // not `active`: the active playbook's border still dims when focus moves
     // to the session list.
-    let border_style = program_border_style(&app.theme, focused);
+    let border_style = playbook_border_style(&app.theme, focused);
     // The session-actions ☰ icon should read as part of the visible frame, so its
     // base hue tracks the current frame color rather than the default
     // session-view close color. Focus dimming + hover still compose via
     // `session_menu_icon_style` (focused → border hue, unfocused → dimmed, hover
     // wins).
-    let menu_icon_color = border_style.fg.unwrap_or(app.theme.program_border);
+    let menu_icon_color = border_style.fg.unwrap_or(app.theme.playbook_border);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
@@ -15419,14 +15419,14 @@ fn render_program_popup_at(
     // function instead of recomputing it after the cluster call below.
     let block_inner = block.inner(rect);
     let inner = block_inner.inner(Margin {
-        horizontal: PROGRAM_CONTENT_PADDING_X,
-        vertical: PROGRAM_CONTENT_PADDING_Y,
+        horizontal: PLAYBOOK_CONTENT_PADDING_X,
+        vertical: PLAYBOOK_CONTENT_PADDING_Y,
     });
     // `block_inner`/`inner` carry the popup's full, un-clipped width (see the
     // clipped-frame-edge handling below) so content lays out without
     // reflowing — but a few popovers (sticky widgets, smart-clip picker,
     // selection context menu) clamp their own paint rect to whatever
-    // `program_area` they're handed instead of to the real buffer, the same
+    // `playbook_area` they're handed instead of to the real buffer, the same
     // way `Clear` does. Handing them the full width would let their `Clear`
     // land past the frame edge and panic — exactly what clipping to
     // `paint_rect` used to prevent. Pass this frame-bounded rect to those
@@ -15437,7 +15437,7 @@ fn render_program_popup_at(
     // rows. Clamp the popup's stored offset to the current geometry (content
     // edits or a resize may have shrunk the scrollable range).
     let viewport_rows = inner.height as usize;
-    let total_rows = program_total_visual_rows(Some(app), &popup.buffer, inner.width as usize);
+    let total_rows = playbook_total_visual_rows(Some(app), &popup.buffer, inner.width as usize);
     let max_scroll = total_rows.saturating_sub(viewport_rows);
     let scroll_offset = popup.scroll_offset.min(max_scroll);
     // GAP E: a fresh agent edit can land scrolled off-screen (e.g. a `Done`
@@ -15449,12 +15449,12 @@ fn render_program_popup_at(
     // keeps it strictly left of that cluster, and the fixed-geometry
     // hit-test formulas the cluster relies on (`view_close_button_range`,
     // `dynamic_ui_trigger_range`) never have to account for it.
-    let block = match program_agent_activity_edge(app, popup, scroll_offset, inner, now) {
-        Some(direction @ ProgramAgentEdgeDirection::Above) => {
-            block.title_top(program_agent_edge_indicator_line(&app.theme, direction))
+    let block = match playbook_agent_activity_edge(app, popup, scroll_offset, inner, now) {
+        Some(direction @ PlaybookAgentEdgeDirection::Above) => {
+            block.title_top(playbook_agent_edge_indicator_line(&app.theme, direction))
         }
-        Some(direction @ ProgramAgentEdgeDirection::Below) => {
-            block.title_bottom(program_agent_edge_indicator_line(&app.theme, direction))
+        Some(direction @ PlaybookAgentEdgeDirection::Below) => {
+            block.title_bottom(playbook_agent_edge_indicator_line(&app.theme, direction))
         }
         None => block,
     };
@@ -15490,8 +15490,8 @@ fn render_program_popup_at(
         // is visible there (a neighboring split, the exposed terminal).
         let pane_right = base_rect.right();
         app.layout.modal_area = Some(rect.intersection(base_rect));
-        app.layout.program_base_area = Some(base_rect);
-        app.layout.program_resize_hit = Some(
+        app.layout.playbook_base_area = Some(base_rect);
+        app.layout.playbook_resize_hit = Some(
             Rect {
                 x: rect.x,
                 y: rect.y + rect.height.saturating_sub(1),
@@ -15503,16 +15503,16 @@ fn render_program_popup_at(
         // Run lives in the left cluster; the close button and widget icons reuse
         // the shared session-view geometry (`view_close_button_range` and
         // `dynamic_ui_widget_hits` from `render_session_widget_title`) so the
-        // program click handlers in `app.rs` line up with what's painted.
-        app.layout.program_title_run_hit = clamp_title_hit_to_pane(left.run, pane_right);
-        app.layout.program_title_toggle_hit = clamp_title_hit_to_pane(title_toggle_hit, pane_right);
-        app.layout.program_title_close_hit = clamp_title_hit_to_pane(
+        // playbook click handlers in `app.rs` line up with what's painted.
+        app.layout.playbook_title_run_hit = clamp_title_hit_to_pane(left.run, pane_right);
+        app.layout.playbook_title_toggle_hit = clamp_title_hit_to_pane(title_toggle_hit, pane_right);
+        app.layout.playbook_title_close_hit = clamp_title_hit_to_pane(
             show_close.then(|| view_close_button_range(rect)),
             pane_right,
         );
-        app.layout.program_title_name_hit =
+        app.layout.playbook_title_name_hit =
             clamp_title_hit_to_pane(Some((left.name.0, left.name.1, rect.y)), pane_right);
-        app.layout.program_title_name_window_start = left.name_window_start;
+        app.layout.playbook_title_name_window_start = left.name_window_start;
         if let Some(cursor_col) = left.cursor_col {
             set_main_block_cursor(f, app, left.name.0.saturating_add(cursor_col), rect.y);
         }
@@ -15525,14 +15525,14 @@ fn render_program_popup_at(
     // so its top sits exactly one row below the title bar, matching the
     // normal session view.
 
-    let selection = program_selection_range(popup);
+    let selection = playbook_selection_range(popup);
     let search = popup
         .search
         .as_ref()
         .filter(|search| !search.matches.is_empty());
     let search_matches = search.map(|search| search.matches.as_slice());
     let search_selected = search.map(|search| search.selected);
-    let mut lines = render_program_markdown_lines(
+    let mut lines = render_playbook_markdown_lines(
         app,
         &popup.buffer,
         inner.width as usize,
@@ -15540,21 +15540,21 @@ fn render_program_popup_at(
         search_matches,
         search_selected,
     );
-    // Run shimmer (spec 0042): while a program Run is executing for this session,
+    // Run shimmer (spec 0042): while a playbook Run is executing for this session,
     // sweep a highlight through the blocks that have not settled yet.
-    if let Some(shimmer) = program_run_shimmer(app, popup, now) {
-        apply_program_shimmer(&mut lines, &shimmer, &app.theme);
+    if let Some(shimmer) = playbook_run_shimmer(app, popup, now) {
+        apply_playbook_shimmer(&mut lines, &shimmer, &app.theme);
     }
-    if let Some(flourish) = program_settle_flourish(app, popup, now) {
-        apply_program_settle_flourish(&mut lines, &flourish, &app.theme, now);
+    if let Some(flourish) = playbook_settle_flourish(app, popup, now) {
+        apply_playbook_settle_flourish(&mut lines, &flourish, &app.theme, now);
     }
-    // Empty program: replace the bare body with a richer onboarding placeholder —
+    // Empty playbook: replace the bare body with a richer onboarding placeholder —
     // a one-line description, a grouped list of clickable templates, a divider,
-    // and a tip. The row hitboxes are returned so the active program can publish
-    // them for the mouse handler. Non-empty programes get no hits.
+    // and a tip. The row hitboxes are returned so the active playbook can publish
+    // them for the mouse handler. Non-empty playbookes get no hits.
     let placeholder_hits = if lines.is_empty() {
         let (placeholder_lines, hits) =
-            program_empty_placeholder(&app.theme, &app.program_templates, app.mouse_pos, inner);
+            playbook_empty_placeholder(&app.theme, &app.playbook_templates, app.mouse_pos, inner);
         lines = placeholder_lines;
         hits
     } else {
@@ -15567,11 +15567,11 @@ fn render_program_popup_at(
     if active {
         // Remember the live viewport so cursor-move handlers can keep the caret
         // visible on the next keystroke, and persist the clamped offset.
-        app.layout.program_inner_area = Some(inner);
+        app.layout.playbook_inner_area = Some(inner);
         // Publish (or clear) the empty-state template buttons. Only the active
-        // program owns the hitboxes, so a click never targets an inactive split.
-        app.layout.program_template_hits = placeholder_hits;
-        if let Some(real) = app.program_popup.as_mut() {
+        // playbook owns the hitboxes, so a click never targets an inactive split.
+        app.layout.playbook_template_hits = placeholder_hits;
+        if let Some(real) = app.playbook_popup.as_mut() {
             real.scroll_offset = scroll_offset;
         }
     }
@@ -15579,7 +15579,7 @@ fn render_program_popup_at(
         .wrap(Wrap { trim: false })
         .scroll((scroll_offset.min(u16::MAX as usize) as u16, 0));
     if clipped_by_frame_edge {
-        // When the slid Program reaches the terminal's right edge, rendering
+        // When the slid Playbook reaches the terminal's right edge, rendering
         // directly into the clipped frame intersection would make Ratatui lay
         // out the block/title/body at the narrower visible width. Render into
         // a popup-sized offscreen buffer instead, then copy only the terminal-
@@ -15588,7 +15588,7 @@ fn render_program_popup_at(
         Clear.render(rect, &mut popup_buffer);
         block.render(rect, &mut popup_buffer);
         para.render(inner, &mut popup_buffer);
-        render_program_scroll_indicator_to_buffer(
+        render_playbook_scroll_indicator_to_buffer(
             &mut popup_buffer,
             &app.theme,
             rect,
@@ -15602,7 +15602,7 @@ fn render_program_popup_at(
         f.render_widget(Clear, paint_rect);
         f.render_widget(block, paint_rect);
         f.render_widget(para, inner);
-        render_program_scroll_indicator(
+        render_playbook_scroll_indicator(
             f,
             &app.theme,
             rect,
@@ -15612,15 +15612,15 @@ fn render_program_popup_at(
             viewport_rows,
         );
     }
-    // Reveal the session's hovered/pinned sticky widgets on top of the program,
+    // Reveal the session's hovered/pinned sticky widgets on top of the playbook,
     // mirroring the normal session view. The title-bar squares are painted by
     // `apply_pane_title_right_cluster` above (which arms `dynamic_ui_hover` on
-    // hover and registers pin hits), but the program's own `Clear` wipes the
+    // hover and registers pin hits), but the playbook's own `Clear` wipes the
     // widget body the session view drew underneath — so without re-rendering it
-    // here the widget never appears while the program is shown. Only the active
-    // program drives the single hover/scroll/popover layout state.
+    // here the widget never appears while the playbook is shown. Only the active
+    // playbook drives the single hover/scroll/popover layout state.
     if active {
-        let panels = session_sticky_widget_panels(app, &popup.program.session_id);
+        let panels = session_sticky_widget_panels(app, &popup.playbook.session_id);
         if !panels.is_empty() {
             // Pass the border-stripped inner rect (not the full `rect`) so the
             // popover starts below the title bar, matching the session view. Using
@@ -15632,95 +15632,95 @@ fn render_program_popup_at(
                 f,
                 safe_block_inner,
                 app,
-                &popup.program.session_id,
+                &popup.playbook.session_id,
                 &panels,
             );
         }
     }
-    // Capture session-clip hitboxes for this program so hover can work for any
-    // visible program, even when another split is focused. Only the active program
+    // Capture session-clip hitboxes for this playbook so hover can work for any
+    // visible playbook, even when another split is focused. Only the active playbook
     // publishes click hitboxes into layout state.
-    let clip_hits = program_session_clip_hits(Some(app), &popup.buffer, scroll_offset, inner);
+    let clip_hits = playbook_session_clip_hits(Some(app), &popup.buffer, scroll_offset, inner);
     // Action links register alongside clips through the same wrap-aware
-    // geometry; only the active program owns click hitboxes, mirroring
-    // `program_clip_hits`.
-    let action_link_hits = program_action_link_hits(
+    // geometry; only the active playbook owns click hitboxes, mirroring
+    // `playbook_clip_hits`.
+    let action_link_hits = playbook_action_link_hits(
         Some(app),
         &popup.buffer,
-        &popup.program.session_id,
+        &popup.playbook.session_id,
         scroll_offset,
         inner,
     );
     if active {
-        app.layout.program_clip_hits = clip_hits.clone();
-        app.layout.program_action_link_hits = action_link_hits;
+        app.layout.playbook_clip_hits = clip_hits.clone();
+        app.layout.playbook_action_link_hits = action_link_hits;
         // Attachment chips register hover/click hitboxes only for the active
-        // program, like the click hitboxes above.
-        app.layout.program_attachment_hits =
-            program_attachment_chip_hits(Some(app), &popup.buffer, scroll_offset, inner);
+        // playbook, like the click hitboxes above.
+        app.layout.playbook_attachment_hits =
+            playbook_attachment_chip_hits(Some(app), &popup.buffer, scroll_offset, inner);
     }
-    render_program_attachment_images(f, app, popup, scroll_offset, inner, active);
+    render_playbook_attachment_images(f, app, popup, scroll_offset, inner, active);
     if active && !popup.closing {
         if let Some(pos) =
-            program_cursor_position(Some(app), &popup.buffer, popup.cursor, scroll_offset, inner)
+            playbook_cursor_position(Some(app), &popup.buffer, popup.cursor, scroll_offset, inner)
         {
             render_editor_cursor(f, pos, &app.theme);
             // Publish the `@`-anchor so the session-picker dialog can hang its
             // `@`→session variant exactly where the inline context menu would
-            // sit. Captured before `render_program_smart_clip_picker`, which
+            // sit. Captured before `render_playbook_smart_clip_picker`, which
             // early-returns once the dialog is open.
             if popup.smart_clip.is_some() {
-                app.layout.program_smart_clip_anchor = Some((pos, safe_inner));
+                app.layout.playbook_smart_clip_anchor = Some((pos, safe_inner));
             }
             // Both this and the selection context menu below clamp their own
-            // paint rect to `program_area` rather than to the real buffer, so
+            // paint rect to `playbook_area` rather than to the real buffer, so
             // they get `safe_inner`, not the popup's full-width `inner`.
-            render_program_smart_clip_picker(f, app, popup, pos, safe_inner);
+            render_playbook_smart_clip_picker(f, app, popup, pos, safe_inner);
         }
-        render_program_collab_cursors(f, app, popup, scroll_offset, inner, now);
+        render_playbook_collab_cursors(f, app, popup, scroll_offset, inner, now);
     }
     if active && !popup.closing {
-        render_program_selection_context_menu(f, app, popup, scroll_offset, safe_inner);
+        render_playbook_selection_context_menu(f, app, popup, scroll_offset, safe_inner);
     }
-    render_program_title_tooltip(f, app, popup, summary_ref, paint_rect);
+    render_playbook_title_tooltip(f, app, popup, summary_ref, paint_rect);
     // Undo everything painted right of the owning pane: this is what crops the
     // slid popup's border/title/contents at the pane edge.
     if let (Some(region), Some(saved)) = (crop, crop_snapshot) {
         restore_buffer_region(f.buffer_mut(), region, saved);
     }
-    (!popup.closing).then(|| ProgramPopupHoverOverlay {
+    (!popup.closing).then(|| PlaybookPopupHoverOverlay {
         popup: popup.clone(),
-        clip_bounds: program_clip_hover_bounds(app.layout.view_area, base_rect),
+        clip_bounds: playbook_clip_hover_bounds(app.layout.view_area, base_rect),
         clip_hits,
         scroll_offset,
         inner,
     })
 }
 
-fn render_program_collab_cursors(
+fn render_playbook_collab_cursors(
     f: &mut Frame,
     app: &App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     scroll_offset: usize,
     inner: Rect,
     now: Instant,
 ) {
     let max_cursor = popup.buffer.chars().count();
     let now_ms = chrono::Utc::now().timestamp_millis();
-    for cursor in app.program_collaborators.values() {
-        if !cursor.active || cursor.session_id != popup.program.session_id {
+    for cursor in app.playbook_collaborators.values() {
+        if !cursor.active || cursor.session_id != popup.playbook.session_id {
             continue;
         }
         let is_agent = cursor.kind == "agent";
         let ttl_ms = if is_agent {
-            PROGRAM_AGENT_COLLAB_CURSOR_TTL_MS
+            PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS
         } else {
-            PROGRAM_COLLAB_CURSOR_TTL_MS
+            PLAYBOOK_COLLAB_CURSOR_TTL_MS
         };
         if now_ms.saturating_sub(cursor.updated_at_ms) > ttl_ms {
             continue;
         }
-        if app.own_program_client_id.as_deref() == Some(cursor.client_id.as_str()) {
+        if app.own_playbook_client_id.as_deref() == Some(cursor.client_id.as_str()) {
             continue;
         }
         // Agent presence (spec 0065 agent presence): the daemon carries the
@@ -15728,28 +15728,28 @@ fn render_program_collab_cursors(
         // its own pseudo-cursor (`kind == "agent"`), not a real text
         // selection. Reveal it with a brief tint instead of an instant
         // repaint, while it's still fresh. The span's end is always
-        // `cursor.cursor` (see `publish_agent_program_cursor`), so the
+        // `cursor.cursor` (see `publish_agent_playbook_cursor`), so the
         // position the reveal already computed for it is reused below
         // instead of walking the wrapped document a second time for the
         // same offset.
         //
         // Freshness is measured from the local receipt clock
-        // (`App::program_agent_reveal_elapsed`), not `cursor.updated_at_ms` —
+        // (`App::playbook_agent_reveal_elapsed`), not `cursor.updated_at_ms` —
         // that daemon stamp doesn't renew on a rebase (by design, so a rebase
         // can't replay the reveal over text the agent never touched), and
         // even for a genuine new write it's already stale by the time
         // broadcast transit and the render tick let this frame paint.
         let mut agent_reveal_end_pos = None;
         if is_agent {
-            if let Some(elapsed) = app.program_agent_reveal_elapsed(&cursor.client_id, now) {
+            if let Some(elapsed) = app.playbook_agent_reveal_elapsed(&cursor.client_id, now) {
                 let elapsed_ms = elapsed.as_millis() as i64;
-                if elapsed_ms <= PROGRAM_AGENT_REVEAL_MS {
+                if elapsed_ms <= PLAYBOOK_AGENT_REVEAL_MS {
                     if let (Some(anchor), Some(head)) =
                         (cursor.selection_anchor, cursor.selection_head)
                     {
                         let progress =
-                            program_agent_reveal_progress(elapsed, PROGRAM_AGENT_REVEAL_MS);
-                        agent_reveal_end_pos = render_program_agent_reveal(
+                            playbook_agent_reveal_progress(elapsed, PLAYBOOK_AGENT_REVEAL_MS);
+                        agent_reveal_end_pos = render_playbook_agent_reveal(
                             f,
                             app,
                             popup,
@@ -15766,7 +15766,7 @@ fn render_program_collab_cursors(
         let pos = match agent_reveal_end_pos {
             Some(pos) => pos,
             None => {
-                let Some(pos) = program_cursor_position(
+                let Some(pos) = playbook_cursor_position(
                     Some(app),
                     &popup.buffer,
                     cursor.cursor.min(max_cursor),
@@ -15786,7 +15786,7 @@ fn render_program_collab_cursors(
         }
         cell.set_style(
             cell.style()
-                .fg(program_collab_cursor_color(&app.theme, cursor.color_index))
+                .fg(playbook_collab_cursor_color(&app.theme, cursor.color_index))
                 .add_modifier(if is_agent {
                     Modifier::BOLD | Modifier::ITALIC
                 } else {
@@ -15798,14 +15798,14 @@ fn render_program_collab_cursors(
             let max_w = inner
                 .right()
                 .saturating_sub(pos.x.saturating_add(1))
-                .min(PROGRAM_COLLAB_CURSOR_LABEL_MAX_WIDTH as u16) as usize;
+                .min(PLAYBOOK_COLLAB_CURSOR_LABEL_MAX_WIDTH as u16) as usize;
             if max_w > 0 {
                 let label = truncate_to_width(label, max_w);
                 let label_w = UnicodeWidthStr::width(label.as_str()) as u16;
                 if label_w > 0 {
                     let rect = Rect::new(pos.x.saturating_add(1), pos.y - 1, label_w, 1);
                     let mut label_style =
-                        program_collab_cursor_label_style(&app.theme, cursor.color_index);
+                        playbook_collab_cursor_label_style(&app.theme, cursor.color_index);
                     if is_agent {
                         label_style = label_style.add_modifier(Modifier::ITALIC);
                     }
@@ -15821,7 +15821,7 @@ fn render_program_collab_cursors(
 /// revealed rather than an instant repaint. Only tints cells with no
 /// background yet, so it never fights the selection/search/shimmer
 /// overlays already baked into the rendered buffer (mirroring how
-/// `apply_program_shimmer` leaves backed spans alone).
+/// `apply_playbook_shimmer` leaves backed spans alone).
 ///
 /// This deliberately doesn't share `render_selection_rect`'s row/column loop
 /// despite the visual similarity: that function takes pre-computed
@@ -15834,12 +15834,12 @@ fn render_program_collab_cursors(
 /// which risks an off-by-one more than it saves.
 ///
 /// Paints the reveal tint and returns `end`'s on-screen position (in the
-/// same coordinate space `program_cursor_position` would produce), so a
+/// same coordinate space `playbook_cursor_position` would produce), so a
 /// caller painting the point cursor at that same offset — which, for an
 /// agent's presence cursor, is always exactly `end` — can reuse it instead
 /// of walking the document a second time to relocate the identical offset.
 ///
-/// `progress` (0.0..=1.0, from `program_agent_reveal_progress`) gives the
+/// `progress` (0.0..=1.0, from `playbook_agent_reveal_progress`) gives the
 /// reveal a typewriter feel: only the leading `progress` fraction of
 /// `[start, end)` is tinted, sweeping left-to-right across the span as the
 /// caller re-renders on each tick of the same 120ms loop that already drives
@@ -15847,10 +15847,10 @@ fn render_program_collab_cursors(
 /// positions always sits at the edit's true `end`, regardless of how much of
 /// the sweep has painted — the agent's presence is already there; the sweep
 /// is the reader catching up, not the agent moving.
-fn render_program_agent_reveal(
+fn render_playbook_agent_reveal(
     f: &mut Frame,
     app: &App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     scroll_offset: usize,
     inner: Rect,
     start: usize,
@@ -15861,8 +15861,8 @@ fn render_program_agent_reveal(
         return None;
     }
     let width = inner.width as usize;
-    let (start_row, start_col) = program_cursor_visual_pos(Some(app), &popup.buffer, start, width);
-    let (end_row, end_col) = program_cursor_visual_pos(Some(app), &popup.buffer, end, width);
+    let (start_row, start_col) = playbook_cursor_visual_pos(Some(app), &popup.buffer, start, width);
+    let (end_row, end_col) = playbook_cursor_visual_pos(Some(app), &popup.buffer, end, width);
     let end_pos = end_row.checked_sub(scroll_offset).and_then(|view_row| {
         (view_row < inner.height as usize).then_some(Position {
             x: inner.x.saturating_add(end_col as u16),
@@ -15872,7 +15872,7 @@ fn render_program_agent_reveal(
     let revealed_len = (((end - start) as f32) * progress.clamp(0.0, 1.0)).floor() as usize;
     let revealed_end = start + revealed_len.min(end - start);
     let (reveal_row, reveal_col) =
-        program_cursor_visual_pos(Some(app), &popup.buffer, revealed_end, width);
+        playbook_cursor_visual_pos(Some(app), &popup.buffer, revealed_end, width);
     for row in start_row..=reveal_row {
         let Some(view_row) = row.checked_sub(scroll_offset) else {
             continue;
@@ -15913,78 +15913,78 @@ fn render_program_agent_reveal(
 /// linearly to `1.0` once `elapsed` reaches `window_ms` (the whole span
 /// revealed), and clamped at `1.0` beyond it. Pure so the sweep math is
 /// unit-testable without a terminal.
-fn program_agent_reveal_progress(elapsed: Duration, window_ms: i64) -> f32 {
+fn playbook_agent_reveal_progress(elapsed: Duration, window_ms: i64) -> f32 {
     if window_ms <= 0 {
         return 1.0;
     }
     (elapsed.as_secs_f32() / (window_ms as f32 / 1000.0)).clamp(0.0, 1.0)
 }
 
-/// Direction from the visible Program viewport toward a fresh off-screen
+/// Direction from the visible Playbook viewport toward a fresh off-screen
 /// agent edit (GAP E, spec 0065 agent presence): the cursor and reveal both
 /// paint at the edit's own location, so an edit landing in a scrolled-off
 /// part of the document (e.g. a `Done` section below the fold) is otherwise
 /// invisible. Pure so the above/below/inside boundary cases are
 /// unit-testable without a terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProgramAgentEdgeDirection {
+enum PlaybookAgentEdgeDirection {
     Above,
     Below,
 }
 
-fn program_agent_edge_direction(
+fn playbook_agent_edge_direction(
     agent_row: usize,
     scroll_offset: usize,
     viewport_rows: usize,
-) -> Option<ProgramAgentEdgeDirection> {
+) -> Option<PlaybookAgentEdgeDirection> {
     if viewport_rows == 0 {
         return None;
     }
     if agent_row < scroll_offset {
-        Some(ProgramAgentEdgeDirection::Above)
+        Some(PlaybookAgentEdgeDirection::Above)
     } else if agent_row >= scroll_offset + viewport_rows {
-        Some(ProgramAgentEdgeDirection::Below)
+        Some(PlaybookAgentEdgeDirection::Below)
     } else {
         None
     }
 }
 
 /// Freshest off-viewport agent cursor for `popup`'s session, if any is within
-/// `PROGRAM_AGENT_RECENT_ACTIVITY_MS` of its local receipt (looser than the
+/// `PLAYBOOK_AGENT_RECENT_ACTIVITY_MS` of its local receipt (looser than the
 /// reveal window: an edit that scrolled off-screen is still worth pointing at
 /// after its own reveal tint has faded). Keyed off the same receipt clock as
-/// the reveal (`App::program_agent_reveal_elapsed`), not the daemon's
+/// the reveal (`App::playbook_agent_reveal_elapsed`), not the daemon's
 /// `updated_at_ms`, for the same reason GAP D needed it: broadcast transit
 /// and the render tick already eat into any daemon-stamped window.
-fn program_agent_activity_edge(
+fn playbook_agent_activity_edge(
     app: &App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     scroll_offset: usize,
     inner: Rect,
     now: Instant,
-) -> Option<ProgramAgentEdgeDirection> {
+) -> Option<PlaybookAgentEdgeDirection> {
     if inner.width == 0 || inner.height == 0 {
         return None;
     }
     let width = inner.width as usize;
     let viewport_rows = inner.height as usize;
     let max_cursor = popup.buffer.chars().count();
-    app.program_collaborators.values().find_map(|cursor| {
-        if !cursor.active || cursor.kind != "agent" || cursor.session_id != popup.program.session_id
+    app.playbook_collaborators.values().find_map(|cursor| {
+        if !cursor.active || cursor.kind != "agent" || cursor.session_id != popup.playbook.session_id
         {
             return None;
         }
-        let elapsed = app.program_agent_reveal_elapsed(&cursor.client_id, now)?;
-        if elapsed.as_millis() as i64 > PROGRAM_AGENT_RECENT_ACTIVITY_MS {
+        let elapsed = app.playbook_agent_reveal_elapsed(&cursor.client_id, now)?;
+        if elapsed.as_millis() as i64 > PLAYBOOK_AGENT_RECENT_ACTIVITY_MS {
             return None;
         }
-        let agent_row = program_cursor_visual_row(
+        let agent_row = playbook_cursor_visual_row(
             Some(app),
             &popup.buffer,
             cursor.cursor.min(max_cursor),
             width,
         );
-        program_agent_edge_direction(agent_row, scroll_offset, viewport_rows)
+        playbook_agent_edge_direction(agent_row, scroll_offset, viewport_rows)
     })
 }
 
@@ -15993,13 +15993,13 @@ fn program_agent_activity_edge(
 /// dim + italic, matching the agent cursor's own italic styling — and
 /// presentation-only: it never shifts document rows, since it lives on the
 /// border row Ratatui's title layout already reserves.
-fn program_agent_edge_indicator_line(
+fn playbook_agent_edge_indicator_line(
     theme: &Theme,
-    direction: ProgramAgentEdgeDirection,
+    direction: PlaybookAgentEdgeDirection,
 ) -> Line<'static> {
     let text = match direction {
-        ProgramAgentEdgeDirection::Above => " agent editing \u{2191} ",
-        ProgramAgentEdgeDirection::Below => " agent editing \u{2193} ",
+        PlaybookAgentEdgeDirection::Above => " agent editing \u{2191} ",
+        PlaybookAgentEdgeDirection::Below => " agent editing \u{2193} ",
     };
     Line::from(Span::styled(
         text,
@@ -16011,19 +16011,19 @@ fn program_agent_edge_indicator_line(
 }
 
 /// Mini session-preview popover shown while the mouse hovers a `@{session:id}`
-/// smart-clip in the program body, OR — when a clip is pinned — a live,
+/// smart-clip in the playbook body, OR — when a clip is pinned — a live,
 /// keyboard-focused terminal anchored to that clip regardless of the mouse
 /// (single-click pins a clip; see `App::handle_pinned_clip_key`). A pin takes
 /// priority: while one is active, no other clip's hover preview shows, to
 /// avoid two floating cards at once. Reads the freshly captured clip
 /// hitboxes, resolves the relevant session, and paints the shared session
 /// card anchored to the chip.
-fn render_program_clip_hover(
+fn render_playbook_clip_hover(
     f: &mut Frame,
     app: &mut App,
     modal: Rect,
-    hits: &[crate::app::ProgramClipHit],
-    popup: &crate::app::ProgramPopup,
+    hits: &[crate::app::PlaybookClipHit],
+    popup: &crate::app::PlaybookPopup,
 ) {
     if let Some(pinned_session_id) = popup.pinned_clip.as_deref() {
         // Anchored to the clip's own position (unless the user dragged the
@@ -16049,7 +16049,7 @@ fn render_program_clip_hover(
             } else {
                 "pinned — type to send, scroll/Shift+arrows pan, click outside unpins"
             };
-            app.layout.program_pinned_card_rect = render_session_hover_card(
+            app.layout.playbook_pinned_card_rect = render_session_hover_card(
                 f,
                 app,
                 modal,
@@ -16084,11 +16084,11 @@ fn render_program_clip_hover(
         .iter()
         .find(|s| s.id == session_id)
         .map(|s| s.state);
-    let tooltip = program_session_clip_status_tooltip(status);
+    let tooltip = playbook_session_clip_status_tooltip(status);
     render_tooltip_at(f, &app.theme, tooltip, mx, my, 2, -1);
 }
 
-fn program_clip_hover_bounds(view_area: Option<Rect>, base_rect: Rect) -> Rect {
+fn playbook_clip_hover_bounds(view_area: Option<Rect>, base_rect: Rect) -> Rect {
     view_area.unwrap_or(base_rect)
 }
 
@@ -16138,7 +16138,7 @@ fn session_hover_card_rect(
 /// Render the floating session hover card — a live tail of the session's PTY
 /// output — anchored just below `(anchor_col, anchor_row)` (or above it when
 /// there's no room) and kept inside `modal`. Clears its own area so it overlays
-/// the program body without disturbing it. Used by the clip-chip hover, which
+/// the playbook body without disturbing it. Used by the clip-chip hover, which
 /// previews the referenced session's terminal; always laid out wider than it
 /// is tall. When `title` is `Some`, it captions the card's top border
 /// (truncated to fit). `focused` marks a *pinned* card — accent border and a
@@ -16195,9 +16195,9 @@ fn render_session_hover_card(
             modal_cap,
         ),
         None => (
-            modal_cap.min(PROGRAM_CLIP_HOVER_PREVIEW_COLS),
-            PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
-            modal_cap.min(PROGRAM_CLIP_HOVER_PREVIEW_COLS),
+            modal_cap.min(PLAYBOOK_CLIP_HOVER_PREVIEW_COLS),
+            PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS,
+            modal_cap.min(PLAYBOOK_CLIP_HOVER_PREVIEW_COLS),
         ),
     };
     let owned_size = pinned.and_then(|view| view.owned);
@@ -16300,45 +16300,45 @@ fn render_session_hover_card(
     Some(area)
 }
 
-/// Status-text tooltip shown while the mouse hovers *shimmering* program text —
-/// a block still running under a program Run. Resolves the shimmering block
+/// Status-text tooltip shown while the mouse hovers *shimmering* playbook text —
+/// a block still running under a playbook Run. Resolves the shimmering block
 /// under the cursor and paints its concise run-status tooltip (spec 0057), e.g.
-/// "Building PR". Never a session preview: the roll-down Program view already
+/// "Building PR". Never a session preview: the roll-down Playbook view already
 /// puts the terminal a scroll away, so shimmer hover stays a plain label.
 /// Hovering the `@{session:…}` clip chip itself is the distinct affordance for
-/// previewing a referenced worker's live output (see `render_program_clip_hover`).
+/// previewing a referenced worker's live output (see `render_playbook_clip_hover`).
 ///
 /// Gated on pointer-enter, not mere position: a block that starts shimmering
 /// under an already-resting pointer (e.g. the selection-Run context menu sits
 /// adjacent to the selection, so the pointer is left resting on the block the
 /// instant it starts shimmering) must not immediately reveal the tooltip.
 /// Only a pointer that actually moves onto the block *after* it started
-/// shimmering arms it — see `App::mouse_moved_at` / `ProgramRun::pending_since`.
+/// shimmering arms it — see `App::mouse_moved_at` / `PlaybookRun::pending_since`.
 /// When it does open, it anchors on the row directly below the block's last
 /// on-screen row (or above when that would be clipped by `bounds`'s bottom
 /// edge) so it never paints over the shimmering text it describes.
-fn render_program_shimmer_hover(
+fn render_playbook_shimmer_hover(
     f: &mut Frame,
     app: &App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     scroll_offset: usize,
     body: Rect,
     bounds: Rect,
-    clip_hits: &[crate::app::ProgramClipHit],
+    clip_hits: &[crate::app::PlaybookClipHit],
     now: Instant,
 ) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
-    // A clip chip under the cursor is owned by `render_program_clip_hover`; don't
+    // A clip chip under the cursor is owned by `render_playbook_clip_hover`; don't
     // double-render the tooltip on top of it.
     if clip_hits.iter().any(|hit| hit.contains(mx, my)) {
         return;
     }
-    let Some(shimmer) = program_run_shimmer(app, popup, now) else {
+    let Some(shimmer) = playbook_run_shimmer(app, popup, now) else {
         return;
     };
-    let Some((block_id, block_lines)) = program_shimmer_block_at(
+    let Some((block_id, block_lines)) = playbook_shimmer_block_at(
         Some(app),
         &popup.buffer,
         (popup.buffer == popup.saved_markdown).then_some(popup.blocks.as_slice()),
@@ -16350,7 +16350,7 @@ fn render_program_shimmer_hover(
     ) else {
         return;
     };
-    let run = app.program_runs.get(&popup.program.session_id);
+    let run = app.playbook_runs.get(&popup.playbook.session_id);
     let armed = match run.and_then(|run| run.pending_since.get(&block_id)) {
         Some(since) => app.mouse_moved_at.is_some_and(|at| at > *since),
         // No tracked start time (legacy run state, or a run injected outside
@@ -16368,15 +16368,15 @@ fn render_program_shimmer_hover(
         Some(run) => match run.pending_tooltips.get(&block_id) {
             Some(t) if !t.trim().is_empty() => t.as_str(),
             _ => {
-                system_tooltip = program_system_status_tooltip(run, now);
+                system_tooltip = playbook_system_status_tooltip(run, now);
                 system_tooltip
                     .as_deref()
-                    .unwrap_or(construct_protocol::PROGRAM_SHIMMER_FALLBACK_TOOLTIP)
+                    .unwrap_or(construct_protocol::PLAYBOOK_SHIMMER_FALLBACK_TOOLTIP)
             }
         },
-        None => construct_protocol::PROGRAM_SHIMMER_FALLBACK_TOOLTIP,
+        None => construct_protocol::PLAYBOOK_SHIMMER_FALLBACK_TOOLTIP,
     };
-    let (row_first, row_last) = program_block_visual_rows(
+    let (row_first, row_last) = playbook_block_visual_rows(
         Some(app),
         &popup.buffer,
         block_lines.start,
@@ -16384,8 +16384,8 @@ fn render_program_shimmer_hover(
         body.width as usize,
     )
     .unwrap_or((scroll_offset, scroll_offset));
-    let block_first_row = program_clamp_visual_row_to_viewport(body, scroll_offset, row_first);
-    let block_last_row = program_clamp_visual_row_to_viewport(body, scroll_offset, row_last);
+    let block_first_row = playbook_clamp_visual_row_to_viewport(body, scroll_offset, row_first);
+    let block_last_row = playbook_clamp_visual_row_to_viewport(body, scroll_offset, row_last);
     render_shimmer_hover_tooltip(
         f,
         &app.theme,
@@ -16398,7 +16398,7 @@ fn render_program_shimmer_hover(
 }
 
 /// Paint the shimmer hover tooltip box anchored beside (never over) the
-/// hovered block's on-screen rows, per `program_shimmer_hover_anchor_row`.
+/// hovered block's on-screen rows, per `playbook_shimmer_hover_anchor_row`.
 fn render_shimmer_hover_tooltip(
     f: &mut Frame,
     theme: &Theme,
@@ -16416,7 +16416,7 @@ fn render_shimmer_hover_tooltip(
     if tx.saturating_add(w) > bounds_right {
         tx = bounds_right.saturating_sub(w).max(bounds.x);
     }
-    let ty = program_shimmer_hover_anchor_row(bounds, block_first_row, block_last_row, h);
+    let ty = playbook_shimmer_hover_anchor_row(bounds, block_first_row, block_last_row, h);
     render_tooltip_rect(
         f,
         theme,
@@ -16435,7 +16435,7 @@ fn render_shimmer_hover_tooltip(
 /// default, falling back to directly above `block_first_row` when the popup's
 /// bottom edge would clip the box below. Either placement keeps the box off
 /// every row the hovered block itself occupies.
-fn program_shimmer_hover_anchor_row(
+fn playbook_shimmer_hover_anchor_row(
     bounds: Rect,
     block_first_row: u16,
     block_last_row: u16,
@@ -16458,7 +16458,7 @@ fn program_shimmer_hover_anchor_row(
 /// given `scroll_offset`, pinned to the viewport's near edge when the row
 /// itself is scrolled out of view. Lets the hover-box anchor use whichever
 /// part of a (possibly partially scrolled) block is actually visible.
-fn program_clamp_visual_row_to_viewport(
+fn playbook_clamp_visual_row_to_viewport(
     area: Rect,
     scroll_offset: usize,
     visual_row: usize,
@@ -16477,7 +16477,7 @@ fn program_clamp_visual_row_to_viewport(
 /// source lines `[start_line, end_line)` occupy when `markdown` wraps at
 /// `width` columns. Used to anchor the shimmer hover tooltip beside the
 /// hovered block instead of on top of it (spec 0057 placement).
-fn program_block_visual_rows(
+fn playbook_block_visual_rows(
     app: Option<&App>,
     markdown: &str,
     start_line: usize,
@@ -16495,9 +16495,9 @@ fn program_block_visual_rows(
         if i >= end_line {
             break;
         }
-        let li = program_line_instance(&mut dups, raw);
-        let (rendered, _clips) = program_rendered_line_with_clips(app, raw, width, li);
-        let rows = program_wrap_row_starts(&rendered, width).len().max(1);
+        let li = playbook_line_instance(&mut dups, raw);
+        let (rendered, _clips) = playbook_rendered_line_with_clips(app, raw, width, li);
+        let rows = playbook_wrap_row_starts(&rendered, width).len().max(1);
         if i >= start_line {
             first.get_or_insert(visual_row_base);
             last = Some(visual_row_base + rows - 1);
@@ -16507,10 +16507,10 @@ fn program_block_visual_rows(
     first.zip(last)
 }
 
-fn program_shimmer_block_at(
+fn playbook_shimmer_block_at(
     app: Option<&App>,
     markdown: &str,
-    blocks: Option<&[construct_protocol::ProgramBlockView]>,
+    blocks: Option<&[construct_protocol::PlaybookBlockView]>,
     active_lines: &[bool],
     scroll_offset: usize,
     area: Rect,
@@ -16532,9 +16532,9 @@ fn program_shimmer_block_at(
     let mut source_line = None;
     let mut dups = std::collections::HashMap::new();
     for (i, raw) in markdown.lines().enumerate() {
-        let li = program_line_instance(&mut dups, raw);
-        let (rendered, _clips) = program_rendered_line_with_clips(app, raw, width, li);
-        let rows = program_wrap_row_starts(&rendered, width).len();
+        let li = playbook_line_instance(&mut dups, raw);
+        let (rendered, _clips) = playbook_rendered_line_with_clips(app, raw, width, li);
+        let rows = playbook_wrap_row_starts(&rendered, width).len();
         let next_base = visual_row_base.saturating_add(rows);
         if target_abs_row >= visual_row_base && target_abs_row < next_base {
             source_line = Some(i);
@@ -16554,17 +16554,17 @@ fn program_shimmer_block_at(
             return Some((block.id.clone(), block.start_line..block.end_line));
         }
     }
-    crate::app::program_blocks(markdown)
+    crate::app::playbook_blocks(markdown)
         .into_iter()
         .find(|block| (block.start_line..block.end_line).contains(&source_line))
         .map(|block| (block.id, block.start_line..block.end_line))
 }
 
-/// Paint a slim vertical scroll thumb on the program popup's right border when
+/// Paint a slim vertical scroll thumb on the playbook popup's right border when
 /// the body overflows its viewport. Like the terminal scrollback bar, it tints
 /// only the cell background so the border glyph underneath stays intact, and it
 /// sits on the border column so it never clobbers body text.
-fn render_program_scroll_indicator_to_buffer(
+fn render_playbook_scroll_indicator_to_buffer(
     buf: &mut Buffer,
     theme: &Theme,
     rect: Rect,
@@ -16601,7 +16601,7 @@ fn render_program_scroll_indicator_to_buffer(
     }
 }
 
-fn render_program_scroll_indicator(
+fn render_playbook_scroll_indicator(
     f: &mut Frame,
     theme: &Theme,
     rect: Rect,
@@ -16610,7 +16610,7 @@ fn render_program_scroll_indicator(
     total_rows: usize,
     viewport_rows: usize,
 ) {
-    render_program_scroll_indicator_to_buffer(
+    render_playbook_scroll_indicator_to_buffer(
         f.buffer_mut(),
         theme,
         rect,
@@ -16621,23 +16621,23 @@ fn render_program_scroll_indicator(
     );
 }
 
-fn program_border_style(theme: &Theme, active: bool) -> Style {
+fn playbook_border_style(theme: &Theme, active: bool) -> Style {
     if active {
         Style::default()
-            .fg(theme.program_border)
+            .fg(theme.playbook_border)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
-            .fg(theme.program_border)
+            .fg(theme.playbook_border)
             .add_modifier(Modifier::DIM)
     }
 }
 
-/// Column geometry for the program title bar's LEFT cluster — the truncated
+/// Column geometry for the playbook title bar's LEFT cluster — the truncated
 /// session label, the Run button (now wedged between the name and the dirty
 /// marker), and the `modified` marker. Both the title renderer and the tooltip
 /// hit-tester derive positions from this so they can't drift.
-struct ProgramTitleLeft {
+struct PlaybookTitleLeft {
     /// Truncated session label (or short id when the session isn't summarized) —
     /// or, mid-rename, the live edit-buffer window.
     label: String,
@@ -16647,7 +16647,7 @@ struct ProgramTitleLeft {
     /// Bounded run-stage label that fits between Run and the dirty marker.
     stage_label: Option<String>,
     /// `modified` word hit range `(x_start, x_end_exclusive)` on row `rect.y`,
-    /// or `None` when the program is not dirty.
+    /// or `None` when the playbook is not dirty.
     modified: Option<(u16, u16)>,
     /// `label`'s own on-screen column range `(x_start, x_end_exclusive)`.
     name: (u16, u16),
@@ -16658,7 +16658,7 @@ struct ProgramTitleLeft {
     name_window_start: usize,
 }
 
-fn program_title_left_layout(
+fn playbook_title_left_layout(
     summary: Option<&construct_protocol::SessionSummary>,
     fallback_label: &str,
     rect: Rect,
@@ -16666,9 +16666,9 @@ fn program_title_left_layout(
     show_close: bool,
     stage_label: Option<&str>,
     rename: Option<(&str, usize)>,
-) -> ProgramTitleLeft {
-    let glyph_w = UnicodeWidthStr::width(program_mode_glyph());
-    let run_w = UnicodeWidthStr::width(PROGRAM_RUN_BUTTON);
+) -> PlaybookTitleLeft {
+    let glyph_w = UnicodeWidthStr::width(playbook_mode_glyph());
+    let run_w = UnicodeWidthStr::width(PLAYBOOK_RUN_BUTTON);
     let marker_w = if dirty {
         UnicodeWidthStr::width(" * modified")
     } else {
@@ -16700,7 +16700,7 @@ fn program_title_left_layout(
         .unwrap_or(0);
     // Mirror the session view's title-label budget (corners + harness + close +
     // ` <glyph> <label> ` scaffolding), and additionally reserve the
-    // program-only left-cluster extras: the Run button and the dirty marker.
+    // playbook-only left-cluster extras: the Run button and the dirty marker.
     let label_budget = (rect.width as usize)
         .saturating_sub(2)
         .saturating_sub(harness_w)
@@ -16750,7 +16750,7 @@ fn program_title_left_layout(
         let end = start.saturating_add(UnicodeWidthStr::width("modified") as u16);
         (start, end)
     });
-    ProgramTitleLeft {
+    PlaybookTitleLeft {
         label,
         run,
         stage_label,
@@ -16761,68 +16761,68 @@ fn program_title_left_layout(
     }
 }
 
-const PROGRAM_RUN_STAGE_MAX_WIDTH: usize = 18;
+const PLAYBOOK_RUN_STAGE_MAX_WIDTH: usize = 18;
 
-fn program_run_stage_label(
+fn playbook_run_stage_label(
     app: &App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     now: Instant,
 ) -> Option<String> {
     let run = app
-        .program_runs
-        .get(&popup.program.session_id)
+        .playbook_runs
+        .get(&popup.playbook.session_id)
         .filter(|run| now < run.deadline)?;
     let label = match run.stage {
-        construct_protocol::ProgramRunStage::Pressed => "pressed".to_string(),
-        construct_protocol::ProgramRunStage::Delivered => "delivered".to_string(),
-        construct_protocol::ProgramRunStage::FirstOutput => "first output".to_string(),
-        construct_protocol::ProgramRunStage::PlanningPassDone => "planning pass done".to_string(),
-        construct_protocol::ProgramRunStage::Settling => {
+        construct_protocol::PlaybookRunStage::Pressed => "pressed".to_string(),
+        construct_protocol::PlaybookRunStage::Delivered => "delivered".to_string(),
+        construct_protocol::PlaybookRunStage::FirstOutput => "first output".to_string(),
+        construct_protocol::PlaybookRunStage::PlanningPassDone => "planning pass done".to_string(),
+        construct_protocol::PlaybookRunStage::Settling => {
             format!(
                 "{}/{} settled",
                 run.settled_block_count, run.total_block_count
             )
         }
     };
-    Some(truncate_to_width(&label, PROGRAM_RUN_STAGE_MAX_WIDTH))
+    Some(truncate_to_width(&label, PLAYBOOK_RUN_STAGE_MAX_WIDTH))
 }
 
 /// `active` marks the popup owning interaction state (the last-focused
-/// pane's program); `focused` says whether that pane actually holds keyboard
+/// pane's playbook); `focused` says whether that pane actually holds keyboard
 /// focus. The frame chrome (glyph, Run, markers) tracks `focused` so it dims
 /// with the border, while the session label keeps full brightness on the
-/// active program even when focus sits on the session list — mirroring the
+/// active playbook even when focus sits on the session list — mirroring the
 /// last-focused session pane's undimmed title.
-fn program_title_line<'a>(
+fn playbook_title_line<'a>(
     app: &App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     active: bool,
     focused: bool,
     now: Instant,
-    left: &ProgramTitleLeft,
+    left: &PlaybookTitleLeft,
 ) -> Line<'a> {
     let dirty = popup.buffer != popup.saved_markdown;
-    // The program's left-edge mode glyph is the same live status indicator as
+    // The playbook's left-edge mode glyph is the same live status indicator as
     // a session pane: while the owning session is working it becomes the
-    // spinner, otherwise it remains the static Program rectangle. Keeping it
+    // spinner, otherwise it remains the static Playbook rectangle. Keeping it
     // in this left slot makes the two title bars agree, while
-    // `program_toggle_style` preserves the Program frame's accent color.
+    // `playbook_toggle_style` preserves the Playbook frame's accent color.
     let toggle_glyph = app
         .sessions
         .iter()
-        .find(|s| s.id == popup.program.session_id)
-        .map(|s| session_mode_glyph(app, s, program_mode_glyph()))
-        .unwrap_or_else(program_mode_glyph);
-    let border_style = program_border_style(&app.theme, focused);
+        .find(|s| s.id == popup.playbook.session_id)
+        .map(|s| session_mode_glyph(app, s, playbook_mode_glyph()))
+        .unwrap_or_else(playbook_mode_glyph);
+    let border_style = playbook_border_style(&app.theme, focused);
     // Title spans patch onto the border cells already painted underneath, so
     // a bright label over a dimmed frame must explicitly subtract DIM — an
     // additive style alone would keep the border's DIM modifier.
     let label_style = if focused || active {
-        program_border_style(&app.theme, true).remove_modifier(Modifier::DIM)
+        playbook_border_style(&app.theme, true).remove_modifier(Modifier::DIM)
     } else {
-        program_border_style(&app.theme, false)
+        playbook_border_style(&app.theme, false)
     };
-    let program_style = program_toggle_style(app, popup, focused);
+    let playbook_style = playbook_toggle_style(app, popup, focused);
     let modified_style = Style::default()
         .fg(app.theme.warning)
         .add_modifier(Modifier::BOLD);
@@ -16834,8 +16834,8 @@ fn program_title_line<'a>(
     // A run in flight pulses the Run glyph, so there's a running cue even once
     // every block has settled but the owning turn is still going (spec 0042).
     let run_started = app
-        .program_runs
-        .get(&popup.program.session_id)
+        .playbook_runs
+        .get(&popup.playbook.session_id)
         .filter(|run| now < run.deadline && !run.first_output_seen)
         .map(|run| run.started_at);
     let run_style = if run_hovered {
@@ -16843,7 +16843,7 @@ fn program_title_line<'a>(
             .fg(app.theme.text)
             .add_modifier(Modifier::BOLD)
     } else if let Some(started) = run_started {
-        let phase = now.saturating_duration_since(started).as_secs_f32() * PROGRAM_SHIMMER_SPEED;
+        let phase = now.saturating_duration_since(started).as_secs_f32() * PLAYBOOK_SHIMMER_SPEED;
         let t = (0.5 + 0.5 * phase.sin()).clamp(0.0, 1.0);
         Style::default()
             .fg(blend_color(app.theme.accent, app.theme.text, t))
@@ -16859,7 +16859,7 @@ fn program_title_line<'a>(
 
     let mut spans = vec![
         Span::styled(" ", border_style),
-        Span::styled(toggle_glyph.to_string(), program_style),
+        Span::styled(toggle_glyph.to_string(), playbook_style),
         Span::styled(" ", border_style),
         Span::styled(left.label.clone(), label_style),
     ];
@@ -16869,7 +16869,7 @@ fn program_title_line<'a>(
         let run_button = if run_started.is_some() {
             format!(" {} ", app.spinner_frame())
         } else {
-            PROGRAM_RUN_BUTTON.to_string()
+            PLAYBOOK_RUN_BUTTON.to_string()
         };
         spans.push(Span::styled(run_button, run_style));
         if let Some(label) = left.stage_label.as_deref() {
@@ -16890,28 +16890,28 @@ fn program_title_line<'a>(
     Line::from(spans)
 }
 
-fn program_mode_glyph() -> &'static str {
+fn playbook_mode_glyph() -> &'static str {
     "▣"
 }
 
-fn program_toggle_style(app: &App, popup: &crate::app::ProgramPopup, active: bool) -> Style {
+fn playbook_toggle_style(app: &App, popup: &crate::app::PlaybookPopup, active: bool) -> Style {
     let style = if popup.closing {
         Style::default().fg(app.theme.muted)
     } else if active {
-        Style::default().fg(app.theme.program_border)
+        Style::default().fg(app.theme.playbook_border)
     } else {
         Style::default()
-            .fg(app.theme.program_border)
+            .fg(app.theme.playbook_border)
             .add_modifier(Modifier::DIM)
     };
     style.add_modifier(Modifier::BOLD)
 }
 
-fn program_title_toggle_button_range(
+fn playbook_title_toggle_button_range(
     summary: Option<&construct_protocol::SessionSummary>,
     rect: Rect,
 ) -> Option<(u16, u16, u16)> {
-    let toggle_w = UnicodeWidthStr::width(program_mode_glyph()) as u16;
+    let toggle_w = UnicodeWidthStr::width(playbook_mode_glyph()) as u16;
     if toggle_w == 0 || rect.width < toggle_w.saturating_add(2) {
         return None;
     }
@@ -16931,10 +16931,10 @@ fn program_title_toggle_button_range(
     Some((x_start, x_end, rect.y))
 }
 
-fn render_program_title_tooltip(
+fn render_playbook_title_tooltip(
     f: &mut Frame,
     app: &App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     summary: Option<&construct_protocol::SessionSummary>,
     rect: Rect,
 ) {
@@ -16944,11 +16944,11 @@ fn render_program_title_tooltip(
     if my != rect.y {
         return;
     }
-    if let Some((xs, xe, y)) = app.layout.program_title_toggle_hit {
+    if let Some((xs, xe, y)) = app.layout.playbook_title_toggle_hit {
         if my == y && mx >= xs && mx < xe {
-            let mode = if popup.closing { "Chat" } else { "Program" };
+            let mode = if popup.closing { "Chat" } else { "Playbook" };
             let action = if popup.closing {
-                "open program"
+                "open playbook"
             } else {
                 "return to chat"
             };
@@ -16962,13 +16962,13 @@ fn render_program_title_tooltip(
             return;
         }
     }
-    if let Some((xs, xe, y)) = app.layout.program_title_run_hit {
+    if let Some((xs, xe, y)) = app.layout.playbook_title_run_hit {
         if my == y && mx >= xs && mx < xe {
-            render_button_tooltip(f, &app.theme, " Run program · C-x C-r ", mx, my);
+            render_button_tooltip(f, &app.theme, " Run playbook · C-x C-r ", mx, my);
             return;
         }
     }
-    if let Some((xs, xe, y)) = app.layout.program_title_close_hit {
+    if let Some((xs, xe, y)) = app.layout.playbook_title_close_hit {
         if my == y && mx >= xs && mx < xe {
             if app.session_title_menu.is_some() {
                 return;
@@ -16977,13 +16977,13 @@ fn render_program_title_tooltip(
             return;
         }
     }
-    if let Some((xs, xe, y)) = app.layout.program_title_name_hit {
+    if let Some((xs, xe, y)) = app.layout.playbook_title_name_hit {
         if my == y
             && mx >= xs
             && mx < xe
             && !app.session_title_rename.as_ref().is_some_and(|r| {
-                r.session_id == popup.program.session_id
-                    && r.origin == crate::app::TitleRenameOrigin::Program
+                r.session_id == popup.playbook.session_id
+                    && r.origin == crate::app::TitleRenameOrigin::Playbook
             })
         {
             render_button_tooltip(f, &app.theme, " Click to rename ", mx, my);
@@ -16991,13 +16991,13 @@ fn render_program_title_tooltip(
         }
     }
     let dirty = popup.buffer != popup.saved_markdown;
-    let left = program_title_left_layout(
+    let left = playbook_title_left_layout(
         summary,
-        short_id(&popup.program.session_id),
+        short_id(&popup.playbook.session_id),
         rect,
         dirty,
         true,
-        program_run_stage_label(app, popup, Instant::now()).as_deref(),
+        playbook_run_stage_label(app, popup, Instant::now()).as_deref(),
         None,
     );
     if let Some((start, end)) = left.modified {
@@ -17007,51 +17007,51 @@ fn render_program_title_tooltip(
     }
 }
 
-fn render_program_selection_context_menu(
+fn render_playbook_selection_context_menu(
     f: &mut Frame,
     app: &mut App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     scroll_offset: usize,
-    program_area: Rect,
+    playbook_area: Rect,
 ) {
-    if program_selection_range(popup).is_none() {
-        app.layout.program_selection_run_hit = None;
-        app.layout.program_selection_verb_hits.clear();
+    if playbook_selection_range(popup).is_none() {
+        app.layout.playbook_selection_run_hit = None;
+        app.layout.playbook_selection_verb_hits.clear();
         return;
     }
-    let Some(pos) = program_cursor_position(
+    let Some(pos) = playbook_cursor_position(
         Some(app),
         &popup.buffer,
         popup.cursor,
         scroll_offset,
-        program_area,
+        playbook_area,
     ) else {
-        app.layout.program_selection_run_hit = None;
-        app.layout.program_selection_verb_hits.clear();
+        app.layout.playbook_selection_run_hit = None;
+        app.layout.playbook_selection_verb_hits.clear();
         return;
     };
     let menu = popup.selection_menu.as_ref().cloned().unwrap_or_default();
     // Verb buttons (spec 0089) render as a vertical list below the
     // comment/Run row, one row per verb, ordered as advertised by the daemon.
-    let verbs = app.program_verbs.clone();
-    let rect = program_selection_context_menu_rect(pos, program_area, &menu, &verbs);
+    let verbs = app.playbook_verbs.clone();
+    let rect = playbook_selection_context_menu_rect(pos, playbook_area, &menu, &verbs);
     if rect.width < 3 || rect.height < 3 {
-        app.layout.program_selection_run_hit = None;
-        app.layout.program_selection_verb_hits.clear();
+        app.layout.playbook_selection_run_hit = None;
+        app.layout.playbook_selection_verb_hits.clear();
         return;
     }
-    let inner_x = rect.x.saturating_add(1 + PROGRAM_SELECTION_RUN_MENU_PAD_X);
+    let inner_x = rect.x.saturating_add(1 + PLAYBOOK_SELECTION_RUN_MENU_PAD_X);
     let inner_y = rect.y.saturating_add(1);
     let inner_width = rect
         .width
-        .saturating_sub(2 + PROGRAM_SELECTION_RUN_MENU_PAD_X.saturating_mul(2))
+        .saturating_sub(2 + PLAYBOOK_SELECTION_RUN_MENU_PAD_X.saturating_mul(2))
         as usize;
-    let run_button = if app.program_selection_run_on_fork {
-        PROGRAM_SELECTION_RUN_FORK_BUTTON
+    let run_button = if app.playbook_selection_run_on_fork {
+        PLAYBOOK_SELECTION_RUN_FORK_BUTTON
     } else {
-        PROGRAM_SELECTION_RUN_BUTTON
+        PLAYBOOK_SELECTION_RUN_BUTTON
     };
-    let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_FORK_BUTTON);
+    let run_button_width = UnicodeWidthStr::width(PLAYBOOK_SELECTION_RUN_FORK_BUTTON);
     let rendered_run_button_width = UnicodeWidthStr::width(run_button);
     let button_x = inner_x.saturating_add(inner_width.saturating_sub(run_button_width) as u16);
     let hit = (
@@ -17059,7 +17059,7 @@ fn render_program_selection_context_menu(
         inner_x.saturating_add(inner_width as u16),
         inner_y,
     );
-    app.layout.program_selection_run_hit = Some(hit);
+    app.layout.playbook_selection_run_hit = Some(hit);
     // Gated on pointer-enter, not mere position (spec 0057/0089): a pointer
     // left resting from an earlier action can coincide with the Run
     // button's or a verb row's fixed position the instant the menu appears,
@@ -17082,7 +17082,7 @@ fn render_program_selection_context_menu(
         }
     };
     let run_selected = hovered
-        || (menu.focused && menu.selected_action == crate::app::ProgramSelectionAction::Run);
+        || (menu.focused && menu.selected_action == crate::app::PlaybookSelectionAction::Run);
     let comment_gap = usize::from(inner_width > run_button_width);
     let comment_width = inner_width
         .saturating_sub(run_button_width)
@@ -17098,7 +17098,7 @@ fn render_program_selection_context_menu(
     // row's description wraps to while focused (spec 0089 — wrapped, not
     // truncated), at the bottom of the menu, below the comment rows —
     // `visible_comment_rows` bounds how many comment lines fit above them.
-    let description_rows = program_selection_description_line_count(
+    let description_rows = playbook_selection_description_line_count(
         &menu,
         &verbs,
         rect.width,
@@ -17109,7 +17109,7 @@ fn render_program_selection_context_menu(
     let visible_comment_rows = content_rows.saturating_sub(verb_rows);
     comment_lines.truncate(visible_comment_rows.max(1));
     let comment_selected =
-        menu.focused && menu.selected_action == crate::app::ProgramSelectionAction::Comment;
+        menu.focused && menu.selected_action == crate::app::PlaybookSelectionAction::Comment;
     // Typed instruction text keeps its underline regardless of which row
     // Up/Down currently highlights — the underline is what marks this as
     // typed content rather than a menu action label, so it must not
@@ -17188,8 +17188,8 @@ fn render_program_selection_context_menu(
                     my == y && mx >= inner_x && mx < inner_x.saturating_add(inner_width as u16)
                 });
             let verb_key_selected = menu.focused
-                && menu.selected_action == crate::app::ProgramSelectionAction::Verb(idx);
-            let label = if app.program_selection_run_on_fork {
+                && menu.selected_action == crate::app::PlaybookSelectionAction::Verb(idx);
+            let label = if app.playbook_selection_run_on_fork {
                 format!("▸ {} (fork)", verb.label)
             } else {
                 format!("▸ {}", verb.label)
@@ -17217,7 +17217,7 @@ fn render_program_selection_context_menu(
                 verb.name.clone(),
             ));
         }
-        app.layout.program_selection_verb_hits = verb_hits;
+        app.layout.playbook_selection_verb_hits = verb_hits;
         // Description of the currently keyboard-highlighted row (spec
         // 0089), wrapped — never truncated with an ellipsis — across
         // however many rows `description_rows` reserved below the last
@@ -17225,10 +17225,10 @@ fn render_program_selection_context_menu(
         // text, so the space Tab reserved doesn't jitter depending on
         // which row Up/Down lands on.
         if description_rows > 0 {
-            let description = program_selection_action_description(
+            let description = playbook_selection_action_description(
                 menu.selected_action,
                 &verbs,
-                app.program_selection_run_on_fork,
+                app.playbook_selection_run_on_fork,
             )
             .unwrap_or_default();
             let mut desc_lines = wrap_to_width(&description, inner_width);
@@ -17255,20 +17255,20 @@ fn render_program_selection_context_menu(
             }
         }
     } else {
-        app.layout.program_selection_verb_hits.clear();
+        app.layout.playbook_selection_verb_hits.clear();
     }
 }
 
 /// The menu box's content width, honoring its border and horizontal
 /// padding — shared by the comment field (which further carves out room
 /// for the Run button) and the description row (which uses the full span).
-fn program_selection_inner_width(menu_width: u16) -> usize {
-    menu_width.saturating_sub(2 + PROGRAM_SELECTION_RUN_MENU_PAD_X.saturating_mul(2)) as usize
+fn playbook_selection_inner_width(menu_width: u16) -> usize {
+    menu_width.saturating_sub(2 + PLAYBOOK_SELECTION_RUN_MENU_PAD_X.saturating_mul(2)) as usize
 }
 
-pub(crate) fn program_selection_comment_width(menu_width: u16) -> usize {
-    let inner_width = program_selection_inner_width(menu_width);
-    let run_button_width = UnicodeWidthStr::width(PROGRAM_SELECTION_RUN_FORK_BUTTON);
+pub(crate) fn playbook_selection_comment_width(menu_width: u16) -> usize {
+    let inner_width = playbook_selection_inner_width(menu_width);
+    let run_button_width = UnicodeWidthStr::width(PLAYBOOK_SELECTION_RUN_FORK_BUTTON);
     let comment_gap = usize::from(inner_width > run_button_width);
     inner_width
         .saturating_sub(run_button_width)
@@ -17282,16 +17282,16 @@ pub(crate) fn program_selection_comment_width(menu_width: u16) -> usize {
 /// least `1` even when the highlighted row has no description text, so a
 /// verb that omitted `description` still reserves a (blank) row rather than
 /// visibly shrinking the menu relative to its neighbors.
-fn program_selection_description_line_count(
-    menu: &crate::app::ProgramSelectionMenu,
-    verbs: &[construct_protocol::ProgramVerb],
+fn playbook_selection_description_line_count(
+    menu: &crate::app::PlaybookSelectionMenu,
+    verbs: &[construct_protocol::PlaybookVerb],
     menu_width: u16,
     max_rows: usize,
 ) -> usize {
     if !menu.focused {
         return 0;
     }
-    let width = program_selection_inner_width(menu_width).max(1);
+    let width = playbook_selection_inner_width(menu_width).max(1);
     // Reserve for the longer of the two destination variants, so pressing or
     // releasing Shift only swaps the wording — it never resizes the menu under
     // the pointer, and never truncates the longer sentence.
@@ -17299,7 +17299,7 @@ fn program_selection_description_line_count(
         .into_iter()
         .map(|run_on_fork| {
             let text =
-                program_selection_action_description(menu.selected_action, verbs, run_on_fork)
+                playbook_selection_action_description(menu.selected_action, verbs, run_on_fork)
                     .unwrap_or_default();
             wrap_to_width(&text, width).len()
         })
@@ -17309,12 +17309,12 @@ fn program_selection_description_line_count(
         .min(max_rows.max(1))
 }
 
-fn program_selection_comment_line_count(
-    menu: &crate::app::ProgramSelectionMenu,
+fn playbook_selection_comment_line_count(
+    menu: &crate::app::PlaybookSelectionMenu,
     menu_width: u16,
     max_rows: usize,
 ) -> usize {
-    let comment_width = program_selection_comment_width(menu_width);
+    let comment_width = playbook_selection_comment_width(menu_width);
     let text = if menu.comment.is_empty() {
         "type additional instruction"
     } else {
@@ -17336,9 +17336,9 @@ fn program_selection_comment_line_count(
 /// continuation clause after that prefix (e.g. "surface hidden
 /// assumptions…", not "Surface hidden assumptions…" or "Annotate hidden
 /// assumptions…" — the effect word is supplied automatically).
-fn program_selection_action_description(
-    action: crate::app::ProgramSelectionAction,
-    verbs: &[construct_protocol::ProgramVerb],
+fn playbook_selection_action_description(
+    action: crate::app::PlaybookSelectionAction,
+    verbs: &[construct_protocol::PlaybookVerb],
     run_on_fork: bool,
 ) -> Option<String> {
     let destination = if run_on_fork {
@@ -17347,17 +17347,17 @@ fn program_selection_action_description(
         " Runs on the main session."
     };
     match action {
-        crate::app::ProgramSelectionAction::Comment => {
+        crate::app::PlaybookSelectionAction::Comment => {
             Some("Free-text guidance appended to Run or the selected verb.".to_string())
         }
-        crate::app::ProgramSelectionAction::Run => Some(format!(
+        crate::app::PlaybookSelectionAction::Run => Some(format!(
             "Execute the selection now, as orchestration.{destination}"
         )),
-        crate::app::ProgramSelectionAction::Verb(idx) => {
+        crate::app::PlaybookSelectionAction::Verb(idx) => {
             let verb = verbs.get(idx)?;
             let effect_label = match verb.effect {
-                construct_protocol::ProgramVerbEffect::Annotate => "Annotate",
-                construct_protocol::ProgramVerbEffect::Rewrite => "Rewrite",
+                construct_protocol::PlaybookVerbEffect::Annotate => "Annotate",
+                construct_protocol::PlaybookVerbEffect::Rewrite => "Rewrite",
             };
             let description = match verb.description.as_deref() {
                 Some(desc) if !desc.is_empty() => format!("{effect_label}: {desc}"),
@@ -17368,20 +17368,20 @@ fn program_selection_action_description(
     }
 }
 
-fn program_selection_context_menu_rect(
+fn playbook_selection_context_menu_rect(
     pos: Position,
     total: Rect,
-    menu: &crate::app::ProgramSelectionMenu,
-    verbs: &[construct_protocol::ProgramVerb],
+    menu: &crate::app::PlaybookSelectionMenu,
+    verbs: &[construct_protocol::PlaybookVerb],
 ) -> Rect {
-    let width = PROGRAM_SELECTION_RUN_MENU_W.min(total.width);
+    let width = PLAYBOOK_SELECTION_RUN_MENU_W.min(total.width);
     let max_rows = total.height.saturating_sub(2) as usize;
-    let comment_rows = program_selection_comment_line_count(menu, width, max_rows);
+    let comment_rows = playbook_selection_comment_line_count(menu, width, max_rows);
     // One row per verb (spec 0089), below the comment/Run row, plus however
     // many rows the highlighted row's description wraps to while focused —
     // wrapped, not truncated, so a long description can grow the menu
     // rather than being cut with an ellipsis.
-    let description_rows = program_selection_description_line_count(menu, verbs, width, max_rows);
+    let description_rows = playbook_selection_description_line_count(menu, verbs, width, max_rows);
     let height = (2 + comment_rows as u16 + verbs.len() as u16 + description_rows as u16)
         .min(total.height)
         .max(1);
@@ -17395,12 +17395,12 @@ fn program_selection_context_menu_rect(
     }
 }
 
-fn render_program_smart_clip_picker(
+fn render_playbook_smart_clip_picker(
     f: &mut Frame,
     app: &App,
-    popup: &crate::app::ProgramPopup,
+    popup: &crate::app::PlaybookPopup,
     cursor_pos: Position,
-    program_area: Rect,
+    playbook_area: Rect,
 ) {
     let Some(search) = popup.smart_clip.as_ref() else {
         return;
@@ -17410,10 +17410,10 @@ fn render_program_smart_clip_picker(
     if app.session_picker.is_some() {
         return;
     }
-    if program_area.width == 0 || program_area.height < 3 {
+    if playbook_area.width == 0 || playbook_area.height < 3 {
         return;
     }
-    let rows = app.program_smart_clip_rows(popup);
+    let rows = app.playbook_smart_clip_rows(popup);
 
     // Raw indices of the selectable rows, and the raw index currently highlighted.
     let selectable_raw: Vec<usize> = rows
@@ -17429,7 +17429,7 @@ fn render_program_smart_clip_picker(
     };
 
     let total = rows.len().max(1);
-    let max_rows = program_area.height.saturating_sub(2).min(14);
+    let max_rows = playbook_area.height.saturating_sub(2).min(14);
     let row_count = (total as u16).min(max_rows).max(1);
 
     // Scroll the visible window so the highlighted row stays on screen.
@@ -17442,26 +17442,26 @@ fn render_program_smart_clip_picker(
     }
 
     let title = match search.view {
-        crate::app::ProgramSmartClipView::Root => " smart clip ".to_string(),
-        crate::app::ProgramSmartClipView::Submenu(group) => {
+        crate::app::PlaybookSmartClipView::Root => " smart clip ".to_string(),
+        crate::app::PlaybookSmartClipView::Submenu(group) => {
             format!(" smart clip › {} ", group.label())
         }
     };
 
-    let width = 46u16.min(program_area.width.max(1));
+    let width = 46u16.min(playbook_area.width.max(1));
     let x = cursor_pos.x.min(
-        program_area
+        playbook_area
             .x
-            .saturating_add(program_area.width.saturating_sub(width)),
+            .saturating_add(playbook_area.width.saturating_sub(width)),
     );
     let below_y = cursor_pos.y.saturating_add(1);
     let above_y = cursor_pos.y.saturating_sub(row_count.saturating_add(2));
     let y = if below_y.saturating_add(row_count).saturating_add(2)
-        <= program_area.y.saturating_add(program_area.height)
+        <= playbook_area.y.saturating_add(playbook_area.height)
     {
         below_y
     } else {
-        above_y.max(program_area.y)
+        above_y.max(playbook_area.y)
     };
     let rect = Rect {
         x,
@@ -17497,7 +17497,7 @@ fn render_program_smart_clip_picker(
             .take(row_count as usize)
         {
             let selected = sel_raw == Some(raw_idx);
-            lines.push(render_program_smart_clip_row(app, row, selected, inner_w));
+            lines.push(render_playbook_smart_clip_row(app, row, selected, inner_w));
         }
     }
     f.render_widget(Paragraph::new(lines), inner);
@@ -17506,25 +17506,25 @@ fn render_program_smart_clip_picker(
 /// One line of the smart-clip picker: a relevance/submenu clip, a divider, an
 /// expandable category header, or a project/group header inside the session
 /// submenu.
-fn render_program_smart_clip_row(
+fn render_playbook_smart_clip_row(
     app: &App,
-    row: &crate::app::ProgramSmartClipRow,
+    row: &crate::app::PlaybookSmartClipRow,
     selected: bool,
     width: usize,
 ) -> Line<'static> {
-    use crate::app::ProgramSmartClipRow;
+    use crate::app::PlaybookSmartClipRow;
     match row {
-        ProgramSmartClipRow::Separator => Line::from(Span::styled(
+        PlaybookSmartClipRow::Separator => Line::from(Span::styled(
             "─".repeat(width.max(1)),
             Style::default().fg(app.theme.dim),
         )),
-        ProgramSmartClipRow::Header(label) => Line::from(Span::styled(
+        PlaybookSmartClipRow::Header(label) => Line::from(Span::styled(
             label.clone(),
             Style::default()
                 .fg(app.theme.muted)
                 .add_modifier(Modifier::BOLD),
         )),
-        ProgramSmartClipRow::Category { group, count } => {
+        PlaybookSmartClipRow::Category { group, count } => {
             let base = if selected {
                 Style::default()
                     .fg(app.theme.highlight_fg)
@@ -17552,7 +17552,7 @@ fn render_program_smart_clip_row(
                 Span::styled("▸".to_string(), base),
             ])
         }
-        ProgramSmartClipRow::Clip { candidate, dimmed } => {
+        PlaybookSmartClipRow::Clip { candidate, dimmed } => {
             let (label_style, detail_style) = if selected {
                 let s = Style::default()
                     .fg(app.theme.highlight_fg)
@@ -17590,9 +17590,9 @@ fn render_program_smart_clip_row(
 ///   **fixed** height (derived from the full, unfiltered list) so the search
 ///   line never jumps as the query narrows the results; the body scrolls within
 ///   the constant frame.
-/// * program `@`→session — a search-less list **anchored where the inline `@`
+/// * playbook `@`→session — a search-less list **anchored where the inline `@`
 ///   context menu sat**, sized to its content. The live `@<typeahead>` token in
-///   the program buffer (visible just above the dialog) is the query, so no
+///   the playbook buffer (visible just above the dialog) is the query, so no
 ///   in-dialog search line is needed.
 ///
 /// Drawn topmost.
@@ -17616,7 +17616,7 @@ fn render_session_picker(f: &mut Frame, app: &mut App) {
     // context menu's position when that anchor was captured this frame.
     let show_search = matches!(dialog.purpose, crate::app::SessionPickerPurpose::Switch);
     let anchor = (!show_search)
-        .then(|| app.layout.program_smart_clip_anchor)
+        .then(|| app.layout.playbook_smart_clip_anchor)
         .flatten();
 
     // Raw indices of the selectable (visible, non-dimmed) session rows, and the
@@ -17890,13 +17890,13 @@ fn render_session_picker_row(
                 Span::styled(harness, harness_style),
             ])
         }
-        SessionPickerRow::ProgramHeader => Line::from(Span::styled(
-            "▾ Program",
+        SessionPickerRow::PlaybookHeader => Line::from(Span::styled(
+            "▾ Playbook",
             Style::default()
                 .fg(app.theme.group)
                 .add_modifier(Modifier::BOLD),
         )),
-        SessionPickerRow::ProgramBlock { text, .. } => {
+        SessionPickerRow::PlaybookBlock { text, .. } => {
             let prefix = if selected { ">" } else { " " };
             let style = if selected {
                 Style::default()
@@ -17929,7 +17929,7 @@ fn render_session_picker_row(
             let prefix = if selected { ">" } else { " " };
             let scope_tag = match hit.scope {
                 construct_protocol::SearchScope::Name => "name",
-                construct_protocol::SearchScope::Program => "program",
+                construct_protocol::SearchScope::Playbook => "playbook",
                 construct_protocol::SearchScope::Transcript => "history",
             };
             let base_style = if selected {
@@ -17985,13 +17985,13 @@ fn safe_slice_bounds(s: &str, start: usize, end: usize) -> (usize, usize) {
     (start, end)
 }
 
-/// Absolute wrapped position of the cursor within the program body:
+/// Absolute wrapped position of the cursor within the playbook body:
 /// `(visual_row, column_within_row)`, both in the `Wrap { trim: false }`
 /// word-wrap coordinate space the body is laid out with (see
-/// [`program_wrap_row_starts`] / [`program_wrap_locate`]). `width` is the inner
+/// [`playbook_wrap_row_starts`] / [`playbook_wrap_locate`]). `width` is the inner
 /// content width in cells; a zero width collapses the whole buffer onto row 0,
 /// column 0.
-pub(crate) fn program_cursor_visual_pos(
+pub(crate) fn playbook_cursor_visual_pos(
     app: Option<&App>,
     markdown: &str,
     cursor: usize,
@@ -18000,9 +18000,9 @@ pub(crate) fn program_cursor_visual_pos(
     if width == 0 {
         return (0, 0);
     }
-    let (line, col) = program_line_col(markdown, cursor);
+    let (line, col) = playbook_line_col(markdown, cursor);
 
-    // The program body is rendered with `Wrap { trim: false }`, which WORD-wraps
+    // The playbook body is rendered with `Wrap { trim: false }`, which WORD-wraps
     // at whitespace (and hard-breaks words longer than the width) rather than
     // slicing every `width` characters. A logical line containing spaces breaks
     // earlier than naive char-division predicts, so the cursor must reuse the
@@ -18012,32 +18012,32 @@ pub(crate) fn program_cursor_visual_pos(
     let mut visual_row = 0usize;
     let mut dups = std::collections::HashMap::new();
     for raw in markdown.lines().take(line) {
-        let li = program_line_instance(&mut dups, raw);
-        let text = program_rendered_line_text(app, raw, width, li);
-        visual_row = visual_row.saturating_add(program_wrap_row_starts(&text, width).len());
+        let li = playbook_line_instance(&mut dups, raw);
+        let text = playbook_rendered_line_text(app, raw, width, li);
+        visual_row = visual_row.saturating_add(playbook_wrap_row_starts(&text, width).len());
     }
 
     let cur_raw = markdown.lines().nth(line).unwrap_or("");
-    let cur_li = program_line_instance(&mut dups, cur_raw);
-    let visual_col = program_visual_col_for_line(app, cur_raw, col, width, cur_li);
-    let starts = program_wrap_row_starts(
-        &program_rendered_line_text(app, cur_raw, width, cur_li),
+    let cur_li = playbook_line_instance(&mut dups, cur_raw);
+    let visual_col = playbook_visual_col_for_line(app, cur_raw, col, width, cur_li);
+    let starts = playbook_wrap_row_starts(
+        &playbook_rendered_line_text(app, cur_raw, width, cur_li),
         width,
     );
-    let (row_in_line, col_in_row) = program_wrap_locate(&starts, visual_col, width);
+    let (row_in_line, col_in_row) = playbook_wrap_locate(&starts, visual_col, width);
     let visual_row = visual_row.saturating_add(row_in_line);
     (visual_row, col_in_row)
 }
 
-/// Wrapped visual row of the cursor (see [`program_cursor_visual_pos`]). Drives
+/// Wrapped visual row of the cursor (see [`playbook_cursor_visual_pos`]). Drives
 /// the cursor-follow scroll so the caret stays inside the visible window.
-pub(crate) fn program_cursor_visual_row(
+pub(crate) fn playbook_cursor_visual_row(
     app: Option<&App>,
     markdown: &str,
     cursor: usize,
     width: usize,
 ) -> usize {
-    program_cursor_visual_pos(app, markdown, cursor, width).0
+    playbook_cursor_visual_pos(app, markdown, cursor, width).0
 }
 
 /// Total number of wrapped visual rows the whole buffer occupies at `width`,
@@ -18045,11 +18045,11 @@ pub(crate) fn program_cursor_visual_row(
 /// in a newline (or is empty). Bounds the scroll offset and drives the scroll
 /// indicator. Defined as "the cursor's row at the very end of the buffer, plus
 /// one" so the last reachable caret row is always `< total`.
-pub(crate) fn program_total_visual_rows(app: Option<&App>, markdown: &str, width: usize) -> usize {
+pub(crate) fn playbook_total_visual_rows(app: Option<&App>, markdown: &str, width: usize) -> usize {
     if width == 0 {
         return markdown.matches('\n').count() + 1;
     }
-    program_cursor_visual_pos(app, markdown, markdown.chars().count(), width)
+    playbook_cursor_visual_pos(app, markdown, markdown.chars().count(), width)
         .0
         .saturating_add(1)
 }
@@ -18058,7 +18058,7 @@ pub(crate) fn program_total_visual_rows(app: Option<&App>, markdown: &str, width
 /// `viewport_height`-row window. Scrolls up so the cursor is the top row when it
 /// sits above the window, and down so it is the bottom row when it sits below;
 /// otherwise the offset is left unchanged.
-pub(crate) fn program_follow_scroll(
+pub(crate) fn playbook_follow_scroll(
     scroll_offset: usize,
     cursor_row: usize,
     viewport_height: usize,
@@ -18075,7 +18075,7 @@ pub(crate) fn program_follow_scroll(
     }
 }
 
-/// Inverse of [`program_cursor_visual_pos`]: the buffer char offset whose cursor
+/// Inverse of [`playbook_cursor_visual_pos`]: the buffer char offset whose cursor
 /// paints at absolute visual `(target_row, target_col)` in the word-wrapped
 /// body. Used by vertical navigation (land on a visual row while keeping a
 /// preferred column) and mouse hit-testing (place the cursor where a click fell,
@@ -18086,7 +18086,7 @@ pub(crate) fn program_follow_scroll(
 /// `target_col` left of or past a row's content clamps to that row's first or
 /// last offset. Forward visual position is monotonic in char offset, so the
 /// landing offset is the last column on the target row at or before the target.
-pub(crate) fn program_visual_to_cursor(
+pub(crate) fn playbook_visual_to_cursor(
     app: Option<&App>,
     markdown: &str,
     target_row: usize,
@@ -18103,9 +18103,9 @@ pub(crate) fn program_visual_to_cursor(
     let mut owner: Option<(usize, Vec<usize>, &str, usize, u64)> = None;
     let mut dups = std::collections::HashMap::new();
     for raw in markdown.split('\n') {
-        let li = program_line_instance(&mut dups, raw);
-        let rendered = program_rendered_line_text(app, raw, width, li);
-        let starts = program_wrap_row_starts(&rendered, width);
+        let li = playbook_line_instance(&mut dups, raw);
+        let rendered = playbook_rendered_line_text(app, raw, width, li);
+        let starts = playbook_wrap_row_starts(&rendered, width);
         let row_count = starts.len();
         if target_row < rows_before + row_count {
             owner = Some((line_start, starts, raw, rows_before, li));
@@ -18125,8 +18125,8 @@ pub(crate) fn program_visual_to_cursor(
     let line_len = raw.chars().count();
     let mut best_col = 0usize;
     for raw_col in 0..=line_len {
-        let visual_col = program_visual_col_for_line(app, raw, raw_col, width, owner_li);
-        let (r, c) = program_wrap_locate(&starts, visual_col, width);
+        let visual_col = playbook_visual_col_for_line(app, raw, raw_col, width, owner_li);
+        let (r, c) = playbook_wrap_locate(&starts, visual_col, width);
         if r < row_in_line || (r == row_in_line && c <= target_col) {
             best_col = raw_col;
         } else {
@@ -18136,18 +18136,18 @@ pub(crate) fn program_visual_to_cursor(
     line_start + best_col
 }
 
-/// The inner content width available to the program body, derived from the
+/// The inner content width available to the playbook body, derived from the
 /// popup's outer modal rect: the bordered block removes one cell per side and
-/// the content margin removes [`PROGRAM_CONTENT_PADDING_X`] more per side. Mouse
+/// the content margin removes [`PLAYBOOK_CONTENT_PADDING_X`] more per side. Mouse
 /// hit-testing reuses this so it word-wraps on the exact width
-/// [`render_program_popup_at`] paints.
-pub(crate) fn program_modal_inner_width(modal: Rect) -> usize {
+/// [`render_playbook_popup_at`] paints.
+pub(crate) fn playbook_modal_inner_width(modal: Rect) -> usize {
     (modal.width as usize)
         .saturating_sub(2)
-        .saturating_sub(2 * PROGRAM_CONTENT_PADDING_X as usize)
+        .saturating_sub(2 * PLAYBOOK_CONTENT_PADDING_X as usize)
 }
 
-fn program_cursor_position(
+fn playbook_cursor_position(
     app: Option<&App>,
     markdown: &str,
     cursor: usize,
@@ -18158,7 +18158,7 @@ fn program_cursor_position(
         return None;
     }
     let width = area.width as usize;
-    let (visual_row, x) = program_cursor_visual_pos(app, markdown, cursor, width);
+    let (visual_row, x) = playbook_cursor_visual_pos(app, markdown, cursor, width);
     // Translate the absolute wrapped row into a row within the scrolled window;
     // a cursor scrolled above the top or below the bottom has no on-screen cell.
     let visual_row = visual_row.checked_sub(scroll_offset)?;
@@ -18173,12 +18173,12 @@ fn program_cursor_position(
 
 /// Locate a display column `visual_col` within a word-wrapped line: return the
 /// `(row, col)` of the wrapped row that holds it, given the per-row starting
-/// display offsets from [`program_wrap_row_starts`]. The row is the last one
+/// display offsets from [`playbook_wrap_row_starts`]. The row is the last one
 /// whose start is at or before `visual_col`; the column is the remainder. A
 /// cursor parked exactly at the right edge of a full row (or inside a run of
 /// collapsed break-whitespace) is rolled onto the next row so it never paints
 /// past the editor edge.
-fn program_wrap_locate(starts: &[usize], visual_col: usize, width: usize) -> (usize, usize) {
+fn playbook_wrap_locate(starts: &[usize], visual_col: usize, width: usize) -> (usize, usize) {
     let width = width.max(1);
     let mut row = 0usize;
     for (idx, &start) in starts.iter().enumerate() {
@@ -18205,7 +18205,7 @@ fn program_wrap_locate(starts: &[usize], visual_col: usize, width: usize) -> (us
 ///   and are not break opportunities.
 /// - Whitespace classification follows `StyledGrapheme::is_whitespace`: a
 ///   zero-width space is a break opportunity, a no-break space is not.
-fn program_paint_graphemes(text: &str) -> impl Iterator<Item = (usize, bool)> + '_ {
+fn playbook_paint_graphemes(text: &str) -> impl Iterator<Item = (usize, bool)> + '_ {
     text.graphemes(true)
         .filter(|g| !g.contains(char::is_control))
         .map(|g| {
@@ -18215,13 +18215,13 @@ fn program_paint_graphemes(text: &str) -> impl Iterator<Item = (usize, bool)> + 
 }
 
 /// Display width of the first `n_chars` chars of `text`, measured on the
-/// grapheme clusters ratatui paints (see [`program_paint_graphemes`]). Cursor
+/// grapheme clusters ratatui paints (see [`playbook_paint_graphemes`]). Cursor
 /// offsets are char offsets, so an offset can fall inside a multi-char
 /// cluster; the partially-covered cluster counts whole, placing the caret
 /// after the glyph the next edit will affect — and letting the inverse
-/// mapping ([`program_visual_to_cursor`]) resolve clicks to cluster
+/// mapping ([`playbook_visual_to_cursor`]) resolve clicks to cluster
 /// boundaries rather than mid-sequence offsets.
-fn program_prefix_display_width(text: &str, n_chars: usize) -> usize {
+fn playbook_prefix_display_width(text: &str, n_chars: usize) -> usize {
     let mut width = 0usize;
     let mut chars_seen = 0usize;
     for g in text.graphemes(true) {
@@ -18247,13 +18247,13 @@ fn program_prefix_display_width(text: &str, n_chars: usize) -> usize {
 /// flushed onto the pending row together with the whitespace that preceded it;
 /// once the row is full the whitespace sitting at the break is dropped so the
 /// next word starts the following row. It walks the same units ratatui does —
-/// grapheme clusters, not chars (see [`program_paint_graphemes`]) — so emoji
+/// grapheme clusters, not chars (see [`playbook_paint_graphemes`]) — so emoji
 /// sequences, control chars, NBSP, and ZWSP wrap on the exact glyphs the body
 /// paints. Verified against ratatui's `TestBackend` output for word breaks,
 /// hard breaks, trailing/leading whitespace, collapsed multi-space runs, and
 /// the grapheme cases above (the differential test in `app.rs` re-checks the
 /// whole pipeline against a painted buffer).
-fn program_wrap_row_starts(text: &str, width: usize) -> Vec<usize> {
+fn playbook_wrap_row_starts(text: &str, width: usize) -> Vec<usize> {
     let max = width.max(1);
     // Each buffered glyph carries `(origin, glyph_width)` where `origin` is its
     // display offset in the unwrapped line, so a finished row reports where it
@@ -18269,7 +18269,7 @@ fn program_wrap_row_starts(text: &str, width: usize) -> Vec<usize> {
     let mut non_ws_previous = false;
     let mut origin = 0usize;
 
-    for (sw, is_ws) in program_paint_graphemes(text) {
+    for (sw, is_ws) in playbook_paint_graphemes(text) {
         let here = origin;
         origin = origin.saturating_add(sw);
         // ratatui ignores glyphs wider than the whole line.
@@ -18356,7 +18356,7 @@ fn program_wrap_row_starts(text: &str, width: usize) -> Vec<usize> {
 /// the user just typed survives — `raw.trim()` would drop it, stranding the
 /// cursor at the end of the line because the rendered glyphs and the cursor
 /// column would then disagree on the line's width.
-fn program_list_item_content(raw: &str) -> Option<(usize, &str)> {
+fn playbook_list_item_content(raw: &str) -> Option<(usize, &str)> {
     let stripped = raw.trim_start();
     if !stripped.starts_with("- ") && !stripped.starts_with("* ") {
         return None;
@@ -18378,15 +18378,15 @@ fn program_list_item_content(raw: &str) -> Option<(usize, &str)> {
 /// `content` is the heading text — the `#` markers are painted literally, so
 /// they stay in the slice — taken from the raw line WITH its trailing whitespace
 /// preserved, or `None` when the line isn't a heading. Detection matches the
-/// renderer (`program_heading_level` on the fully-trimmed line), but the content
+/// renderer (`playbook_heading_level` on the fully-trimmed line), but the content
 /// is sliced from the raw line so a trailing space the user just typed survives —
 /// `raw.trim()` would drop it, stranding the cursor at the end of the line
 /// because the rendered glyphs and the cursor column would then disagree on the
 /// line's width. Headings don't render their leading indent, so only the indent
 /// is stripped from the front, mirroring the trimmed text the renderer used.
-fn program_heading_content(raw: &str) -> Option<(usize, &str)> {
+fn playbook_heading_content(raw: &str) -> Option<(usize, &str)> {
     let trimmed = raw.trim();
-    program_heading_level(trimmed)?;
+    playbook_heading_level(trimmed)?;
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
     let content = raw
         .char_indices()
@@ -18396,16 +18396,16 @@ fn program_heading_content(raw: &str) -> Option<(usize, &str)> {
     Some((leading, content))
 }
 
-/// The plain text the program body paints for one logical markdown line, before
+/// The plain text the playbook body paints for one logical markdown line, before
 /// ratatui word-wraps it. Mirrors the per-line transformation in
-/// [`render_program_markdown_lines`] / [`program_visual_col_for_line`] — kept
+/// [`render_playbook_markdown_lines`] / [`playbook_visual_col_for_line`] — kept
 /// heading markers (painted literally, chips included), the `  • ` list
 /// prefix, the fixed chip text of `:::clip` / `:::` fence lines, and expanded
 /// smart-clip chips — so the cursor's wrap math sees exactly the glyphs (and
 /// their spaces) ratatui wraps. `width` is the wrap width, consulted only to
 /// pad expanded inline attachment images (spec 0099) to their block height;
 /// pass 0 from callers that only measure intra-line prefixes.
-fn program_rendered_line_text(
+fn playbook_rendered_line_text(
     app: Option<&App>,
     raw: &str,
     width: usize,
@@ -18415,19 +18415,19 @@ fn program_rendered_line_text(
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
     if trimmed.is_empty() {
         String::new()
-    } else if let Some((_, content)) = program_heading_content(raw) {
-        // Headings paint their source literally (`render_program_heading_line`
-        // goes through `program_text_spans`, which never expands `@{…}`
+    } else if let Some((_, content)) = playbook_heading_content(raw) {
+        // Headings paint their source literally (`render_playbook_heading_line`
+        // goes through `playbook_text_spans`, which never expands `@{…}`
         // chips), so the wrap math must measure the literal text too.
         content.to_string()
-    } else if let Some((_, rest)) = program_list_item_content(raw) {
+    } else if let Some((_, rest)) = playbook_list_item_content(raw) {
         format!(
             "{}  • {}",
             " ".repeat(leading),
-            program_inline_rendered_text(app, rest, Some(line_instance), width)
+            playbook_inline_rendered_text(app, rest, Some(line_instance), width)
         )
     } else if let Some(rest) = trimmed.strip_prefix(":::clip") {
-        // Painted as `  ` + the padded chip label (`program_chip_span`), not
+        // Painted as `  ` + the padded chip label (`playbook_chip_span`), not
         // the raw fence source; the leading indent is dropped with the rest
         // of the source syntax.
         format!("   {} ", format!("clip {}", rest.trim()).trim())
@@ -18442,7 +18442,7 @@ fn program_rendered_line_text(
             .map(|(idx, _)| &raw[idx..])
             .unwrap_or("");
         let mut out: String = raw.chars().take(leading).collect();
-        out.push_str(&program_inline_rendered_text(
+        out.push_str(&playbook_inline_rendered_text(
             app,
             body,
             Some(line_instance),
@@ -18452,11 +18452,11 @@ fn program_rendered_line_text(
     }
 }
 
-/// A local-file Markdown link found in program text: `![name](path)` for
+/// A local-file Markdown link found in playbook text: `![name](path)` for
 /// images, `[name](path)` for other files. Only local paths — absolute, `~/`,
 /// or either wrapped in `<…>` — are recognized (spec 0099); `http(s)` URLs,
 /// `agentd:action/…` links, and anything else stay literal text.
-pub(crate) struct ProgramMdLink<'a> {
+pub(crate) struct PlaybookMdLink<'a> {
     /// Byte range of the whole link source within the scanned text.
     pub start: usize,
     pub end: usize,
@@ -18466,7 +18466,7 @@ pub(crate) struct ProgramMdLink<'a> {
     pub is_image: bool,
 }
 
-pub(crate) fn find_program_md_link(text: &str) -> Option<ProgramMdLink<'_>> {
+pub(crate) fn find_playbook_md_link(text: &str) -> Option<PlaybookMdLink<'_>> {
     let bytes = text.as_bytes();
     let mut from = 0usize;
     while let Some(rel) = text.get(from..).and_then(|t| t.find('[')) {
@@ -18509,7 +18509,7 @@ pub(crate) fn find_program_md_link(text: &str) -> Option<ProgramMdLink<'_>> {
         if !is_image {
             continue;
         }
-        return Some(ProgramMdLink {
+        return Some(PlaybookMdLink {
             start,
             end: target_start + target_len + 1,
             name,
@@ -18522,7 +18522,7 @@ pub(crate) fn find_program_md_link(text: &str) -> Option<ProgramMdLink<'_>> {
 
 /// Chip label for an attachment link: kind + (truncated) name, so the chip
 /// stays informative without needing document-wide numbering.
-pub(crate) fn program_md_link_label(name: &str, is_image: bool) -> String {
+pub(crate) fn playbook_md_link_label(name: &str, is_image: bool) -> String {
     let name = name.trim();
     let name = if name.is_empty() { "attachment" } else { name };
     let shown: String = name.chars().take(24).collect();
@@ -18536,7 +18536,7 @@ pub(crate) fn program_md_link_label(name: &str, is_image: bool) -> String {
 /// within the line — is expanded: the image fully replaces the chip
 /// (spec 0099, GitHub semantics), leaving zero cells at the source
 /// position; the image itself carries collapse-on-click and hover info.
-enum ProgramChipRender {
+enum PlaybookChipRender {
     /// Collapsed: the compact `[Image: name]` chip label.
     Label(String),
     /// Expanded: the link renders as its inline image block of this many
@@ -18544,46 +18544,46 @@ enum ProgramChipRender {
     Block(u16),
 }
 
-fn program_md_chip_render(
+fn playbook_md_chip_render(
     app: Option<&App>,
-    link: &ProgramMdLink<'_>,
+    link: &PlaybookMdLink<'_>,
     line_key: Option<u64>,
     idx: usize,
-) -> ProgramChipRender {
+) -> PlaybookChipRender {
     if link.is_image {
         if let Some(lk) = line_key {
             if let Some((_, rows)) = app
-                .and_then(|a| a.program_popup.as_ref())
+                .and_then(|a| a.playbook_popup.as_ref())
                 .and_then(|p| p.expanded_attachments.get(&(lk, idx)))
             {
-                return ProgramChipRender::Block(*rows);
+                return PlaybookChipRender::Block(*rows);
             }
         }
     }
-    ProgramChipRender::Label(program_md_link_label(link.name, link.is_image))
+    PlaybookChipRender::Label(playbook_md_link_label(link.name, link.is_image))
 }
 
 /// Default and bounds for an expanded inline attachment image's height, in
 /// body rows (spec 0099). Client-local; drag-resize adjusts within bounds.
-pub(crate) const PROGRAM_ATTACHMENT_DEFAULT_ROWS: u16 = 12;
-pub(crate) const PROGRAM_ATTACHMENT_MIN_ROWS: u16 = 3;
-pub(crate) const PROGRAM_ATTACHMENT_MAX_ROWS: u16 = 40;
+pub(crate) const PLAYBOOK_ATTACHMENT_DEFAULT_ROWS: u16 = 12;
+pub(crate) const PLAYBOOK_ATTACHMENT_MIN_ROWS: u16 = 3;
+pub(crate) const PLAYBOOK_ATTACHMENT_MAX_ROWS: u16 = 40;
 
 /// Expanded inline image state for a source line (spec 0099): when `raw` is a
-/// standalone image link whose path the active program popup has expanded,
+/// standalone image link whose path the active playbook popup has expanded,
 /// returns (path, image rows). The line then renders as its chip row plus
 /// that many image rows — produced by padding the rendered text (see
-/// [`program_attachment_pad`]) so every wrap-math consumer counts the same
+/// [`playbook_attachment_pad`]) so every wrap-math consumer counts the same
 /// height without bespoke cases.
-/// Identity of one image-link *instance* in the program doc (spec 0099):
+/// Identity of one image-link *instance* in the playbook doc (spec 0099):
 /// the containing line's content hash plus the link's index within that
 /// line. Same path on two lines — or twice on one line — gets independent
 /// expansion state; and because the key is content-derived, breaking a link
 /// mid-edit and re-completing it restores the same key, so the image
 /// re-expands the moment the link is whole again.
-pub(crate) type ProgramAttachmentKey = (u64, usize);
+pub(crate) type PlaybookAttachmentKey = (u64, usize);
 
-pub(crate) fn program_line_key(raw: &str) -> u64 {
+pub(crate) fn playbook_line_key(raw: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut hasher);
@@ -18595,11 +18595,11 @@ pub(crate) fn program_line_key(raw: &str) -> u64 {
 /// independent expansion state. Every layout walker threads one `dups` map
 /// per pass from the top of the document; the first occurrence keeps the
 /// plain content hash (the blend is identity at ordinal 0).
-pub(crate) fn program_line_instance(
+pub(crate) fn playbook_line_instance(
     dups: &mut std::collections::HashMap<u64, usize>,
     raw: &str,
 ) -> u64 {
-    let hash = program_line_key(raw);
+    let hash = playbook_line_key(raw);
     let ordinal = match dups.entry(hash) {
         std::collections::hash_map::Entry::Occupied(mut e) => {
             *e.get_mut() += 1;
@@ -18616,13 +18616,13 @@ pub(crate) fn program_line_instance(
 /// Every image-link instance in `markdown`, in document order, with its
 /// expansion key and target path. Drives expansion-state reconciliation
 /// after edits (spec 0099).
-pub(crate) fn program_attachment_instances(markdown: &str) -> Vec<((u64, usize), String)> {
+pub(crate) fn playbook_attachment_instances(markdown: &str) -> Vec<((u64, usize), String)> {
     let mut out = Vec::new();
     let mut dups = std::collections::HashMap::new();
     for raw in markdown.lines() {
-        let li = program_line_instance(&mut dups, raw);
+        let li = playbook_line_instance(&mut dups, raw);
         let trimmed = raw.trim();
-        if program_heading_content(raw).is_some()
+        if playbook_heading_content(raw).is_some()
             || trimmed.starts_with(":::clip")
             || trimmed == ":::"
         {
@@ -18630,7 +18630,7 @@ pub(crate) fn program_attachment_instances(markdown: &str) -> Vec<((u64, usize),
         }
         let mut rest = raw;
         let mut idx = 0usize;
-        while let Some(link) = find_program_md_link(rest) {
+        while let Some(link) = find_playbook_md_link(rest) {
             out.push(((li, idx), link.path.to_string()));
             rest = &rest[link.end..];
             idx += 1;
@@ -18643,7 +18643,7 @@ pub(crate) fn program_attachment_instances(markdown: &str) -> Vec<((u64, usize),
 /// expanded image's rows (spec 0099): moving down skips to the first row
 /// below the block, moving up to the last row above it. Without this,
 /// visual-row motion maps back into the block and the caret gets stuck.
-pub(crate) fn program_skip_attachment_rows(
+pub(crate) fn playbook_skip_attachment_rows(
     app: Option<&App>,
     markdown: &str,
     target_row: usize,
@@ -18654,9 +18654,9 @@ pub(crate) fn program_skip_attachment_rows(
     let mut row_base = 0usize;
     let mut dups = std::collections::HashMap::new();
     for raw in markdown.lines() {
-        let li = program_line_instance(&mut dups, raw);
-        let (rendered, clips) = program_rendered_line_with_clips(app, raw, width, li);
-        let starts = program_wrap_row_starts(&rendered, width);
+        let li = playbook_line_instance(&mut dups, raw);
+        let (rendered, clips) = playbook_rendered_line_with_clips(app, raw, width, li);
+        let starts = playbook_wrap_row_starts(&rendered, width);
         let rows = starts.len().max(1);
         if target_row < row_base + rows {
             for clip in &clips {
@@ -18667,7 +18667,7 @@ pub(crate) fn program_skip_attachment_rows(
                 else {
                     continue;
                 };
-                let (row_in_line, _) = program_wrap_locate(&starts, clip.visual_start + 1, width);
+                let (row_in_line, _) = playbook_wrap_locate(&starts, clip.visual_start + 1, width);
                 let img_first = row_base + row_in_line;
                 let img_last = img_first + (*img_rows as usize).saturating_sub(1);
                 if target_row >= img_first && target_row <= img_last {
@@ -18690,7 +18690,7 @@ pub(crate) fn program_skip_attachment_rows(
 /// centered) and the top. `paint_resized_quadrants` center-crops within the
 /// rect it's given, so passing an exact-fit rect eliminates the letterbox
 /// centering.
-fn program_attachment_draw_rect(dims: (u32, u32), rect: Rect) -> Rect {
+fn playbook_attachment_draw_rect(dims: (u32, u32), rect: Rect) -> Rect {
     let (ow, oh) = blit_scale_dims(dims, rect, false);
     Rect {
         x: rect.x,
@@ -18710,7 +18710,7 @@ fn program_attachment_draw_rect(dims: (u32, u32), rect: Rect) -> Rect {
 /// image like a Markdown renderer. Braille blank is NOT
 /// `char::is_whitespace`, so the wrap math and ratatui agree on it, and it
 /// paints as a blank glyph the image blits over.
-fn program_attachment_block(width: usize, rows: u16) -> String {
+fn playbook_attachment_block(width: usize, rows: u16) -> String {
     if width < 2 || rows == 0 {
         return String::new();
     }
@@ -18721,29 +18721,29 @@ fn program_attachment_block(width: usize, rows: u16) -> String {
 /// The next inline token — smart clip or attachment link — in `text`, with
 /// its byte offset. The shared scanner keeps the rendered-text, hit-testing,
 /// and painting passes tokenizing identically.
-enum ProgramInlineToken<'a> {
+enum PlaybookInlineToken<'a> {
     /// `@{…}`: the clip body and the full source length in bytes.
     Clip {
         raw: &'a str,
         src_len: usize,
     },
-    Link(ProgramMdLink<'a>),
+    Link(PlaybookMdLink<'a>),
 }
 
-fn next_program_inline_token(text: &str) -> Option<(usize, ProgramInlineToken<'_>)> {
+fn next_playbook_inline_token(text: &str) -> Option<(usize, PlaybookInlineToken<'_>)> {
     let clip = text.find("@{").and_then(|start| {
         text[start + 2..].find('}').map(|end| {
             let raw = &text[start + 2..start + 2 + end];
             (
                 start,
-                ProgramInlineToken::Clip {
+                PlaybookInlineToken::Clip {
                     raw,
                     src_len: end + 3,
                 },
             )
         })
     });
-    let link = find_program_md_link(text).map(|l| (l.start, ProgramInlineToken::Link(l)));
+    let link = find_playbook_md_link(text).map(|l| (l.start, PlaybookInlineToken::Link(l)));
     match (clip, link) {
         (Some(c), Some(l)) => Some(if c.0 <= l.0 { c } else { l }),
         (c, l) => c.or(l),
@@ -18755,7 +18755,7 @@ fn next_program_inline_token(text: &str) -> Option<(usize, ProgramInlineToken<'_
 /// the surrounding text untouched. The labels come from the same source as
 /// the painting pass, so the rendered text and the cursor column stay
 /// width-consistent.
-fn program_inline_rendered_text(
+fn playbook_inline_rendered_text(
     app: Option<&App>,
     text: &str,
     line_key: Option<u64>,
@@ -18764,27 +18764,27 @@ fn program_inline_rendered_text(
     let mut out = String::new();
     let mut rest = text;
     let mut link_idx = 0usize;
-    while let Some((start, token)) = next_program_inline_token(rest) {
+    while let Some((start, token)) = next_playbook_inline_token(rest) {
         out.push_str(&rest[..start]);
         let src_len = match token {
-            ProgramInlineToken::Clip { raw, src_len } => {
-                let (_, label) = program_smart_clip_label(app, raw);
+            PlaybookInlineToken::Clip { raw, src_len } => {
+                let (_, label) = playbook_smart_clip_label(app, raw);
                 out.push(' ');
                 out.push_str(&label);
                 out.push(' ');
                 src_len
             }
-            ProgramInlineToken::Link(link) => {
-                match program_md_chip_render(app, &link, line_key, link_idx) {
-                    ProgramChipRender::Label(label) => {
+            PlaybookInlineToken::Link(link) => {
+                match playbook_md_chip_render(app, &link, line_key, link_idx) {
+                    PlaybookChipRender::Label(label) => {
                         out.push(' ');
                         out.push_str(&label);
                         out.push(' ');
                     }
                     // Expanded: the image block IS the link's rendered form,
                     // inline in the flow (spec 0099).
-                    ProgramChipRender::Block(rows) => {
-                        out.push_str(&program_attachment_block(width, rows));
+                    PlaybookChipRender::Block(rows) => {
+                        out.push_str(&playbook_attachment_block(width, rows));
                     }
                 }
                 link_idx += 1;
@@ -18797,7 +18797,7 @@ fn program_inline_rendered_text(
     out
 }
 
-/// One inline chip located within a rendered program line: its display-column
+/// One inline chip located within a rendered playbook line: its display-column
 /// `visual_start` (counting collapsed break-whitespace, before word-wrap), its
 /// `visual_width`, and what it stands for.
 struct LineClip {
@@ -18815,18 +18815,18 @@ enum LineClipKind {
         name: String,
         path: String,
         is_image: bool,
-        key: ProgramAttachmentKey,
+        key: PlaybookAttachmentKey,
         expanded: Option<u16>,
     },
 }
 
-/// Like [`program_inline_rendered_text`] but also reports each smart-clip's
+/// Like [`playbook_inline_rendered_text`] but also reports each smart-clip's
 /// display-column span within the produced text. `base` is the visual column at
 /// which `text` begins on the rendered line (e.g. a bullet's `  • ` prefix), so
 /// the returned spans are in the same coordinate space as
-/// [`program_wrap_row_starts`]. The produced string is byte-for-byte what
-/// `program_inline_rendered_text` returns.
-fn program_inline_with_clips(
+/// [`playbook_wrap_row_starts`]. The produced string is byte-for-byte what
+/// `playbook_inline_rendered_text` returns.
+fn playbook_inline_with_clips(
     app: Option<&App>,
     text: &str,
     base: usize,
@@ -18838,13 +18838,13 @@ fn program_inline_with_clips(
     let mut visual = base;
     let mut rest = text;
     let mut link_idx = 0usize;
-    while let Some((start, token)) = next_program_inline_token(rest) {
+    while let Some((start, token)) = next_playbook_inline_token(rest) {
         let before = &rest[..start];
         out.push_str(before);
         visual += UnicodeWidthStr::width(before);
         let src_len = match token {
-            ProgramInlineToken::Clip { raw, src_len } => {
-                let (_, label) = program_smart_clip_label(app, raw);
+            PlaybookInlineToken::Clip { raw, src_len } => {
+                let (_, label) = playbook_smart_clip_label(app, raw);
                 let w = UnicodeWidthStr::width(label.as_str()) + 2;
                 clips.push(LineClip {
                     visual_start: visual,
@@ -18857,7 +18857,7 @@ fn program_inline_with_clips(
                 visual += w;
                 src_len
             }
-            ProgramInlineToken::Link(link) => {
+            PlaybookInlineToken::Link(link) => {
                 let kind = LineClipKind::Attachment {
                     name: link.name.to_string(),
                     path: link.path.to_string(),
@@ -18865,8 +18865,8 @@ fn program_inline_with_clips(
                     key: (line_key.unwrap_or(0), link_idx),
                     expanded: None,
                 };
-                match program_md_chip_render(app, &link, line_key, link_idx) {
-                    ProgramChipRender::Label(label) => {
+                match playbook_md_chip_render(app, &link, line_key, link_idx) {
+                    PlaybookChipRender::Label(label) => {
                         let w = UnicodeWidthStr::width(label.as_str()) + 2;
                         clips.push(LineClip {
                             visual_start: visual,
@@ -18878,12 +18878,12 @@ fn program_inline_with_clips(
                         out.push(' ');
                         visual += w;
                     }
-                    ProgramChipRender::Block(rows) => {
+                    PlaybookChipRender::Block(rows) => {
                         // The expanded link's block is recorded as a clip so
                         // the image walker can locate its rows; the chip-hit
                         // walker skips expanded entries (the image rect
                         // carries collapse/resize/hover instead).
-                        let block = program_attachment_block(width, rows);
+                        let block = playbook_attachment_block(width, rows);
                         let w = UnicodeWidthStr::width(block.as_str());
                         let LineClipKind::Attachment {
                             name,
@@ -18920,11 +18920,11 @@ fn program_inline_with_clips(
     (out, clips)
 }
 
-/// The plain text the program body paints for one logical line (identical to
-/// [`program_rendered_line_text`]) paired with the display-column spans of every
+/// The plain text the playbook body paints for one logical line (identical to
+/// [`playbook_rendered_line_text`]) paired with the display-column spans of every
 /// smart-clip in it. Computing both from one pass keeps the clip offsets and the
 /// wrapped text perfectly consistent for hit-testing.
-fn program_rendered_line_with_clips(
+fn playbook_rendered_line_with_clips(
     app: Option<&App>,
     raw: &str,
     width: usize,
@@ -18934,7 +18934,7 @@ fn program_rendered_line_with_clips(
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
     let (text, clips) = if trimmed.is_empty() {
         (String::new(), Vec::new())
-    } else if program_heading_content(raw).is_some()
+    } else if playbook_heading_content(raw).is_some()
         || trimmed.starts_with(":::clip")
         || trimmed == ":::"
     {
@@ -18942,12 +18942,12 @@ fn program_rendered_line_with_clips(
         // fence lines paint fixed chip text — neither carries clickable clip
         // spans, so both report the rendered text with no clips.
         (
-            program_rendered_line_text(app, raw, width, line_instance),
+            playbook_rendered_line_text(app, raw, width, line_instance),
             Vec::new(),
         )
-    } else if let Some((_, rest)) = program_list_item_content(raw) {
+    } else if let Some((_, rest)) = playbook_list_item_content(raw) {
         let (body, clips) =
-            program_inline_with_clips(app, rest, leading + 4, Some(line_instance), width);
+            playbook_inline_with_clips(app, rest, leading + 4, Some(line_instance), width);
         (format!("{}  • {body}", " ".repeat(leading)), clips)
     } else {
         let body = raw
@@ -18957,24 +18957,24 @@ fn program_rendered_line_with_clips(
             .unwrap_or("");
         let lead: String = raw.chars().take(leading).collect();
         let (body_text, clips) =
-            program_inline_with_clips(app, body, leading, Some(line_instance), width);
+            playbook_inline_with_clips(app, body, leading, Some(line_instance), width);
         (format!("{lead}{body_text}"), clips)
     };
     (text, clips)
 }
 
 /// On-screen cell ranges of every session smart-clip in `markdown`, laid out in
-/// `area` with the same word-wrap as [`program_cursor_position`] (ratatui's
+/// `area` with the same word-wrap as [`playbook_cursor_position`] (ratatui's
 /// `Wrap { trim: false }`). Each session clip maps to one or more
-/// [`ProgramClipHit`]s (one per wrapped-row segment) so the mouse handler can
+/// [`PlaybookClipHit`]s (one per wrapped-row segment) so the mouse handler can
 /// resolve a cell → session id for hover-preview and click-to-focus. Clips of
 /// other kinds (harness, response) are skipped.
-pub(crate) fn program_session_clip_hits(
+pub(crate) fn playbook_session_clip_hits(
     app: Option<&App>,
     markdown: &str,
     scroll_offset: usize,
     area: Rect,
-) -> Vec<crate::app::ProgramClipHit> {
+) -> Vec<crate::app::PlaybookClipHit> {
     let mut hits = Vec::new();
     if area.width == 0 || area.height == 0 {
         return hits;
@@ -18989,18 +18989,18 @@ pub(crate) fn program_session_clip_hits(
         if visual_row_base >= viewport_end {
             break;
         }
-        let li = program_line_instance(&mut dups, raw);
-        let (rendered, clips) = program_rendered_line_with_clips(app, raw, width, li);
-        let starts = program_wrap_row_starts(&rendered, width);
+        let li = playbook_line_instance(&mut dups, raw);
+        let (rendered, clips) = playbook_rendered_line_with_clips(app, raw, width, li);
+        let starts = playbook_wrap_row_starts(&rendered, width);
         for clip in &clips {
             let LineClipKind::Smart(raw_clip) = &clip.kind else {
                 continue;
             };
-            let (kind, id) = program_smart_clip_target(raw_clip);
+            let (kind, id) = playbook_smart_clip_target(raw_clip);
             if kind != "session" {
                 continue;
             }
-            for (row, col_start, col_end) in program_visual_span_segments(
+            for (row, col_start, col_end) in playbook_visual_span_segments(
                 &starts,
                 clip.visual_start,
                 clip.visual_width,
@@ -19010,7 +19010,7 @@ pub(crate) fn program_session_clip_hits(
                 viewport_end,
                 area,
             ) {
-                hits.push(crate::app::ProgramClipHit {
+                hits.push(crate::app::PlaybookClipHit {
                     col_start,
                     col_end,
                     row,
@@ -19025,14 +19025,14 @@ pub(crate) fn program_session_clip_hits(
 
 /// On-screen cell ranges of every attachment chip (spec 0099) in `markdown`,
 /// registered through the same wrap-aware geometry as
-/// [`program_session_clip_hits`] so hover resolves correctly under scrolling
+/// [`playbook_session_clip_hits`] so hover resolves correctly under scrolling
 /// and word-wrap.
-pub(crate) fn program_attachment_chip_hits(
+pub(crate) fn playbook_attachment_chip_hits(
     app: Option<&App>,
     markdown: &str,
     scroll_offset: usize,
     area: Rect,
-) -> Vec<crate::app::ProgramAttachmentHit> {
+) -> Vec<crate::app::PlaybookAttachmentHit> {
     let mut hits = Vec::new();
     if area.width == 0 || area.height == 0 {
         return hits;
@@ -19045,9 +19045,9 @@ pub(crate) fn program_attachment_chip_hits(
         if visual_row_base >= viewport_end {
             break;
         }
-        let li = program_line_instance(&mut dups, raw);
-        let (rendered, clips) = program_rendered_line_with_clips(app, raw, width, li);
-        let starts = program_wrap_row_starts(&rendered, width);
+        let li = playbook_line_instance(&mut dups, raw);
+        let (rendered, clips) = playbook_rendered_line_with_clips(app, raw, width, li);
+        let starts = playbook_wrap_row_starts(&rendered, width);
         for clip in &clips {
             let LineClipKind::Attachment {
                 name,
@@ -19059,7 +19059,7 @@ pub(crate) fn program_attachment_chip_hits(
             else {
                 continue;
             };
-            for (row, col_start, col_end) in program_visual_span_segments(
+            for (row, col_start, col_end) in playbook_visual_span_segments(
                 &starts,
                 clip.visual_start,
                 clip.visual_width,
@@ -19069,7 +19069,7 @@ pub(crate) fn program_attachment_chip_hits(
                 viewport_end,
                 area,
             ) {
-                hits.push(crate::app::ProgramAttachmentHit {
+                hits.push(crate::app::PlaybookAttachmentHit {
                     col_start,
                     col_end,
                     row,
@@ -19085,12 +19085,12 @@ pub(crate) fn program_attachment_chip_hits(
     hits
 }
 
-/// Map one visual-column span of a rendered program line to its on-screen
+/// Map one visual-column span of a rendered playbook line to its on-screen
 /// `(row, col_start, col_end)` segments, walking each display column through
 /// the wrap math and merging contiguous same-row cells. Shared by smart-clip
 /// and action-link hit-testing so both resolve identically under scrolling
 /// and word-wrap.
-fn program_visual_span_segments(
+fn playbook_visual_span_segments(
     starts: &[usize],
     visual_start: usize,
     visual_width: usize,
@@ -19103,7 +19103,7 @@ fn program_visual_span_segments(
     let mut segments = Vec::new();
     let mut segment: Option<(u16, u16, u16)> = None; // (row, start, end)
     for vcol in visual_start..visual_start.saturating_add(visual_width) {
-        let (row_in_line, col_in_row) = program_wrap_locate(starts, vcol, width);
+        let (row_in_line, col_in_row) = playbook_wrap_locate(starts, vcol, width);
         let abs_row = visual_row_base.saturating_add(row_in_line);
         if abs_row < scroll_offset {
             continue; // above the fold (rows grow with the column)
@@ -19135,24 +19135,24 @@ fn program_visual_span_segments(
 }
 
 /// On-screen cell ranges of every `[label](agentd:action/…)` link in the
-/// program body — the editor's clickable-affordance sibling of
-/// [`program_session_clip_hits`], registered through the same wrap-aware
+/// playbook body — the editor's clickable-affordance sibling of
+/// [`playbook_session_clip_hits`], registered through the same wrap-aware
 /// geometry so clicks resolve correctly under scrolling and wrapping. The
 /// link text renders literally on this surface (an editor never collapses
 /// source), so ranges come from scanning the rendered line text; visual
 /// columns account for smart-clip chip expansion earlier in the line.
-pub(crate) fn program_action_link_hits(
+pub(crate) fn playbook_action_link_hits(
     app: Option<&App>,
     markdown: &str,
     session_id: &str,
     scroll_offset: usize,
     area: Rect,
-) -> Vec<crate::app::ProgramActionLinkHit> {
+) -> Vec<crate::app::PlaybookActionLinkHit> {
     let mut hits = Vec::new();
     if area.width == 0 || area.height == 0 {
         return hits;
     }
-    if !surface_allows_extension(construct_protocol::dialect::SURFACE_PROGRAM, "action-link") {
+    if !surface_allows_extension(construct_protocol::dialect::SURFACE_PLAYBOOK, "action-link") {
         return hits;
     }
     let width = area.width as usize;
@@ -19163,13 +19163,13 @@ pub(crate) fn program_action_link_hits(
         if visual_row_base >= viewport_end {
             break;
         }
-        let li = program_line_instance(&mut dups, raw);
-        let rendered = program_rendered_line_text(app, raw, width, li);
-        let starts = program_wrap_row_starts(&rendered, width);
+        let li = playbook_line_instance(&mut dups, raw);
+        let rendered = playbook_rendered_line_text(app, raw, width, li);
+        let starts = playbook_wrap_row_starts(&rendered, width);
         for link in scan_agentd_action_links(&rendered) {
             let visual_start = UnicodeWidthStr::width(&rendered[..link.start]);
             let visual_width = UnicodeWidthStr::width(&rendered[link.start..link.end]);
-            for (row, col_start, col_end) in program_visual_span_segments(
+            for (row, col_start, col_end) in playbook_visual_span_segments(
                 &starts,
                 visual_start,
                 visual_width,
@@ -19179,7 +19179,7 @@ pub(crate) fn program_action_link_hits(
                 viewport_end,
                 area,
             ) {
-                hits.push(crate::app::ProgramActionLinkHit {
+                hits.push(crate::app::PlaybookActionLinkHit {
                     col_start,
                     col_end,
                     row,
@@ -19199,7 +19199,7 @@ pub(crate) fn program_action_link_hits(
     hits
 }
 
-fn program_line_col(markdown: &str, cursor: usize) -> (usize, usize) {
+fn playbook_line_col(markdown: &str, cursor: usize) -> (usize, usize) {
     let mut line = 0usize;
     let mut col = 0usize;
     for (idx, ch) in markdown.chars().enumerate() {
@@ -19216,7 +19216,7 @@ fn program_line_col(markdown: &str, cursor: usize) -> (usize, usize) {
     (line, col)
 }
 
-fn program_visual_col_for_line(
+fn playbook_visual_col_for_line(
     app: Option<&App>,
     raw: &str,
     raw_col: usize,
@@ -19226,21 +19226,21 @@ fn program_visual_col_for_line(
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
     let col = raw_col.saturating_sub(leading);
     let trimmed = raw.trim();
-    if let Some((_, content)) = program_heading_content(raw) {
+    if let Some((_, content)) = playbook_heading_content(raw) {
         // `content` keeps any trailing space (sliced from the raw line, leading
         // indent stripped) so the cursor column advances past a space typed at the
         // end of the heading — matching the glyphs the renderer paints. Headings
         // paint literally (no chip expansion), so the width is the literal
         // prefix width.
-        program_prefix_display_width(content, col)
+        playbook_prefix_display_width(content, col)
     } else if trimmed.starts_with(":::clip") || trimmed == ":::" {
         // Fence lines paint as fixed chip text whose glyphs don't correspond
         // 1:1 to the source chars; measure the source column literally and
         // clamp it into the painted width so the caret stays on the line (and
         // end-of-line clicks resolve to the line's last offset).
-        let rendered = program_rendered_line_text(app, raw, 0, line_instance);
-        program_prefix_display_width(raw, raw_col).min(UnicodeWidthStr::width(rendered.as_str()))
-    } else if let Some((_, rest)) = program_list_item_content(raw) {
+        let rendered = playbook_rendered_line_text(app, raw, 0, line_instance);
+        playbook_prefix_display_width(raw, raw_col).min(UnicodeWidthStr::width(rendered.as_str()))
+    } else if let Some((_, rest)) = playbook_list_item_content(raw) {
         // Mirror the proportional indent rendered for nested bullets: the bullet
         // glyph and text sit `leading` columns further right than a top-level
         // item, so the cursor column must account for the same offset. The `- `/
@@ -19248,7 +19248,7 @@ fn program_visual_col_for_line(
         // `rest` keeps any trailing space so the column advances past it.
         leading
             + 4
-            + program_inline_visual_width(
+            + playbook_inline_visual_width(
                 app,
                 rest,
                 col.saturating_sub(2),
@@ -19264,11 +19264,11 @@ fn program_visual_col_for_line(
             .map(|(idx, _)| &raw[idx..])
             .unwrap_or("");
         leading
-            + program_inline_visual_width(app, body, raw_col - leading, Some(line_instance), width)
+            + playbook_inline_visual_width(app, body, raw_col - leading, Some(line_instance), width)
     }
 }
 
-fn program_inline_visual_width(
+fn playbook_inline_visual_width(
     app: Option<&App>,
     text: &str,
     raw_col: usize,
@@ -19283,27 +19283,27 @@ fn program_inline_visual_width(
     // every chip — smart clip or attachment link — is atomic for the cursor.
     // A raw column strictly inside a chip's source maps to the chip's end,
     // so the caret can never paint mid-chip.
-    while let Some((start_b, token)) = next_program_inline_token(rest) {
+    while let Some((start_b, token)) = next_playbook_inline_token(rest) {
         let before = &rest[..start_b];
         let before_len = before.chars().count();
         if raw_col <= raw + before_len {
-            return visual + program_prefix_display_width(before, raw_col - raw);
+            return visual + playbook_prefix_display_width(before, raw_col - raw);
         }
         visual += UnicodeWidthStr::width(before);
         raw += before_len;
 
         let (chip_width, src_len) = match &token {
-            ProgramInlineToken::Clip {
+            PlaybookInlineToken::Clip {
                 raw: raw_clip,
                 src_len,
-            } => (program_smart_clip_visual_width(app, raw_clip), *src_len),
-            ProgramInlineToken::Link(link) => {
+            } => (playbook_smart_clip_visual_width(app, raw_clip), *src_len),
+            PlaybookInlineToken::Link(link) => {
                 // An expanded image's chip width is its inline block width,
                 // so following text maps onto the rows below it.
-                let w = match program_md_chip_render(app, link, line_key, link_idx) {
-                    ProgramChipRender::Label(label) => UnicodeWidthStr::width(label.as_str()) + 2,
-                    ProgramChipRender::Block(rows) => {
-                        UnicodeWidthStr::width(program_attachment_block(wrap_width, rows).as_str())
+                let w = match playbook_md_chip_render(app, link, line_key, link_idx) {
+                    PlaybookChipRender::Label(label) => UnicodeWidthStr::width(label.as_str()) + 2,
+                    PlaybookChipRender::Block(rows) => {
+                        UnicodeWidthStr::width(playbook_attachment_block(wrap_width, rows).as_str())
                     }
                 };
                 link_idx += 1;
@@ -19318,17 +19318,17 @@ fn program_inline_visual_width(
         raw += src_chars;
         rest = &rest[start_b + src_len..];
     }
-    visual + program_prefix_display_width(rest, raw_col.saturating_sub(raw))
+    visual + playbook_prefix_display_width(rest, raw_col.saturating_sub(raw))
 }
 
-fn program_selection_range(popup: &crate::app::ProgramPopup) -> Option<(usize, usize)> {
+fn playbook_selection_range(popup: &crate::app::PlaybookPopup) -> Option<(usize, usize)> {
     let selection = popup.selection.as_ref()?;
     let start = selection.anchor.min(selection.head);
     let end = selection.anchor.max(selection.head);
     (start != end).then_some((start, end))
 }
 
-fn render_program_markdown_lines<'a>(
+fn render_playbook_markdown_lines<'a>(
     app: &App,
     markdown: &'a str,
     width: usize,
@@ -19336,11 +19336,11 @@ fn render_program_markdown_lines<'a>(
     search_matches: Option<&'a [(usize, usize)]>,
     search_selected: Option<usize>,
 ) -> Vec<Line<'a>> {
-    // Action links are part of the shared dialect on the program surface too
+    // Action links are part of the shared dialect on the playbook surface too
     // (spec 0074); consult the registry rather than hardcoding it, so a
     // future restriction lands here without a code change.
     let action_links_enabled =
-        surface_allows_extension(construct_protocol::dialect::SURFACE_PROGRAM, "action-link");
+        surface_allows_extension(construct_protocol::dialect::SURFACE_PLAYBOOK, "action-link");
     let mut out = Vec::new();
     let mut line_start = 0usize;
     let mut dups = std::collections::HashMap::new();
@@ -19351,22 +19351,22 @@ fn render_program_markdown_lines<'a>(
         // buffer char offsets — the editor styles the literal source text as
         // an interactive span (never collapsing it, so cursor math and
         // editing stay untouched) and registers click hits separately via
-        // `program_action_link_hits`.
+        // `playbook_action_link_hits`.
         let action_ranges: Vec<(usize, usize)> = if action_links_enabled {
-            program_line_action_link_char_ranges(raw, line_start)
+            playbook_line_action_link_char_ranges(raw, line_start)
         } else {
             Vec::new()
         };
-        let li = program_line_instance(&mut dups, raw);
+        let li = playbook_line_instance(&mut dups, raw);
         if trimmed.is_empty() {
             out.push(Line::from(""));
-        } else if let Some(level) = program_heading_level(trimmed) {
+        } else if let Some(level) = playbook_heading_level(trimmed) {
             // Slice the heading text from the raw line (leading indent stripped,
             // trailing whitespace kept) so a space typed at the end of the heading
             // paints a cell for the cursor to land on. `raw.trim()` would drop it,
             // desyncing the caret from the rendered glyphs.
-            let content = program_heading_content(raw).map_or(trimmed, |(_, c)| c);
-            out.push(render_program_heading_line(
+            let content = playbook_heading_content(raw).map_or(trimmed, |(_, c)| c);
+            out.push(render_playbook_heading_line(
                 &app.theme,
                 level,
                 content,
@@ -19380,7 +19380,7 @@ fn render_program_markdown_lines<'a>(
             // them are ordinary checklist lines and get the shared glyph
             // colors below — one visual line per source line, no connector
             // rows (this is an editable surface with cursor mapping).
-            out.push(Line::from(program_text_spans(
+            out.push(Line::from(playbook_text_spans(
                 &app.theme,
                 raw,
                 line_start,
@@ -19390,7 +19390,7 @@ fn render_program_markdown_lines<'a>(
                 search_selected,
                 &[],
             )));
-        } else if let Some((_, rest)) = program_list_item_content(raw) {
+        } else if let Some((_, rest)) = playbook_list_item_content(raw) {
             // Nesting is encoded as leading spaces on the source line; render it
             // as proportional indentation before the bullet so deeper items sit
             // visibly further right than their parents. `rest` keeps any trailing
@@ -19415,7 +19415,7 @@ fn render_program_markdown_lines<'a>(
             };
             let bullet = format!("{}  • ", " ".repeat(leading));
             let mut spans = vec![Span::styled(bullet, bullet_style)];
-            spans.extend(render_program_inline_spans(
+            spans.extend(render_playbook_inline_spans(
                 app,
                 rest,
                 line_start + leading + 2,
@@ -19430,12 +19430,12 @@ fn render_program_markdown_lines<'a>(
             out.push(Line::from(spans));
         } else if let Some(rest) = trimmed.strip_prefix(":::clip") {
             // Every clip fence renders as an inert chip on this surface —
-            // program-section projection is widget-only per the dialect
-            // registry's recorded restriction, so `:::clip program` never
+            // playbook-section projection is widget-only per the dialect
+            // registry's recorded restriction, so `:::clip playbook` never
             // recurses here.
             out.push(Line::from(vec![
                 Span::raw("  "),
-                program_chip_span(
+                playbook_chip_span(
                     format!("clip {}", rest.trim()).trim(),
                     app.theme.highlight_fg,
                     app.theme.info,
@@ -19450,7 +19450,7 @@ fn render_program_markdown_lines<'a>(
             // GFM table delimiter rows render dim; content rows stay plain
             // text (full table layout is out of scope for the editor — one
             // visual line per source line).
-            out.push(Line::from(program_text_spans(
+            out.push(Line::from(playbook_text_spans(
                 &app.theme,
                 raw,
                 line_start,
@@ -19461,7 +19461,7 @@ fn render_program_markdown_lines<'a>(
                 &[],
             )));
         } else {
-            let spans = render_program_inline_spans(
+            let spans = render_playbook_inline_spans(
                 app,
                 raw,
                 line_start,
@@ -19483,7 +19483,7 @@ fn render_program_markdown_lines<'a>(
 /// Absolute buffer char ranges (matching the selection/search coordinate
 /// space) of every `[label](agentd:action/…)` construct on `raw`, whose
 /// first char sits at buffer char offset `line_start`.
-fn program_line_action_link_char_ranges(raw: &str, line_start: usize) -> Vec<(usize, usize)> {
+fn playbook_line_action_link_char_ranges(raw: &str, line_start: usize) -> Vec<(usize, usize)> {
     scan_agentd_action_links(raw)
         .into_iter()
         .map(|link| {
@@ -19495,15 +19495,15 @@ fn program_line_action_link_char_ranges(raw: &str, line_start: usize) -> Vec<(us
 }
 
 #[cfg(test)]
-pub(crate) fn render_program_markdown_lines_for_test<'a>(
+pub(crate) fn render_playbook_markdown_lines_for_test<'a>(
     app: &App,
     markdown: &'a str,
 ) -> Vec<Line<'a>> {
-    render_program_markdown_lines(app, markdown, 80, None, None, None)
+    render_playbook_markdown_lines(app, markdown, 80, None, None, None)
 }
 
 /// Widget-surface renderer entry point for tests outside this module (the
-/// app-level tests exercising live chip status and program projections).
+/// app-level tests exercising live chip status and playbook projections).
 #[cfg(test)]
 pub(crate) fn render_agentd_markdown_lines_for_test(
     app: Option<&App>,
@@ -19511,7 +19511,7 @@ pub(crate) fn render_agentd_markdown_lines_for_test(
     theme: &Theme,
     area: Rect,
     session_id: Option<&str>,
-    wanted_programs: &mut Vec<String>,
+    wanted_playbooks: &mut Vec<String>,
 ) -> Vec<Line<'static>> {
     let mut hits = Vec::new();
     let mut url_hits = Vec::new();
@@ -19526,11 +19526,11 @@ pub(crate) fn render_agentd_markdown_lines_for_test(
         &mut hits,
         &mut url_hits,
         false,
-        wanted_programs,
+        wanted_playbooks,
     )
 }
 
-fn program_heading_level(trimmed: &str) -> Option<u8> {
+fn playbook_heading_level(trimmed: &str) -> Option<u8> {
     if trimmed.starts_with("### ") {
         Some(3)
     } else if trimmed.starts_with("## ") {
@@ -19542,7 +19542,7 @@ fn program_heading_level(trimmed: &str) -> Option<u8> {
     }
 }
 
-fn render_program_heading_line<'a>(
+fn render_playbook_heading_line<'a>(
     theme: &Theme,
     level: u8,
     text: &'a str,
@@ -19557,7 +19557,7 @@ fn render_program_heading_line<'a>(
         _ => theme.info,
     };
     let style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
-    Line::from(program_text_spans(
+    Line::from(playbook_text_spans(
         theme,
         text,
         base,
@@ -19569,7 +19569,7 @@ fn render_program_heading_line<'a>(
     ))
 }
 
-fn render_program_inline_spans<'a>(
+fn render_playbook_inline_spans<'a>(
     app: &App,
     text: &'a str,
     base: usize,
@@ -19585,10 +19585,10 @@ fn render_program_inline_spans<'a>(
     let mut rest = text;
     let mut offset = 0usize;
     let mut link_idx = 0usize;
-    while let Some((start, token)) = next_program_inline_token(rest) {
+    while let Some((start, token)) = next_playbook_inline_token(rest) {
         let before = &rest[..start];
         if !before.is_empty() {
-            spans.extend(program_text_spans(
+            spans.extend(playbook_text_spans(
                 &app.theme,
                 before,
                 base + offset,
@@ -19601,8 +19601,8 @@ fn render_program_inline_spans<'a>(
         }
         let before_chars = before.chars().count();
         let src_len = match &token {
-            ProgramInlineToken::Clip { src_len, .. } => *src_len,
-            ProgramInlineToken::Link(link) => link.end - link.start,
+            PlaybookInlineToken::Clip { src_len, .. } => *src_len,
+            PlaybookInlineToken::Link(link) => link.end - link.start,
         };
         let src_chars = rest[start..start + src_len].chars().count();
         let chip_char_start = base + offset + before_chars;
@@ -19614,8 +19614,8 @@ fn render_program_inline_spans<'a>(
         });
         let chip_is_active_match = chip_match_idx.is_some_and(|idx| search_selected == Some(idx));
         match token {
-            ProgramInlineToken::Clip { raw, .. } => {
-                spans.push(program_smart_clip_span(
+            PlaybookInlineToken::Clip { raw, .. } => {
+                spans.push(playbook_smart_clip_span(
                     Some(app),
                     &app.theme,
                     raw,
@@ -19623,8 +19623,8 @@ fn render_program_inline_spans<'a>(
                     chip_is_active_match,
                 ));
             }
-            ProgramInlineToken::Link(link) => {
-                spans.push(program_attachment_chip_span(
+            PlaybookInlineToken::Link(link) => {
+                spans.push(playbook_attachment_chip_span(
                     Some(app),
                     &app.theme,
                     &link,
@@ -19641,7 +19641,7 @@ fn render_program_inline_spans<'a>(
         rest = &rest[start + src_len..];
     }
     if !rest.is_empty() {
-        spans.extend(program_text_spans(
+        spans.extend(playbook_text_spans(
             &app.theme,
             rest,
             base + offset,
@@ -19659,10 +19659,10 @@ fn render_program_inline_spans<'a>(
 /// `[File: name]` pill an inline attachment link renders as. Static styling —
 /// liveness/status concepts don't apply to files; the hover card carries the
 /// details.
-fn program_attachment_chip_span(
+fn playbook_attachment_chip_span(
     app: Option<&App>,
     theme: &Theme,
-    link: &ProgramMdLink<'_>,
+    link: &PlaybookMdLink<'_>,
     line_key: Option<u64>,
     link_idx: usize,
     wrap_width: usize,
@@ -19671,10 +19671,10 @@ fn program_attachment_chip_span(
 ) -> Span<'static> {
     // Expanded image: the chip paints as its inline blank block, which the
     // image blits over after the Paragraph renders (spec 0099).
-    let label = match program_md_chip_render(app, link, line_key, link_idx) {
-        ProgramChipRender::Label(label) => label,
-        ProgramChipRender::Block(rows) => {
-            return Span::raw(program_attachment_block(wrap_width, rows));
+    let label = match playbook_md_chip_render(app, link, line_key, link_idx) {
+        PlaybookChipRender::Label(label) => label,
+        PlaybookChipRender::Block(rows) => {
+            return Span::raw(playbook_attachment_block(wrap_width, rows));
         }
     };
     let bg = if is_active_match || in_match {
@@ -19691,7 +19691,7 @@ fn program_attachment_chip_span(
     Span::styled(format!(" {label} "), style)
 }
 
-fn program_text_spans<'a>(
+fn playbook_text_spans<'a>(
     theme: &Theme,
     text: &str,
     base: usize,
@@ -19710,7 +19710,7 @@ fn program_text_spans<'a>(
     for (idx, ch) in text.chars().enumerate() {
         let absolute_idx = base + idx;
         let match_idx =
-            search_matches.and_then(|matches| program_search_match_index(matches, absolute_idx));
+            search_matches.and_then(|matches| playbook_search_match_index(matches, absolute_idx));
         let in_match = Some(match_idx.is_some());
         let in_active_match =
             Some(search_selected.is_some_and(|selected| Some(selected) == match_idx));
@@ -19729,7 +19729,7 @@ fn program_text_spans<'a>(
             if !chunk.is_empty() {
                 spans.push(Span::styled(
                     std::mem::take(&mut chunk),
-                    program_text_span_style(
+                    playbook_text_span_style(
                         theme,
                         style,
                         chunk_selected,
@@ -19749,7 +19749,7 @@ fn program_text_spans<'a>(
     if !chunk.is_empty() {
         spans.push(Span::styled(
             chunk,
-            program_text_span_style(
+            playbook_text_span_style(
                 theme,
                 style,
                 chunk_selected,
@@ -19762,7 +19762,7 @@ fn program_text_spans<'a>(
     spans
 }
 
-fn program_text_span_style(
+fn playbook_text_span_style(
     theme: &Theme,
     mut style: Style,
     selected: Option<bool>,
@@ -19792,27 +19792,27 @@ fn program_text_span_style(
     style
 }
 
-fn program_search_match_index(matches: &[(usize, usize)], idx: usize) -> Option<usize> {
+fn playbook_search_match_index(matches: &[(usize, usize)], idx: usize) -> Option<usize> {
     matches
         .iter()
         .enumerate()
         .find_map(|(i, &(start, end))| (idx >= start && idx < end).then_some(i))
 }
 
-/// The ONE smart-clip chip builder (spec 0074): both the program surface and
+/// The ONE smart-clip chip builder (spec 0074): both the playbook surface and
 /// the widget surface render `@{…}` typed references through this function,
 /// so a session chip carries the same label, live status color, and
 /// missing-reference strike-through everywhere. Without an `App` (measuring
 /// paths, tests) it degrades to an inert chip with a static label — "not
 /// loaded yet" rather than "deleted".
-fn program_smart_clip_span<'a>(
+fn playbook_smart_clip_span<'a>(
     app: Option<&App>,
     theme: &Theme,
     raw_clip: &str,
     in_match: bool,
     is_active_match: bool,
 ) -> Span<'a> {
-    let (kind, label) = program_smart_clip_label(app, raw_clip);
+    let (kind, label) = playbook_smart_clip_label(app, raw_clip);
     let mut modifier = Modifier::BOLD;
     let bg = if is_active_match || in_match {
         theme.highlight_bg
@@ -19820,15 +19820,15 @@ fn program_smart_clip_span<'a>(
         match kind {
             "session" => match app {
                 Some(app) => {
-                    let status = program_session_clip_status(app, raw_clip);
+                    let status = playbook_session_clip_status(app, raw_clip);
                     if status.is_none() {
                         // A dead reference reads as struck-through, not just
                         // recolored, so it's unmistakable at a glance.
                         modifier |= Modifier::CROSSED_OUT;
-                    } else if program_session_chip_is_dimmed(status) {
+                    } else if playbook_session_chip_is_dimmed(status) {
                         modifier |= Modifier::DIM;
                     }
-                    program_session_chip_bg(theme, status)
+                    playbook_session_chip_bg(theme, status)
                 }
                 None => theme.muted,
             },
@@ -19848,8 +19848,8 @@ fn program_smart_clip_span<'a>(
 /// `None` means the referenced session id no longer resolves against the
 /// fleet (deleted, archived, or never existed) — the chip renders that as
 /// "missing" rather than silently keeping whatever color it last had.
-fn program_session_clip_status(app: &App, raw_clip: &str) -> Option<SessionState> {
-    let (_, id) = program_smart_clip_target(raw_clip);
+fn playbook_session_clip_status(app: &App, raw_clip: &str) -> Option<SessionState> {
+    let (_, id) = playbook_smart_clip_target(raw_clip);
     app.sessions.iter().find(|s| s.id == id).map(|s| s.state)
 }
 
@@ -19860,11 +19860,11 @@ fn program_session_clip_status(app: &App, raw_clip: &str) -> Option<SessionState
 /// reference looks the same as before this badge existed; every other status
 /// gets its own color so a state change — especially a worker dying — is
 /// visible at a glance without reading the label text. `Done` is additionally
-/// rendered with [`Modifier::DIM`] (see `program_smart_clip_span`) so a
+/// rendered with [`Modifier::DIM`] (see `playbook_smart_clip_span`) so a
 /// settled clip visually recedes next to an in-progress one at full
 /// brightness, rather than the two competing for attention with equally
 /// vivid colors.
-fn program_session_chip_bg(theme: &Theme, status: Option<SessionState>) -> ratatui::style::Color {
+fn playbook_session_chip_bg(theme: &Theme, status: Option<SessionState>) -> ratatui::style::Color {
     match status {
         Some(SessionState::Pending) => theme.muted,
         Some(SessionState::Running) | Some(SessionState::AwaitingInput) => theme.success,
@@ -19879,7 +19879,7 @@ fn program_session_chip_bg(theme: &Theme, status: Option<SessionState>) -> ratat
 /// (`Done`) target — an in-progress, queued, paused, errored, or unresolved
 /// reference stays at normal brightness so it doesn't compete for attention
 /// with (or get mistaken for) a completed one.
-fn program_session_chip_is_dimmed(status: Option<SessionState>) -> bool {
+fn playbook_session_chip_is_dimmed(status: Option<SessionState>) -> bool {
     matches!(status, Some(SessionState::Done))
 }
 
@@ -19888,7 +19888,7 @@ fn program_session_chip_is_dimmed(status: Option<SessionState>) -> bool {
 /// actually reads on hover: an errored worker reads as "exited with error"
 /// (not the internal word "errored"), and an unresolved session id reads as
 /// "session deleted" rather than "missing".
-fn program_session_clip_status_tooltip(status: Option<SessionState>) -> &'static str {
+fn playbook_session_clip_status_tooltip(status: Option<SessionState>) -> &'static str {
     match status {
         Some(SessionState::Pending) => "pending",
         Some(SessionState::Running) => "running",
@@ -19900,15 +19900,15 @@ fn program_session_clip_status_tooltip(status: Option<SessionState>) -> &'static
     }
 }
 
-fn program_smart_clip_visual_width(app: Option<&App>, raw_clip: &str) -> usize {
-    let (_, label) = program_smart_clip_label(app, raw_clip);
+fn playbook_smart_clip_visual_width(app: Option<&App>, raw_clip: &str) -> usize {
+    let (_, label) = playbook_smart_clip_label(app, raw_clip);
     UnicodeWidthStr::width(label.as_str()) + 2
 }
 
 /// Parse a smart-clip body (`session:abc`, `harness:codex`, or
 /// `session:abc clip_id=3`) into its `(kind, id)`. The kind selects the chip
 /// styling and label; the id resolves the referenced session/harness.
-fn program_smart_clip_target(raw_clip: &str) -> (&str, &str) {
+fn playbook_smart_clip_target(raw_clip: &str) -> (&str, &str) {
     let first = raw_clip.split_whitespace().next().unwrap_or(raw_clip);
     first.split_once(':').unwrap_or(("clip", first))
 }
@@ -19920,7 +19920,7 @@ fn program_smart_clip_target(raw_clip: &str) -> (&str, &str) {
 /// caller decides static vs. animated (via `session_status_glyph`'s shared
 /// `session_should_animate_status` gate) so this formatter can't fork that
 /// logic.
-fn program_session_clip_label(glyph: &str, s: &construct_protocol::SessionSummary) -> String {
+fn playbook_session_clip_label(glyph: &str, s: &construct_protocol::SessionSummary) -> String {
     format!("{} {} · {}", glyph, primary_label(s), harness_label(s))
 }
 
@@ -19928,20 +19928,20 @@ fn program_session_clip_label(glyph: &str, s: &construct_protocol::SessionSummar
 /// against the live fleet. Carries its own glyph (distinct from any
 /// `SessionState::glyph()`) so a dead reference is visually distinct from a
 /// resolved one, not just a plain fallback string.
-fn program_missing_session_clip_label(id: &str) -> String {
+fn playbook_missing_session_clip_label(id: &str) -> String {
     format!("⊘ {} · missing", short_id(id))
 }
 
-fn program_harness_clip_label(h: &construct_protocol::HarnessInfo) -> String {
+fn playbook_harness_clip_label(h: &construct_protocol::HarnessInfo) -> String {
     let status_icon = if h.available { "✓" } else { "✗" };
     format!("{status_icon} {}", h.name)
 }
 
-pub(crate) fn program_smart_clip_label<'a>(
+pub(crate) fn playbook_smart_clip_label<'a>(
     app: Option<&App>,
     raw_clip: &'a str,
 ) -> (&'a str, String) {
-    let (kind, mut id) = program_smart_clip_target(raw_clip);
+    let (kind, mut id) = playbook_smart_clip_target(raw_clip);
     if kind == "harness" && id == "antigravity" {
         id = "agy";
     }
@@ -19954,8 +19954,8 @@ pub(crate) fn program_smart_clip_label<'a>(
                 .sessions
                 .iter()
                 .find(|s| s.id == id)
-                .map(|s| program_session_clip_label(session_status_glyph(app, s), s))
-                .unwrap_or_else(|| program_missing_session_clip_label(id)),
+                .map(|s| playbook_session_clip_label(session_status_glyph(app, s), s))
+                .unwrap_or_else(|| playbook_missing_session_clip_label(id)),
             None => format!("session {id}"),
         },
         "harness" => app
@@ -19963,7 +19963,7 @@ pub(crate) fn program_smart_clip_label<'a>(
                 app.harnesses
                     .iter()
                     .find(|h| h.name == id)
-                    .map(program_harness_clip_label)
+                    .map(playbook_harness_clip_label)
             })
             .unwrap_or_else(|| format!("harness {id}")),
         "session-response" => format!("response {id}"),
@@ -19972,7 +19972,7 @@ pub(crate) fn program_smart_clip_label<'a>(
     (kind, label)
 }
 
-fn program_chip_span<'a>(
+fn playbook_chip_span<'a>(
     label: impl AsRef<str>,
     fg: ratatui::style::Color,
     bg: ratatui::style::Color,
@@ -21197,8 +21197,8 @@ mod tests {
     }
 
     #[test]
-    fn program_md_link_parses_local_image_links() {
-        let link = find_program_md_link("see ![shot](/a/b/shot.png) here").expect("image link");
+    fn playbook_md_link_parses_local_image_links() {
+        let link = find_playbook_md_link("see ![shot](/a/b/shot.png) here").expect("image link");
         assert_eq!(link.name, "shot");
         assert_eq!(link.path, "/a/b/shot.png");
         assert!(link.is_image);
@@ -21208,35 +21208,35 @@ mod tests {
         );
 
         // Angle-bracket targets (paths with spaces) resolve to the bare path.
-        let link = find_program_md_link("![s](</Users/x/App Support/s.png>)").expect("bracketed");
+        let link = find_playbook_md_link("![s](</Users/x/App Support/s.png>)").expect("bracketed");
         assert_eq!(link.path, "/Users/x/App Support/s.png");
     }
 
     #[test]
-    fn program_md_link_leaves_non_image_and_non_local_links_literal() {
+    fn playbook_md_link_leaves_non_image_and_non_local_links_literal() {
         // Plain file links, http(s), agentd action links, and bracket-only
         // text all stay literal (spec 0099: image links only chip).
-        assert!(find_program_md_link("[notes](~/docs/notes.pdf)").is_none());
-        assert!(find_program_md_link("[docs](https://example.com)").is_none());
-        assert!(find_program_md_link("[run](agentd:action/run)").is_none());
-        assert!(find_program_md_link("[not a link] (separate)").is_none());
-        assert!(find_program_md_link("array[0](x)").is_none());
+        assert!(find_playbook_md_link("[notes](~/docs/notes.pdf)").is_none());
+        assert!(find_playbook_md_link("[docs](https://example.com)").is_none());
+        assert!(find_playbook_md_link("[run](agentd:action/run)").is_none());
+        assert!(find_playbook_md_link("[not a link] (separate)").is_none());
+        assert!(find_playbook_md_link("array[0](x)").is_none());
         // A later valid link after an earlier non-qualifying one still chips.
-        let link = find_program_md_link("[docs](https://x) ![a](/tmp/a.png)").expect("second");
+        let link = find_playbook_md_link("[docs](https://x) ![a](/tmp/a.png)").expect("second");
         assert_eq!(link.path, "/tmp/a.png");
     }
 
     #[test]
-    fn program_rendered_text_expands_attachment_links_to_chip_labels() {
+    fn playbook_rendered_text_expands_attachment_links_to_chip_labels() {
         let rendered =
-            program_inline_rendered_text(None, "before ![shot](/tmp/shot.png) after", None, 80);
+            playbook_inline_rendered_text(None, "before ![shot](/tmp/shot.png) after", None, 80);
         assert_eq!(rendered, "before  Image: shot  after");
 
         let (out, clips) =
-            program_inline_with_clips(None, "x ![n](/tmp/n.png) y @{session:abc} z", 0, None, 80);
+            playbook_inline_with_clips(None, "x ![n](/tmp/n.png) y @{session:abc} z", 0, None, 80);
         assert_eq!(
             out,
-            program_inline_rendered_text(None, "x ![n](/tmp/n.png) y @{session:abc} z", None, 80)
+            playbook_inline_rendered_text(None, "x ![n](/tmp/n.png) y @{session:abc} z", None, 80)
         );
         assert_eq!(clips.len(), 2);
         let LineClipKind::Attachment { path, is_image, .. } = &clips[0].kind else {
@@ -21249,24 +21249,24 @@ mod tests {
         assert_eq!(clips[0].visual_start, 2);
         assert_eq!(
             clips[0].visual_width,
-            UnicodeWidthStr::width(program_md_link_label("n", true).as_str()) + 2
+            UnicodeWidthStr::width(playbook_md_link_label("n", true).as_str()) + 2
         );
     }
 
     /// Without expansion state the chip keeps its collapsed label; when
-    /// expanded, `program_md_chip_label` returns None and the source
+    /// expanded, `playbook_md_chip_label` returns None and the source
     /// occupies zero cells — asserted end-to-end (label absence, no chip
     /// hitbox, caret hop) by the app-level render tests.
     #[test]
     fn collapsed_chip_label_and_expanded_none() {
         assert_eq!(
-            program_inline_rendered_text(None, "a ![shot](/tmp/s.png) b", None, 80),
+            playbook_inline_rendered_text(None, "a ![shot](/tmp/s.png) b", None, 80),
             "a  Image: shot  b"
         );
-        let link = find_program_md_link("![shot](/tmp/s.png)").expect("link");
+        let link = find_playbook_md_link("![shot](/tmp/s.png)").expect("link");
         assert!(matches!(
-            program_md_chip_render(None, &link, None, 0),
-            ProgramChipRender::Label(label) if label == "Image: shot"
+            playbook_md_chip_render(None, &link, None, 0),
+            PlaybookChipRender::Label(label) if label == "Image: shot"
         ));
     }
 
@@ -21275,23 +21275,23 @@ mod tests {
     /// from the chip's painted width — not the (longer) source width — so
     /// the caret and selection land where the user sees them.
     #[test]
-    fn program_visual_col_maps_attachment_chip_atomically() {
+    fn playbook_visual_col_maps_attachment_chip_atomically() {
         let raw = "before ![shot](/tmp/s.png) after";
-        let chip_w = UnicodeWidthStr::width(program_md_link_label("shot", true).as_str()) + 2;
+        let chip_w = UnicodeWidthStr::width(playbook_md_link_label("shot", true).as_str()) + 2;
         let link_chars = "![shot](/tmp/s.png)".chars().count();
         assert_eq!(
-            program_visual_col_for_line(None, raw, 7, 80, program_line_key(raw)),
+            playbook_visual_col_for_line(None, raw, 7, 80, playbook_line_key(raw)),
             7
         );
         for inside in 8..=(7 + link_chars) {
             assert_eq!(
-                program_visual_col_for_line(None, raw, inside, 80, program_line_key(raw)),
+                playbook_visual_col_for_line(None, raw, inside, 80, playbook_line_key(raw)),
                 7 + chip_w,
                 "raw col {inside} should sit at the chip's end"
             );
         }
         assert_eq!(
-            program_visual_col_for_line(None, raw, 7 + link_chars + 3, 80, program_line_key(raw)),
+            playbook_visual_col_for_line(None, raw, 7 + link_chars + 3, 80, playbook_line_key(raw)),
             7 + chip_w + 3
         );
     }
@@ -21304,15 +21304,15 @@ mod tests {
         for prefix in ["", "x", "word and more words"] {
             for rows in [1u16, 3, 5, 12] {
                 for width in [20usize, 37, 94] {
-                    let block = program_attachment_block(width, rows);
+                    let block = playbook_attachment_block(width, rows);
                     let line = format!("{prefix}{block} tail");
                     let prefix_rows = if prefix.is_empty() {
                         0
                     } else {
-                        program_wrap_row_starts(prefix, width).len()
+                        playbook_wrap_row_starts(prefix, width).len()
                     };
                     assert_eq!(
-                        program_wrap_row_starts(&line, width).len(),
+                        playbook_wrap_row_starts(&line, width).len(),
                         prefix_rows + rows as usize + 1,
                         "prefix={prefix:?} rows={rows} width={width}"
                     );
@@ -21322,11 +21322,11 @@ mod tests {
     }
 
     #[test]
-    fn program_md_link_label_truncates_long_names() {
-        assert_eq!(program_md_link_label("shot.png", true), "Image: shot.png");
-        assert_eq!(program_md_link_label("", false), "File: attachment");
+    fn playbook_md_link_label_truncates_long_names() {
+        assert_eq!(playbook_md_link_label("shot.png", true), "Image: shot.png");
+        assert_eq!(playbook_md_link_label("", false), "File: attachment");
         let long = "a".repeat(40);
-        let label = program_md_link_label(&long, true);
+        let label = playbook_md_link_label(&long, true);
         assert!(label.ends_with('…'));
         assert!(label.chars().count() <= 24 + "Image: …".chars().count());
     }
@@ -21343,22 +21343,22 @@ mod tests {
         );
     }
 
-    /// GAP D: `program_agent_reveal_progress` must sweep linearly from `0.0`
+    /// GAP D: `playbook_agent_reveal_progress` must sweep linearly from `0.0`
     /// right when the edit is received to `1.0` once the reveal window has
     /// fully elapsed, and stay clamped at `1.0` beyond it.
     #[test]
-    fn program_agent_reveal_progress_interpolates_zero_to_full() {
-        assert_eq!(program_agent_reveal_progress(Duration::ZERO, 800), 0.0);
+    fn playbook_agent_reveal_progress_interpolates_zero_to_full() {
+        assert_eq!(playbook_agent_reveal_progress(Duration::ZERO, 800), 0.0);
         assert_eq!(
-            program_agent_reveal_progress(Duration::from_millis(400), 800),
+            playbook_agent_reveal_progress(Duration::from_millis(400), 800),
             0.5
         );
         assert_eq!(
-            program_agent_reveal_progress(Duration::from_millis(800), 800),
+            playbook_agent_reveal_progress(Duration::from_millis(800), 800),
             1.0
         );
         assert_eq!(
-            program_agent_reveal_progress(Duration::from_millis(5_000), 800),
+            playbook_agent_reveal_progress(Duration::from_millis(5_000), 800),
             1.0,
             "past the window, progress must clamp rather than exceed 1.0"
         );
@@ -21368,34 +21368,34 @@ mod tests {
     /// below points "down", and inside the viewport yields no indicator at
     /// all (the cursor + reveal at the edit's own location already cover it).
     #[test]
-    fn program_agent_edge_direction_matches_viewport_position() {
+    fn playbook_agent_edge_direction_matches_viewport_position() {
         assert_eq!(
-            program_agent_edge_direction(2, 10, 20),
-            Some(ProgramAgentEdgeDirection::Above),
+            playbook_agent_edge_direction(2, 10, 20),
+            Some(PlaybookAgentEdgeDirection::Above),
             "a row before the scroll offset is above the viewport"
         );
         assert_eq!(
-            program_agent_edge_direction(35, 10, 20),
-            Some(ProgramAgentEdgeDirection::Below),
+            playbook_agent_edge_direction(35, 10, 20),
+            Some(PlaybookAgentEdgeDirection::Below),
             "a row past scroll_offset + viewport_rows is below the viewport"
         );
         assert_eq!(
-            program_agent_edge_direction(15, 10, 20),
+            playbook_agent_edge_direction(15, 10, 20),
             None,
             "a row inside [scroll_offset, scroll_offset + viewport_rows) is already visible"
         );
         assert_eq!(
-            program_agent_edge_direction(10, 10, 20),
+            playbook_agent_edge_direction(10, 10, 20),
             None,
             "the viewport's first row is visible, not \"above\""
         );
         assert_eq!(
-            program_agent_edge_direction(29, 10, 20),
+            playbook_agent_edge_direction(29, 10, 20),
             None,
             "the viewport's last row is visible, not \"below\""
         );
         assert_eq!(
-            program_agent_edge_direction(5, 10, 0),
+            playbook_agent_edge_direction(5, 10, 0),
             None,
             "a zero-height viewport has no direction to report"
         );
@@ -22028,11 +22028,11 @@ mod tests {
     }
 
     #[test]
-    fn view_program_toggle_tooltip_stays_inside_session_view() {
+    fn view_playbook_toggle_tooltip_stays_inside_session_view() {
         let view = Rect::new(30, 0, 90, 40);
         let total = Rect::new(0, 0, 120, 40);
-        let (anchor_x, _, anchor_y) = view_program_toggle_button_range(view);
-        let rect = view_program_toggle_tooltip_rect(view, total, anchor_x, anchor_y, 40, 3);
+        let (anchor_x, _, anchor_y) = view_playbook_toggle_button_range(view);
+        let rect = view_playbook_toggle_tooltip_rect(view, total, anchor_x, anchor_y, 40, 3);
 
         assert!(
             rect.x >= view.x,
@@ -22100,9 +22100,9 @@ mod tests {
     #[test]
     fn session_hover_card_preview_geometry_reads_close_to_4_by_3() {
         let (w, h) = session_hover_card_size(
-            PROGRAM_CLIP_HOVER_PREVIEW_COLS,
-            PROGRAM_CLIP_HOVER_PREVIEW_ROWS,
-            PROGRAM_CLIP_HOVER_PREVIEW_COLS,
+            PLAYBOOK_CLIP_HOVER_PREVIEW_COLS,
+            PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS,
+            PLAYBOOK_CLIP_HOVER_PREVIEW_COLS,
         );
         assert_eq!((w, h), (64, 24), "outer card should paint 64x24 cells");
         // Terminal cells are ~2:1 tall, so the on-screen aspect is w : 2h.
@@ -22710,27 +22710,27 @@ mod tests {
     }
 
     #[test]
-    fn program_clip_hover_uses_view_bounds_not_program_rect() {
+    fn playbook_clip_hover_uses_view_bounds_not_playbook_rect() {
         let view_area = Rect::new(10, 0, 140, 40);
-        let program_rect = Rect::new(10, 0, 140, 16);
+        let playbook_rect = Rect::new(10, 0, 140, 16);
 
         assert_eq!(
-            program_clip_hover_bounds(Some(view_area), program_rect),
+            playbook_clip_hover_bounds(Some(view_area), playbook_rect),
             view_area,
-            "session preview cards should be allowed to extend outside the rolled-down Program"
+            "session preview cards should be allowed to extend outside the rolled-down Playbook"
         );
         assert_eq!(
-            program_clip_hover_bounds(None, program_rect),
-            program_rect,
-            "fallback to the Program pane when no broader view geometry is known"
+            playbook_clip_hover_bounds(None, playbook_rect),
+            playbook_rect,
+            "fallback to the Playbook pane when no broader view geometry is known"
         );
     }
 
     #[test]
-    fn program_shimmer_hover_anchor_row_prefers_below_the_block() {
+    fn playbook_shimmer_hover_anchor_row_prefers_below_the_block() {
         let bounds = Rect::new(0, 0, 80, 40);
         // Block occupies rows 9..=11; plenty of room below within `bounds`.
-        let row = program_shimmer_hover_anchor_row(bounds, 9, 11, 3);
+        let row = playbook_shimmer_hover_anchor_row(bounds, 9, 11, 3);
         assert_eq!(
             row, 12,
             "tooltip should anchor directly below the block's last row by default"
@@ -22738,12 +22738,12 @@ mod tests {
     }
 
     #[test]
-    fn program_shimmer_hover_anchor_row_flips_above_when_bottom_clipped() {
+    fn playbook_shimmer_hover_anchor_row_flips_above_when_bottom_clipped() {
         let bounds = Rect::new(0, 0, 80, 20);
         // Block's last row (18) leaves no room for a 3-row box below the
         // bounds' bottom edge (20), so the box must flip above the block's
         // first row (16) instead of clipping into (or past) the boundary.
-        let row = program_shimmer_hover_anchor_row(bounds, 16, 18, 3);
+        let row = playbook_shimmer_hover_anchor_row(bounds, 16, 18, 3);
         assert_eq!(
             row, 13,
             "tooltip should anchor directly above the block's first row when clipped below"
@@ -22755,11 +22755,11 @@ mod tests {
     }
 
     #[test]
-    fn program_shimmer_hover_anchor_row_never_overlaps_the_block() {
+    fn playbook_shimmer_hover_anchor_row_never_overlaps_the_block() {
         let bounds = Rect::new(0, 0, 80, 40);
         for last_row in 0..40u16 {
             let first_row = last_row.saturating_sub(2);
-            let row = program_shimmer_hover_anchor_row(bounds, first_row, last_row, 3);
+            let row = playbook_shimmer_hover_anchor_row(bounds, first_row, last_row, 3);
             let box_range = row..row.saturating_add(3);
             assert!(
                 !box_range.contains(&first_row) && !box_range.contains(&last_row),
@@ -22770,32 +22770,32 @@ mod tests {
     }
 
     #[test]
-    fn program_cursor_position_targets_current_character_cell() {
+    fn playbook_cursor_position_targets_current_character_cell() {
         let area = Rect::new(10, 2, 20, 4);
         assert_eq!(
-            program_cursor_position(None, "abc", 1, 0, area),
+            playbook_cursor_position(None, "abc", 1, 0, area),
             Some(Position { x: 11, y: 2 })
         );
     }
 
     #[test]
-    fn program_cursor_position_accounts_for_wrapped_lines() {
+    fn playbook_cursor_position_accounts_for_wrapped_lines() {
         let area = Rect::new(10, 2, 5, 4);
         assert_eq!(
-            program_cursor_position(None, "abcdef", 6, 0, area),
+            playbook_cursor_position(None, "abcdef", 6, 0, area),
             Some(Position { x: 11, y: 3 })
         );
     }
 
     #[test]
-    fn program_cursor_position_uses_rendered_smart_clip_width() {
+    fn playbook_cursor_position_uses_rendered_smart_clip_width() {
         let area = Rect::new(10, 2, 80, 4);
         let markdown = "run @{harness:codex} now";
         let cursor = "run @{harness:codex}".chars().count();
         let chip_width = " harness codex ".chars().count();
 
         assert_eq!(
-            program_cursor_position(None, markdown, cursor, 0, area),
+            playbook_cursor_position(None, markdown, cursor, 0, area),
             Some(Position {
                 x: 10 + "run ".chars().count() as u16 + chip_width as u16,
                 y: 2,
@@ -23217,14 +23217,14 @@ mod tests {
     }
 
     #[test]
-    fn program_session_clip_label_shows_glyph_name_and_harness() {
+    fn playbook_session_clip_label_shows_glyph_name_and_harness() {
         let s = clip_test_session("abc123", Some("My Task"), "codex", SessionState::Running);
         // `<glyph> <name> · <harness>` — no "session" prefix, no model, no status word.
         assert_eq!(
-            program_session_clip_label(s.state.glyph(), &s),
+            playbook_session_clip_label(s.state.glyph(), &s),
             "● My Task · codex"
         );
-        let label = program_session_clip_label(s.state.glyph(), &s);
+        let label = playbook_session_clip_label(s.state.glyph(), &s);
         assert!(
             !label.contains("session"),
             "dropped the session prefix: {label}"
@@ -23236,7 +23236,7 @@ mod tests {
     }
 
     #[test]
-    fn program_session_clip_label_uses_caller_supplied_glyph() {
+    fn playbook_session_clip_label_uses_caller_supplied_glyph() {
         // The glyph is the caller's decision, not this formatter's — the
         // chip's animation swap (spinner frame in place of the static
         // lifecycle glyph, gated by the shared `session_should_animate_status`
@@ -23245,26 +23245,26 @@ mod tests {
         let s = clip_test_session("abc123", Some("My Task"), "codex", SessionState::Running);
         let spinner = crate::app::SPINNER_FRAMES[2];
         assert_eq!(
-            program_session_clip_label(spinner, &s),
+            playbook_session_clip_label(spinner, &s),
             format!("{spinner} My Task · codex")
         );
     }
 
     #[test]
-    fn program_session_clip_label_used_by_smart_clip_label() {
+    fn playbook_session_clip_label_used_by_smart_clip_label() {
         // The chip label routes through the shared session-label helper when the
         // session resolves against the app.
         let s = clip_test_session("s9", Some("Build"), "claude", SessionState::Done);
         let (kind, label) = (
-            program_smart_clip_target("session:s9").0,
-            program_session_clip_label(s.state.glyph(), &s),
+            playbook_smart_clip_target("session:s9").0,
+            playbook_session_clip_label(s.state.glyph(), &s),
         );
         assert_eq!(kind, "session");
         assert_eq!(label, "✓ Build · claude");
     }
 
     #[test]
-    fn program_harness_clip_label_shows_status_icon_and_name() {
+    fn playbook_harness_clip_label_shows_status_icon_and_name() {
         let available = construct_protocol::HarnessInfo {
             name: "codex".into(),
             available: true,
@@ -23282,38 +23282,38 @@ mod tests {
             capabilities: Default::default(),
         };
 
-        assert_eq!(program_harness_clip_label(&available), "✓ codex");
-        assert_eq!(program_harness_clip_label(&missing), "✗ claude");
+        assert_eq!(playbook_harness_clip_label(&available), "✓ codex");
+        assert_eq!(playbook_harness_clip_label(&missing), "✗ claude");
     }
 
     #[test]
-    fn program_session_chip_bg_maps_status_to_theme_colors() {
+    fn playbook_session_chip_bg_maps_status_to_theme_colors() {
         let theme = crate::theme::Theme::default();
         assert_eq!(
-            program_session_chip_bg(&theme, Some(SessionState::Pending)),
+            playbook_session_chip_bg(&theme, Some(SessionState::Pending)),
             theme.muted
         );
         assert_eq!(
-            program_session_chip_bg(&theme, Some(SessionState::Running)),
+            playbook_session_chip_bg(&theme, Some(SessionState::Running)),
             theme.success
         );
         assert_eq!(
-            program_session_chip_bg(&theme, Some(SessionState::AwaitingInput)),
+            playbook_session_chip_bg(&theme, Some(SessionState::AwaitingInput)),
             theme.success
         );
         assert_eq!(
-            program_session_chip_bg(&theme, Some(SessionState::Paused)),
+            playbook_session_chip_bg(&theme, Some(SessionState::Paused)),
             theme.warning
         );
         assert_eq!(
-            program_session_chip_bg(&theme, Some(SessionState::Done)),
+            playbook_session_chip_bg(&theme, Some(SessionState::Done)),
             theme.info
         );
         assert_eq!(
-            program_session_chip_bg(&theme, Some(SessionState::Errored)),
+            playbook_session_chip_bg(&theme, Some(SessionState::Errored)),
             theme.danger
         );
-        assert_eq!(program_session_chip_bg(&theme, None), theme.muted);
+        assert_eq!(playbook_session_chip_bg(&theme, None), theme.muted);
         // A settled reference keeps exactly the pre-badge chip color (both are
         // the same theme color today), so this change is invisible for the
         // common "everything's fine" case.
@@ -23321,46 +23321,46 @@ mod tests {
     }
 
     #[test]
-    fn program_session_chip_is_dimmed_only_for_done() {
-        assert!(!program_session_chip_is_dimmed(Some(SessionState::Pending)));
-        assert!(!program_session_chip_is_dimmed(Some(SessionState::Running)));
-        assert!(!program_session_chip_is_dimmed(Some(
+    fn playbook_session_chip_is_dimmed_only_for_done() {
+        assert!(!playbook_session_chip_is_dimmed(Some(SessionState::Pending)));
+        assert!(!playbook_session_chip_is_dimmed(Some(SessionState::Running)));
+        assert!(!playbook_session_chip_is_dimmed(Some(
             SessionState::AwaitingInput
         )));
-        assert!(!program_session_chip_is_dimmed(Some(SessionState::Paused)));
-        assert!(program_session_chip_is_dimmed(Some(SessionState::Done)));
-        assert!(!program_session_chip_is_dimmed(Some(SessionState::Errored)));
-        assert!(!program_session_chip_is_dimmed(None));
+        assert!(!playbook_session_chip_is_dimmed(Some(SessionState::Paused)));
+        assert!(playbook_session_chip_is_dimmed(Some(SessionState::Done)));
+        assert!(!playbook_session_chip_is_dimmed(Some(SessionState::Errored)));
+        assert!(!playbook_session_chip_is_dimmed(None));
     }
 
     #[test]
-    fn program_session_clip_status_tooltip_uses_plain_language() {
+    fn playbook_session_clip_status_tooltip_uses_plain_language() {
         assert_eq!(
-            program_session_clip_status_tooltip(Some(SessionState::Pending)),
+            playbook_session_clip_status_tooltip(Some(SessionState::Pending)),
             "pending"
         );
         assert_eq!(
-            program_session_clip_status_tooltip(Some(SessionState::Running)),
+            playbook_session_clip_status_tooltip(Some(SessionState::Running)),
             "running"
         );
         assert_eq!(
-            program_session_clip_status_tooltip(Some(SessionState::AwaitingInput)),
+            playbook_session_clip_status_tooltip(Some(SessionState::AwaitingInput)),
             "awaiting input"
         );
         assert_eq!(
-            program_session_clip_status_tooltip(Some(SessionState::Done)),
+            playbook_session_clip_status_tooltip(Some(SessionState::Done)),
             "done"
         );
         assert_eq!(
-            program_session_clip_status_tooltip(Some(SessionState::Errored)),
+            playbook_session_clip_status_tooltip(Some(SessionState::Errored)),
             "exited with error"
         );
-        assert_eq!(program_session_clip_status_tooltip(None), "session deleted");
+        assert_eq!(playbook_session_clip_status_tooltip(None), "session deleted");
     }
 
     #[test]
-    fn program_missing_session_clip_label_has_distinct_glyph() {
-        let label = program_missing_session_clip_label("abcdefghijklmnop");
+    fn playbook_missing_session_clip_label_has_distinct_glyph() {
+        let label = playbook_missing_session_clip_label("abcdefghijklmnop");
         assert_eq!(label, "⊘ abcdefghij · missing");
         assert_ne!(
             label, "session abcdefghijklmnop",
@@ -23369,31 +23369,31 @@ mod tests {
     }
 
     #[test]
-    fn program_smart_clip_label_missing_session_keeps_legacy_text_without_app() {
+    fn playbook_smart_clip_label_missing_session_keeps_legacy_text_without_app() {
         // Without a live App there's no way to distinguish "not found" from
         // "not loaded yet", so the plain fallback stays — this is the width
         // math cursor positioning and hit-testing use before an App exists.
-        let (_, label) = program_smart_clip_label(None, "session:ghost");
+        let (_, label) = playbook_smart_clip_label(None, "session:ghost");
         assert_eq!(label, "session ghost");
     }
 
     #[test]
-    fn program_session_clip_hits_map_cells_to_session_ids() {
+    fn playbook_session_clip_hits_map_cells_to_session_ids() {
         // Two session clips with a harness clip between them: only the session
         // clips produce hits, each over the chip's painted cells (incl. padding).
         let area = Rect::new(0, 0, 80, 6);
         let md = "@{session:s1} mid @{harness:codex} @{session:s2}";
-        let hits = program_session_clip_hits(None, md, 0, area);
+        let hits = playbook_session_clip_hits(None, md, 0, area);
         assert_eq!(
             hits,
             vec![
-                crate::app::ProgramClipHit {
+                crate::app::PlaybookClipHit {
                     col_start: 0,
                     col_end: 12,
                     row: 0,
                     session_id: "s1".into(),
                 },
-                crate::app::ProgramClipHit {
+                crate::app::PlaybookClipHit {
                     col_start: 33,
                     col_end: 45,
                     row: 0,
@@ -23409,16 +23409,16 @@ mod tests {
     }
 
     #[test]
-    fn program_session_clip_hits_use_terminal_display_width() {
+    fn playbook_session_clip_hits_use_terminal_display_width() {
         // Hit-testing must track terminal cells, not Unicode scalar counts. Wide
         // glyphs before the chip shift its painted start, and wide glyphs inside
         // the fallback session label expand its painted end.
         let area = Rect::new(0, 0, 80, 6);
         let md = "🚀 @{session:火}";
-        let hits = program_session_clip_hits(None, md, 0, area);
+        let hits = playbook_session_clip_hits(None, md, 0, area);
         assert_eq!(
             hits,
-            vec![crate::app::ProgramClipHit {
+            vec![crate::app::PlaybookClipHit {
                 col_start: UnicodeWidthStr::width("🚀 ") as u16,
                 col_end: UnicodeWidthStr::width("🚀  session 火 ") as u16,
                 row: 0,
@@ -23434,11 +23434,11 @@ mod tests {
     }
 
     #[test]
-    fn program_session_clip_hits_span_wrapped_rows() {
+    fn playbook_session_clip_hits_span_wrapped_rows() {
         // A chip wider than the body wraps; the clip still maps entirely to its
         // session across every row it occupies, with no foreign ids.
         let area = Rect::new(0, 0, 8, 6);
-        let hits = program_session_clip_hits(None, "@{session:s1}", 0, area);
+        let hits = playbook_session_clip_hits(None, "@{session:s1}", 0, area);
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|h| h.session_id == "s1"));
         let rows: std::collections::BTreeSet<u16> = hits.iter().map(|h| h.row).collect();
@@ -23449,13 +23449,13 @@ mod tests {
     }
 
     #[test]
-    fn program_session_clip_hits_empty_without_clips() {
+    fn playbook_session_clip_hits_empty_without_clips() {
         let area = Rect::new(0, 0, 40, 4);
-        assert!(program_session_clip_hits(None, "just prose, no clips", 0, area).is_empty());
+        assert!(playbook_session_clip_hits(None, "just prose, no clips", 0, area).is_empty());
     }
 
-    fn placeholder_template(id: &str, name: &str) -> construct_protocol::ProgramTemplate {
-        construct_protocol::ProgramTemplate {
+    fn placeholder_template(id: &str, name: &str) -> construct_protocol::PlaybookTemplate {
+        construct_protocol::PlaybookTemplate {
             id: id.to_string(),
             name: name.to_string(),
             description: None,
@@ -23465,7 +23465,7 @@ mod tests {
     }
 
     #[test]
-    fn program_empty_placeholder_offers_clickable_template_rows() {
+    fn playbook_empty_placeholder_offers_clickable_template_rows() {
         let theme = crate::theme::Theme::default();
         let templates = vec![
             placeholder_template("blank", "Blank"),
@@ -23474,7 +23474,7 @@ mod tests {
         ];
         // Inner rect offset from origin to confirm hits use absolute coordinates.
         let inner = Rect::new(2, 1, 76, 20);
-        let (lines, hits) = program_empty_placeholder(&theme, &templates, None, inner);
+        let (lines, hits) = playbook_empty_placeholder(&theme, &templates, None, inner);
 
         // Two rows — "blank" is the empty state itself, so it's filtered out.
         // Ordered by name (case-insensitive): Investigation before Tasks.
@@ -23531,13 +23531,13 @@ mod tests {
     }
 
     #[test]
-    fn program_empty_placeholder_hides_tip_when_custom_template_exists() {
+    fn playbook_empty_placeholder_hides_tip_when_custom_template_exists() {
         let theme = crate::theme::Theme::default();
         let mut custom = placeholder_template("mine", "Mine");
         custom.built_in = false;
         let templates = vec![placeholder_template("tasks", "Tasks"), custom];
         let (lines, _) =
-            program_empty_placeholder(&theme, &templates, None, Rect::new(2, 1, 76, 20));
+            playbook_empty_placeholder(&theme, &templates, None, Rect::new(2, 1, 76, 20));
         let rendered: String = lines
             .iter()
             .map(|l| {
@@ -23555,7 +23555,7 @@ mod tests {
     }
 
     #[test]
-    fn program_empty_placeholder_orders_rows_by_name() {
+    fn playbook_empty_placeholder_orders_rows_by_name() {
         let theme = crate::theme::Theme::default();
         // Deliberately out of order, mixed case, with "blank" mixed in.
         let templates = vec![
@@ -23565,24 +23565,24 @@ mod tests {
             placeholder_template("mid", "mid"),
         ];
         let (_, hits) =
-            program_empty_placeholder(&theme, &templates, None, Rect::new(0, 0, 80, 30));
+            playbook_empty_placeholder(&theme, &templates, None, Rect::new(0, 0, 80, 30));
         let ids: Vec<&str> = hits.iter().map(|h| h.template_id.as_str()).collect();
         // Case-insensitive name order; "blank" excluded.
         assert_eq!(ids, vec!["alpha", "mid", "zeta"]);
     }
 
     #[test]
-    fn program_empty_placeholder_hovered_row_highlights() {
+    fn playbook_empty_placeholder_hovered_row_highlights() {
         let theme = crate::theme::Theme::default();
         let templates = vec![
             placeholder_template("tasks", "Tasks"),
             placeholder_template("investigation", "Investigation"),
         ];
         let inner = Rect::new(2, 1, 76, 20);
-        let (_, hits) = program_empty_placeholder(&theme, &templates, None, inner);
+        let (_, hits) = playbook_empty_placeholder(&theme, &templates, None, inner);
         let second = &hits[1];
         let hovered_pos = Some((second.col_start, second.row_start));
-        let (lines, _) = program_empty_placeholder(&theme, &templates, hovered_pos, inner);
+        let (lines, _) = playbook_empty_placeholder(&theme, &templates, hovered_pos, inner);
 
         // The hovered row's label span carries the accent background; the other
         // rows and the border characters do not.
@@ -23606,7 +23606,7 @@ mod tests {
     }
 
     #[test]
-    fn program_empty_placeholder_lists_many_rows_vertically() {
+    fn playbook_empty_placeholder_lists_many_rows_vertically() {
         let theme = crate::theme::Theme::default();
         let templates = vec![
             placeholder_template("aaa", "Aaa"),
@@ -23616,7 +23616,7 @@ mod tests {
             placeholder_template("eee", "Eee"),
         ];
         let inner = Rect::new(2, 1, 20, 30);
-        let (lines, hits) = program_empty_placeholder(&theme, &templates, None, inner);
+        let (lines, hits) = playbook_empty_placeholder(&theme, &templates, None, inner);
 
         // All five rows rendered and clickable, one per line.
         assert_eq!(hits.len(), 5);
@@ -23634,7 +23634,7 @@ mod tests {
     }
 
     #[test]
-    fn program_empty_placeholder_truncates_with_overflow_indicator() {
+    fn playbook_empty_placeholder_truncates_with_overflow_indicator() {
         let theme = crate::theme::Theme::default();
         let templates = vec![
             placeholder_template("aaa", "Aaa"),
@@ -23646,7 +23646,7 @@ mod tests {
         ];
         // height 10 leaves room for only a few list rows plus an overflow row.
         let inner = Rect::new(0, 0, 20, 10);
-        let (lines, hits) = program_empty_placeholder(&theme, &templates, None, inner);
+        let (lines, hits) = playbook_empty_placeholder(&theme, &templates, None, inner);
 
         assert!(hits.len() < 6, "some rows should be hidden");
         assert!(!hits.is_empty(), "at least one row should render");
@@ -23672,38 +23672,38 @@ mod tests {
     }
 
     #[test]
-    fn program_empty_placeholder_falls_back_when_narrow() {
+    fn playbook_empty_placeholder_falls_back_when_narrow() {
         let theme = crate::theme::Theme::default();
         let templates = vec![placeholder_template("tasks", "Tasks")];
         // Too narrow to fit even the indent + bullet: plain description + syntax only.
-        let (_, hits) = program_empty_placeholder(&theme, &templates, None, Rect::new(0, 0, 4, 20));
+        let (_, hits) = playbook_empty_placeholder(&theme, &templates, None, Rect::new(0, 0, 4, 20));
         assert!(hits.is_empty());
     }
 
     #[test]
-    fn program_empty_placeholder_has_no_rows_without_templates() {
+    fn playbook_empty_placeholder_has_no_rows_without_templates() {
         let theme = crate::theme::Theme::default();
-        let (lines, hits) = program_empty_placeholder(&theme, &[], None, Rect::new(0, 0, 80, 20));
+        let (lines, hits) = playbook_empty_placeholder(&theme, &[], None, Rect::new(0, 0, 80, 20));
         assert!(hits.is_empty());
         // Still shows the description and syntax prose.
         assert!(!lines.is_empty());
     }
 
     #[test]
-    fn program_session_clip_hits_track_scroll_offset() {
+    fn playbook_session_clip_hits_track_scroll_offset() {
         // A clip on the third logical row (abs visual row 2) shifts up by the
         // scroll offset so its hitbox follows the visible viewport.
         let area = Rect::new(0, 0, 80, 6);
         let md = "l0\nl1\n@{session:s1}\nl3";
-        let unscrolled = program_session_clip_hits(None, md, 0, area);
+        let unscrolled = playbook_session_clip_hits(None, md, 0, area);
         assert_eq!(unscrolled.len(), 1);
         assert_eq!(unscrolled[0].row, 2);
         assert_eq!(unscrolled[0].session_id, "s1");
 
-        let scrolled = program_session_clip_hits(None, md, 2, area);
+        let scrolled = playbook_session_clip_hits(None, md, 2, area);
         assert_eq!(
             scrolled,
-            vec![crate::app::ProgramClipHit {
+            vec![crate::app::PlaybookClipHit {
                 col_start: 0,
                 col_end: 12,
                 row: 0,
@@ -23712,11 +23712,11 @@ mod tests {
         );
 
         // Scrolled entirely past the clip: no hit remains.
-        assert!(program_session_clip_hits(None, md, 3, area).is_empty());
+        assert!(playbook_session_clip_hits(None, md, 3, area).is_empty());
     }
 
     #[test]
-    fn program_cursor_position_accounts_for_preceding_wrapped_line() {
+    fn playbook_cursor_position_accounts_for_preceding_wrapped_line() {
         // "abcdef" wraps to two visual rows at width 5, so the next logical
         // line ("XY") starts on the third row (y offset 2), not the second.
         let area = Rect::new(10, 2, 5, 6);
@@ -23724,13 +23724,13 @@ mod tests {
         let cursor = "abcdef\n".chars().count();
 
         assert_eq!(
-            program_cursor_position(None, markdown, cursor, 0, area),
+            playbook_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 10, y: 4 })
         );
     }
 
     #[test]
-    fn program_cursor_position_combines_preceding_wrap_and_intra_line_offset() {
+    fn playbook_cursor_position_combines_preceding_wrap_and_intra_line_offset() {
         // The preceding line wraps (2 rows) AND the cursor sits past a wrap
         // boundary within its own line: both offsets must accumulate.
         let area = Rect::new(10, 2, 5, 8);
@@ -23738,13 +23738,13 @@ mod tests {
         let cursor = "abcdef\nghijklm".chars().count();
 
         assert_eq!(
-            program_cursor_position(None, markdown, cursor, 0, area),
+            playbook_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 12, y: 5 })
         );
     }
 
     #[test]
-    fn program_cursor_position_offsets_normal_line_below_wrapped_line() {
+    fn playbook_cursor_position_offsets_normal_line_below_wrapped_line() {
         // "longlineAAAA" (12 cols) wraps to three rows at width 5, so the
         // following non-wrapping line ("short") starts on the fourth row.
         let area = Rect::new(10, 2, 5, 8);
@@ -23752,14 +23752,14 @@ mod tests {
         let cursor = "longlineAAAA\nsh".chars().count();
 
         assert_eq!(
-            program_cursor_position(None, markdown, cursor, 0, area),
+            playbook_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 12, y: 5 })
         );
     }
 
     #[test]
-    fn program_cursor_position_word_wraps_line_with_spaces() {
-        // The program body renders with `Wrap { trim: false }`, which WORD-wraps
+    fn playbook_cursor_position_word_wraps_line_with_spaces() {
+        // The playbook body renders with `Wrap { trim: false }`, which WORD-wraps
         // at spaces. "hello world foo" at width 8 lays out as three rows
         // ("hello" / "world" / "foo"), so a cursor before "foo" sits at the
         // start of the third row. Naive char-division (col / width) would put
@@ -23769,13 +23769,13 @@ mod tests {
         let cursor = "hello world ".chars().count();
 
         assert_eq!(
-            program_cursor_position(None, markdown, cursor, 0, area),
+            playbook_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 10, y: 4 })
         );
     }
 
     #[test]
-    fn program_cursor_position_word_wrapped_line_offsets_following_line() {
+    fn playbook_cursor_position_word_wrapped_line_offsets_following_line() {
         // A word-wrapped line consumes the right number of visual rows, so a
         // normal line below it lands on the correct row. "hello world foo" at
         // width 8 is three rows; "next" starts on the fourth. Char-division
@@ -23785,13 +23785,13 @@ mod tests {
         let cursor = "hello world foo\n".chars().count();
 
         assert_eq!(
-            program_cursor_position(None, markdown, cursor, 0, area),
+            playbook_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 10, y: 5 })
         );
     }
 
     #[test]
-    fn program_cursor_position_hard_break_then_space_no_phantom_row() {
+    fn playbook_cursor_position_hard_break_then_space_no_phantom_row() {
         // "abcd efgh" at width 4: "abcd" exactly fills row 0, the space is the
         // break point (consumed), and "efgh" is row 1 — two rows, not three.
         // A cursor before 'e' sits at row 1 col 0. (A naive `wrap_to_width`
@@ -23802,16 +23802,16 @@ mod tests {
         let cursor = "abcd ".chars().count();
 
         assert_eq!(
-            program_cursor_position(None, markdown, cursor, 0, area),
+            playbook_cursor_position(None, markdown, cursor, 0, area),
             Some(Position { x: 10, y: 3 })
         );
     }
 
     #[test]
-    fn program_cursor_position_matches_painted_glyph_on_wrapped_line() {
+    fn playbook_cursor_position_matches_painted_glyph_on_wrapped_line() {
         // Cross-check the computed cursor cell against the glyph ratatui
         // actually paints, using the exact `Paragraph::wrap(Wrap{trim:false})`
-        // the program body uses. The cursor before "foo" must land on the
+        // the playbook body uses. The cursor before "foo" must land on the
         // painted 'f' at the start of the wrapped row — not somewhere in the
         // middle of "world" as char-division would compute.
         let w = 8u16;
@@ -23820,13 +23820,13 @@ mod tests {
         let markdown = "hello world foo";
         let cursor = "hello world ".chars().count();
 
-        let pos = program_cursor_position(None, markdown, cursor, 0, area).expect("cursor pos");
+        let pos = playbook_cursor_position(None, markdown, cursor, 0, area).expect("cursor pos");
 
         let backend = ratatui::backend::TestBackend::new(w, h);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| {
             // Plain markdown renders one Line == the raw text, so this matches
-            // what `render_program_popup_at` feeds the Paragraph for this input.
+            // what `render_playbook_popup_at` feeds the Paragraph for this input.
             let para = Paragraph::new(markdown).wrap(Wrap { trim: false });
             f.render_widget(para, area);
         })
@@ -23844,7 +23844,7 @@ mod tests {
     }
 
     #[test]
-    fn program_cursor_position_accounts_for_wide_emoji() {
+    fn playbook_cursor_position_accounts_for_wide_emoji() {
         // ⏳ (U+23F3, HOURGLASS WITH FLOWING SAND) is a double-width character
         // (display width 2). The cursor placed just after it must sit at column 2,
         // not column 1, and the character after it must sit at column 3, not 2.
@@ -23853,64 +23853,64 @@ mod tests {
 
         // Cursor at char index 0 (before ⏳) → display col 0.
         assert_eq!(
-            program_cursor_position(None, markdown, 0, 0, area),
+            playbook_cursor_position(None, markdown, 0, 0, area),
             Some(Position { x: 10, y: 2 }),
             "cursor before ⏳ should be at col 0"
         );
         // Cursor at char index 1 (after ⏳) → display col 2 (emoji is 2 wide).
         assert_eq!(
-            program_cursor_position(None, markdown, 1, 0, area),
+            playbook_cursor_position(None, markdown, 1, 0, area),
             Some(Position { x: 12, y: 2 }),
             "cursor after ⏳ should be at col 2 (emoji is double-width)"
         );
         // Cursor at char index 2 (after ⏳ + 'a') → display col 3.
         assert_eq!(
-            program_cursor_position(None, markdown, 2, 0, area),
+            playbook_cursor_position(None, markdown, 2, 0, area),
             Some(Position { x: 13, y: 2 }),
             "cursor after ⏳a should be at col 3"
         );
     }
 
     #[test]
-    fn program_visual_to_cursor_accounts_for_wide_emoji() {
+    fn playbook_visual_to_cursor_accounts_for_wide_emoji() {
         // Inverse: clicking at display column 2 on a line starting with ⏳ should
         // resolve to char offset 1 (just after the emoji), not char offset 2.
         let markdown = "⏳abc";
         // Display col 2 on row 0 (just after ⏳) → char offset 1.
         assert_eq!(
-            program_visual_to_cursor(None, markdown, 0, 2, 40),
+            playbook_visual_to_cursor(None, markdown, 0, 2, 40),
             1,
             "click at display col 2 should land at char offset 1 (after ⏳)"
         );
         // Display col 3 on row 0 (after 'a') → char offset 2.
         assert_eq!(
-            program_visual_to_cursor(None, markdown, 0, 3, 40),
+            playbook_visual_to_cursor(None, markdown, 0, 3, 40),
             2,
             "click at display col 3 should land at char offset 2 (after ⏳a)"
         );
     }
 
     #[test]
-    fn program_follow_scroll_advances_when_cursor_below_window() {
+    fn playbook_follow_scroll_advances_when_cursor_below_window() {
         // Cursor on visual row 19 with a 5-row window anchored at offset 0 must
         // scroll down so the cursor becomes the bottom visible row (offset 15).
-        assert_eq!(program_follow_scroll(0, 19, 5), 15);
+        assert_eq!(playbook_follow_scroll(0, 19, 5), 15);
     }
 
     #[test]
-    fn program_follow_scroll_returns_to_top_when_cursor_above_window() {
+    fn playbook_follow_scroll_returns_to_top_when_cursor_above_window() {
         // Cursor back on row 0 while scrolled to 15 snaps the window to the top.
-        assert_eq!(program_follow_scroll(15, 0, 5), 0);
+        assert_eq!(playbook_follow_scroll(15, 0, 5), 0);
     }
 
     #[test]
-    fn program_follow_scroll_unchanged_when_cursor_already_visible() {
-        assert_eq!(program_follow_scroll(0, 2, 5), 0);
-        assert_eq!(program_follow_scroll(10, 12, 5), 10);
+    fn playbook_follow_scroll_unchanged_when_cursor_already_visible() {
+        assert_eq!(playbook_follow_scroll(0, 2, 5), 0);
+        assert_eq!(playbook_follow_scroll(10, 12, 5), 10);
     }
 
     #[test]
-    fn program_cursor_position_subtracts_scroll_offset() {
+    fn playbook_cursor_position_subtracts_scroll_offset() {
         // Ten single-row lines at width 20; the cursor sits on logical line 7.
         let area = Rect::new(10, 0, 20, 5);
         let markdown = (0..10)
@@ -23920,38 +23920,38 @@ mod tests {
         let cursor = markdown.find("L7").unwrap();
         // Scrolled past the first 5 rows, row 7 renders two rows into the view.
         assert_eq!(
-            program_cursor_position(None, &markdown, cursor, 5, area),
+            playbook_cursor_position(None, &markdown, cursor, 5, area),
             Some(Position { x: 10, y: 2 })
         );
         // Without scrolling, that row is below the 5-row window: no cell to draw.
         assert_eq!(
-            program_cursor_position(None, &markdown, cursor, 0, area),
+            playbook_cursor_position(None, &markdown, cursor, 0, area),
             None
         );
     }
 
     #[test]
-    fn program_total_visual_rows_counts_trailing_empty_line() {
+    fn playbook_total_visual_rows_counts_trailing_empty_line() {
         // "a\n" is two rows: the text row and the trailing empty row the cursor
         // can sit on. The count must include that final row so the scroll clamp
         // keeps it reachable.
-        assert_eq!(program_total_visual_rows(None, "a\n", 20), 2);
-        assert_eq!(program_total_visual_rows(None, "", 20), 1);
+        assert_eq!(playbook_total_visual_rows(None, "a\n", 20), 2);
+        assert_eq!(playbook_total_visual_rows(None, "", 20), 1);
         // "abcdef" wraps to two rows at width 5.
-        assert_eq!(program_total_visual_rows(None, "abcdef", 5), 2);
+        assert_eq!(playbook_total_visual_rows(None, "abcdef", 5), 2);
     }
 
     #[test]
-    fn program_heading_rendering_keeps_markdown_marker() {
+    fn playbook_heading_rendering_keeps_markdown_marker() {
         let theme = Theme::default();
         assert_eq!(
-            line_text(&render_program_heading_line(
+            line_text(&render_playbook_heading_line(
                 &theme, 1, "# Todo", 0, None, None, None
             )),
             "# Todo"
         );
         assert_eq!(
-            line_text(&render_program_heading_line(
+            line_text(&render_playbook_heading_line(
                 &theme,
                 2,
                 "## Progress",
@@ -23965,9 +23965,9 @@ mod tests {
     }
 
     #[test]
-    fn program_text_spans_highlights_search_matches() {
+    fn playbook_text_spans_highlights_search_matches() {
         let theme = Theme::default();
-        let spans = program_text_spans(
+        let spans = playbook_text_spans(
             &theme,
             "alpha alpha",
             0,
@@ -24002,25 +24002,25 @@ mod tests {
     }
 
     #[test]
-    fn program_focus_styles_are_distinct_from_session_focus() {
+    fn playbook_focus_styles_are_distinct_from_session_focus() {
         let theme = Theme::default();
-        let active_program = program_border_style(&theme, true);
-        let inactive_program = program_border_style(&theme, false);
+        let active_playbook = playbook_border_style(&theme, true);
+        let inactive_playbook = playbook_border_style(&theme, false);
 
         assert_eq!(
             pane_border_style(&theme, true).fg,
             Some(theme.border_focused)
         );
-        assert_eq!(active_program.fg, Some(theme.program_border));
-        assert_eq!(inactive_program.fg, active_program.fg);
-        assert_ne!(inactive_program.fg, Some(theme.border));
-        assert!(active_program.add_modifier.contains(Modifier::BOLD));
-        assert!(!inactive_program.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(active_playbook.fg, Some(theme.playbook_border));
+        assert_eq!(inactive_playbook.fg, active_playbook.fg);
+        assert_ne!(inactive_playbook.fg, Some(theme.border));
+        assert!(active_playbook.add_modifier.contains(Modifier::BOLD));
+        assert!(!inactive_playbook.add_modifier.contains(Modifier::BOLD));
         assert!(
-            inactive_program.add_modifier.contains(Modifier::DIM),
-            "inactive program border should dim without switching hue"
+            inactive_playbook.add_modifier.contains(Modifier::DIM),
+            "inactive playbook border should dim without switching hue"
         );
-        assert_ne!(active_program.fg, pane_border_style(&theme, true).fg);
+        assert_ne!(active_playbook.fg, pane_border_style(&theme, true).fg);
     }
 
     /// Spec 0112: the block's own geometry is the geometry it has with a
@@ -24104,15 +24104,15 @@ mod tests {
     }
 
     #[test]
-    fn terminal_focused_program_popup_slides_right_without_resizing() {
+    fn terminal_focused_playbook_popup_slides_right_without_resizing() {
         let base = Rect::new(10, 4, 100, 30);
-        let rect = program_popup_visible_rect(base, 20, 1.0);
+        let rect = playbook_popup_visible_rect(base, 20, 1.0);
 
         assert_eq!(rect.x, 30, "20% of the pane should be revealed at left");
         assert_eq!(rect.y, base.y);
         assert_eq!(
             rect.width, base.width,
-            "Program content must not reflow narrower"
+            "Playbook content must not reflow narrower"
         );
         assert_eq!(rect.height, 20);
         assert!(
@@ -24121,18 +24121,18 @@ mod tests {
         );
 
         assert_eq!(
-            program_popup_visible_rect(base, 20, 0.0),
+            playbook_popup_visible_rect(base, 20, 0.0),
             Rect::new(10, 4, 100, 20),
-            "normal Program rendering stays anchored"
+            "normal Playbook rendering stays anchored"
         );
     }
 
     #[test]
-    fn program_popup_slide_animates_between_anchored_and_slid() {
+    fn playbook_popup_slide_animates_between_anchored_and_slid() {
         let base = Rect::new(10, 4, 100, 30);
-        let full_offset = program_terminal_focus_slide_offset(base.width);
+        let full_offset = playbook_terminal_focus_slide_offset(base.width);
 
-        let halfway = program_popup_visible_rect(base, 20, 0.5);
+        let halfway = playbook_popup_visible_rect(base, 20, 0.5);
         assert_eq!(
             halfway.x,
             base.x + full_offset / 2,
@@ -24143,51 +24143,51 @@ mod tests {
 
         // Out-of-range fractions clamp to the endpoints rather than
         // overshooting past the pane or sliding left.
-        assert_eq!(program_popup_visible_rect(base, 20, -0.5).x, base.x);
+        assert_eq!(playbook_popup_visible_rect(base, 20, -0.5).x, base.x);
         assert_eq!(
-            program_popup_visible_rect(base, 20, 1.5).x,
+            playbook_popup_visible_rect(base, 20, 1.5).x,
             base.x + full_offset
         );
     }
 
     #[test]
-    fn program_popup_crop_region_covers_only_the_slide_overhang() {
+    fn playbook_popup_crop_region_covers_only_the_slide_overhang() {
         let buffer_area = Rect::new(0, 0, 200, 50);
         let base = Rect::new(10, 4, 100, 30);
 
         // Anchored popup: nothing to crop.
         assert_eq!(
-            program_popup_crop_region(base, Rect::new(10, 4, 100, 20), buffer_area),
+            playbook_popup_crop_region(base, Rect::new(10, 4, 100, 20), buffer_area),
             None
         );
 
         // Slid popup: the strip right of the pane, spanning the pane's rows.
-        let slid = program_popup_visible_rect(base, 20, 1.0);
+        let slid = playbook_popup_visible_rect(base, 20, 1.0);
         assert_eq!(
-            program_popup_crop_region(base, slid, buffer_area),
+            playbook_popup_crop_region(base, slid, buffer_area),
             Some(Rect::new(110, 4, 20, 30))
         );
 
         // Pane flush against the terminal edge: the overhang is off-screen and
         // ratatui already clips it, so there is nothing to restore.
         let narrow_buffer = Rect::new(0, 0, 110, 50);
-        assert_eq!(program_popup_crop_region(base, slid, narrow_buffer), None);
+        assert_eq!(playbook_popup_crop_region(base, slid, narrow_buffer), None);
     }
 
     #[test]
-    fn program_popup_paint_rect_clips_terminal_right_edge() {
+    fn playbook_popup_paint_rect_clips_terminal_right_edge() {
         let buffer_area = Rect::new(0, 0, 110, 50);
         let base = Rect::new(10, 4, 100, 30);
-        let slid = program_popup_visible_rect(base, 20, 1.0);
+        let slid = playbook_popup_visible_rect(base, 20, 1.0);
 
         assert_eq!(slid.right(), 130, "setup should overhang the terminal");
         assert_eq!(
-            program_popup_crop_region(base, slid, buffer_area),
+            playbook_popup_crop_region(base, slid, buffer_area),
             None,
             "off-screen overhang has no neighboring-pane strip to restore"
         );
         assert_eq!(
-            program_popup_paint_rect(slid, buffer_area),
+            playbook_popup_paint_rect(slid, buffer_area),
             Some(Rect::new(30, 4, 80, 20)),
             "painting must be clipped to the frame buffer before widgets render"
         );
@@ -24197,7 +24197,7 @@ mod tests {
     fn terminal_edge_copy_preserves_logical_popup_width() {
         let frame_area = Rect::new(0, 0, 20, 4);
         let logical = Rect::new(8, 0, 20, 4);
-        let visible = program_popup_paint_rect(logical, frame_area).expect("visible strip");
+        let visible = playbook_popup_paint_rect(logical, frame_area).expect("visible strip");
 
         let mut popup = Buffer::empty(logical);
         let text = "abcdefghijklmnop";
@@ -24234,7 +24234,7 @@ mod tests {
             }
         }
 
-        let region = program_popup_crop_region(base, slid, buffer_area).expect("overhang");
+        let region = playbook_popup_crop_region(base, slid, buffer_area).expect("overhang");
         let saved = snapshot_buffer_region(&buf, region);
         for y in slid.top()..slid.bottom() {
             for x in slid.left()..slid.right() {
@@ -24273,7 +24273,7 @@ mod tests {
     }
 
     #[test]
-    fn active_program_popup_uses_owning_split_rect_before_active_window() {
+    fn active_playbook_popup_uses_owning_split_rect_before_active_window() {
         let left = Rect::new(0, 0, 50, 30);
         let right = Rect::new(50, 0, 50, 30);
         let hits = vec![
@@ -24295,7 +24295,7 @@ mod tests {
             },
         ];
 
-        let rect = program_popup_base_rect(
+        let rect = playbook_popup_base_rect(
             &hits,
             2,
             None,
@@ -24310,13 +24310,13 @@ mod tests {
 
         assert_eq!(
             rect, left,
-            "a rolled-down Program must stay anchored to its session pane, \
+            "a rolled-down Playbook must stay anchored to its session pane, \
              even when terminal focus moves to another split"
         );
     }
 
     #[test]
-    fn active_program_popup_keeps_active_rect_when_active_window_owns_session() {
+    fn active_playbook_popup_keeps_active_rect_when_active_window_owns_session() {
         let left = Rect::new(0, 0, 50, 30);
         let right = Rect::new(50, 0, 50, 30);
         let hits = vec![
@@ -24338,7 +24338,7 @@ mod tests {
             },
         ];
 
-        let rect = program_popup_base_rect(
+        let rect = playbook_popup_base_rect(
             &hits,
             2,
             None,
@@ -24352,7 +24352,7 @@ mod tests {
 
         assert_eq!(
             rect, right,
-            "when the focused split also owns the Program session, use that split"
+            "when the focused split also owns the Playbook session, use that split"
         );
     }
 
@@ -24360,7 +24360,7 @@ mod tests {
     fn session_menu_icon_dims_when_pane_unfocused() {
         // The session-actions menu glyph (` ☰ `) at the right of the pane title
         // bar is shared by both the chat/PTY session view (`render_detail`) and
-        // the program view via `apply_pane_title_right_cluster`. When the pane is
+        // the playbook view via `apply_pane_title_right_cluster`. When the pane is
         // focused it stays at full brightness; when unfocused it dims to match
         // the unfocused title-bar border. Hover always wins regardless of focus.
         // The chat/PTY session view passes `matrix_close` as the base hue.
@@ -24395,41 +24395,41 @@ mod tests {
     }
 
     #[test]
-    fn program_title_menu_icon_matches_program_border_color() {
-        // In the PROGRAM view's title bar the session-actions ☰ glyph should be
-        // drawn in the program border color (the cyan accent the program frame
+    fn playbook_title_menu_icon_matches_playbook_border_color() {
+        // In the PLAYBOOK view's title bar the session-actions ☰ glyph should be
+        // drawn in the playbook border color (the cyan accent the playbook frame
         // uses) rather than the default chat/PTY session-view close hue. The
         // unfocused-dim and hover behavior from #551 must still compose: focused
         // → border hue, unfocused → border hue + DIM, hover → bold themed text.
         let theme = Theme::default();
 
-        // Derive the base hue the same way the program render path does, so the
+        // Derive the base hue the same way the playbook render path does, so the
         // icon can't drift from the border color it's meant to match.
-        let focused_border = program_border_style(&theme, true);
-        let unfocused_border = program_border_style(&theme, false);
-        let base = focused_border.fg.unwrap_or(theme.program_border);
+        let focused_border = playbook_border_style(&theme, true);
+        let unfocused_border = playbook_border_style(&theme, false);
+        let base = focused_border.fg.unwrap_or(theme.playbook_border);
 
-        // The base IS the program border color, and it's distinct from the
+        // The base IS the playbook border color, and it's distinct from the
         // session-view default (matrix_close) — otherwise this would be a no-op.
         assert_eq!(Some(base), focused_border.fg);
         assert_eq!(
             focused_border.fg, unfocused_border.fg,
-            "program border hue is focus-independent"
+            "playbook border hue is focus-independent"
         );
         assert_ne!(
             base, theme.matrix_close,
-            "program icon must not reuse the session-view close hue"
+            "playbook icon must not reuse the session-view close hue"
         );
 
         let focused = session_menu_icon_style(&theme, base, false, true);
         let unfocused = session_menu_icon_style(&theme, base, false, false);
         let hovered = session_menu_icon_style(&theme, base, true, true);
 
-        // Focused: program border hue at full brightness (matches the frame).
+        // Focused: playbook border hue at full brightness (matches the frame).
         assert_eq!(focused.fg, focused_border.fg);
         assert!(!focused.add_modifier.contains(Modifier::DIM));
 
-        // Unfocused: same hue, dimmed (tracks the dimmed program border).
+        // Unfocused: same hue, dimmed (tracks the dimmed playbook border).
         assert_eq!(unfocused.fg, focused_border.fg);
         assert!(unfocused.add_modifier.contains(Modifier::DIM));
 
@@ -24440,19 +24440,19 @@ mod tests {
     }
 
     #[test]
-    fn program_title_left_layout_places_run_between_name_and_marker() {
+    fn playbook_title_left_layout_places_run_between_name_and_marker() {
         // The Run button now lives in the LEFT cluster: directly after the
         // ` <glyph> <label>` prefix and left of the ` * modified` marker.
         let rect = Rect::new(0, 0, 100, 12);
         let summary = summary_with_mode("smith", Some("interactive"));
         let summary_ref = Some(&summary);
 
-        let layout = program_title_left_layout(summary_ref, "sess", rect, true, true, None, None);
+        let layout = playbook_title_left_layout(summary_ref, "sess", rect, true, true, None, None);
         let run = layout.run.expect("run button fits at this width");
         let modified = layout.modified.expect("dirty marker present");
 
         assert_eq!(run.2, rect.y, "run sits on the title row");
-        let glyph_w = UnicodeWidthStr::width(program_mode_glyph()) as u16;
+        let glyph_w = UnicodeWidthStr::width(playbook_mode_glyph()) as u16;
         let label_w = UnicodeWidthStr::width(layout.label.as_str()) as u16;
         assert_eq!(
             run.0,
@@ -24461,7 +24461,7 @@ mod tests {
         );
         assert_eq!(
             run.1 - run.0,
-            UnicodeWidthStr::width(PROGRAM_RUN_BUTTON) as u16,
+            UnicodeWidthStr::width(PLAYBOOK_RUN_BUTTON) as u16,
             "run hit spans the ▶ button width"
         );
         assert!(
@@ -24470,7 +24470,7 @@ mod tests {
         );
 
         // The mode toggle stays far left of the Run button.
-        let toggle = program_title_toggle_button_range(summary_ref, rect).expect("toggle range");
+        let toggle = playbook_title_toggle_button_range(summary_ref, rect).expect("toggle range");
         assert!(
             toggle.1 <= run.0,
             "toggle {toggle:?} sits left of run {run:?}"
@@ -24478,7 +24478,7 @@ mod tests {
     }
 
     #[test]
-    fn program_title_left_layout_clears_shared_right_cluster() {
+    fn playbook_title_left_layout_clears_shared_right_cluster() {
         // The left cluster (label + Run + dirty marker) is budgeted so it never
         // overruns the space reserved for the shared right cluster (harness +
         // close), mirroring how the session view budgets its title label. Use a
@@ -24487,7 +24487,7 @@ mod tests {
         let summary = summary_with_mode("smith", Some("interactive"));
         let summary_ref = Some(&summary);
 
-        let layout = program_title_left_layout(
+        let layout = playbook_title_left_layout(
             summary_ref,
             "sess",
             rect,
@@ -25043,7 +25043,7 @@ mod tests {
     }
 
     /// Spec 0074: the widget surface renders inline `@{…}` typed references
-    /// through the same chip builder the program surface uses. Without an
+    /// through the same chip builder the playbook surface uses. Without an
     /// App the chip degrades to a static label but still reads as a chip
     /// (bold, colored background), and the surrounding text stays intact.
     #[test]
@@ -25106,10 +25106,10 @@ mod tests {
     }
 
     #[test]
-    fn program_section_projection_extracts_named_section() {
+    fn playbook_section_projection_extracts_named_section() {
         let md = "# Plan\nintro\n## Progress\n- [x] step one\n### Detail\nnested\n## Next\nrest";
         assert_eq!(
-            program_section_projection(md, Some("Progress")).as_deref(),
+            playbook_section_projection(md, Some("Progress")).as_deref(),
             Some("## Progress\n- [x] step one\n### Detail\nnested"),
             "a section projects its heading plus content up to the next \
              same-or-higher-level heading, keeping deeper subsections"
@@ -25117,37 +25117,37 @@ mod tests {
     }
 
     #[test]
-    fn program_section_projection_matches_case_insensitively() {
+    fn playbook_section_projection_matches_case_insensitively() {
         let md = "## Progress\n- [ ] todo\n## Next\nrest";
         assert_eq!(
-            program_section_projection(md, Some("progress")).as_deref(),
+            playbook_section_projection(md, Some("progress")).as_deref(),
             Some("## Progress\n- [ ] todo")
         );
     }
 
     #[test]
-    fn program_section_projection_without_section_is_whole_document() {
+    fn playbook_section_projection_without_section_is_whole_document() {
         let md = "# Plan\nintro\n## Progress\ndone";
-        assert_eq!(program_section_projection(md, None).as_deref(), Some(md));
+        assert_eq!(playbook_section_projection(md, None).as_deref(), Some(md));
     }
 
     #[test]
-    fn program_section_projection_missing_section_is_none() {
+    fn playbook_section_projection_missing_section_is_none() {
         let md = "# Plan\nintro";
-        assert_eq!(program_section_projection(md, Some("Progress")), None);
+        assert_eq!(playbook_section_projection(md, Some("Progress")), None);
     }
 
-    /// A widget `:::clip program` with no cached program renders the chip, a
+    /// A widget `:::clip playbook` with no cached playbook renders the chip, a
     /// dim loading line, and the dim end line — never blocking the render
     /// loop on a fetch.
     #[test]
-    fn widget_clip_program_renders_loading_placeholder_without_cache() {
+    fn widget_clip_playbook_renders_loading_placeholder_without_cache() {
         let mut hits = Vec::new();
         let mut url_hits = Vec::new();
         let mut wanted = Vec::new();
         let lines = render_agentd_markdown_lines(
             None,
-            ":::clip program\nsection=\"Progress\"\n:::\nafter",
+            ":::clip playbook\nsection=\"Progress\"\n:::\nafter",
             &Theme::default(),
             None,
             Rect::new(0, 0, 80, 10),
@@ -25159,8 +25159,8 @@ mod tests {
             &mut wanted,
         );
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
-        assert!(rendered[0].contains("clip program"), "{rendered:?}");
-        assert!(rendered[1].contains("loading program…"), "{rendered:?}");
+        assert!(rendered[0].contains("clip playbook"), "{rendered:?}");
+        assert!(rendered[1].contains("loading playbook…"), "{rendered:?}");
         assert!(rendered[2].contains("end clip"), "{rendered:?}");
         assert_eq!(rendered[3], "after", "{rendered:?}");
         // The attribute line was consumed by the block, not rendered as text.
@@ -25170,17 +25170,17 @@ mod tests {
         );
     }
 
-    /// Recursion guard: inside a projection (depth > 0) a `:::clip program`
+    /// Recursion guard: inside a projection (depth > 0) a `:::clip playbook`
     /// block renders as an inert chip — it never projects again, so a
-    /// program embedding a program clip cannot recurse.
+    /// playbook embedding a playbook clip cannot recurse.
     #[test]
-    fn widget_clip_program_inside_projection_renders_inert_chip() {
+    fn widget_clip_playbook_inside_projection_renders_inert_chip() {
         let mut hits = Vec::new();
         let mut url_hits = Vec::new();
         let mut wanted = Vec::new();
         let lines = render_agentd_markdown_lines_at_depth(
             None,
-            ":::clip program\nsection=\"Progress\"\n:::",
+            ":::clip playbook\nsection=\"Progress\"\n:::",
             &Theme::default(),
             None,
             Rect::new(0, 0, 80, 10),
@@ -25193,15 +25193,15 @@ mod tests {
             1,
         );
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
-        assert!(rendered[0].contains("clip program"), "{rendered:?}");
+        assert!(rendered[0].contains("clip playbook"), "{rendered:?}");
         assert!(
-            !rendered.iter().any(|l| l.contains("loading program…")),
-            "a nested program clip must not try to project: {rendered:?}"
+            !rendered.iter().any(|l| l.contains("loading playbook…")),
+            "a nested playbook clip must not try to project: {rendered:?}"
         );
-        assert!(wanted.is_empty(), "no fetch for a nested program clip");
+        assert!(wanted.is_empty(), "no fetch for a nested playbook clip");
     }
 
-    /// Non-program clip blocks in widgets render as the program surface
+    /// Non-playbook clip blocks in widgets render as the playbook surface
     /// renders them: chip fence line, body as ordinary lines, dim end line.
     #[test]
     fn widget_clip_fence_of_other_types_renders_chip_and_end_line() {
@@ -25244,16 +25244,16 @@ mod tests {
         assert!(link.close);
     }
 
-    /// Program surface action links: the literal source text is styled as an
+    /// Playbook surface action links: the literal source text is styled as an
     /// interactive span (accent, bold, underlined) without collapsing it —
     /// the editor keeps its cursor math — while surrounding text stays plain.
     #[test]
-    fn program_text_spans_style_action_ranges_as_interactive() {
+    fn playbook_text_spans_style_action_ranges_as_interactive() {
         let theme = Theme::default();
         let raw = "run [Go](agentd:action/go) now";
-        let ranges = program_line_action_link_char_ranges(raw, 0);
+        let ranges = playbook_line_action_link_char_ranges(raw, 0);
         assert_eq!(ranges, vec![(4, 26)]);
-        let spans = program_text_spans(
+        let spans = playbook_text_spans(
             &theme,
             raw,
             0,
@@ -25278,13 +25278,13 @@ mod tests {
         assert!(!plain.style.add_modifier.contains(Modifier::UNDERLINED));
     }
 
-    /// Program surface action links are clickable: hits register through the
+    /// Playbook surface action links are clickable: hits register through the
     /// same wrap-aware geometry as smart-clip hits, carrying the parsed
-    /// `UiAction` and the program's owning session id.
+    /// `UiAction` and the playbook's owning session id.
     #[test]
-    fn program_action_link_hits_map_click_geometry() {
+    fn playbook_action_link_hits_map_click_geometry() {
         let area = Rect::new(0, 0, 80, 6);
-        let hits = program_action_link_hits(
+        let hits = playbook_action_link_hits(
             None,
             "run [Go](agentd:action/go?key=g) now",
             "sess",
@@ -26061,24 +26061,24 @@ mod tests {
     }
 
     #[test]
-    fn program_open_title_glyph_takes_program_border_color() {
-        // When the Program view is open for the selected session, the title
+    fn playbook_open_title_glyph_takes_playbook_border_color() {
+        // When the Playbook view is open for the selected session, the title
         // bar's mode glyph (▣ or the animated spinner in its place) must read
-        // as part of the Program frame it toggles into — the program border
-        // color, focus-dimmed the same way `program_border_style` dims the
-        // actual Program pane's border.
+        // as part of the Playbook frame it toggles into — the playbook border
+        // color, focus-dimmed the same way `playbook_border_style` dims the
+        // actual Playbook pane's border.
         let theme = Theme::default();
         let focused = session_title_glyph_style(&theme, true, true);
         let unfocused = session_title_glyph_style(&theme, true, false);
-        assert_eq!(focused.fg, Some(theme.program_border));
-        assert_eq!(unfocused.fg, Some(theme.program_border));
+        assert_eq!(focused.fg, Some(theme.playbook_border));
+        assert_eq!(unfocused.fg, Some(theme.playbook_border));
         assert!(!focused.add_modifier.contains(Modifier::DIM));
         assert!(unfocused.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
     fn closed_title_glyph_is_unstyled() {
-        // No Program open → the glyph keeps the title's plain default style,
+        // No Playbook open → the glyph keeps the title's plain default style,
         // unchanged from before this indicator existed.
         let theme = Theme::default();
         assert_eq!(
@@ -26092,13 +26092,13 @@ mod tests {
     }
 
     #[test]
-    fn program_mode_glyph_differs_from_every_spinner_frame() {
+    fn playbook_mode_glyph_differs_from_every_spinner_frame() {
         // `session_mode_glyph` swaps in a spinner frame in place of `▣`
         // whenever `session_should_animate_status` is true, falling back to
         // the static `▣` otherwise. If the static glyph ever collided with a
-        // spinner frame, the Program-open indicator would silently stop
+        // spinner frame, the Playbook-open indicator would silently stop
         // appearing to animate.
-        assert!(!crate::app::SPINNER_FRAMES.contains(&program_mode_glyph()));
+        assert!(!crate::app::SPINNER_FRAMES.contains(&playbook_mode_glyph()));
     }
 
     fn widget(markdown: &str) -> construct_protocol::UiPanel {

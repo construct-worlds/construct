@@ -9,11 +9,11 @@ Scope: Web UI session activity indicators use the same animated glyph sequence a
 
 When the web UI animates session activity, it must swap the status indicator glyph through the TUI spinner sequence `["✦", "✧", "✶", "✷", "✸", "✷", "✶", "✧"]` at the TUI cadence of 120 ms per frame.
 
-This applies to both the session list status indicator and session smart-clip chips in the Program editor. The indicator itself may change glyphs, but the row or chip must not bounce, pulse, scale, or otherwise move as the activity cue.
+This applies to both the session list status indicator and session smart-clip chips in the Playbook editor. The indicator itself may change glyphs, but the row or chip must not bounce, pulse, scale, or otherwise move as the activity cue.
 
 ## Reason
 
-The TUI and web UI represent the same fleet. Matching the activity indicator avoids a client-specific motion language and keeps Program session clips visually stable while work runs.
+The TUI and web UI represent the same fleet. Matching the activity indicator avoids a client-specific motion language and keeps Playbook session clips visually stable while work runs.
 
 ## Consequences
 

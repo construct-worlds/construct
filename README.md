@@ -7,7 +7,7 @@
     <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/built_with-rust-dea584?logo=rust&logoColor=white" alt="built with rust"></a>
     <a href="https://discord.gg/89fPgTKsRF"><img src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" alt="join the construct discord"></a>
   </p>
-  <img src="https://raw.githubusercontent.com/construct-worlds/construct/52849f56c902397d6729ec286293064c5b15bcfe/demos/lineage-program-run.gif" alt="construct lineage and program run">
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/52849f56c902397d6729ec286293064c5b15bcfe/demos/lineage-program-run.gif" alt="construct lineage and playbook run">
 </div>
 
 ### Quick start
@@ -46,11 +46,11 @@ More screenshots and demos: [gallery](gallery.md).
   cross-harness fork — and merge the results back.
 
   <img src="https://raw.githubusercontent.com/construct-worlds/construct/9de1982e7ec4ae9ad71c32f3f3e3f2f58fbe93ca/demos/fork-merge.gif" alt="construct fork and merge demo" width="70%">
-- **Program** — collaborative, executable Markdown
-  ([docs/program.md](docs/program.md)): co-develop workflows, tasks, and ideas
+- **Playbook** — collaborative, executable Markdown
+  ([docs/playbook.md](docs/playbook.md)): co-develop workflows, tasks, and ideas
   with the agent, then run them from the same document.
 
-  <img src="https://raw.githubusercontent.com/construct-worlds/construct/90d02bd2c1e6108eaa5c763bde9e2d78f8786691/demos/program.gif" alt="construct program demo" width="70%">
+  <img src="https://raw.githubusercontent.com/construct-worlds/construct/90d02bd2c1e6108eaa5c763bde9e2d78f8786691/demos/program.gif" alt="construct playbook demo" width="70%">
 - **Agent-to-agent orchestration** — let your Codex and Claude Code sessions
   talk to each other: one agent can hand a task to another, check how it's
   going, and pick up the results.
@@ -217,11 +217,11 @@ For an optimized build, use `cargo build --workspace --release` and replace
   Agent Harness Protocol (AHP).
 - [Harnesses and session modes](docs/harnesses.md) — supported adapters,
   interactive vs. headless modes, worktree isolation, and resume behavior.
-- [Program](docs/program.md) — the per-session Markdown document you and the
+- [Playbook](docs/playbook.md) — the per-session Markdown document you and the
   agent co-edit and run: smart clips, run shimmer, templates, and live
   collaboration.
-- [Program selection verbs](docs/program-verbs.md) — typed refinement actions
-  on a Program selection (challenge assumptions, simplify, crystallize,
+- [Playbook selection verbs](docs/playbook-verbs.md) — typed refinement actions
+  on a Playbook selection (challenge assumptions, simplify, crystallize,
   interview), the pinned inline terminal for interactive verbs, and authoring
   your own.
 - [smith built-in agent](docs/smith.md) — providers, model selection, tools,

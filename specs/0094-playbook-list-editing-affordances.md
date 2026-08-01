@@ -1,13 +1,13 @@
-# 0094-program-list-editing-affordances
+# 0094-playbook-list-editing-affordances
 
 Status: accepted
 Date: 2026-07-14
 Area: ux
-Scope: how the program editor formats and continues markdown list items while the user is typing them.
+Scope: how the playbook editor formats and continues markdown list items while the user is typing them.
 
 ## Decision
 
-The program editor treats markdown list editing the way mainstream editors
+The playbook editor treats markdown list editing the way mainstream editors
 (Notion, Obsidian, VS Code) do:
 
 - A line whose content after the indent is just a list marker (`- ` or `* `,
@@ -45,7 +45,7 @@ memory from other editors transfers directly.
   editor's existing undo, selection-replacement, and live-edit sync exactly
   like any other insertion or deletion.
 - Accepted tradeoff: a literal `- ` or `* ` line can no longer be kept as
-  plain text in the program editor.
+  plain text in the playbook editor.
 
 ## Non-Goals
 

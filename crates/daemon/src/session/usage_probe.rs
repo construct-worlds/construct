@@ -322,7 +322,7 @@ impl SessionManager {
 
             // Record the current PTY log offset, then send the probe
             // command as a bracketed paste + separate Enter — the same
-            // delivery shape the program Run path uses for these exact
+            // delivery shape the playbook Run path uses for these exact
             // harnesses, but with the Enter gated on the paste's echo
             // rather than a fixed delay (see `submit_probe_command`). Plain
             // `send_input` (ahp `SESSION_INPUT`, "type it and append \n")
@@ -330,8 +330,8 @@ impl SessionManager {
             // interactive TUIs only treat a real bracketed paste as one
             // atomic submission, so a bulk raw write lands the text in the
             // input box without ever submitting it — see
-            // `program_submit_typed_prompt`'s own doc comment for the same
-            // lesson learned once already for the program Run path.
+            // `playbook_submit_typed_prompt`'s own doc comment for the same
+            // lesson learned once already for the playbook Run path.
             let before_offset = self.pty_log_len(&id);
             let sent_at_ms = Utc::now().timestamp_millis();
             if let Err(e) = self.submit_probe_command(&id, command, before_offset).await {
@@ -413,8 +413,8 @@ impl SessionManager {
     /// harness to *echo* the pasted text back, then send the submit Enter.
     ///
     /// The echo gate replaces the fixed post-paste delay
-    /// (`PROGRAM_EXTERNAL_PTY_SUBMIT_DELAY`) the shared
-    /// `program_submit_typed_prompt` helper uses, because a fixed delay
+    /// (`PLAYBOOK_EXTERNAL_PTY_SUBMIT_DELAY`) the shared
+    /// `playbook_submit_typed_prompt` helper uses, because a fixed delay
     /// only separates the paste and the Enter at the *write* end.
     /// Empirically observed failure (spec 0086): a probe session
     /// cold-starts its harness, and a harness still busy with its own
@@ -436,7 +436,7 @@ impl SessionManager {
     /// meaningful because the probe command is short: claude collapses
     /// *long* pastes into a `[Pasted text #N]` placeholder that never
     /// echoes the text itself, which is why this gate lives here and not
-    /// in the shared program-Run delivery path.
+    /// in the shared playbook-Run delivery path.
     ///
     /// `before_offset` is the PTY-log offset recorded just before this
     /// call, so only output the paste itself produced counts as echo.
@@ -450,7 +450,7 @@ impl SessionManager {
         command: &str,
         before_offset: u64,
     ) -> Result<()> {
-        self.pty_input_without_capture(id, program_bracketed_paste_bytes(command))
+        self.pty_input_without_capture(id, playbook_bracketed_paste_bytes(command))
             .await?;
         if !self.wait_for_paste_echo(id, before_offset, command).await {
             tracing::warn!(
@@ -519,7 +519,7 @@ impl SessionManager {
     /// Current byte length of `id`'s on-disk `pty.log`, used to mark "the
     /// probe command hasn't been sent yet" before step 5 so step 7 can
     /// slice out only what the command produced. `pub(super)`: also the
-    /// before-marker for program fork prompt delivery's paste-output gate.
+    /// before-marker for playbook fork prompt delivery's paste-output gate.
     pub(super) fn pty_log_len(&self, id: &str) -> u64 {
         std::fs::metadata(self.storage.pty_log_path(id))
             .map(|m| m.len())

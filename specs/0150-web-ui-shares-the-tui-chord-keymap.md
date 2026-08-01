@@ -46,10 +46,10 @@ Sharing the spelling rather than inventing browser-native equivalents is the del
 ## Examples
 
 - `C-x 3` then `C-x o` splits the view and moves focus to the new pane, in either client.
-- `C-x C-s` while the Program surface is open saves it; the same chord elsewhere reports that Program must be open first.
+- `C-x C-s` while the Playbook surface is open saves it; the same chord elsewhere reports that Playbook must be open first.
 - `C-x` followed by a key with no binding shows that the chord is unbound and sends nothing to the focused session.
 - On a viewport too narrow for panes, `C-x 3` reports that the window is too narrow instead of silently writing a split that other clients would then have to render.
 - A chord opens the new-session dialog; cancel closes it. The same cancel key, pressed with a half-typed chord instead, abandons the chord — one key, whichever layer is on top.
-- The chord that opens Program, pressed again, returns to the surface it was invoked from.
+- The chord that opens Playbook, pressed again, returns to the surface it was invoked from.
 - With two panes open, repeatedly cycling focus visits both panes and the session list, then returns to the first pane.
 - With a list row focused, the next/previous keys move the selection; the same keys typed into the composer insert text and leave the selection alone.

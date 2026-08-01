@@ -111,16 +111,16 @@ impl App {
             Some(MinibufferIntent::ConfirmLocalFileUpload {
                 session_id,
                 path,
-                to_program,
-            }) => Some((session_id.clone(), path.clone(), *to_program)),
+                to_playbook,
+            }) => Some((session_id.clone(), path.clone(), *to_playbook)),
             _ => None,
         };
-        if let Some((session_id, path, to_program)) = upload_intent {
+        if let Some((session_id, path, to_playbook)) = upload_intent {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                     self.minibuffer = None;
-                    self.upload_local_file(session_id, path, to_program).await;
+                    self.upload_local_file(session_id, path, to_playbook).await;
                 }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                     self.minibuffer = None;
@@ -780,7 +780,7 @@ impl App {
             MinibufferIntent::ConfirmLocalFileUpload {
                 session_id,
                 path,
-                to_program,
+                to_playbook,
             } => {
                 // Defensive fallback, same as `RestartDaemonConfirm` above.
                 let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
@@ -788,7 +788,7 @@ impl App {
                     self.set_status("upload cancelled".to_string());
                     return;
                 }
-                self.upload_local_file(session_id, path, to_program).await;
+                self.upload_local_file(session_id, path, to_playbook).await;
             }
             MinibufferIntent::CommandPalette => {
                 let cmd = input.trim();

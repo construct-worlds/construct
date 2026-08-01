@@ -6,9 +6,9 @@ use crate::session::{BroadcastMsg, SessionManager};
 use construct_protocol::jsonrpc::{self, MessageKind};
 use construct_protocol::{
     ipc_method, ipc_notif, transport, ChatViewerActiveResult, CreateSessionParams, ErrorObject,
-    LayoutSetParams, Notification, PingResult, ProgramCursorParams, ProgramEditParams,
-    ProgramExecuteParams, ProgramGetParams, ProgramUpdateActor, ProgramUpdateParams,
-    ProgramVerbExecuteParams, ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams,
+    LayoutSetParams, Notification, PingResult, PlaybookCursorParams, PlaybookEditParams,
+    PlaybookExecuteParams, PlaybookGetParams, PlaybookUpdateActor, PlaybookUpdateParams,
+    PlaybookVerbExecuteParams, ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams,
     ProjectMoveParams, ProjectRenameParams, ProjectSetCollapsedParams, PtyReplayParams, Request,
     Response, RouterListRoutesParams, SearchParams, SessionAttachClipboardParams, SessionIdParams,
     SessionInputParams, SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams,
@@ -943,9 +943,9 @@ fn forward_broadcast(
     conn_id: u64,
 ) {
     // A plain cursor publish is skipped for its own source connection — see
-    // `BroadcastMsg::ProgramCursor`'s doc comment. Every other message kind
+    // `BroadcastMsg::PlaybookCursor`'s doc comment. Every other message kind
     // (and every other connection) forwards as usual.
-    if let BroadcastMsg::ProgramCursor {
+    if let BroadcastMsg::PlaybookCursor {
         skip_conn_id: Some(skip),
         ..
     } = &msg
@@ -960,8 +960,8 @@ fn forward_broadcast(
             BroadcastMsg::PtyResize { payload, .. } => payload.session_id == *f,
             BroadcastMsg::State(s) => s.session.id == *f,
             BroadcastMsg::Deleted(d) => d.session_id == *f,
-            BroadcastMsg::ProgramState(c) => c.program.session_id == *f,
-            BroadcastMsg::ProgramCursor { payload, .. } => payload.cursor.session_id == *f,
+            BroadcastMsg::PlaybookState(c) => c.playbook.session_id == *f,
+            BroadcastMsg::PlaybookCursor { payload, .. } => payload.cursor.session_id == *f,
             // Project, remote-state and layout notifications aren't session-
             // specific; always forward even when a session filter
             // is set so the local TUI's remote badge stays accurate
@@ -1016,19 +1016,19 @@ fn forward_broadcast(
             };
             Notification::new(ipc_notif::DELETED, Some(p))
         }
-        BroadcastMsg::ProgramState(c) => {
+        BroadcastMsg::PlaybookState(c) => {
             let p = match serde_json::to_value(&c) {
                 Ok(v) => v,
                 Err(_) => return,
             };
-            Notification::new(ipc_notif::PROGRAM_STATE, Some(p))
+            Notification::new(ipc_notif::PLAYBOOK_STATE, Some(p))
         }
-        BroadcastMsg::ProgramCursor { payload, .. } => {
+        BroadcastMsg::PlaybookCursor { payload, .. } => {
             let p = match serde_json::to_value(&payload) {
                 Ok(v) => v,
                 Err(_) => return,
             };
-            Notification::new(ipc_notif::PROGRAM_CURSOR, Some(p))
+            Notification::new(ipc_notif::PLAYBOOK_CURSOR, Some(p))
         }
         BroadcastMsg::GroupState(g) => {
             let p = match serde_json::to_value(&g) {
@@ -1160,39 +1160,39 @@ async fn dispatch(
         let p = params!(req, TokenHistoryParams);
         ok!(req, &manager.token_history(p.window_secs, p.max_samples))
     });
-    dispatch_entry!(ipc_method::PROGRAM_GET, {
-        let p = params!(req, ProgramGetParams);
-        match manager.program_get(&p.session_id).await {
+    dispatch_entry!(ipc_method::PLAYBOOK_GET, {
+        let p = params!(req, PlaybookGetParams);
+        match manager.playbook_get(&p.session_id).await {
             Ok(result) => ok!(req, &result),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::PROGRAM_UPDATE, {
-        let p = params!(req, ProgramUpdateParams);
-        match manager.program_update(p).await {
+    dispatch_entry!(ipc_method::PLAYBOOK_UPDATE, {
+        let p = params!(req, PlaybookUpdateParams);
+        match manager.playbook_update(p).await {
             Ok(result) => ok!(req, &result),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::PROGRAM_EDIT, {
-        let p = params!(req, ProgramEditParams);
-        let source_conn_id = if p.actor == ProgramUpdateActor::Human {
+    dispatch_entry!(ipc_method::PLAYBOOK_EDIT, {
+        let p = params!(req, PlaybookEditParams);
+        let source_conn_id = if p.actor == PlaybookUpdateActor::Human {
             Some(conn_id)
         } else {
             None
         };
-        match manager.program_edit_from_conn(p, source_conn_id).await {
+        match manager.playbook_edit_from_conn(p, source_conn_id).await {
             Ok(result) => ok!(req, &result),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::PROGRAM_CURSOR, {
-        let p = params!(req, ProgramCursorParams);
+    dispatch_entry!(ipc_method::PLAYBOOK_CURSOR, {
+        let p = params!(req, PlaybookCursorParams);
         let kind_label = match kind {
             ClientKind::Remote => "web",
             ClientKind::Tui => "tui",
         };
-        match manager.program_cursor(conn_id, kind_label, p).await {
+        match manager.playbook_cursor(conn_id, kind_label, p).await {
             Ok(result) => ok!(req, &result),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
@@ -1202,25 +1202,25 @@ async fn dispatch(
         manager.set_terminal_background(conn_id, p.background);
         Response::ok(req.id.clone(), serde_json::Value::Null)
     });
-    dispatch_entry!(ipc_method::PROGRAM_EXECUTE, {
-        let p = params!(req, ProgramExecuteParams);
-        match manager.program_execute(p).await {
+    dispatch_entry!(ipc_method::PLAYBOOK_EXECUTE, {
+        let p = params!(req, PlaybookExecuteParams);
+        match manager.playbook_execute(p).await {
             Ok(result) => ok!(req, &result),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::PROGRAM_LIST_TEMPLATES, {
-        match manager.program_templates() {
+    dispatch_entry!(ipc_method::PLAYBOOK_LIST_TEMPLATES, {
+        match manager.playbook_templates() {
             Ok(result) => ok!(req, &result),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::PROGRAM_LIST_VERBS, {
-        ok!(req, &manager.program_verbs())
+    dispatch_entry!(ipc_method::PLAYBOOK_LIST_VERBS, {
+        ok!(req, &manager.playbook_verbs())
     });
-    dispatch_entry!(ipc_method::PROGRAM_VERB_EXECUTE, {
-        let p = params!(req, ProgramVerbExecuteParams);
-        match manager.program_verb_execute(p).await {
+    dispatch_entry!(ipc_method::PLAYBOOK_VERB_EXECUTE, {
+        let p = params!(req, PlaybookVerbExecuteParams);
+        match manager.playbook_verb_execute(p).await {
             Ok(result) => ok!(req, &result),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
@@ -1724,8 +1724,8 @@ async fn dispatch(
 mod tests {
     use super::*;
 
-    fn test_program_cursor(session_id: &str, client_id: &str) -> construct_protocol::ProgramCursor {
-        construct_protocol::ProgramCursor {
+    fn test_playbook_cursor(session_id: &str, client_id: &str) -> construct_protocol::PlaybookCursor {
+        construct_protocol::PlaybookCursor {
             session_id: session_id.to_string(),
             client_id: client_id.to_string(),
             label: "TUI".to_string(),
@@ -1741,15 +1741,15 @@ mod tests {
     }
 
     #[test]
-    fn forward_broadcast_skips_program_cursor_for_its_own_publisher() {
+    fn forward_broadcast_skips_playbook_cursor_for_its_own_publisher() {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let payload = construct_protocol::ProgramCursorNotificationPayload {
-            cursor: test_program_cursor("s1", "c7"),
+        let payload = construct_protocol::PlaybookCursorNotificationPayload {
+            cursor: test_playbook_cursor("s1", "c7"),
         };
         forward_broadcast(
             &out_tx,
             &None,
-            BroadcastMsg::ProgramCursor {
+            BroadcastMsg::PlaybookCursor {
                 payload,
                 skip_conn_id: Some(7),
             },
@@ -1762,15 +1762,15 @@ mod tests {
     }
 
     #[test]
-    fn forward_broadcast_still_delivers_program_cursor_to_other_connections() {
+    fn forward_broadcast_still_delivers_playbook_cursor_to_other_connections() {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let payload = construct_protocol::ProgramCursorNotificationPayload {
-            cursor: test_program_cursor("s1", "c7"),
+        let payload = construct_protocol::PlaybookCursorNotificationPayload {
+            cursor: test_playbook_cursor("s1", "c7"),
         };
         forward_broadcast(
             &out_tx,
             &None,
-            BroadcastMsg::ProgramCursor {
+            BroadcastMsg::PlaybookCursor {
                 payload,
                 skip_conn_id: Some(7),
             },
@@ -1783,17 +1783,17 @@ mod tests {
     }
 
     #[test]
-    fn forward_broadcast_delivers_program_cursor_rebase_to_its_owner() {
+    fn forward_broadcast_delivers_playbook_cursor_rebase_to_its_owner() {
         // skip_conn_id: None is what genuine rebases (and disconnect
         // tombstones) use — the cursor's own owner must still receive it.
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let payload = construct_protocol::ProgramCursorNotificationPayload {
-            cursor: test_program_cursor("s1", "c7"),
+        let payload = construct_protocol::PlaybookCursorNotificationPayload {
+            cursor: test_playbook_cursor("s1", "c7"),
         };
         forward_broadcast(
             &out_tx,
             &None,
-            BroadcastMsg::ProgramCursor {
+            BroadcastMsg::PlaybookCursor {
                 payload,
                 skip_conn_id: None,
             },

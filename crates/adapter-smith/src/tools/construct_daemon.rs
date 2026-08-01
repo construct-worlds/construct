@@ -785,22 +785,22 @@ impl Tool for LoopRemove {
     }
 }
 
-// ---------- Program ----------
+// ---------- Playbook ----------
 
-/// Native mirror of the MCP `construct_program_get` tool: read a session's
-/// current Program document. Exists so a smith session without an MCP
-/// connection can read Program content at all — no native tool covered this
+/// Native mirror of the MCP `construct_playbook_get` tool: read a session's
+/// current Playbook document. Exists so a smith session without an MCP
+/// connection can read Playbook content at all — no native tool covered this
 /// before (spec 0089 verb subagents get the document inlined in their
 /// prompt at spawn time, but this is their live, always-fresh fallback for a
 /// document that changed since, or one too large to inline in full).
-pub struct ProgramGet;
+pub struct PlaybookGet;
 #[async_trait]
-impl Tool for ProgramGet {
+impl Tool for PlaybookGet {
     fn name(&self) -> &str {
-        "agentd_program_get"
+        "agentd_playbook_get"
     }
     fn description(&self) -> &str {
-        "Read a session's current Program document: its Markdown, version, and per-block \
+        "Read a session's current Playbook document: its Markdown, version, and per-block \
          shimmer state. `session_id` defaults to the calling session."
     }
     fn schema(&self) -> Value {
@@ -820,7 +820,7 @@ impl Tool for ProgramGet {
             .or_else(calling_session_id)
             .ok_or_else(|| anyhow!("session_id required (and CONSTRUCT_SESSION_ID unset)"))?;
         let c = client(ctx).await?;
-        let result = c.program_get(&sid).await?;
+        let result = c.playbook_get(&sid).await?;
         Ok(ToolOutcome {
             ok: true,
             output: serde_json::to_string(&result)?,
@@ -828,26 +828,26 @@ impl Tool for ProgramGet {
     }
 }
 
-/// Native mirror of the MCP `construct_program_edit` tool, minus shimmer
+/// Native mirror of the MCP `construct_playbook_edit` tool, minus shimmer
 /// declaration. Exists so a smith session — the orchestrator included — can
-/// apply an anchored Program edit without an MCP connection; today the only
+/// apply an anchored Playbook edit without an MCP connection; today the only
 /// caller is verb-drift escalation (spec 0089), where the daemon asks the
-/// Program-owning session to reconcile a subagent's result whose selection
+/// Playbook-owning session to reconcile a subagent's result whose selection
 /// anchor changed underneath it.
-pub struct ProgramEdit;
+pub struct PlaybookEdit;
 #[async_trait]
-impl Tool for ProgramEdit {
+impl Tool for PlaybookEdit {
     fn name(&self) -> &str {
-        "agentd_program_edit"
+        "agentd_playbook_edit"
     }
     fn description(&self) -> &str {
-        "Apply one or more anchored find/replace edits to a session's Program document. Each \
+        "Apply one or more anchored find/replace edits to a session's Playbook document. Each \
          edit replaces `old_string` with `new_string`; set `replace_all` to replace every \
          occurrence, or include enough surrounding context to make `old_string` unique. An \
-         empty `old_string` appends `new_string`. Edits apply to the LATEST program content, so \
+         empty `old_string` appends `new_string`. Edits apply to the LATEST playbook content, so \
          concurrent changes to other regions merge cleanly. Fails — writing nothing — if an \
          `old_string` is missing or ambiguous, meaning that exact text changed underneath you: \
-         re-read the program and retry. `session_id` defaults to the calling session."
+         re-read the playbook and retry. `session_id` defaults to the calling session."
     }
     fn schema(&self) -> Value {
         json!({
@@ -886,7 +886,7 @@ impl Tool for ProgramEdit {
             .get("edits")
             .cloned()
             .ok_or_else(|| anyhow!("missing `edits`"))?;
-        let edits: Vec<construct_protocol::ProgramEdit> = serde_json::from_value(edits_val)
+        let edits: Vec<construct_protocol::PlaybookEdit> = serde_json::from_value(edits_val)
             .map_err(|e| anyhow!("invalid `edits`: {e}"))?;
         if edits.is_empty() {
             return Err(anyhow!("edits must not be empty"));
@@ -895,15 +895,15 @@ impl Tool for ProgramEdit {
             .get("note")
             .and_then(|s| s.as_str())
             .map(|s| s.to_string());
-        let params = construct_protocol::ProgramEditParams {
+        let params = construct_protocol::PlaybookEditParams {
             session_id: sid,
             edits,
-            actor: construct_protocol::ProgramUpdateActor::Agent,
+            actor: construct_protocol::PlaybookUpdateActor::Agent,
             note,
             shimmer: Vec::new(),
         };
         let c = client(ctx).await?;
-        let result = c.program_edit(params).await?;
+        let result = c.playbook_edit(params).await?;
         Ok(ToolOutcome {
             ok: true,
             output: serde_json::to_string(&result)?,

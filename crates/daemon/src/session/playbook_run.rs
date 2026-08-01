@@ -1,6 +1,6 @@
 use super::*;
 
-fn block_ref_or_id(block: &construct_protocol::ProgramBlockView) -> String {
+fn block_ref_or_id(block: &construct_protocol::PlaybookBlockView) -> String {
     if !block.block_ref.is_empty() {
         block.block_ref.clone()
     } else {
@@ -8,8 +8,8 @@ fn block_ref_or_id(block: &construct_protocol::ProgramBlockView) -> String {
     }
 }
 
-fn program_block_ids(
-    blocks: &[construct_protocol::ProgramBlockView],
+fn playbook_block_ids(
+    blocks: &[construct_protocol::PlaybookBlockView],
 ) -> std::collections::HashSet<String> {
     blocks
         .iter()
@@ -26,10 +26,10 @@ fn program_block_ids(
 /// empty/short result the same way an unresolvable span would. Document order
 /// is preserved by iterating `saved_blocks`, matching the ordering guarantee
 /// callers rely on for an explicit initial pending declaration.
-fn program_run_blocks_from_ids(
+fn playbook_run_blocks_from_ids(
     ids: &[String],
-    saved_blocks: &[construct_protocol::ProgramBlockView],
-) -> Vec<construct_protocol::ProgramBlockView> {
+    saved_blocks: &[construct_protocol::PlaybookBlockView],
+) -> Vec<construct_protocol::PlaybookBlockView> {
     let wanted: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
     saved_blocks
         .iter()
@@ -54,11 +54,11 @@ fn program_run_blocks_from_ids(
 /// document repeats the same text in more than one block, in which case this
 /// still fabricates a phantom block scoped to just the selected substring —
 /// a known limitation of running without `selection_block_ids`.
-fn program_run_blocks_from_spans(
+fn playbook_run_blocks_from_spans(
     body: &str,
-    saved_blocks: &[construct_protocol::ProgramBlockView],
-) -> Vec<construct_protocol::ProgramBlockView> {
-    let mut by_content: std::collections::HashMap<String, Vec<&construct_protocol::ProgramBlockView>> =
+    saved_blocks: &[construct_protocol::PlaybookBlockView],
+) -> Vec<construct_protocol::PlaybookBlockView> {
+    let mut by_content: std::collections::HashMap<String, Vec<&construct_protocol::PlaybookBlockView>> =
         std::collections::HashMap::new();
     for block in saved_blocks {
         if !block.content_id.is_empty() {
@@ -69,7 +69,7 @@ fn program_run_blocks_from_spans(
         }
     }
 
-    construct_protocol::program_block_spans(body)
+    construct_protocol::playbook_block_spans(body)
         .into_iter()
         .map(|span| {
             if let Some(matches) = by_content.get(&span.id) {
@@ -79,7 +79,7 @@ fn program_run_blocks_from_spans(
             }
             let trimmed = span.text.trim();
             if !trimmed.is_empty() {
-                let containing: Vec<&construct_protocol::ProgramBlockView> = saved_blocks
+                let containing: Vec<&construct_protocol::PlaybookBlockView> = saved_blocks
                     .iter()
                     .filter(|block| block.text.contains(trimmed))
                     .collect();
@@ -87,7 +87,7 @@ fn program_run_blocks_from_spans(
                     return (*block).clone();
                 }
             }
-            construct_protocol::ProgramBlockView {
+            construct_protocol::PlaybookBlockView {
                 id: span.id.clone(),
                 block_id: String::new(),
                 content_epoch: 0,
@@ -103,25 +103,25 @@ fn program_run_blocks_from_spans(
         .collect()
 }
 
-fn program_run_system_status(run: &ProgramRunProgress) -> &'static str {
+fn playbook_run_system_status(run: &PlaybookRunProgress) -> &'static str {
     if run.queued_behind_current_turn && !run.seen_running {
-        construct_protocol::PROGRAM_SHIMMER_STATUS_QUEUED
+        construct_protocol::PLAYBOOK_SHIMMER_STATUS_QUEUED
     } else if run.first_output_seen {
-        construct_protocol::PROGRAM_SHIMMER_STATUS_AGENT_WORKING
+        construct_protocol::PLAYBOOK_SHIMMER_STATUS_AGENT_WORKING
     } else {
-        construct_protocol::PROGRAM_SHIMMER_STATUS_DELIVERED
+        construct_protocol::PLAYBOOK_SHIMMER_STATUS_DELIVERED
     }
 }
 
-fn project_program_run_status(mut run: ProgramRunProgress) -> ProgramRunProgress {
-    run.system_status = Some(program_run_system_status(&run).to_string());
+fn project_playbook_run_status(mut run: PlaybookRunProgress) -> PlaybookRunProgress {
+    run.system_status = Some(playbook_run_system_status(&run).to_string());
     run
 }
 
 impl SessionManager {
-    pub(super) fn program_run_snapshot(&self, session_id: &str) -> Option<ProgramRunProgress> {
+    pub(super) fn playbook_run_snapshot(&self, session_id: &str) -> Option<PlaybookRunProgress> {
         let now_ms = Utc::now().timestamp_millis();
-        let mut runs = self.program_runs.lock().ok()?;
+        let mut runs = self.playbook_runs.lock().ok()?;
         let expired = runs
             .get(session_id)
             .is_some_and(|run| run.expires_at_ms <= now_ms);
@@ -141,7 +141,7 @@ impl SessionManager {
             {
                 let mut out = run.clone();
                 if !out.pending_block_refs.is_empty() {
-                    if let Ok((program, blocks)) = self.storage.read_program_with_blocks(session_id)
+                    if let Ok((playbook, blocks)) = self.storage.read_playbook_with_blocks(session_id)
                     {
                         let refs: std::collections::HashSet<String> =
                             out.pending_block_refs.iter().cloned().collect();
@@ -150,14 +150,14 @@ impl SessionManager {
                             .filter(|block| refs.contains(&block_ref_or_id(block)))
                             .map(|block| block.content_id.clone())
                             .collect();
-                        if out.pending_block_ids.is_empty() && !program.markdown.trim().is_empty() {
+                        if out.pending_block_ids.is_empty() && !playbook.markdown.trim().is_empty() {
                             out.pending_block_ids = out.pending_block_refs.clone();
                         }
                     } else {
                         out.pending_block_ids = out.pending_block_refs.clone();
                     }
                 }
-                Some(project_program_run_status(out.with_refreshed_stage()))
+                Some(project_playbook_run_status(out.with_refreshed_stage()))
             }
             _ => None,
         }
@@ -165,13 +165,13 @@ impl SessionManager {
 
     /// Build the per-block projection (spec 0053): each block of `markdown` with
     /// its stable ref, text, and current shimmer state from the active run.
-    pub(super) fn program_blocks_projection(
+    pub(super) fn playbook_blocks_projection(
         &self,
         session_id: &str,
         markdown: &str,
-    ) -> Vec<construct_protocol::ProgramBlockView> {
+    ) -> Vec<construct_protocol::PlaybookBlockView> {
         let run = self
-            .program_runs
+            .playbook_runs
             .lock()
             .ok()
             .and_then(|runs| runs.get(session_id).cloned())
@@ -190,12 +190,12 @@ impl SessionManager {
             .unwrap_or_default();
         let blocks = self
             .storage
-            .read_program_with_blocks(session_id)
+            .read_playbook_with_blocks(session_id)
             .map(|(_, blocks)| blocks)
             .unwrap_or_else(|_| {
-                construct_protocol::program_block_spans(markdown)
+                construct_protocol::playbook_block_spans(markdown)
                     .into_iter()
-                    .map(|span| construct_protocol::ProgramBlockView {
+                    .map(|span| construct_protocol::PlaybookBlockView {
                         id: span.id.clone(),
                         block_id: String::new(),
                         content_epoch: 0,
@@ -228,14 +228,14 @@ impl SessionManager {
     }
 
     #[cfg(test)]
-    pub(super) fn start_program_run(
+    pub(super) fn start_playbook_run(
         &self,
         session_id: &str,
         body: &str,
         is_selection: bool,
         initial: Option<&[bool]>,
-    ) -> Option<ProgramRunProgress> {
-        self.start_program_run_with_dispatch_state(
+    ) -> Option<PlaybookRunProgress> {
+        self.start_playbook_run_with_dispatch_state(
             session_id,
             body,
             is_selection,
@@ -245,7 +245,7 @@ impl SessionManager {
         )
     }
 
-    pub(super) fn start_program_run_with_dispatch_state(
+    pub(super) fn start_playbook_run_with_dispatch_state(
         &self,
         session_id: &str,
         body: &str,
@@ -253,24 +253,24 @@ impl SessionManager {
         initial: Option<&[bool]>,
         queued_behind_current_turn: bool,
         selection_block_ids: Option<&[String]>,
-    ) -> Option<ProgramRunProgress> {
+    ) -> Option<PlaybookRunProgress> {
         let (blocks, is_full_document_body) =
-            match self.storage.read_program_with_blocks(session_id) {
-                Ok((program, saved_blocks)) if program.markdown.trim() == body.trim() => {
+            match self.storage.read_playbook_with_blocks(session_id) {
+                Ok((playbook, saved_blocks)) if playbook.markdown.trim() == body.trim() => {
                     (saved_blocks, true)
                 }
-                Ok((_program, saved_blocks)) => {
+                Ok((_playbook, saved_blocks)) => {
                     let by_ids = selection_block_ids
                         .filter(|ids| !ids.is_empty())
-                        .map(|ids| program_run_blocks_from_ids(ids, &saved_blocks));
+                        .map(|ids| playbook_run_blocks_from_ids(ids, &saved_blocks));
                     let blocks = by_ids
-                        .unwrap_or_else(|| program_run_blocks_from_spans(body, &saved_blocks));
+                        .unwrap_or_else(|| playbook_run_blocks_from_spans(body, &saved_blocks));
                     (blocks, false)
                 }
-                Err(_) => (program_run_blocks_from_spans(body, &[]), false),
+                Err(_) => (playbook_run_blocks_from_spans(body, &[]), false),
             };
         if blocks.is_empty() {
-            if let Ok(mut runs) = self.program_runs.lock() {
+            if let Ok(mut runs) = self.playbook_runs.lock() {
                 runs.remove(session_id);
             }
             return None;
@@ -290,7 +290,7 @@ impl SessionManager {
                     .collect()
             } else if is_selection {
                 body_ids
-            } else if let Ok(runs) = self.program_runs.lock() {
+            } else if let Ok(runs) = self.playbook_runs.lock() {
                 if let Some(old) = runs.get(session_id) {
                     // Re-run mid-flight preserves the agent's prior narrowing:
                     // keep only blocks that are still pending and still present.
@@ -314,7 +314,7 @@ impl SessionManager {
                 body_ids
             };
         if adds_to_existing {
-            if let Ok(mut runs) = self.program_runs.lock() {
+            if let Ok(mut runs) = self.playbook_runs.lock() {
                 if let Some(run) = runs.get_mut(session_id) {
                     let previous_pending: std::collections::HashSet<String> = run
                         .pending_block_refs
@@ -335,24 +335,24 @@ impl SessionManager {
                         }
                     }
                     run.total_block_count = run.total_block_count.saturating_add(added);
-                    run.expires_at_ms = now_ms + PROGRAM_RUN_MAX_MS;
+                    run.expires_at_ms = now_ms + PLAYBOOK_RUN_MAX_MS;
                     run.refresh_stage();
-                    return Some(project_program_run_status(run.clone()));
+                    return Some(project_playbook_run_status(run.clone()));
                 }
             }
         }
         if pending.is_empty() {
             // An explicit all-settled initial set leaves nothing to shimmer.
-            if let Ok(mut runs) = self.program_runs.lock() {
+            if let Ok(mut runs) = self.playbook_runs.lock() {
                 runs.remove(session_id);
             }
             return None;
         }
         let total_block_count = pending.len();
-        let run = ProgramRunProgress {
+        let run = PlaybookRunProgress {
             run_id: format!("{session_id}:{now_ms}"),
             started_at_ms: now_ms,
-            expires_at_ms: now_ms + PROGRAM_RUN_MAX_MS,
+            expires_at_ms: now_ms + PLAYBOOK_RUN_MAX_MS,
             system_status: None,
             pending_block_ids: Vec::new(),
             pending_block_refs: pending.into_iter().collect(),
@@ -361,33 +361,33 @@ impl SessionManager {
             first_output_seen: false,
             queued_behind_current_turn,
             // Unmanaged until the agent narrows it with a declaration/edit.
-            // Until then it is the optimistic full-program shimmer and stays
+            // Until then it is the optimistic full-playbook shimmer and stays
             // subject to the owning-session idle stop signal.
             agent_managed: false,
-            stage: construct_protocol::ProgramRunStage::Delivered,
+            stage: construct_protocol::PlaybookRunStage::Delivered,
             settled_block_count: 0,
             total_block_count,
         }
         .with_refreshed_stage();
-        if let Ok(mut runs) = self.program_runs.lock() {
+        if let Ok(mut runs) = self.playbook_runs.lock() {
             runs.insert(session_id.to_string(), run.clone());
         }
-        Some(project_program_run_status(run))
+        Some(project_playbook_run_status(run))
     }
 
     /// Apply a partial shimmer declaration after an edit (spec 0053): drop
     /// blocks whose id no longer exists (changed/removed), then set each
     /// declared id pending or settled. Ids absent from the post-edit document
     /// are ignored (fail closed — the block changed underneath the caller).
-    pub(super) fn narrow_program_run(
+    pub(super) fn narrow_playbook_run(
         &self,
         session_id: &str,
         markdown: &str,
-        decls: &[construct_protocol::ProgramShimmerDecl],
+        decls: &[construct_protocol::PlaybookShimmerDecl],
     ) {
         let now_ms = Utc::now().timestamp_millis();
-        let blocks = self.program_blocks_projection(session_id, markdown);
-        let current = program_block_ids(&blocks);
+        let blocks = self.playbook_blocks_projection(session_id, markdown);
+        let current = playbook_block_ids(&blocks);
         let by_decl: std::collections::HashMap<String, String> = blocks
             .iter()
             .flat_map(|block| {
@@ -396,7 +396,7 @@ impl SessionManager {
             })
             .filter(|(from, _)| !from.is_empty())
             .collect();
-        if let Ok(mut runs) = self.program_runs.lock() {
+        if let Ok(mut runs) = self.playbook_runs.lock() {
             let Some(run) = runs.get_mut(session_id) else {
                 return;
             };
@@ -407,7 +407,7 @@ impl SessionManager {
             // background work is still in flight). See spec 0042.
             run.agent_managed = true;
             // Refresh the inactivity backstop — the run is still being worked.
-            run.expires_at_ms = now_ms + PROGRAM_RUN_MAX_MS;
+            run.expires_at_ms = now_ms + PLAYBOOK_RUN_MAX_MS;
             run.pending_block_refs.retain(|id| current.contains(id));
             run.pending_block_ids.retain(|id| current.contains(id));
             for decl in decls {
@@ -421,7 +421,7 @@ impl SessionManager {
                     if let Some(tip) = decl
                         .tooltip
                         .as_deref()
-                        .and_then(construct_protocol::normalize_program_tooltip)
+                        .and_then(construct_protocol::normalize_playbook_tooltip)
                     {
                         run.pending_block_tooltips.insert(key, tip);
                     }
@@ -440,7 +440,7 @@ impl SessionManager {
             // NOT remove the run mid-turn (spec 0053): a still-running agent may
             // re-declare a moved block's new id next, and destroying the run
             // would make that revival a no-op. Idle/terminal reaping is owned by
-            // note_session_state_for_program_run.
+            // note_session_state_for_playbook_run.
             if run.expires_at_ms <= now_ms {
                 runs.remove(session_id);
             }
@@ -449,17 +449,17 @@ impl SessionManager {
 
     /// Authoritatively replace a run's pending set with `pending` — a map from
     /// each pending block's id to its optional run-status tooltip, intersected
-    /// with blocks present in `markdown`. Used by a program update's complete
+    /// with blocks present in `markdown`. Used by a playbook update's complete
     /// declaration (specs 0053, 0056); a no-op when no run is active.
-    pub(super) fn set_program_run_pending(
+    pub(super) fn set_playbook_run_pending(
         &self,
         session_id: &str,
         markdown: &str,
         pending: std::collections::HashMap<String, Option<String>>,
     ) {
         let now_ms = Utc::now().timestamp_millis();
-        let blocks = self.program_blocks_projection(session_id, markdown);
-        let current = program_block_ids(&blocks);
+        let blocks = self.playbook_blocks_projection(session_id, markdown);
+        let current = playbook_block_ids(&blocks);
         let by_decl: std::collections::HashMap<String, String> = blocks
             .iter()
             .flat_map(|block| {
@@ -468,14 +468,14 @@ impl SessionManager {
             })
             .filter(|(from, _)| !from.is_empty())
             .collect();
-        if let Ok(mut runs) = self.program_runs.lock() {
+        if let Ok(mut runs) = self.playbook_runs.lock() {
             let Some(run) = runs.get_mut(session_id) else {
                 return;
             };
             // A complete declaration is active management (spec 0042): keep the
             // run alive past owning-session idle and refresh the backstop.
             run.agent_managed = true;
-            run.expires_at_ms = now_ms + PROGRAM_RUN_MAX_MS;
+            run.expires_at_ms = now_ms + PLAYBOOK_RUN_MAX_MS;
             let pending: Vec<(String, Option<String>)> = pending
                 .into_iter()
                 .filter_map(|(id, tip)| {
@@ -490,7 +490,7 @@ impl SessionManager {
                 .iter()
                 .filter_map(|(id, tip)| {
                     tip.as_deref()
-                        .and_then(construct_protocol::normalize_program_tooltip)
+                        .and_then(construct_protocol::normalize_playbook_tooltip)
                         .map(|t| (id.clone(), t))
                 })
                 .collect();
@@ -504,9 +504,9 @@ impl SessionManager {
         }
     }
 
-    pub(super) fn mark_program_run_output_seen(&self, session_id: &str) {
+    pub(super) fn mark_playbook_run_output_seen(&self, session_id: &str) {
         let mut updated = false;
-        if let Ok(mut runs) = self.program_runs.lock() {
+        if let Ok(mut runs) = self.playbook_runs.lock() {
             if let Some(run) = runs.get_mut(session_id) {
                 if !run.first_output_seen {
                     run.first_output_seen = true;
@@ -515,13 +515,13 @@ impl SessionManager {
             }
         }
         if updated {
-            if let Ok(program) = self.storage.read_program(session_id) {
-                self.broadcast_program_state(program);
+            if let Ok(playbook) = self.storage.read_playbook(session_id) {
+                self.broadcast_playbook_state(playbook);
             }
         }
     }
 
-    pub(super) fn note_session_state_for_program_run(
+    pub(super) fn note_session_state_for_playbook_run(
         &self,
         session_id: &str,
         state: construct_protocol::SessionState,
@@ -529,7 +529,7 @@ impl SessionManager {
         use construct_protocol::SessionState;
         let mut clear = false;
         let mut updated = false;
-        if let Ok(mut runs) = self.program_runs.lock() {
+        if let Ok(mut runs) = self.playbook_runs.lock() {
             if let Some(run) = runs.get_mut(session_id) {
                 match state {
                     SessionState::Running => {
@@ -575,8 +575,8 @@ impl SessionManager {
             }
         }
         if clear || updated {
-            if let Ok(program) = self.storage.read_program(session_id) {
-                self.broadcast_program_state(program);
+            if let Ok(playbook) = self.storage.read_playbook(session_id) {
+                self.broadcast_playbook_state(playbook);
             }
         }
     }

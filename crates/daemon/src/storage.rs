@@ -15,8 +15,8 @@
 //! ```
 
 use construct_protocol::{
-    GroupSummary, LayoutDocument, ProgramBlockView, ProgramDocument, ProgramEdit, ProgramRevision,
-    ProgramTemplate, ProgramUpdateActor, SearchHit, SearchParams, SearchResult, SearchScope,
+    GroupSummary, LayoutDocument, PlaybookBlockView, PlaybookDocument, PlaybookEdit, PlaybookRevision,
+    PlaybookTemplate, PlaybookUpdateActor, SearchHit, SearchParams, SearchResult, SearchScope,
     SessionSummary, TimestampedEvent, TranscriptResult, UiPanel, UiPlacement,
 };
 use anyhow::{Context, Result};
@@ -28,7 +28,7 @@ const GLOBAL_MEMORY_TEMPLATE: &str =
     "# Global Memory\n\n## Preferences\n\n## Workflows\n\n## Pitfalls\n";
 const PROJECT_MEMORY_TEMPLATE: &str =
     "# Project Memory\n\n## Overview\n\n## Architecture\n\n## Workflows\n\n## Decisions\n\n## Pitfalls\n";
-const PROGRAM_REVISION_LIMIT: usize = 50;
+const PLAYBOOK_REVISION_LIMIT: usize = 50;
 /// Per-session cap on transcript bytes read from the tail while searching
 /// (spec 0076), mirroring `PTY_REPLAY_CAP`'s "bound the worst case, not the
 /// common case" role for `session.pty_replay`.
@@ -40,8 +40,8 @@ const GLOBAL_TRANSCRIPT_SCAN_CAP: u64 = 64 * 1024 * 1024;
 /// Search hit snippets are trimmed to roughly this many characters,
 /// centered on the match.
 const SEARCH_SNIPPET_MAX_CHARS: usize = 200;
-const BLANK_PROGRAM: &str = "";
-const TASKS_PROGRAM: &str = concat!(
+const BLANK_PLAYBOOK: &str = "";
+const TASKS_PLAYBOOK: &str = concat!(
     "# Rule\n",
     "\n",
     "Todo -> In progress (dispatched) -> Done (merged). I'm pre-approving all ",
@@ -54,10 +54,10 @@ const TASKS_PROGRAM: &str = concat!(
     "\n",
     "## Done\n",
 );
-const INVESTIGATION_PROGRAM: &str = concat!(
+const INVESTIGATION_PLAYBOOK: &str = concat!(
     "# Investigation\n",
     "\n",
-    "Run this program to investigate autonomously: the agent works the Plan, ",
+    "Run this playbook to investigate autonomously: the agent works the Plan, ",
     "gathers evidence into Findings, and keeps going until the Question is ",
     "answered. Select a single step and Run to scope the work narrowly, or hand a ",
     "sub-investigation to a subagent by naming a harness like @{harness:claude}.\n",
@@ -87,10 +87,10 @@ const INVESTIGATION_PROGRAM: &str = concat!(
     "\n",
     "Closed-out work and the final answer to the Question.\n",
 );
-const GOAL_PROGRAM: &str = concat!(
+const GOAL_PLAYBOOK: &str = concat!(
     "# Goal\n",
     "\n",
-    "Run this program to complete the Goal. The agent uses Context and ",
+    "Run this playbook to complete the Goal. The agent uses Context and ",
     "Requirements to execute the work, verifies the result, and records the ",
     "outcome in Done. Ask only when a missing decision blocks safe progress. ",
     "Type @ to embed a live session or harness.\n",
@@ -126,7 +126,7 @@ struct WidgetFrontmatter {
 /// appends `new_string` to the end of the document. A missing anchor or an
 /// ambiguous one (multiple matches without `replace_all`) is an error — the
 /// signal that the targeted text genuinely changed underneath the writer.
-pub fn apply_program_edits(base: &str, edits: &[ProgramEdit]) -> Result<String> {
+pub fn apply_playbook_edits(base: &str, edits: &[PlaybookEdit]) -> Result<String> {
     let mut working = base.to_string();
     for (i, edit) in edits.iter().enumerate() {
         if edit.old_string.is_empty() {
@@ -143,12 +143,12 @@ pub fn apply_program_edits(base: &str, edits: &[ProgramEdit]) -> Result<String> 
         let matches = working.matches(&edit.old_string).count();
         match matches {
             0 => anyhow::bail!(
-                "program edit {}: old_string not found in the current program:\n{}",
+                "playbook edit {}: old_string not found in the current playbook:\n{}",
                 i + 1,
                 edit.old_string
             ),
             n if n > 1 && !edit.replace_all => anyhow::bail!(
-                "program edit {}: old_string is not unique ({} matches); add surrounding context or set replace_all",
+                "playbook edit {}: old_string is not unique ({} matches); add surrounding context or set replace_all",
                 i + 1,
                 n
             ),
@@ -165,7 +165,7 @@ pub fn apply_program_edits(base: &str, edits: &[ProgramEdit]) -> Result<String> 
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-struct ProgramMeta {
+struct PlaybookMeta {
     #[serde(default)]
     version: u64,
     #[serde(default)]
@@ -175,11 +175,11 @@ struct ProgramMeta {
     #[serde(default)]
     next_block_ordinal: u64,
     #[serde(default)]
-    blocks: Vec<ProgramBlockIdentity>,
+    blocks: Vec<PlaybookBlockIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct ProgramBlockIdentity {
+struct PlaybookBlockIdentity {
     block_id: String,
     content_epoch: u64,
     content_id: String,
@@ -217,19 +217,19 @@ pub fn is_user_prompt_for_history(text: &str) -> bool {
 
 pub struct Storage {
     data_dir: PathBuf,
-    /// When set, program templates are read from this directory instead of the
-    /// default `data_dir/program/templates`. Resolved at daemon start from the
-    /// `[program].templates_dir` config option / `CONSTRUCT_PROGRAM_TEMPLATES_DIR`
+    /// When set, playbook templates are read from this directory instead of the
+    /// default `data_dir/playbook/templates`. Resolved at daemon start from the
+    /// `[playbook].templates_dir` config option / `CONSTRUCT_PLAYBOOK_TEMPLATES_DIR`
     /// env override. `None` keeps the legacy default location (and its
-    /// `canvas/templates` → `program/templates` migration).
-    program_templates_dir_override: Option<PathBuf>,
-    /// Directory user Program-verb definition files are read from (spec
+    /// `canvas/templates` → `playbook/templates` migration).
+    playbook_templates_dir_override: Option<PathBuf>,
+    /// Directory user Playbook-verb definition files are read from (spec
     /// 0087): `verbs/*.md`, one file per verb, each replacing a built-in of
     /// the same name. Daemon start always sets this to the config
-    /// directory's `verbs/` subdirectory — unlike program templates, verbs
+    /// directory's `verbs/` subdirectory — unlike playbook templates, verbs
     /// are a personal customization, not project data. `None` (only in
     /// tests that don't call the setter) falls back to `data_dir/verbs`.
-    program_verbs_dir_override: Option<PathBuf>,
+    playbook_verbs_dir_override: Option<PathBuf>,
     /// Plugin verb directories as `(namespace, dir)` pairs (spec 0152).
     /// Verbs from these load force-namespaced `<namespace>:<name>`.
     plugin_verb_dirs: Vec<(String, PathBuf)>,
@@ -247,28 +247,48 @@ impl Storage {
             .with_context(|| format!("create {}", data_dir.display()))?;
         std::fs::create_dir_all(data_dir.join("projects"))
             .with_context(|| format!("create {}", data_dir.join("projects").display()))?;
+        Self::migrate_legacy_playbook_data_dir(&data_dir);
         Ok(Self {
             data_dir,
-            program_templates_dir_override: None,
-            program_verbs_dir_override: None,
+            playbook_templates_dir_override: None,
+            playbook_verbs_dir_override: None,
             plugin_verb_dirs: Vec::new(),
             plugin_template_dirs: Vec::new(),
             prompt_history_lock: std::sync::Mutex::new(()),
         })
     }
 
-    /// Override the directory program templates are read from. Set once at
-    /// daemon start from config; `None` (the default) keeps `data_dir/program/templates`.
-    pub fn with_program_templates_dir(mut self, dir: Option<PathBuf>) -> Self {
-        self.program_templates_dir_override = dir;
+    /// One-time, idempotent migration of the shared playbook data directory,
+    /// which was named `program/` before the playbook rename. Custom templates
+    /// live under it, so an un-migrated install would silently lose them. Only
+    /// renames when the legacy directory exists and the new one does not.
+    fn migrate_legacy_playbook_data_dir(data_dir: &std::path::Path) {
+        let legacy = data_dir.join("program");
+        let current = data_dir.join("playbook");
+        if legacy.is_dir() && !current.exists() {
+            if let Err(e) = std::fs::rename(&legacy, &current) {
+                tracing::warn!(
+                    legacy = %legacy.display(),
+                    current = %current.display(),
+                    error = %e,
+                    "migrate legacy playbook data dir failed"
+                );
+            }
+        }
+    }
+
+    /// Override the directory playbook templates are read from. Set once at
+    /// daemon start from config; `None` (the default) keeps `data_dir/playbook/templates`.
+    pub fn with_playbook_templates_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.playbook_templates_dir_override = dir;
         self
     }
 
-    /// Set the directory user Program-verb definition files are read from.
+    /// Set the directory user Playbook-verb definition files are read from.
     /// Daemon start always calls this with the config dir's `verbs/`
     /// subdirectory (see `lib.rs::run`).
-    pub fn with_program_verbs_dir(mut self, dir: PathBuf) -> Self {
-        self.program_verbs_dir_override = Some(dir);
+    pub fn with_playbook_verbs_dir(mut self, dir: PathBuf) -> Self {
+        self.playbook_verbs_dir_override = Some(dir);
         self
     }
 
@@ -286,15 +306,15 @@ impl Storage {
         self
     }
 
-    pub fn program_verbs_dir(&self) -> PathBuf {
-        self.program_verbs_dir_override
+    pub fn playbook_verbs_dir(&self) -> PathBuf {
+        self.playbook_verbs_dir_override
             .clone()
             .unwrap_or_else(|| self.data_dir.join("verbs"))
     }
 
-    pub fn program_verbs(&self) -> Vec<construct_protocol::ProgramVerb> {
-        crate::program_verbs::load_verbs_with_plugins(
-            &self.program_verbs_dir(),
+    pub fn playbook_verbs(&self) -> Vec<construct_protocol::PlaybookVerb> {
+        crate::playbook_verbs::load_verbs_with_plugins(
+            &self.playbook_verbs_dir(),
             &self.plugin_verb_dirs,
         )
     }
@@ -521,57 +541,63 @@ impl Storage {
         self.session_dir(id).join("widgets")
     }
 
-    pub fn program_path(&self, id: &str) -> PathBuf {
-        self.session_dir(id).join("program.md")
+    pub fn playbook_path(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("playbook.md")
     }
 
-    pub fn program_meta_path(&self, id: &str) -> PathBuf {
-        self.session_dir(id).join("program.json")
+    pub fn playbook_meta_path(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("playbook.json")
     }
 
-    pub fn program_revisions_path(&self, id: &str) -> PathBuf {
-        self.session_dir(id).join("program-revisions.jsonl")
+    pub fn playbook_revisions_path(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("playbook-revisions.jsonl")
     }
 
-    pub fn program_templates_dir(&self) -> PathBuf {
-        self.program_templates_dir_override
+    pub fn playbook_templates_dir(&self) -> PathBuf {
+        self.playbook_templates_dir_override
             .clone()
-            .unwrap_or_else(|| self.data_dir.join("program").join("templates"))
+            .unwrap_or_else(|| self.data_dir.join("playbook").join("templates"))
     }
 
-    /// One-time, idempotent migration: the per-session program document was
-    /// formerly named "canvas". Rename any surviving `canvas.*` artifacts to
-    /// their `program.*` counterparts on first access so existing sessions keep
-    /// their content after the rename. Only renames when the legacy file exists
-    /// and the new file does not, so it is safe to call on every read.
-    fn migrate_legacy_program_files(&self, id: &str) {
+    /// One-time, idempotent migration: the per-session playbook document was
+    /// named "canvas" in the first generation and "program" in the second.
+    /// Rename any surviving legacy artifacts to their `playbook.*` counterparts
+    /// on first access so existing sessions keep their content across both
+    /// renames. Only renames when the legacy file exists and the new file does
+    /// not, so it is safe to call on every read. `program.*` is tried before
+    /// `canvas.*` so the newer generation wins for a session carrying both.
+    fn migrate_legacy_playbook_files(&self, id: &str) {
         let dir = self.session_dir(id);
         for (old, new) in [
-            ("canvas.md", "program.md"),
-            ("canvas.json", "program.json"),
-            ("canvas-revisions.jsonl", "program-revisions.jsonl"),
-            ("canvas-run-context.json", "program-run-context.json"),
+            ("program.md", "playbook.md"),
+            ("program.json", "playbook.json"),
+            ("program-revisions.jsonl", "playbook-revisions.jsonl"),
+            ("program-run-context.json", "playbook-run-context.json"),
+            ("canvas.md", "playbook.md"),
+            ("canvas.json", "playbook.json"),
+            ("canvas-revisions.jsonl", "playbook-revisions.jsonl"),
+            ("canvas-run-context.json", "playbook-run-context.json"),
         ] {
             let old_path = dir.join(old);
             let new_path = dir.join(new);
             if old_path.exists() && !new_path.exists() {
                 if let Err(e) = std::fs::rename(&old_path, &new_path) {
-                    tracing::warn!(session = %id, old, new, error = %e, "migrate legacy canvas file failed");
+                    tracing::warn!(session = %id, old, new, error = %e, "migrate legacy playbook file failed");
                 }
             }
         }
     }
 
-    pub fn read_program(&self, id: &str) -> Result<ProgramDocument> {
+    pub fn read_playbook(&self, id: &str) -> Result<PlaybookDocument> {
         self.ensure_session_dir(id)?;
-        self.migrate_legacy_program_files(id);
-        let markdown = std::fs::read_to_string(self.program_path(id)).unwrap_or_default();
-        let mut meta = self.read_program_meta(id).unwrap_or_default();
-        let changed = self.reconcile_program_block_identities(&mut meta, &markdown);
+        self.migrate_legacy_playbook_files(id);
+        let markdown = std::fs::read_to_string(self.playbook_path(id)).unwrap_or_default();
+        let mut meta = self.read_playbook_meta(id).unwrap_or_default();
+        let changed = self.reconcile_playbook_block_identities(&mut meta, &markdown);
         if changed {
-            self.save_program_meta_struct(id, &meta)?;
+            self.save_playbook_meta_struct(id, &meta)?;
         }
-        Ok(ProgramDocument {
+        Ok(PlaybookDocument {
             session_id: id.to_string(),
             markdown,
             version: meta.version,
@@ -580,43 +606,43 @@ impl Storage {
         })
     }
 
-    pub fn read_program_with_blocks(
+    pub fn read_playbook_with_blocks(
         &self,
         id: &str,
-    ) -> Result<(ProgramDocument, Vec<ProgramBlockView>)> {
-        let program = self.read_program(id)?;
-        let mut meta = self.read_program_meta(id).unwrap_or_default();
-        let changed = self.reconcile_program_block_identities(&mut meta, &program.markdown);
+    ) -> Result<(PlaybookDocument, Vec<PlaybookBlockView>)> {
+        let playbook = self.read_playbook(id)?;
+        let mut meta = self.read_playbook_meta(id).unwrap_or_default();
+        let changed = self.reconcile_playbook_block_identities(&mut meta, &playbook.markdown);
         if changed {
-            self.save_program_meta_struct(id, &meta)?;
+            self.save_playbook_meta_struct(id, &meta)?;
         }
-        let blocks = self.program_block_views_from_meta(&meta, &program.markdown);
-        Ok((program, blocks))
+        let blocks = self.playbook_block_views_from_meta(&meta, &playbook.markdown);
+        Ok((playbook, blocks))
     }
 
-    pub fn update_program(
+    pub fn update_playbook(
         &self,
         id: &str,
         markdown: String,
-        actor: ProgramUpdateActor,
+        actor: PlaybookUpdateActor,
         base_version: Option<u64>,
         template_id: Option<String>,
         note: Option<String>,
-    ) -> Result<ProgramDocument> {
-        let current = self.read_program(id)?;
+    ) -> Result<PlaybookDocument> {
+        let current = self.read_playbook(id)?;
         if let Some(base) = base_version {
             if base != current.version {
                 anyhow::bail!(
-                    "program conflict: current version is {}, attempted base version is {}",
+                    "playbook conflict: current version is {}, attempted base version is {}",
                     current.version,
                     base
                 );
             }
         }
-        if actor == ProgramUpdateActor::Agent && current.version > 0 {
-            self.append_program_revision(
+        if actor == PlaybookUpdateActor::Agent && current.version > 0 {
+            self.append_playbook_revision(
                 id,
-                ProgramRevision {
+                PlaybookRevision {
                     version: current.version,
                     actor,
                     at_ms: current.updated_at_ms,
@@ -626,48 +652,48 @@ impl Storage {
             )?;
         }
         self.ensure_session_dir(id)?;
-        let next = ProgramDocument {
+        let next = PlaybookDocument {
             session_id: id.to_string(),
             markdown,
             version: current.version.saturating_add(1),
             updated_at_ms: chrono::Utc::now().timestamp_millis(),
             template_id: template_id.or(current.template_id),
         };
-        let program_tmp = self.program_path(id).with_extension("md.tmp");
-        std::fs::write(&program_tmp, &next.markdown)
-            .with_context(|| format!("write {}", program_tmp.display()))?;
-        std::fs::rename(&program_tmp, self.program_path(id))
-            .with_context(|| format!("rename {}", self.program_path(id).display()))?;
-        self.save_program_meta(&next)?;
+        let playbook_tmp = self.playbook_path(id).with_extension("md.tmp");
+        std::fs::write(&playbook_tmp, &next.markdown)
+            .with_context(|| format!("write {}", playbook_tmp.display()))?;
+        std::fs::rename(&playbook_tmp, self.playbook_path(id))
+            .with_context(|| format!("rename {}", self.playbook_path(id).display()))?;
+        self.save_playbook_meta(&next)?;
         Ok(next)
     }
 
-    /// Apply a sequence of anchored edits to the *latest* program content and
-    /// persist the result as a new version. Unlike [`Self::update_program`],
+    /// Apply a sequence of anchored edits to the *latest* playbook content and
+    /// persist the result as a new version. Unlike [`Self::update_playbook`],
     /// there is no `base_version` gate: edits are anchored to text, so
     /// concurrent changes to *other* regions merge cleanly. Returns an error
     /// — and writes nothing — when any edit's anchor is missing or ambiguous,
     /// so the caller can re-read and retry. An empty or no-op edit set leaves
-    /// the document and version untouched, allowing status-only program edits.
-    pub fn edit_program(
+    /// the document and version untouched, allowing status-only playbook edits.
+    pub fn edit_playbook(
         &self,
         id: &str,
-        edits: &[ProgramEdit],
-        actor: ProgramUpdateActor,
+        edits: &[PlaybookEdit],
+        actor: PlaybookUpdateActor,
         note: Option<String>,
-    ) -> Result<ProgramDocument> {
+    ) -> Result<PlaybookDocument> {
         if edits.is_empty() {
-            return self.read_program(id);
+            return self.read_playbook(id);
         }
-        let current = self.read_program(id)?;
-        let markdown = apply_program_edits(&current.markdown, edits)?;
+        let current = self.read_playbook(id)?;
+        let markdown = apply_playbook_edits(&current.markdown, edits)?;
         if markdown == current.markdown {
             return Ok(current);
         }
-        if actor == ProgramUpdateActor::Agent && current.version > 0 {
-            self.append_program_revision(
+        if actor == PlaybookUpdateActor::Agent && current.version > 0 {
+            self.append_playbook_revision(
                 id,
-                ProgramRevision {
+                PlaybookRevision {
                     version: current.version,
                     actor,
                     at_ms: current.updated_at_ms,
@@ -677,24 +703,24 @@ impl Storage {
             )?;
         }
         self.ensure_session_dir(id)?;
-        let next = ProgramDocument {
+        let next = PlaybookDocument {
             session_id: id.to_string(),
             markdown,
             version: current.version.saturating_add(1),
             updated_at_ms: chrono::Utc::now().timestamp_millis(),
             template_id: current.template_id.clone(),
         };
-        let program_tmp = self.program_path(id).with_extension("md.tmp");
-        std::fs::write(&program_tmp, &next.markdown)
-            .with_context(|| format!("write {}", program_tmp.display()))?;
-        std::fs::rename(&program_tmp, self.program_path(id))
-            .with_context(|| format!("rename {}", self.program_path(id).display()))?;
-        self.save_program_meta(&next)?;
+        let playbook_tmp = self.playbook_path(id).with_extension("md.tmp");
+        std::fs::write(&playbook_tmp, &next.markdown)
+            .with_context(|| format!("write {}", playbook_tmp.display()))?;
+        std::fs::rename(&playbook_tmp, self.playbook_path(id))
+            .with_context(|| format!("rename {}", self.playbook_path(id).display()))?;
+        self.save_playbook_meta(&next)?;
         Ok(next)
     }
 
-    pub fn read_program_revisions(&self, id: &str) -> Result<Vec<ProgramRevision>> {
-        let path = self.program_revisions_path(id);
+    pub fn read_playbook_revisions(&self, id: &str) -> Result<Vec<PlaybookRevision>> {
+        let path = self.playbook_revisions_path(id);
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -706,56 +732,56 @@ impl Storage {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<ProgramRevision>(&line) {
+            match serde_json::from_str::<PlaybookRevision>(&line) {
                 Ok(revision) => revisions.push(revision),
-                Err(e) => tracing::warn!(session = %id, error = %e, "skip bad program revision"),
+                Err(e) => tracing::warn!(session = %id, error = %e, "skip bad playbook revision"),
             }
         }
         Ok(revisions)
     }
 
-    pub fn program_templates(&self) -> Result<Vec<ProgramTemplate>> {
+    pub fn playbook_templates(&self) -> Result<Vec<PlaybookTemplate>> {
         let mut templates = vec![
-            ProgramTemplate {
+            PlaybookTemplate {
                 id: "blank".to_string(),
                 name: "Blank".to_string(),
-                description: Some("Start with an empty orchestration program".to_string()),
-                markdown: BLANK_PROGRAM.to_string(),
+                description: Some("Start with an empty orchestration playbook".to_string()),
+                markdown: BLANK_PLAYBOOK.to_string(),
                 built_in: true,
             },
-            ProgramTemplate {
+            PlaybookTemplate {
                 id: "tasks".to_string(),
                 name: "Tasks".to_string(),
                 description: Some(
                     "Todo / Progress / Done board the agent runs and delegates".to_string(),
                 ),
-                markdown: TASKS_PROGRAM.to_string(),
+                markdown: TASKS_PLAYBOOK.to_string(),
                 built_in: true,
             },
-            ProgramTemplate {
+            PlaybookTemplate {
                 id: "investigation".to_string(),
                 name: "Investigation".to_string(),
                 description: Some(
                     "Question, context, plan, findings, and done — run to investigate".to_string(),
                 ),
-                markdown: INVESTIGATION_PROGRAM.to_string(),
+                markdown: INVESTIGATION_PLAYBOOK.to_string(),
                 built_in: true,
             },
-            ProgramTemplate {
+            PlaybookTemplate {
                 id: "goal".to_string(),
                 name: "Goal".to_string(),
                 description: Some(
                     "Goal, context, requirements, and verification — run to execute".to_string(),
                 ),
-                markdown: GOAL_PROGRAM.to_string(),
+                markdown: GOAL_PLAYBOOK.to_string(),
                 built_in: true,
             },
         ];
-        let dir = self.program_templates_dir();
+        let dir = self.playbook_templates_dir();
         // Migrate user templates from the former `canvas/templates` location.
         // Only for the default location — when an explicit override is set the
         // operator owns that directory, so we never move files into it.
-        if self.program_templates_dir_override.is_none() {
+        if self.playbook_templates_dir_override.is_none() {
             let legacy_dir = self.data_dir.join("canvas").join("templates");
             if legacy_dir.exists() && !dir.exists() {
                 if let Some(parent) = dir.parent() {
@@ -781,11 +807,11 @@ impl Storage {
                 let raw = match std::fs::read_to_string(&path) {
                     Ok(raw) => raw,
                     Err(e) => {
-                        tracing::warn!(path = %path.display(), error = ?e, "skip unreadable program template");
+                        tracing::warn!(path = %path.display(), error = ?e, "skip unreadable playbook template");
                         continue;
                     }
                 };
-                templates.push(ProgramTemplate {
+                templates.push(PlaybookTemplate {
                     id: stem.to_string(),
                     name: prettify_template_name(stem),
                     description: None,
@@ -819,7 +845,7 @@ impl Storage {
                         continue;
                     }
                 };
-                templates.push(ProgramTemplate {
+                templates.push(PlaybookTemplate {
                     id: format!("{namespace}:{stem}"),
                     name: prettify_template_name(stem),
                     description: Some(format!("from plugin {namespace}")),
@@ -837,30 +863,30 @@ impl Storage {
         Ok(templates)
     }
 
-    fn read_program_meta(&self, id: &str) -> Result<ProgramMeta> {
-        let path = self.program_meta_path(id);
+    fn read_playbook_meta(&self, id: &str) -> Result<PlaybookMeta> {
+        let path = self.playbook_meta_path(id);
         if !path.exists() {
-            return Ok(ProgramMeta::default());
+            return Ok(PlaybookMeta::default());
         }
         let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
     }
 
-    fn save_program_meta(&self, program: &ProgramDocument) -> Result<()> {
-        self.ensure_session_dir(&program.session_id)?;
+    fn save_playbook_meta(&self, playbook: &PlaybookDocument) -> Result<()> {
+        self.ensure_session_dir(&playbook.session_id)?;
         let mut meta = self
-            .read_program_meta(&program.session_id)
+            .read_playbook_meta(&playbook.session_id)
             .unwrap_or_default();
-        meta.version = program.version;
-        meta.updated_at_ms = program.updated_at_ms;
-        meta.template_id = program.template_id.clone();
-        self.reconcile_program_block_identities(&mut meta, &program.markdown);
-        self.save_program_meta_struct(&program.session_id, &meta)
+        meta.version = playbook.version;
+        meta.updated_at_ms = playbook.updated_at_ms;
+        meta.template_id = playbook.template_id.clone();
+        self.reconcile_playbook_block_identities(&mut meta, &playbook.markdown);
+        self.save_playbook_meta_struct(&playbook.session_id, &meta)
     }
 
-    fn save_program_meta_struct(&self, id: &str, meta: &ProgramMeta) -> Result<()> {
+    fn save_playbook_meta_struct(&self, id: &str, meta: &PlaybookMeta) -> Result<()> {
         self.ensure_session_dir(id)?;
-        let path = self.program_meta_path(id);
+        let path = self.playbook_meta_path(id);
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(&meta)?;
         std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
@@ -868,7 +894,7 @@ impl Storage {
         Ok(())
     }
 
-    fn next_program_block_id(meta: &mut ProgramMeta) -> String {
+    fn next_playbook_block_id(meta: &mut PlaybookMeta) -> String {
         let id = format!("b{:x}", meta.next_block_ordinal);
         meta.next_block_ordinal = meta.next_block_ordinal.saturating_add(1);
         id
@@ -890,8 +916,8 @@ impl Storage {
     /// index) — so an insertion or deletion elsewhere no longer shifts which
     /// prior record an edited block's continuity is attributed to. A leftover
     /// span beyond the leftover records' count is a brand-new block.
-    fn reconcile_program_block_identities(&self, meta: &mut ProgramMeta, markdown: &str) -> bool {
-        // Block ids are program-scoped ordinals. Migrate the old fixed-width
+    fn reconcile_playbook_block_identities(&self, meta: &mut PlaybookMeta, markdown: &str) -> bool {
+        // Block ids are playbook-scoped ordinals. Migrate the old fixed-width
         // spelling on access so ids stay compact in subsequent payloads.
         let mut migrated = false;
         for block in &mut meta.blocks {
@@ -902,10 +928,10 @@ impl Storage {
                 }
             }
         }
-        let spans = construct_protocol::program_block_spans(markdown);
+        let spans = construct_protocol::playbook_block_spans(markdown);
         let old = meta.blocks.clone();
         let mut used = vec![false; old.len()];
-        let mut next: Vec<Option<ProgramBlockIdentity>> = vec![None; spans.len()];
+        let mut next: Vec<Option<PlaybookBlockIdentity>> = vec![None; spans.len()];
         let mut changed = migrated || old.len() != spans.len();
 
         for (i, span) in spans.iter().enumerate() {
@@ -930,8 +956,8 @@ impl Storage {
                 rec.content_id = spans[i].id.clone();
                 rec
             } else {
-                ProgramBlockIdentity {
-                    block_id: Self::next_program_block_id(meta),
+                PlaybookBlockIdentity {
+                    block_id: Self::next_playbook_block_id(meta),
                     content_epoch: 0,
                     content_id: spans[i].id.clone(),
                 }
@@ -941,7 +967,7 @@ impl Storage {
 
         // Every span was filled by an exact match (pass 1) or a leftover
         // pairing (pass 2), so this never panics.
-        let next: Vec<ProgramBlockIdentity> = next.into_iter().map(Option::unwrap).collect();
+        let next: Vec<PlaybookBlockIdentity> = next.into_iter().map(Option::unwrap).collect();
         if meta.blocks != next {
             changed = true;
             meta.blocks = next;
@@ -949,17 +975,17 @@ impl Storage {
         changed
     }
 
-    fn program_block_views_from_meta(
+    fn playbook_block_views_from_meta(
         &self,
-        meta: &ProgramMeta,
+        meta: &PlaybookMeta,
         markdown: &str,
-    ) -> Vec<ProgramBlockView> {
-        construct_protocol::program_block_spans(markdown)
+    ) -> Vec<PlaybookBlockView> {
+        construct_protocol::playbook_block_spans(markdown)
             .into_iter()
             .zip(meta.blocks.iter())
             .map(|(span, rec)| {
                 let block_ref = format!("{}:{}", rec.block_id, rec.content_epoch);
-                ProgramBlockView {
+                PlaybookBlockView {
                     id: block_ref.clone(),
                     block_id: rec.block_id.clone(),
                     content_epoch: rec.content_epoch,
@@ -975,12 +1001,12 @@ impl Storage {
             .collect()
     }
 
-    fn append_program_revision(&self, id: &str, revision: ProgramRevision) -> Result<()> {
+    fn append_playbook_revision(&self, id: &str, revision: PlaybookRevision) -> Result<()> {
         self.ensure_session_dir(id)?;
-        let mut revisions = self.read_program_revisions(&id)?;
+        let mut revisions = self.read_playbook_revisions(&id)?;
         revisions.push(revision);
-        let start = revisions.len().saturating_sub(PROGRAM_REVISION_LIMIT);
-        let path = self.program_revisions_path(&id);
+        let start = revisions.len().saturating_sub(PLAYBOOK_REVISION_LIMIT);
+        let path = self.playbook_revisions_path(&id);
         let tmp = path.with_extension("jsonl.tmp");
         let mut f =
             std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
@@ -1302,7 +1328,7 @@ impl Storage {
         Ok(events)
     }
 
-    /// Substring search across session name/metadata, stored `program.md`
+    /// Substring search across session name/metadata, stored `playbook.md`
     /// contents, and transcript history (spec 0076). The file-scanning core
     /// of `session.search`: `SessionManager::search` is a thin async
     /// wrapper around this.
@@ -1312,7 +1338,7 @@ impl Storage {
     /// state, including sessions whose latest activity hasn't been synced
     /// to disk yet). This method re-orders and filters that list itself
     /// (by recency and `params.session_ids`) and only touches disk for
-    /// each session's `program.md` / `transcript.jsonl`.
+    /// each session's `playbook.md` / `transcript.jsonl`.
     pub fn search(
         &self,
         sessions: &[SessionSummary],
@@ -1348,7 +1374,7 @@ impl Storage {
         let scopes: Vec<SearchScope> = params.scopes.clone().unwrap_or_else(|| {
             vec![
                 SearchScope::Name,
-                SearchScope::Program,
+                SearchScope::Playbook,
                 SearchScope::Transcript,
             ]
         });
@@ -1396,11 +1422,11 @@ impl Storage {
                     }
                 }
             }
-            if scopes.contains(&SearchScope::Program) {
-                let (program_hits, program_truncated) =
-                    self.search_program(summary, &query_lower, per_session_limit)?;
-                truncated |= program_truncated;
-                for hit in program_hits {
+            if scopes.contains(&SearchScope::Playbook) {
+                let (playbook_hits, playbook_truncated) =
+                    self.search_playbook(summary, &query_lower, per_session_limit)?;
+                truncated |= playbook_truncated;
+                for hit in playbook_hits {
                     hits.push(hit);
                     if hits.len() >= limit {
                         truncated = true;
@@ -1438,17 +1464,17 @@ impl Storage {
         })
     }
 
-    /// Scope `program`: line-by-line substring search over the session's
-    /// `program.md` (via [`Self::read_program`], which also runs the
-    /// canvas→program legacy migration). Returns up to `per_session_limit`
+    /// Scope `playbook`: line-by-line substring search over the session's
+    /// `playbook.md` (via [`Self::read_playbook`], which also runs the
+    /// canvas→playbook legacy migration). Returns up to `per_session_limit`
     /// hits and whether that limit cut the scan short.
-    fn search_program(
+    fn search_playbook(
         &self,
         summary: &SessionSummary,
         query_lower: &str,
         per_session_limit: usize,
     ) -> Result<(Vec<SearchHit>, bool)> {
-        let doc = self.read_program(&summary.id)?;
+        let doc = self.read_playbook(&summary.id)?;
         let mut hits = Vec::new();
         let mut truncated = false;
         for line in doc.markdown.lines() {
@@ -1466,7 +1492,7 @@ impl Storage {
                     session_id: summary.id.clone(),
                     title: session_label(summary),
                     harness: summary.harness.clone(),
-                    scope: SearchScope::Program,
+                    scope: SearchScope::Playbook,
                     seq: None,
                     at: None,
                     snippet,
@@ -2385,18 +2411,18 @@ mod pty_range_tests {
 }
 
 #[cfg(test)]
-mod program_tests {
+mod playbook_tests {
     use super::*;
 
     #[test]
-    fn program_update_rejects_stale_base_version() {
+    fn playbook_update_rejects_stale_base_version() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("data")).unwrap();
         let first = storage
-            .update_program(
+            .update_playbook(
                 "s1",
                 "# Todo\n".into(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 Some(0),
                 None,
                 None,
@@ -2405,21 +2431,21 @@ mod program_tests {
         assert_eq!(first.version, 1);
 
         let err = storage
-            .update_program(
+            .update_playbook(
                 "s1",
                 "# Changed\n".into(),
-                construct_protocol::ProgramUpdateActor::Agent,
+                construct_protocol::PlaybookUpdateActor::Agent,
                 Some(0),
                 None,
                 None,
             )
             .unwrap_err();
 
-        assert!(err.to_string().contains("program conflict"));
+        assert!(err.to_string().contains("playbook conflict"));
     }
 
-    fn edit(old: &str, new: &str) -> ProgramEdit {
-        ProgramEdit {
+    fn edit(old: &str, new: &str) -> PlaybookEdit {
+        PlaybookEdit {
             old_string: old.into(),
             new_string: new.into(),
             replace_all: false,
@@ -2428,8 +2454,8 @@ mod program_tests {
     }
 
     #[test]
-    fn apply_program_edits_replaces_unique_anchor() {
-        let out = apply_program_edits(
+    fn apply_playbook_edits_replaces_unique_anchor() {
+        let out = apply_playbook_edits(
             "# Todo\n- ship it\n# Done\n",
             &[edit("- ship it", "- ship it @{harness:claude}")],
         )
@@ -2438,84 +2464,84 @@ mod program_tests {
     }
 
     #[test]
-    fn program_block_refs_use_compact_ordinals_and_migrate_padded_ids() {
+    fn playbook_block_refs_use_compact_ordinals_and_migrate_padded_ids() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("data")).unwrap();
         storage
-            .update_program(
+            .update_playbook(
                 "s1",
                 "# Todo\n".into(),
-                ProgramUpdateActor::Human,
+                PlaybookUpdateActor::Human,
                 None,
                 None,
                 None,
             )
             .unwrap();
-        let (_, blocks) = storage.read_program_with_blocks("s1").unwrap();
+        let (_, blocks) = storage.read_playbook_with_blocks("s1").unwrap();
         assert_eq!(blocks[0].id, "b0:0");
 
-        let mut meta = storage.read_program_meta("s1").unwrap();
+        let mut meta = storage.read_playbook_meta("s1").unwrap();
         meta.blocks[0].block_id = "pb_0000000000000000".into();
-        storage.save_program_meta_struct("s1", &meta).unwrap();
-        let (_, migrated) = storage.read_program_with_blocks("s1").unwrap();
+        storage.save_playbook_meta_struct("s1", &meta).unwrap();
+        let (_, migrated) = storage.read_playbook_with_blocks("s1").unwrap();
         assert_eq!(migrated[0].id, "b0:0");
     }
 
     #[test]
-    fn status_only_program_edit_does_not_create_revision() {
+    fn status_only_playbook_edit_does_not_create_revision() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("data")).unwrap();
         let initial = storage
-            .update_program(
+            .update_playbook(
                 "s1",
                 "# Todo\n".into(),
-                ProgramUpdateActor::Human,
+                PlaybookUpdateActor::Human,
                 None,
                 None,
                 None,
             )
             .unwrap();
         let result = storage
-            .edit_program("s1", &[], ProgramUpdateActor::Agent, None)
+            .edit_playbook("s1", &[], PlaybookUpdateActor::Agent, None)
             .unwrap();
         assert_eq!(result.version, initial.version);
-        assert!(storage.read_program_revisions("s1").unwrap().is_empty());
+        assert!(storage.read_playbook_revisions("s1").unwrap().is_empty());
     }
 
     #[test]
-    fn apply_program_edits_appends_on_empty_old_string() {
+    fn apply_playbook_edits_appends_on_empty_old_string() {
         // Empty doc: append sets the content.
         assert_eq!(
-            apply_program_edits("", &[edit("", "first")]).unwrap(),
+            apply_playbook_edits("", &[edit("", "first")]).unwrap(),
             "first"
         );
         // Non-empty without trailing newline: a separator is inserted.
         assert_eq!(
-            apply_program_edits("# Todo", &[edit("", "- new")]).unwrap(),
+            apply_playbook_edits("# Todo", &[edit("", "- new")]).unwrap(),
             "# Todo\n- new"
         );
         // Already ends in newline: no extra blank line forced.
         assert_eq!(
-            apply_program_edits("# Todo\n", &[edit("", "- new")]).unwrap(),
+            apply_playbook_edits("# Todo\n", &[edit("", "- new")]).unwrap(),
             "# Todo\n- new"
         );
     }
 
     #[test]
-    fn apply_program_edits_errors_on_missing_anchor() {
-        let err = apply_program_edits("# Todo\n", &[edit("- nope", "x")]).unwrap_err();
+    fn apply_playbook_edits_errors_on_missing_anchor() {
+        let err = apply_playbook_edits("# Todo\n", &[edit("- nope", "x")]).unwrap_err();
         assert!(err.to_string().contains("old_string not found"));
     }
 
     #[test]
-    fn apply_program_edits_errors_on_ambiguous_anchor_then_replace_all_works() {
+    fn apply_playbook_edits_errors_on_ambiguous_anchor_then_replace_all_works() {
         let base = "- a\n- a\n";
-        let err = apply_program_edits(base, &[edit("- a", "- b")]).unwrap_err();
+        let err = apply_playbook_edits(base, &[edit("- a", "- b")]).unwrap_err();
         assert!(err.to_string().contains("not unique"));
 
-        let out = apply_program_edits(
+        let out = apply_playbook_edits(
             base,
-            &[ProgramEdit {
+            &[PlaybookEdit {
                 old_string: "- a".into(),
                 new_string: "- b".into(),
                 replace_all: true,
@@ -2527,21 +2553,21 @@ mod program_tests {
     }
 
     #[test]
-    fn apply_program_edits_are_sequential() {
-        let out = apply_program_edits("one two", &[edit("one", "1"), edit("two", "2")]).unwrap();
+    fn apply_playbook_edits_are_sequential() {
+        let out = apply_playbook_edits("one two", &[edit("one", "1"), edit("two", "2")]).unwrap();
         assert_eq!(out, "1 2");
     }
 
     #[test]
-    fn edit_program_applies_to_latest_without_a_version_gate() {
+    fn edit_playbook_applies_to_latest_without_a_version_gate() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("data")).unwrap();
         // A human writes v1.
         let v1 = storage
-            .update_program(
+            .update_playbook(
                 "s1",
                 "# Todo\n- a\n# Done\n".into(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 Some(0),
                 None,
                 None,
@@ -2551,29 +2577,29 @@ mod program_tests {
         // The agent edits an anchor with no base_version — it lands on the
         // latest content and bumps the version.
         let v2 = storage
-            .edit_program(
+            .edit_playbook(
                 "s1",
                 &[edit("- a", "- a (done)")],
-                construct_protocol::ProgramUpdateActor::Agent,
+                construct_protocol::PlaybookUpdateActor::Agent,
                 None,
             )
             .unwrap();
         assert_eq!(v2.version, 2);
         assert_eq!(v2.markdown, "# Todo\n- a (done)\n# Done\n");
         // The overwritten version is retained in history.
-        let revisions = storage.read_program_revisions("s1").unwrap();
+        let revisions = storage.read_playbook_revisions("s1").unwrap();
         assert_eq!(revisions.last().unwrap().version, 1);
     }
 
     #[test]
-    fn edit_program_noop_keeps_version() {
+    fn edit_playbook_noop_keeps_version() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("data")).unwrap();
         let v1 = storage
-            .update_program(
+            .update_playbook(
                 "s1",
                 "# Todo\n- a\n".into(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 Some(0),
                 None,
                 None,
@@ -2581,10 +2607,10 @@ mod program_tests {
             .unwrap();
         // Replacing text with itself changes nothing → version is unchanged.
         let same = storage
-            .edit_program(
+            .edit_playbook(
                 "s1",
                 &[edit("- a", "- a")],
-                construct_protocol::ProgramUpdateActor::Agent,
+                construct_protocol::PlaybookUpdateActor::Agent,
                 None,
             )
             .unwrap();
@@ -2592,46 +2618,46 @@ mod program_tests {
     }
 
     #[test]
-    fn edit_program_errors_on_missing_anchor_and_writes_nothing() {
+    fn edit_playbook_errors_on_missing_anchor_and_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("data")).unwrap();
         storage
-            .update_program(
+            .update_playbook(
                 "s1",
                 "# Todo\n- a\n".into(),
-                construct_protocol::ProgramUpdateActor::Human,
+                construct_protocol::PlaybookUpdateActor::Human,
                 Some(0),
                 None,
                 None,
             )
             .unwrap();
         let err = storage
-            .edit_program(
+            .edit_playbook(
                 "s1",
                 &[edit("- vanished", "x")],
-                construct_protocol::ProgramUpdateActor::Agent,
+                construct_protocol::PlaybookUpdateActor::Agent,
                 None,
             )
             .unwrap_err();
         assert!(err.to_string().contains("old_string not found"));
         // Unchanged on disk.
-        let current = storage.read_program("s1").unwrap();
+        let current = storage.read_playbook("s1").unwrap();
         assert_eq!(current.version, 1);
         assert_eq!(current.markdown, "# Todo\n- a\n");
     }
 
     #[test]
-    fn program_templates_use_filename_as_name_with_verbatim_markdown() {
+    fn playbook_templates_use_filename_as_name_with_verbatim_markdown() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("data")).unwrap();
-        let dir = storage.program_templates_dir();
+        let dir = storage.playbook_templates_dir();
         std::fs::create_dir_all(&dir).unwrap();
         // No frontmatter handling: the filename stem is the name and the file
         // contents are the markdown verbatim, including any leading `---`.
         let contents = "---\nstill: body\n---\n# Code Review\n- look\n";
         std::fs::write(dir.join("code-review.md"), contents).unwrap();
 
-        let templates = storage.program_templates().unwrap();
+        let templates = storage.playbook_templates().unwrap();
         let review = templates.iter().find(|t| t.id == "code-review").unwrap();
 
         assert_eq!(review.name, "Code Review");
@@ -2651,7 +2677,7 @@ mod program_tests {
             .unwrap()
             .with_plugin_template_dirs(vec![("secplug".to_string(), plugin_dir)]);
 
-        let templates = storage.program_templates().unwrap();
+        let templates = storage.playbook_templates().unwrap();
         let t = templates
             .iter()
             .find(|t| t.id == "secplug:threat-model")
@@ -2664,11 +2690,61 @@ mod program_tests {
     }
 
     #[test]
-    fn program_templates_include_goal_builtin() {
+    fn legacy_program_session_files_migrate_to_playbook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        let id = "sess-legacy-program";
+        storage.ensure_session_dir(id).unwrap();
+        std::fs::write(
+            storage.session_dir(id).join("program.md"),
+            "# From the program generation\n",
+        )
+        .unwrap();
+
+        let doc = storage.read_playbook(id).unwrap();
+
+        assert_eq!(doc.markdown, "# From the program generation\n");
+        assert!(storage.playbook_path(id).exists());
+        assert!(!storage.session_dir(id).join("program.md").exists());
+    }
+
+    #[test]
+    fn program_generation_wins_over_canvas_when_a_session_carries_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("data")).unwrap();
+        let id = "sess-both-generations";
+        storage.ensure_session_dir(id).unwrap();
+        std::fs::write(storage.session_dir(id).join("canvas.md"), "# canvas\n").unwrap();
+        std::fs::write(storage.session_dir(id).join("program.md"), "# program\n").unwrap();
+
+        let doc = storage.read_playbook(id).unwrap();
+
+        // `program.*` is the newer generation, so it becomes the playbook.
+        assert_eq!(doc.markdown, "# program\n");
+    }
+
+    #[test]
+    fn legacy_program_data_dir_migrates_to_playbook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let legacy_templates = data.join("program").join("templates");
+        std::fs::create_dir_all(&legacy_templates).unwrap();
+        std::fs::write(legacy_templates.join("ops.md"), "# Ops\n").unwrap();
+
+        let storage = Storage::new(data.clone()).unwrap();
+
+        assert!(!data.join("program").exists());
+        assert!(data.join("playbook").join("templates").join("ops.md").exists());
+        let templates = storage.playbook_templates().unwrap();
+        assert!(templates.iter().any(|t| t.id == "ops" && t.name == "Ops"));
+    }
+
+    #[test]
+    fn playbook_templates_include_goal_builtin() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("data")).unwrap();
 
-        let templates = storage.program_templates().unwrap();
+        let templates = storage.playbook_templates().unwrap();
         let goal = templates.iter().find(|t| t.id == "goal").unwrap();
 
         assert_eq!(goal.name, "Goal");
@@ -2686,7 +2762,7 @@ mod program_tests {
     }
 
     #[test]
-    fn program_templates_dir_override_redirects_reads() {
+    fn playbook_templates_dir_override_redirects_reads() {
         let tmp = tempfile::tempdir().unwrap();
         let custom = tmp.path().join("custom-templates");
         std::fs::create_dir_all(&custom).unwrap();
@@ -2694,18 +2770,18 @@ mod program_tests {
 
         let storage = Storage::new(tmp.path().join("data"))
             .unwrap()
-            .with_program_templates_dir(Some(custom.clone()));
+            .with_playbook_templates_dir(Some(custom.clone()));
 
         // The override directory is the one consulted.
-        assert_eq!(storage.program_templates_dir(), custom);
-        let templates = storage.program_templates().unwrap();
+        assert_eq!(storage.playbook_templates_dir(), custom);
+        let templates = storage.playbook_templates().unwrap();
         assert!(templates.iter().any(|t| t.id == "ops" && t.name == "Ops"));
         // A user template dropped under the default location is NOT read when an
         // override is set.
-        let default_dir = tmp.path().join("data").join("program").join("templates");
+        let default_dir = tmp.path().join("data").join("playbook").join("templates");
         std::fs::create_dir_all(&default_dir).unwrap();
         std::fs::write(default_dir.join("ignored.md"), "# Ignored\n").unwrap();
-        let templates = storage.program_templates().unwrap();
+        let templates = storage.playbook_templates().unwrap();
         assert!(!templates.iter().any(|t| t.id == "ignored"));
     }
 }
@@ -2943,23 +3019,23 @@ mod search_tests {
     }
 
     #[test]
-    fn program_scope_matches_lines_and_trims_long_ones() {
+    fn playbook_scope_matches_lines_and_trims_long_ones() {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("data")).unwrap();
         let sessions = vec![make_summary("s1", None, "shell", 0)];
         storage.ensure_session_dir("s1").unwrap();
         let filler = "z".repeat(300);
         std::fs::write(
-            storage.program_path("s1"),
+            storage.playbook_path("s1"),
             format!("# Title\n\n{filler} needle {filler}\n\nanother line\n"),
         )
         .unwrap();
 
-        let result = search_scoped(&storage, &sessions, "needle", vec![SearchScope::Program]);
+        let result = search_scoped(&storage, &sessions, "needle", vec![SearchScope::Playbook]);
 
         assert_eq!(result.hits.len(), 1);
         let hit = &result.hits[0];
-        assert_eq!(hit.scope, SearchScope::Program);
+        assert_eq!(hit.scope, SearchScope::Playbook);
         assert!(hit.snippet.len() < filler.len());
         assert_eq!(
             hit.snippet[hit.match_start..hit.match_end].to_lowercase(),

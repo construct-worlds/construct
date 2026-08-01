@@ -9,7 +9,7 @@ Scope: Where and how picking a smith auth method in the `/configure` dialog is p
 
 Picking an auth method on the `/configure` dialog's smith-auth tab (see [[0069-configure-dialog]]) persists it as smith's default model by writing `CONSTRUCT_SMITH_MODEL = "<prefix>:<default-model>"` under `[adapters.smith.env]` in the daemon's `config.toml` — the same key documented in that file's own comments for manual editing. Picking "Auto-detect" clears the key instead of writing one, restoring smith's ordinary auto-detect ladder (see [[0071-smith-no-implicit-fallback]]).
 
-The daemon owns this write, exposed as an IPC method the TUI calls — the TUI never edits `config.toml` directly. The write is a format-preserving edit (not a wholesale rewrite): every other table, key, and comment already in the file is left untouched, since a user may have hand-written unrelated configuration (adapter overrides, model profiles, program template paths) in the same file.
+The daemon owns this write, exposed as an IPC method the TUI calls — the TUI never edits `config.toml` directly. The write is a format-preserving edit (not a wholesale rewrite): every other table, key, and comment already in the file is left untouched, since a user may have hand-written unrelated configuration (adapter overrides, model profiles, playbook template paths) in the same file.
 
 The write takes effect for sessions started after it lands — it does not reach into already-running smith adapters (their env was fixed at spawn time). The IPC call's result always carries a note saying so, and the dialog always surfaces that note after a pick; there is no attempt to pretend the change applied live.
 
@@ -17,7 +17,7 @@ Selection in the dialog is guidance-first: picking a method whose credential is 
 
 ## Reason
 
-`config.toml` is user-owned and frequently hand-edited (adapter overrides, named model profiles, program template directories) — a client-side wholesale rewrite would risk silently discarding content the user typed that the TUI doesn't know how to round-trip. Routing the write through the daemon keeps a single owner of the file and lets the edit be minimal and format-preserving instead of re-serializing the whole document from a partial in-memory model. Making the "restart required" caveat unavoidable (always shown, never silently skipped) matches the general principle that a probe or a config write is a point-in-time action, not a live guarantee — the same posture spec 0068 takes for availability probes.
+`config.toml` is user-owned and frequently hand-edited (adapter overrides, named model profiles, playbook template directories) — a client-side wholesale rewrite would risk silently discarding content the user typed that the TUI doesn't know how to round-trip. Routing the write through the daemon keeps a single owner of the file and lets the edit be minimal and format-preserving instead of re-serializing the whole document from a partial in-memory model. Making the "restart required" caveat unavoidable (always shown, never silently skipped) matches the general principle that a probe or a config write is a point-in-time action, not a live guarantee — the same posture spec 0068 takes for availability probes.
 
 ## Consequences
 

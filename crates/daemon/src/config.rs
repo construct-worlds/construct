@@ -7,10 +7,10 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-/// Env override for the program-templates directory. Wins over the
-/// `[program].templates_dir` config option; both fall back to the default
-/// `data_dir/program/templates`.
-pub const PROGRAM_TEMPLATES_DIR_ENV: &str = "CONSTRUCT_PROGRAM_TEMPLATES_DIR";
+/// Env override for the playbook-templates directory. Wins over the
+/// `[playbook].templates_dir` config option; both fall back to the default
+/// `data_dir/playbook/templates`.
+pub const PLAYBOOK_TEMPLATES_DIR_ENV: &str = "CONSTRUCT_PLAYBOOK_TEMPLATES_DIR";
 
 /// The full config template written to `config.toml.template` on every daemon
 /// start. All configurable parameters are listed with their default values and
@@ -174,20 +174,20 @@ harness = "smith"
 # Default: true
 enabled = true
 
-# ── Program ──────────────────────────────────────────────────────────────────
+# ── Playbook ──────────────────────────────────────────────────────────────────
 #
-# The program is the shared Markdown space each session can run. Built-in
+# The playbook is the shared Markdown space each session can run. Built-in
 # templates (Blank, Tasks, Investigation, Goal) are always offered; drop your own
 # `<name>.md` files in the templates directory to add custom templates. A custom
 # template is just a Markdown file — its filename is its name and its contents are
-# the program. Custom templates reload on every program open — no daemon restart
+# the playbook. Custom templates reload on every playbook open — no daemon restart
 # needed.
 
-# [program]
-# Directory custom program templates are read from.
-# Default: <data_dir>/program/templates  (e.g. ~/.local/share/construct/program/templates)
-# The CONSTRUCT_PROGRAM_TEMPLATES_DIR env var overrides this.
-# templates_dir = "/path/to/my/program-templates"
+# [playbook]
+# Directory custom playbook templates are read from.
+# Default: <data_dir>/playbook/templates  (e.g. ~/.local/share/construct/playbook/templates)
+# The CONSTRUCT_PLAYBOOK_TEMPLATES_DIR env var overrides this.
+# templates_dir = "/path/to/my/playbook-templates"
 
 # ── Next-prompt suggestions ──────────────────────────────────────────────────
 #
@@ -290,7 +290,7 @@ enabled = true
 #   CONSTRUCT_WEBUI_PORT      — pin local web UI port (default: reclaim
 #                              runtime_dir/webui.port or 5746, auto-pick if busy)
 #   CONSTRUCT_REMOTE_WS_PORT  — auto-start remote WS listener on this port at boot
-#   CONSTRUCT_PROGRAM_TEMPLATES_DIR — program templates dir (overrides [program].templates_dir)
+#   CONSTRUCT_PLAYBOOK_TEMPLATES_DIR — playbook templates dir (overrides [playbook].templates_dir)
 #
 # Smith harness (can also be set per-adapter via [adapters.smith.env]):
 #   CONSTRUCT_SMITH_MODEL         — default model (provider:name, @profile, or oauth prefix)
@@ -491,7 +491,7 @@ pub struct Config {
     #[serde(default)]
     pub orchestrator: OrchestratorConfig,
     #[serde(default)]
-    pub program: ProgramConfig,
+    pub playbook: PlaybookConfig,
     #[serde(default)]
     pub suggest: SuggestConfig,
     #[serde(default)]
@@ -718,31 +718,31 @@ fn default_publish_models() -> bool {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct ProgramConfig {
-    /// Directory program templates are read from. When unset, the daemon uses
-    /// `<data_dir>/program/templates`. The `CONSTRUCT_PROGRAM_TEMPLATES_DIR`
+pub struct PlaybookConfig {
+    /// Directory playbook templates are read from. When unset, the daemon uses
+    /// `<data_dir>/playbook/templates`. The `CONSTRUCT_PLAYBOOK_TEMPLATES_DIR`
     /// env var overrides this.
     #[serde(default)]
     pub templates_dir: Option<String>,
 }
 
 impl Config {
-    /// Resolve the program-templates directory override. Precedence:
-    /// `CONSTRUCT_PROGRAM_TEMPLATES_DIR` env > `[program].templates_dir` config >
-    /// default (`None`, leaving the daemon's `data_dir/program/templates`).
-    pub fn program_templates_dir_override(&self) -> Option<PathBuf> {
-        let env = std::env::var(PROGRAM_TEMPLATES_DIR_ENV).ok();
-        resolve_program_templates_dir(self, env.as_deref())
+    /// Resolve the playbook-templates directory override. Precedence:
+    /// `CONSTRUCT_PLAYBOOK_TEMPLATES_DIR` env > `[playbook].templates_dir` config >
+    /// default (`None`, leaving the daemon's `data_dir/playbook/templates`).
+    pub fn playbook_templates_dir_override(&self) -> Option<PathBuf> {
+        let env = std::env::var(PLAYBOOK_TEMPLATES_DIR_ENV).ok();
+        resolve_playbook_templates_dir(self, env.as_deref())
     }
 }
 
-/// Pure resolver for the program-templates directory override, separated from
+/// Pure resolver for the playbook-templates directory override, separated from
 /// the live env read so precedence (env > config > default) is unit-testable.
-pub fn resolve_program_templates_dir(cfg: &Config, env_override: Option<&str>) -> Option<PathBuf> {
+pub fn resolve_playbook_templates_dir(cfg: &Config, env_override: Option<&str>) -> Option<PathBuf> {
     if let Some(v) = env_override.map(str::trim).filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(v));
     }
-    cfg.program
+    cfg.playbook
         .templates_dir
         .as_deref()
         .map(str::trim)
@@ -1151,48 +1151,48 @@ mod tests {
         assert!(!CONFIG_TOML_TEMPLATE.contains("wraps the"));
     }
 
-    /// `[program].templates_dir` parses out of TOML.
+    /// `[playbook].templates_dir` parses out of TOML.
     #[test]
-    fn program_templates_dir_parses() {
+    fn playbook_templates_dir_parses() {
         let toml = r#"
-            [program]
-            templates_dir = "/srv/program-templates"
+            [playbook]
+            templates_dir = "/srv/playbook-templates"
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         assert_eq!(
-            cfg.program.templates_dir.as_deref(),
-            Some("/srv/program-templates")
+            cfg.playbook.templates_dir.as_deref(),
+            Some("/srv/playbook-templates")
         );
     }
 
-    /// Resolution precedence: env override > `[program].templates_dir` > default.
+    /// Resolution precedence: env override > `[playbook].templates_dir` > default.
     #[test]
-    fn resolve_program_templates_dir_precedence() {
+    fn resolve_playbook_templates_dir_precedence() {
         let mut cfg = Config::default();
 
-        // Default: no env, no config → None (daemon uses data_dir/program/templates).
-        assert_eq!(resolve_program_templates_dir(&cfg, None), None);
+        // Default: no env, no config → None (daemon uses data_dir/playbook/templates).
+        assert_eq!(resolve_playbook_templates_dir(&cfg, None), None);
 
         // Config only.
-        cfg.program.templates_dir = Some("/from/config".to_string());
+        cfg.playbook.templates_dir = Some("/from/config".to_string());
         assert_eq!(
-            resolve_program_templates_dir(&cfg, None),
+            resolve_playbook_templates_dir(&cfg, None),
             Some(PathBuf::from("/from/config")),
         );
 
         // Env wins over config.
         assert_eq!(
-            resolve_program_templates_dir(&cfg, Some("/from/env")),
+            resolve_playbook_templates_dir(&cfg, Some("/from/env")),
             Some(PathBuf::from("/from/env")),
         );
 
         // Blank/whitespace values are ignored (fall through to the next source).
         assert_eq!(
-            resolve_program_templates_dir(&cfg, Some("   ")),
+            resolve_playbook_templates_dir(&cfg, Some("   ")),
             Some(PathBuf::from("/from/config")),
         );
-        cfg.program.templates_dir = Some("  ".to_string());
-        assert_eq!(resolve_program_templates_dir(&cfg, Some("")), None);
+        cfg.playbook.templates_dir = Some("  ".to_string());
+        assert_eq!(resolve_playbook_templates_dir(&cfg, Some("")), None);
     }
 
     /// `Config::effective_usage_probe` (spec 0086): absent `usage_probe`

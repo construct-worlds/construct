@@ -1,4 +1,4 @@
-//! Inline session-name editing in a pane's title bar (and the program
+//! Inline session-name editing in a pane's title bar (and the playbook
 //! popup's title bar), as a faster alternative to the bottom-minibuffer
 //! `Rename` prompt (`r` / the session-title menu). Editing model mirrors
 //! `session_picker`'s search-line cursor: `cursor` is a char index into

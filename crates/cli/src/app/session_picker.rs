@@ -12,8 +12,8 @@
 //! The same dialog serves two callers, distinguished by [`SessionPickerPurpose`]:
 //!   * `C-x b` opens it as a session switcher — confirming focuses the chosen
 //!     session in the active window.
-//!   * The program view's `@`→session path opens it as a clip picker —
-//!     confirming inserts an `@{session:id}` clip into the program buffer via
+//!   * The playbook view's `@`→session path opens it as a clip picker —
+//!     confirming inserts an `@{session:id}` clip into the playbook buffer via
 //!     the existing smart-clip insertion path (which stays live underneath).
 
 use super::*;
@@ -23,10 +23,10 @@ use super::*;
 pub enum SessionPickerPurpose {
     /// `C-x b` — switch the active window's focus to the chosen session.
     Switch,
-    /// Program-view `@` → session — insert an `@{session:id}` clip. The
-    /// program's smart-clip search is left active so the existing insertion
+    /// Playbook-view `@` → session — insert an `@{session:id}` clip. The
+    /// playbook's smart-clip search is left active so the existing insertion
     /// path can replace the `@…` token with the clip.
-    InsertProgramClip,
+    InsertPlaybookClip,
 }
 
 /// Minimum query length (chars) before the tier-2 async content search
@@ -47,7 +47,7 @@ pub struct SessionPickerDialog {
     pub query: String,
     /// Char index into `query` where typing/backspace/Emacs motion acts. Only
     /// meaningful for [`SessionPickerPurpose::Switch`], which owns its own
-    /// search line — the `@`→session variant's "query" is the program
+    /// search line — the `@`→session variant's "query" is the playbook
     /// buffer's live token, tracked by the buffer's own cursor instead.
     pub cursor: usize,
     /// Logical index into the *selectable* (visible, non-dimmed) session rows.
@@ -56,10 +56,10 @@ pub struct SessionPickerDialog {
     /// on screen.
     pub scroll: usize,
     /// Tier-2 async content search (spec 0076): hits from the last completed
-    /// `session.search` call over program + transcript content. Name matches
+    /// `session.search` call over playbook + transcript content. Name matches
     /// are tier 1 (instant, in-memory dimming) and never appear here. Both
     /// purposes participate; the query searched is the dialog's *effective*
-    /// query (the switcher's own line, or the program buffer's live
+    /// query (the switcher's own line, or the playbook buffer's live
     /// `@<typeahead>` token for the clip variant).
     pub content_matches: Vec<construct_protocol::SearchHit>,
     /// Bumped on every query edit. The async search task echoes the
@@ -81,13 +81,13 @@ impl SessionPickerDialog {
     pub fn title(&self) -> &'static str {
         match self.purpose {
             SessionPickerPurpose::Switch => " switch session ",
-            SessionPickerPurpose::InsertProgramClip => " insert session clip ",
+            SessionPickerPurpose::InsertPlaybookClip => " insert session clip ",
         }
     }
 }
 
 /// A materialized row in the dialog body. Only [`SessionPickerRow::Session`]
-/// rows with `dimmed == false` and [`SessionPickerRow::ProgramBlock`] rows are
+/// rows with `dimmed == false` and [`SessionPickerRow::PlaybookBlock`] rows are
 /// selectable; headers are decoration.
 #[derive(Debug, Clone)]
 pub enum SessionPickerRow {
@@ -110,22 +110,22 @@ pub enum SessionPickerRow {
         indented: bool,
         dimmed: bool,
     },
-    /// Separator row introducing the currently open program's blocks (see
-    /// [`SessionPickerRow::ProgramBlock`]). Only present for the `C-x b`
-    /// switcher, and only when a program is open.
-    ProgramHeader,
-    /// A block from the currently open program. Selecting it closes the
-    /// picker, brings the program view into focus, and scrolls to the block.
-    ProgramBlock { text: String, start_line: usize },
+    /// Separator row introducing the currently open playbook's blocks (see
+    /// [`SessionPickerRow::PlaybookBlock`]). Only present for the `C-x b`
+    /// switcher, and only when a playbook is open.
+    PlaybookHeader,
+    /// A block from the currently open playbook. Selecting it closes the
+    /// picker, brings the playbook view into focus, and scrolls to the block.
+    PlaybookBlock { text: String, start_line: usize },
     /// Separator introducing the tier-2 async content-search section (spec
-    /// 0076), shown below the session/group/program-block rows once the
+    /// 0076), shown below the session/group/playbook-block rows once the
     /// dialog's effective query is long enough to have kicked one off.
     ContentMatchHeader { searching: bool, truncated: bool },
-    /// One tier-2 content-search hit (program or transcript scope).
+    /// One tier-2 content-search hit (playbook or transcript scope).
     /// Selecting it performs the same purpose-aware action as selecting
     /// `hit.session_id`'s own session row: switch to it (`Switch`) or
-    /// insert its clip (`InsertProgramClip`). Jump-to-match positioning
-    /// within the transcript/program view is out of scope.
+    /// insert its clip (`InsertPlaybookClip`). Jump-to-match positioning
+    /// within the transcript/playbook view is out of scope.
     ContentMatch { hit: construct_protocol::SearchHit },
 }
 
@@ -134,7 +134,7 @@ impl SessionPickerRow {
         matches!(
             self,
             SessionPickerRow::Session { dimmed: false, .. }
-                | SessionPickerRow::ProgramBlock { .. }
+                | SessionPickerRow::PlaybookBlock { .. }
                 | SessionPickerRow::ContentMatch { .. }
         )
     }
@@ -216,17 +216,17 @@ impl App {
         self.schedule_content_search();
     }
 
-    /// Open the dialog from the program view's `@`→session category. The
-    /// program's smart-clip search is intentionally left active so confirming
+    /// Open the dialog from the playbook view's `@`→session category. The
+    /// playbook's smart-clip search is intentionally left active so confirming
     /// can replace the `@…` token with the chosen clip.
-    pub(super) fn open_session_picker_for_program_clip(&mut self) {
-        self.open_session_picker(SessionPickerPurpose::InsertProgramClip);
+    pub(super) fn open_session_picker_for_playbook_clip(&mut self) {
+        self.open_session_picker(SessionPickerPurpose::InsertPlaybookClip);
     }
 
     /// The query that drives dimming/auto-expand. For the `C-x b` switcher this
-    /// is the dialog's own typeahead line. For the program `@`→session variant
+    /// is the dialog's own typeahead line. For the playbook `@`→session variant
     /// there is no search line in the dialog — the live `@<typeahead>` token in
-    /// the program buffer is the query, so it stays in lock-step with what the
+    /// the playbook buffer is the query, so it stays in lock-step with what the
     /// user sees behind the anchored dialog.
     pub(crate) fn session_picker_effective_query(&self) -> String {
         let Some(dialog) = self.session_picker.as_ref() else {
@@ -234,12 +234,12 @@ impl App {
         };
         match dialog.purpose {
             SessionPickerPurpose::Switch => dialog.query.clone(),
-            SessionPickerPurpose::InsertProgramClip => self
-                .program_popup
+            SessionPickerPurpose::InsertPlaybookClip => self
+                .playbook_popup
                 .as_ref()
                 .and_then(|popup| {
                     let trigger_start = popup.smart_clip.as_ref()?.trigger_start;
-                    program_smart_clip_query(popup, trigger_start)
+                    playbook_smart_clip_query(popup, trigger_start)
                 })
                 .unwrap_or_default(),
         }
@@ -327,16 +327,16 @@ impl App {
             }
         }
 
-        // The currently open program's blocks, so `C-x b` can also jump
+        // The currently open playbook's blocks, so `C-x b` can also jump
         // straight to a block. Only for the plain switcher — the `@`→session
         // clip variant expects only `Session` rows among the selectable set.
         if matches!(
             self.session_picker.as_ref().map(|d| &d.purpose),
             Some(SessionPickerPurpose::Switch)
         ) {
-            if let Some(popup) = self.program_popup.as_ref().filter(|p| !p.closing) {
+            if let Some(popup) = self.playbook_popup.as_ref().filter(|p| !p.closing) {
                 let query_lower = query.to_ascii_lowercase();
-                let block_rows: Vec<SessionPickerRow> = program_blocks(&popup.buffer)
+                let block_rows: Vec<SessionPickerRow> = playbook_blocks(&popup.buffer)
                     .into_iter()
                     .filter_map(|b| {
                         let text = popup.buffer.lines().nth(b.start_line)?.trim();
@@ -346,19 +346,19 @@ impl App {
                         !has_query || text.to_ascii_lowercase().contains(&query_lower)
                     })
                     .take(10)
-                    .map(|(text, start_line)| SessionPickerRow::ProgramBlock {
+                    .map(|(text, start_line)| SessionPickerRow::PlaybookBlock {
                         text: truncate_block_text(text),
                         start_line,
                     })
                     .collect();
                 if !block_rows.is_empty() {
-                    out.push(SessionPickerRow::ProgramHeader);
+                    out.push(SessionPickerRow::PlaybookHeader);
                     out.extend(block_rows);
                 }
             }
         }
 
-        // Tier-2 async content-search section (spec 0076): program +
+        // Tier-2 async content-search section (spec 0076): playbook +
         // transcript hits from the debounced background `session.search`
         // call. Both purposes participate — the `C-x b` switcher and the
         // `@`→session clip picker — but only once the query is long enough
@@ -425,9 +425,9 @@ impl App {
     }
 
     /// Insert a paste into the `C-x b` search line as one edit. Returns true
-    /// when the picker consumed the text; the program-clip picker keeps using
-    /// the program editor's existing paste path because its query lives in the
-    /// program buffer rather than in [`SessionPickerDialog::query`].
+    /// when the picker consumed the text; the playbook-clip picker keeps using
+    /// the playbook editor's existing paste path because its query lives in the
+    /// playbook buffer rather than in [`SessionPickerDialog::query`].
     pub(super) fn session_picker_insert_text(&mut self, text: &str) -> bool {
         let Some(dialog) = self.session_picker.as_mut() else {
             return false;
@@ -460,7 +460,7 @@ impl App {
 
     /// (Re)arm the tier-2 async content search debounce after the dialog's
     /// effective query changed (spec 0076) — the switcher's own search
-    /// line, or the program buffer's live `@<typeahead>` token for the
+    /// line, or the playbook buffer's live `@<typeahead>` token for the
     /// `@`→session clip variant. Bumps the generation so any in-flight or
     /// about-to-fire search for the old query is superseded, clears stale
     /// results immediately (so the picker never shows content matches for
@@ -470,7 +470,7 @@ impl App {
     pub(crate) fn schedule_content_search(&mut self) {
         // Resolve through the shared effective-query path *before* taking
         // the mutable dialog borrow: the clip variant's query lives in the
-        // program buffer, not `dialog.query`.
+        // playbook buffer, not `dialog.query`.
         let query_chars = self.session_picker_effective_query().trim().chars().count();
         let Some(dialog) = self.session_picker.as_mut() else {
             return;
@@ -527,13 +527,13 @@ impl App {
     }
 
     /// `@`→session variant: there is no dialog search line, so a typed character
-    /// extends the live `@<typeahead>` token in the program buffer. That token
+    /// extends the live `@<typeahead>` token in the playbook buffer. That token
     /// *is* the query, so the dialog re-filters as the visible text grows. A
     /// character that ends the token (e.g. whitespace) tears the `@` search down,
     /// which dismisses the picker just as the inline `@` menu would.
-    fn session_picker_program_push_char(&mut self, c: char) {
-        self.insert_program_text(&c.to_string());
-        if self.program_smart_clip_active() {
+    fn session_picker_playbook_push_char(&mut self, c: char) {
+        self.insert_playbook_text(&c.to_string());
+        if self.playbook_smart_clip_active() {
             self.session_picker_reset_selection();
             // The buffer's `@<typeahead>` token *is* this dialog's query,
             // so a token edit re-arms the tier-2 content search exactly
@@ -547,8 +547,8 @@ impl App {
     /// `@`→session variant of backspace: delete the last character of the live
     /// `@<typeahead>` token. Backspacing over the `@` itself removes it and
     /// closes the whole picker (mirroring the inline `@` menu).
-    fn session_picker_program_backspace(&mut self) {
-        if self.program_smart_clip_backspace() {
+    fn session_picker_playbook_backspace(&mut self) {
+        if self.playbook_smart_clip_backspace() {
             self.session_picker_reset_selection();
             self.schedule_content_search();
         } else {
@@ -558,31 +558,31 @@ impl App {
         }
     }
 
-    /// Close the dialog without acting. When it was driving a program-clip
+    /// Close the dialog without acting. When it was driving a playbook-clip
     /// insertion, also dismiss the underlying `@` smart-clip menu so it doesn't
     /// reappear behind the closed dialog.
     fn cancel_session_picker(&mut self) {
         let was_clip = self
             .session_picker
             .take()
-            .map(|d| d.purpose == SessionPickerPurpose::InsertProgramClip)
+            .map(|d| d.purpose == SessionPickerPurpose::InsertPlaybookClip)
             .unwrap_or(false);
         if was_clip {
-            self.cancel_program_smart_clip();
+            self.cancel_playbook_smart_clip();
         }
     }
 
     /// Left-arrow "go back": close the `@`→session dialog and return to the
     /// inline `@` context menu it was opened from, re-highlighting the "session"
     /// category so Left/Right are reversible (mirrors
-    /// [`Self::program_smart_clip_collapse`] for the inline submenus). Unlike
+    /// [`Self::playbook_smart_clip_collapse`] for the inline submenus). Unlike
     /// [`Self::cancel_session_picker`], the underlying smart-clip search is left
     /// alive so the inline menu re-renders in the same anchored position. A no-op
     /// for the `C-x b` switcher, which has no parent menu to return to.
     fn session_picker_back_to_menu(&mut self) {
         if !matches!(
             self.session_picker.as_ref().map(|d| &d.purpose),
-            Some(SessionPickerPurpose::InsertProgramClip)
+            Some(SessionPickerPurpose::InsertPlaybookClip)
         ) {
             return;
         }
@@ -591,17 +591,17 @@ impl App {
         // category lives there), so the current rows are the root rows. `None`
         // means there is no live `@` menu underneath (it should be there, but
         // guard rather than assume).
-        let selected = self.program_popup.as_ref().and_then(|popup| {
+        let selected = self.playbook_popup.as_ref().and_then(|popup| {
             popup.smart_clip.as_ref()?;
             Some(
-                self.program_smart_clip_rows(popup)
+                self.playbook_smart_clip_rows(popup)
                     .iter()
                     .filter(|r| r.is_selectable())
                     .position(|r| {
                         matches!(
                             r,
-                            ProgramSmartClipRow::Category {
-                                group: ProgramSmartClipGroup::Session,
+                            PlaybookSmartClipRow::Category {
+                                group: PlaybookSmartClipGroup::Session,
                                 ..
                             }
                         )
@@ -614,18 +614,18 @@ impl App {
         self.session_picker = None;
         if let Some(selected) = selected {
             if let Some(search) = self
-                .program_popup
+                .playbook_popup
                 .as_mut()
                 .and_then(|popup| popup.smart_clip.as_mut())
             {
-                search.view = ProgramSmartClipView::Root;
+                search.view = PlaybookSmartClipView::Root;
                 search.selected = selected;
             }
         }
     }
 
     /// Act on the highlighted row: switch focus to a session, insert its
-    /// clip, or jump the program view to a picked block.
+    /// clip, or jump the playbook view to a picked block.
     fn confirm_session_picker(&mut self) {
         let Some(purpose) = self.session_picker.as_ref().map(|d| d.purpose.clone()) else {
             return;
@@ -651,13 +651,13 @@ impl App {
             SessionPickerRow::Session { summary, .. } => {
                 self.accept_session_pick(&purpose, &summary)
             }
-            SessionPickerRow::ProgramBlock { text, start_line } => {
-                self.jump_to_program_block(start_line);
-                self.set_status(format!("program → {text}"));
+            SessionPickerRow::PlaybookBlock { text, start_line } => {
+                self.jump_to_playbook_block(start_line);
+                self.set_status(format!("playbook → {text}"));
             }
             // Same action as picking the session's own row for this purpose
             // (switch to it / insert its clip) — jump-to-seq positioning
-            // within the transcript/program view is explicitly out of scope
+            // within the transcript/playbook view is explicitly out of scope
             // (spec 0076).
             SessionPickerRow::ContentMatch { hit } => {
                 match self
@@ -672,13 +672,13 @@ impl App {
             }
             SessionPickerRow::GroupHeader { .. }
             | SessionPickerRow::ArchiveHeader { .. }
-            | SessionPickerRow::ProgramHeader
+            | SessionPickerRow::PlaybookHeader
             | SessionPickerRow::ContentMatchHeader { .. } => {}
         }
     }
 
     /// Purpose-aware accept of a chosen session: switch the active window to
-    /// it (`Switch`) or insert its `@{session:…}` clip (`InsertProgramClip`).
+    /// it (`Switch`) or insert its `@{session:…}` clip (`InsertPlaybookClip`).
     /// Shared by the session rows and the tier-2 content-match rows so a
     /// content hit acts exactly like picking that session's own row.
     fn accept_session_pick(&mut self, purpose: &SessionPickerPurpose, summary: &SessionSummary) {
@@ -690,27 +690,27 @@ impl App {
                 self.focus = PaneFocus::View;
                 self.set_status(format!("window → {label}"));
             }
-            SessionPickerPurpose::InsertProgramClip => {
+            SessionPickerPurpose::InsertPlaybookClip => {
                 let candidate = Self::session_smart_clip_candidate(summary);
-                self.insert_program_smart_clip_candidate(&candidate);
+                self.insert_playbook_smart_clip_candidate(&candidate);
             }
         }
     }
 
-    /// Scroll the currently open program view to `start_line` (a source-line
+    /// Scroll the currently open playbook view to `start_line` (a source-line
     /// index into its markdown), e.g. after picking a block from the `C-x b`
-    /// picker. The program is already open — its blocks are only listed in
+    /// picker. The playbook is already open — its blocks are only listed in
     /// the picker while it is — so this just brings it into keyboard focus
     /// (undoing a terminal-focus slide) and moves the scroll to the block.
-    fn jump_to_program_block(&mut self, start_line: usize) {
-        let Some(inner) = self.layout.program_inner_area else {
+    fn jump_to_playbook_block(&mut self, start_line: usize) {
+        let Some(inner) = self.layout.playbook_inner_area else {
             return;
         };
         let width = inner.width as usize;
         if width == 0 {
             return;
         }
-        let Some(popup) = self.program_popup.as_ref() else {
+        let Some(popup) = self.playbook_popup.as_ref() else {
             return;
         };
         let offset: usize = popup
@@ -720,10 +720,10 @@ impl App {
             .map(|line| line.chars().count() + 1)
             .sum();
         let visual_row =
-            crate::ui::program_cursor_visual_row(Some(self), &popup.buffer, offset, width);
+            crate::ui::playbook_cursor_visual_row(Some(self), &popup.buffer, offset, width);
         self.focus = PaneFocus::View;
-        self.set_program_terminal_focus(false);
-        if let Some(popup) = self.program_popup.as_mut() {
+        self.set_playbook_terminal_focus(false);
+        if let Some(popup) = self.playbook_popup.as_mut() {
             popup.scroll_offset = visual_row;
         }
     }
@@ -731,15 +731,15 @@ impl App {
     /// Route a key while the dialog owns input. Captures everything: typing
     /// edits the query, arrows / `C-n` / `C-p` move the selection, Enter
     /// confirms, Esc / `C-g` cancels. Typing/backspace route to whichever query
-    /// backs the dialog — the switcher's own line, or the program's live
+    /// backs the dialog — the switcher's own line, or the playbook's live
     /// `@<typeahead>` token for the `@`→session variant.
     pub(super) fn handle_session_picker_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let super_mod = key.modifiers.contains(KeyModifiers::SUPER);
-        let to_program = matches!(
+        let to_playbook = matches!(
             self.session_picker.as_ref().map(|d| &d.purpose),
-            Some(SessionPickerPurpose::InsertProgramClip)
+            Some(SessionPickerPurpose::InsertPlaybookClip)
         );
         match key.code {
             KeyCode::Esc => self.cancel_session_picker(),
@@ -755,16 +755,16 @@ impl App {
             KeyCode::Char('n') if ctrl => self.move_session_picker_selection(1),
             // Emacs cursor motion on the switcher's own search line. Not
             // wired up for the `@`→session variant, whose "query" is the
-            // program buffer's live token with its own cursor semantics.
-            KeyCode::Char('f') if ctrl && !to_program => self.session_picker_move_cursor(1),
-            KeyCode::Char('b') if ctrl && !to_program => self.session_picker_move_cursor(-1),
-            KeyCode::Char('a') if ctrl && !to_program => self.session_picker_cursor_to_edge(false),
-            KeyCode::Char('e') if ctrl && !to_program => self.session_picker_cursor_to_edge(true),
-            KeyCode::Char('k') if ctrl && !to_program => self.session_picker_kill_to_end(),
-            KeyCode::Backspace if to_program => self.session_picker_program_backspace(),
+            // playbook buffer's live token with its own cursor semantics.
+            KeyCode::Char('f') if ctrl && !to_playbook => self.session_picker_move_cursor(1),
+            KeyCode::Char('b') if ctrl && !to_playbook => self.session_picker_move_cursor(-1),
+            KeyCode::Char('a') if ctrl && !to_playbook => self.session_picker_cursor_to_edge(false),
+            KeyCode::Char('e') if ctrl && !to_playbook => self.session_picker_cursor_to_edge(true),
+            KeyCode::Char('k') if ctrl && !to_playbook => self.session_picker_kill_to_end(),
+            KeyCode::Backspace if to_playbook => self.session_picker_playbook_backspace(),
             KeyCode::Backspace => self.session_picker_backspace(),
-            KeyCode::Char(c) if !ctrl && !alt && !super_mod && to_program => {
-                self.session_picker_program_push_char(c)
+            KeyCode::Char(c) if !ctrl && !alt && !super_mod && to_playbook => {
+                self.session_picker_playbook_push_char(c)
             }
             KeyCode::Char(c) if !ctrl && !alt && !super_mod => self.session_picker_push_char(c),
             _ => {}
@@ -772,19 +772,19 @@ impl App {
     }
 }
 
-/// Max display characters for a [`SessionPickerRow::ProgramBlock`] label, so a
+/// Max display characters for a [`SessionPickerRow::PlaybookBlock`] label, so a
 /// long block's first line can't blow out the dialog's fixed row width.
-const PROGRAM_BLOCK_TEXT_MAX_CHARS: usize = 60;
+const PLAYBOOK_BLOCK_TEXT_MAX_CHARS: usize = 60;
 
-/// Clip a program block's first line to [`PROGRAM_BLOCK_TEXT_MAX_CHARS`],
+/// Clip a playbook block's first line to [`PLAYBOOK_BLOCK_TEXT_MAX_CHARS`],
 /// appending `…` when it didn't fit.
 fn truncate_block_text(text: &str) -> String {
-    if text.chars().count() <= PROGRAM_BLOCK_TEXT_MAX_CHARS {
+    if text.chars().count() <= PLAYBOOK_BLOCK_TEXT_MAX_CHARS {
         return text.to_string();
     }
     let mut out: String = text
         .chars()
-        .take(PROGRAM_BLOCK_TEXT_MAX_CHARS.saturating_sub(1))
+        .take(PLAYBOOK_BLOCK_TEXT_MAX_CHARS.saturating_sub(1))
         .collect();
     out.push('…');
     out
@@ -1037,7 +1037,7 @@ mod tests {
                 session_id: "s".into(),
                 title: "s".into(),
                 harness: "shell".into(),
-                scope: construct_protocol::SearchScope::Program,
+                scope: construct_protocol::SearchScope::Playbook,
                 seq: None,
                 at: None,
                 snippet: "abc found".into(),
@@ -1104,7 +1104,7 @@ mod tests {
                 session_id: "target".into(),
                 title: "target".into(),
                 harness: "shell".into(),
-                scope: construct_protocol::SearchScope::Program,
+                scope: construct_protocol::SearchScope::Playbook,
                 seq: None,
                 at: None,
                 snippet: "needle in a haystack".into(),

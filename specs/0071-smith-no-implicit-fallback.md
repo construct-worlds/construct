@@ -21,7 +21,7 @@ The previous ladder's last rung silently built an `ollama:llama3.1` spec wheneve
 
 ## Consequences
 
-- A session-start failure from this path is not itself a Program/session-list-degrading event beyond the ordinary `Errored` state a startup error already produces — no new failure-handling machinery was needed, only a different failure trigger and a better message.
+- A session-start failure from this path is not itself a Playbook/session-list-degrading event beyond the ordinary `Errored` state a startup error already produces — no new failure-handling machinery was needed, only a different failure trigger and a better message.
 - Any future rung added to the ladder must be an explicit, deliberate choice about what "auto-detect" should guess — silently falling through to a network-dependent default is exactly the failure mode this decision closes off.
 - Existing explicit Ollama users (`--model ollama:<name>`, `CONSTRUCT_SMITH_MODEL=ollama:<name>`, an `@profile` pointing at `provider = "ollama"`) are unaffected — this only changes what happens when no model is specified at all.
 - The orchestrator exception is scoped to the main conversational turn only — the ambient fleet monitor's periodic background tick does not itself re-attempt resolution or fire the curated error; it silently produces no finding until either the main turn's lazy re-resolve succeeds or the session restarts. This is a deliberate scope boundary, not an oversight: the monitor is a background convenience, and re-resolving on every tick would add complexity for a path with no user waiting on it.
