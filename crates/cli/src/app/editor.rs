@@ -308,7 +308,8 @@ impl App {
                             .unwrap_or(0);
                         let editing_this_field =
                             self.session_title_rename.as_ref().is_some_and(|r| {
-                                r.session_id == session_id && r.origin == TitleRenameOrigin::Playbook
+                                r.session_id == session_id
+                                    && r.origin == TitleRenameOrigin::Playbook
                             });
                         if editing_this_field {
                             self.session_title_rename_click_cursor(
@@ -434,7 +435,10 @@ impl App {
                     if popup.expanded_attachments.remove(&hit.key).is_none() {
                         popup.expanded_attachments.insert(
                             hit.key,
-                            (hit.path.clone(), crate::ui::PLAYBOOK_ATTACHMENT_DEFAULT_ROWS),
+                            (
+                                hit.path.clone(),
+                                crate::ui::PLAYBOOK_ATTACHMENT_DEFAULT_ROWS,
+                            ),
                         );
                     }
                 }
@@ -719,7 +723,9 @@ impl App {
                 }
                 self.set_status("playbook selection canceled".to_string());
             }
-            KeyCode::Enter if self.playbook_smart_clip_active() => self.accept_playbook_smart_clip(),
+            KeyCode::Enter if self.playbook_smart_clip_active() => {
+                self.accept_playbook_smart_clip()
+            }
             KeyCode::Tab if self.playbook_smart_clip_active() && !ctrl && !alt => {
                 self.accept_playbook_smart_clip()
             }
@@ -730,8 +736,12 @@ impl App {
                 self.move_playbook_smart_clip_selection(1)
             }
             // Right drills into the highlighted category's submenu; Left backs out.
-            KeyCode::Right if self.playbook_smart_clip_active() => self.playbook_smart_clip_expand(),
-            KeyCode::Left if self.playbook_smart_clip_active() => self.playbook_smart_clip_collapse(),
+            KeyCode::Right if self.playbook_smart_clip_active() => {
+                self.playbook_smart_clip_expand()
+            }
+            KeyCode::Left if self.playbook_smart_clip_active() => {
+                self.playbook_smart_clip_collapse()
+            }
             _ if matches!(ctrl_char, Some(' ' | '@' | '\0')) => self.begin_playbook_selection(),
             _ if ctrl_char == Some('g') => {
                 // Keep the traditional Emacs C-g as an alias for Esc.
@@ -840,7 +850,7 @@ impl App {
 
     /// Change the pinned clip through the size-ownership protocol (spec
     /// 0090). A session pinned while visible nowhere else on screen (no main
-    /// window, not the orchestrator, not in the pin strip) gets its PTY
+    /// window, not the orchestrator) gets its PTY
     /// resized to the card's content dims, so the harness reflows to fit —
     /// full fidelity, no crop — and is resized back to the standard pane
     /// size the moment the pin releases (unpin, switch, dismiss, popup
@@ -2088,7 +2098,10 @@ impl App {
 
     /// The rows on screen for the picker's current view — the single source of
     /// truth shared by navigation, acceptance, and rendering.
-    pub(crate) fn playbook_smart_clip_rows(&self, popup: &PlaybookPopup) -> Vec<PlaybookSmartClipRow> {
+    pub(crate) fn playbook_smart_clip_rows(
+        &self,
+        popup: &PlaybookPopup,
+    ) -> Vec<PlaybookSmartClipRow> {
         match popup.smart_clip.as_ref().map(|search| search.view) {
             Some(PlaybookSmartClipView::Submenu(group)) => {
                 self.playbook_smart_clip_submenu_rows(popup, group)
@@ -2166,8 +2179,12 @@ impl App {
     ) -> Vec<PlaybookSmartClipRow> {
         let query = Self::playbook_smart_clip_query_text(popup);
         match group {
-            PlaybookSmartClipGroup::Session => self.playbook_smart_clip_session_submenu_rows(&query),
-            PlaybookSmartClipGroup::Harness => self.playbook_smart_clip_harness_submenu_rows(&query),
+            PlaybookSmartClipGroup::Session => {
+                self.playbook_smart_clip_session_submenu_rows(&query)
+            }
+            PlaybookSmartClipGroup::Harness => {
+                self.playbook_smart_clip_harness_submenu_rows(&query)
+            }
         }
     }
 

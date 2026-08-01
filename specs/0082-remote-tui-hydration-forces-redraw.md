@@ -41,8 +41,8 @@ client's current geometry.
 - The redraw is scoped to remote clients because network attachment and
   differing client geometry make replay drift common there; local attachment
   keeps the cheaper same-size dedup path.
-- Background pinned or preview-only sessions must not be resized merely to
-  warm their local render cache.
+- Background sessions that are pinned in another client or shown only as a
+  preview must not be resized merely to warm their local render cache.
 - The bump and the settle must be ordered, not concurrent. The daemon
   deduplicates by last-applied size, so overlapping them can collapse both
   into a single no-op.

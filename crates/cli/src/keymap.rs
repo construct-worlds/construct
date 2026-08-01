@@ -33,7 +33,7 @@ pub enum KeyAction {
     /// Kept as a KeyAction so the title-menu / slash-command paths can still
     /// invoke it without a separate chord.
     OpenMerge,
-    /// Zoom: the session view fills the screen (list / pin strip / modeline
+    /// Zoom: the session view fills the screen (list / modeline
     /// all hidden; only the minibuffer stays). Toggling again restores the
     /// default layout. Bound to `C-x z` (emacs) / `z` (vim), matching
     /// tmux's `prefix z` (zoom-pane).
@@ -96,11 +96,6 @@ pub enum KeyAction {
     /// counterpart to `SwitchFocus`'s toggle.
     FocusView,
     ToggleView,
-    /// Pin / unpin the currently-selected session so it stays in the pin
-    /// strip below the main view. On a group selection: pin or unpin all
-    /// members at once (binary toggle: if all are pinned, unpin all;
-    /// otherwise pin all).
-    TogglePin,
     /// Right arrow on a group selection → expand it.
     ExpandGroup,
     /// Left arrow on a group selection → collapse it.
@@ -356,9 +351,6 @@ fn emacs() -> Keymap {
         (Chord(vec![ctrl('x'), ch('f')]), OpenFork),
         // Merge is no longer a dedicated chord — forked sessions get
         // `[m] merge and archive` on the `C-x k` end prompt instead.
-        // Pin / unpin selected session (or all members of a selected group)
-        (Chord(vec![ctrl('x'), ch('p')]), TogglePin),
-        (Chord(vec![ch(' ')]), TogglePin),
         // Expand / collapse on a group selection
         (Chord(vec![key(KeyCode::Right)]), ExpandGroup),
         (Chord(vec![key(KeyCode::Left)]), CollapseGroup),
@@ -438,8 +430,6 @@ fn vim() -> Keymap {
         (Chord(vec![ch('v')]), ToggleView),
         (Chord(vec![ch('z')]), ToggleZoom),
         (Chord(vec![shift('Z'), shift('Z')]), Quit),
-        (Chord(vec![ch(' ')]), TogglePin),
-        (Chord(vec![ch('p')]), TogglePin),
         (Chord(vec![key(KeyCode::Right)]), ExpandGroup),
         (Chord(vec![key(KeyCode::Left)]), CollapseGroup),
         // Reorder selected session in the list. Shift+J/K match vim's

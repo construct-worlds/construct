@@ -38,4 +38,4 @@ Future UI affordances that intentionally duplicate a session into another split 
 
 ## Non-Goals
 
-This does not require split creation to choose a different session automatically. It also does not prevent pinned previews, browser clients, or other non-split surfaces from showing the same session.
+This does not require split creation to choose a different session automatically. It also does not prevent Playbook clip cards, web clients, or other non-split surfaces from showing the same session.
