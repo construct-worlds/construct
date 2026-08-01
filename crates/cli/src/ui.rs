@@ -4280,14 +4280,14 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
         // Paint bottom-up: each band owns a contiguous run of eighths.
         for cell in column_cells(&segments, filled, cells) {
             let y = graph.y + graph.height.saturating_sub(cell.row + 1);
-            let mut style = Style::default().fg(app.token_meter.color(cell.fg.paint()));
+            let mut style = Style::default().fg(app.token_meter.band_color(cell.fg));
             // A terminal cell holds one glyph, so a boundary landing inside
             // one is drawn as a partial block whose *filled* part is the
             // lower band and whose background is the upper one. Painting
             // both as foreground glyphs would mean the second overwrites the
             // first, and the lower band would vanish from the stack.
             if let Some(bg) = cell.bg {
-                style = style.bg(app.token_meter.color(bg.paint()));
+                style = style.bg(app.token_meter.band_color(bg));
             }
             f.buffer_mut().set_string(x, y, cell.glyph, style);
         }
@@ -4298,40 +4298,28 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
     }
 }
 
-/// The glyph a cache-read band fills a cell with: the model's own color, at
-/// half density. A model gets exactly one color — the one on its legend dot —
-/// and the split between what the provider processed fresh and what it served
-/// from cache is carried by fill, not by hue.
-const SHADED_BLOCK: &str = "▒";
-
-/// How a band paints. Bands sharing a `paint` are the same color, so a
-/// boundary between them cannot be encoded as foreground-over-background;
-/// `shaded` is what distinguishes them instead.
+/// How a band identifies its solid paint. Cached and fresh parts of one model
+/// use distinct lightnesses of the same hue, so their boundary can use the
+/// terminal's ordinary foreground/background split without a texture glyph.
 trait BandPaint: Copy + PartialEq {
-    /// Which series color fills this band.
-    fn paint(self) -> u16;
-    /// Whether it fills with the shaded block rather than a solid one.
-    fn shaded(self) -> bool;
+    /// Stable key for the exact tone that fills this band.
+    fn paint(self) -> u32;
 }
 
 impl BandPaint for crate::token_meter::Band {
-    fn paint(self) -> u16 {
-        self.0
-    }
-
-    fn shaded(self) -> bool {
-        matches!(self.1, crate::token_meter::Part::Cached)
+    fn paint(self) -> u32 {
+        u32::from(self.0) * 2
+            + match self.1 {
+                crate::token_meter::Part::Cached => 0,
+                crate::token_meter::Part::New => 1,
+            }
     }
 }
 
 /// Plain series indices, for callers that draw one band per model.
 impl BandPaint for u16 {
-    fn paint(self) -> u16 {
-        self
-    }
-
-    fn shaded(self) -> bool {
-        false
+    fn paint(self) -> u32 {
+        u32::from(self)
     }
 }
 
@@ -4350,20 +4338,15 @@ struct ColumnCell<K> {
 
 /// Lay a column's stacked segments onto terminal cells.
 ///
-/// Cells are 8 eighths tall. A cell wholly owned by one band is a full
-/// block — solid or shaded, per the band; the column's topmost cell is a
-/// partial block; a cell where one band ends and a differently-colored one
-/// begins is a partial block of the lower band drawn *over* the upper band as
-/// background, which is the only way to get two colors into one cell.
+/// Cells are 8 eighths tall. A cell wholly owned by one band is a solid full
+/// block; the column's topmost cell is a partial block; a cell where one band
+/// ends and another begins is a partial block of the lower tone drawn *over*
+/// the upper tone as background, which is the only way to get two colors into
+/// one cell.
 ///
-/// Two cases cannot encode a boundary at all, and both hand the cell to
-/// whichever band owns more of it. A partial cell has to leave its empty part
-/// as panel background, so there is nowhere to put the second band. And where
-/// the two bands are one model's own new/cached split they share a color, so
-/// the fill has to carry the difference — and a block cannot be partially
-/// shaded. The bands are ordered cache-first for this reason: it puts the
-/// unencodable partial cell at the top of a model's run, where new work is,
-/// and solid is the right answer.
+/// Only the partially-filled cell topping a column cannot encode a second
+/// boundary: its empty part has to remain panel background. Whichever band
+/// owns more of that cell takes it.
 fn column_cells<K: BandPaint>(
     segments: &[(K, usize)],
     filled: usize,
@@ -4398,7 +4381,7 @@ fn column_cells<K: BandPaint>(
             // One band owns everything filled here.
             ColumnCell {
                 row: row as u16,
-                glyph: full_cell_glyph(bottom_series, fill),
+                glyph: full_cell_glyph(fill),
                 fg: bottom_series,
                 bg: None,
             }
@@ -4414,8 +4397,8 @@ fn column_cells<K: BandPaint>(
             }
         } else {
             // Either a partially-filled top cell, or a boundary between two
-            // bands of one color. Neither can hold both, so the larger share
-            // takes the cell.
+            // bands with the exact same tone. Neither can hold both, so the
+            // larger share takes the cell.
             let upper_run = fill - bottom_run;
             let winner = if upper_run > bottom_run {
                 upper
@@ -4424,7 +4407,7 @@ fn column_cells<K: BandPaint>(
             };
             ColumnCell {
                 row: row as u16,
-                glyph: full_cell_glyph(winner, fill),
+                glyph: full_cell_glyph(fill),
                 fg: winner,
                 bg: None,
             }
@@ -4434,14 +4417,14 @@ fn column_cells<K: BandPaint>(
     out
 }
 
-/// The glyph for a cell one band owns outright. Only a cell filled to the top
-/// can be shaded: the partial blocks have no half-density counterpart, so a
-/// band that would rather be shaded is drawn solid there.
-fn full_cell_glyph<K: BandPaint>(band: K, fill: usize) -> &'static str {
-    match (fill, band.shaded()) {
-        (8, true) => SHADED_BLOCK,
-        (8, false) => "█",
-        _ => METER_PARTIALS[fill],
+/// The glyph for a cell one band owns outright. Cached and fresh are both
+/// solid; their model-related tonal pair, not glyph density, distinguishes
+/// them.
+fn full_cell_glyph(fill: usize) -> &'static str {
+    if fill == 8 {
+        "█"
+    } else {
+        METER_PARTIALS[fill]
     }
 }
 
@@ -4492,7 +4475,8 @@ fn legend_max_rows(panel_h: u16) -> usize {
     usize::from(panel_h.saturating_sub(GRAPH_MIN_ROWS))
 }
 
-/// One legend entry's rendered text: a dot, the model, and how fast it ran.
+/// One legend entry's rendered text: the model's original single-color dot,
+/// its name, and how fast it ran.
 fn legend_entry_text(entry: &crate::token_meter::LegendEntry) -> String {
     format!("● {} {}", entry.label, legend_rate(entry.rate))
 }
@@ -4533,6 +4517,14 @@ fn legend_rate_style(color: Color, rate: Option<f64>) -> Style {
         return style;
     }
     style.add_modifier(Modifier::DIM)
+}
+
+fn legend_dot_style(entry: &crate::token_meter::LegendEntry) -> Style {
+    Style::default().fg(entry.dot_color)
+}
+
+fn legend_text_style(entry: &crate::token_meter::LegendEntry) -> Style {
+    Style::default().fg(entry.color)
 }
 
 /// The legend's column grid: which entries sit on each row, and how wide a
@@ -4670,8 +4662,16 @@ fn render_token_meter_legend(
             let Some((head, gap, rate)) = legend_cell(entry, room) else {
                 break;
             };
-            let style = Style::default().fg(entry.color);
-            f.buffer_mut().set_string(cell_x, y, head.as_str(), style);
+            f.buffer_mut()
+                .set_string(cell_x, y, head.as_str(), legend_text_style(entry));
+            // Keep the familiar single-dot legend, but use the cached tone
+            // for the dot while the model name and rate stay full-strength.
+            f.buffer_mut().set_string(
+                cell_x,
+                y,
+                "●",
+                legend_dot_style(entry),
+            );
             x = cell_x + UnicodeWidthStr::width(head.as_str()) as u16;
             if !rate.is_empty() {
                 let rate_x = x + gap as u16;
@@ -4731,7 +4731,7 @@ fn truncate_label(label: &str, max: usize) -> String {
 /// Hover detail for one meter column: what that second consumed, split by
 /// model and — where the provider served part of it from cache — by how much
 /// of that model's share was cached. Mirrors the context gauge's
-/// hover-for-exact-numbers idiom, and is the only place the shaded part of a
+/// hover-for-exact-numbers idiom, and is the only place the darker part of a
 /// bar gets an exact figure.
 fn render_matrix_token_tooltip(f: &mut Frame, app: &App) {
     if app.matrix_panel_mode != crate::app::MatrixPanelMode::Tokens {
@@ -23823,46 +23823,40 @@ mod tests {
         assert_eq!(top.bg, None);
     }
 
-    /// A model owns exactly one color — the one on its legend dot. What
-    /// separates the volume its provider served from cache from the work it
-    /// actually did is how densely the cell is filled, so both parts still
-    /// read as one bar.
+    /// Cached and fresh work use solid fills in two lightnesses of one model
+    /// hue. Treating the parts as distinct paints lets their boundary survive
+    /// a shared terminal cell without inventing a third visual section.
     #[test]
-    fn cached_cells_keep_the_model_color_and_change_only_the_fill() {
+    fn cached_and_fresh_cells_are_solid_distinct_tones() {
         use crate::token_meter::Part;
-        assert_eq!(
+        assert_ne!(
             (0u16, Part::Cached).paint(),
             (0u16, Part::New).paint(),
-            "both parts paint with the model's own series color"
+            "the renderer must preserve the two tones"
         );
-        assert_eq!(full_cell_glyph((0u16, Part::Cached), 8), SHADED_BLOCK);
-        assert_eq!(full_cell_glyph((0u16, Part::New), 8), "█");
+        assert_eq!(full_cell_glyph(8), "█");
     }
 
-    /// The eighth-blocks have no half-density counterpart, so a cache band
-    /// that stops short of the top of its cell is drawn solid rather than
-    /// snapped to a glyph that would misstate its height.
+    /// Partial cells retain the eighth-block geometry whichever tone owns
+    /// them; lightness carries cache state without changing their height.
     #[test]
-    fn a_partial_cached_cell_falls_back_to_a_solid_block() {
-        use crate::token_meter::Part;
-        assert_eq!(full_cell_glyph((0u16, Part::Cached), 5), METER_PARTIALS[5]);
+    fn a_partial_cell_keeps_its_eighth_block() {
+        assert_eq!(full_cell_glyph(5), METER_PARTIALS[5]);
     }
 
-    /// Two bands of the *same* model sharing a cell cannot be encoded as
-    /// fg-over-bg — same color, so the boundary would vanish — and no glyph is
-    /// half shaded and half solid. The larger share takes the cell, exactly as
-    /// it does for the partial cell topping a column.
+    /// A model's two tones can occupy one cell exactly: the lower cached tone
+    /// is the partial glyph and the upper fresh tone is its background.
     #[test]
-    fn a_same_model_boundary_in_one_cell_goes_to_the_larger_share() {
+    fn a_same_model_boundary_in_one_cell_keeps_both_tones() {
         use crate::token_meter::Part;
         let cells = column_cells(&[((0u16, Part::Cached), 3), ((0u16, Part::New), 5)], 8, 4);
         assert_eq!(
             cells,
             vec![ColumnCell {
                 row: 0,
-                glyph: "█",
-                fg: (0, Part::New),
-                bg: None,
+                glyph: METER_PARTIALS[3],
+                fg: (0, Part::Cached),
+                bg: Some((0, Part::New)),
             }]
         );
     }
@@ -23930,9 +23924,19 @@ mod tests {
                 label: (*label).to_string(),
                 tokens: 1_000,
                 color: ratatui::style::Color::Reset,
+                dot_color: ratatui::style::Color::Black,
                 rate: Some(100.0),
             })
             .collect()
+    }
+
+    #[test]
+    fn legend_dot_uses_dark_tone_while_text_uses_bright_tone() {
+        let mut entry = legend_entries(&["opus"]).remove(0);
+        entry.color = Color::Rgb(250, 179, 135);
+        entry.dot_color = Color::Rgb(195, 134, 96);
+        assert_eq!(legend_dot_style(&entry).fg, Some(entry.dot_color));
+        assert_eq!(legend_text_style(&entry).fg, Some(entry.color));
     }
 
     /// Rates hang off the cell's right edge, so whatever the names do the
@@ -24013,6 +24017,7 @@ mod tests {
                 label: format!("model-number-{i}"),
                 tokens: 1_000,
                 color: ratatui::style::Color::Reset,
+                dot_color: ratatui::style::Color::Black,
                 rate: Some(100.0),
             })
             .collect();
@@ -24052,6 +24057,7 @@ mod tests {
                 label: format!("model-{i}"),
                 tokens: 1_000,
                 color: ratatui::style::Color::Reset,
+                dot_color: ratatui::style::Color::Black,
                 rate: Some(100.0),
             })
             .collect();

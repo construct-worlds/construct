@@ -5773,9 +5773,11 @@ async fn run_loop(
             // Repair palette collisions before painting, and again whenever the
             // theme changes underneath us (spec 0111). A no-op on a truecolor
             // terminal, and a `u64` comparison otherwise.
-            terminal
-                .backend_mut()
-                .sync_palette(app.theme_revision, || app.theme.contrast_pairs());
+            terminal.backend_mut().sync_palette(app.theme_revision, || {
+                let mut pairs = app.theme.contrast_pairs();
+                pairs.extend(crate::token_meter::contrast_pairs());
+                pairs
+            });
             terminal.draw(|f| ui::render(f, app))?;
             last_draw = Instant::now();
         }
@@ -17512,6 +17514,10 @@ mod tests {
         );
         assert!(out.contains("4.0k/s"), "{out}");
         assert!(
+            out.contains('●'),
+            "legend missing model dot:\n{out}"
+        );
+        assert!(
             out.contains('█') || out.chars().any(|c| "▁▂▃▄▅▆▇".contains(c)),
             "no bar drawn:\n{out}"
         );
@@ -17602,9 +17608,9 @@ mod tests {
         );
         // Cached input is a subset of tokens_in and must not be re-added.
         assert_eq!(app.token_meter.window_total(64), 1_500);
-        // It rides along as the shaded share of that model's band, so the
-        // bar's height is billed volume and its shading says how much of it
-        // the provider served from cache.
+        // It rides along as the darker share of that model's band, so the
+        // bar's height is billed volume and its tone says how much of it the
+        // provider served from cache.
         let bucket = app.token_meter.window(1).next().expect("current bucket");
         assert_eq!(bucket.by_model(), vec![(0, 1_500, 900)]);
         let out = rendered(&mut app, 120, 30);

@@ -71,12 +71,35 @@ const SERIES_PALETTE: [Color; 10] = [
     Color::Rgb(180, 190, 254), // lavender
 ];
 
+/// Darker companions for [`SERIES_PALETTE`], used for cache-served input.
+///
+/// These are not alpha blends toward the panel background: that would wash
+/// chroma out and make a cached band look like a different, grayer model.
+/// Each tone was derived in OKLCH by lowering perceptual lightness by 0.15
+/// and retaining 90% of chroma, which keeps the hue within one degree of its
+/// full-strength partner. Keeping the pairs explicit also makes changes to
+/// the authored palette reviewable instead of hiding color work in every
+/// rendered cell.
+const CACHED_SERIES_PALETTE: [Color; 10] = [
+    Color::Rgb(195, 134, 96),  // orange
+    Color::Rgb(97, 133, 193),  // blue
+    Color::Rgb(198, 178, 134), // yellow
+    Color::Rgb(154, 122, 191), // mauve
+    Color::Rgb(108, 176, 165), // teal
+    Color::Rgb(193, 149, 181), // pink
+    Color::Rgb(124, 177, 120), // green
+    Color::Rgb(186, 98, 123),  // red
+    Color::Rgb(98, 170, 183),  // sky
+    Color::Rgb(135, 144, 198), // lavender
+];
+
 /// Every model past the palette's size shares this gray and is reported as
 /// one collapsed "other" row, rather than reusing a color already spoken
 /// for. The palette is the real limit on how many series a legend can name:
 /// listing more names than there are distinguishable colors would produce
 /// rows nobody could match to a band.
 const OTHER_COLOR: Color = Color::Rgb(127, 132, 156);
+const CACHED_OTHER_COLOR: Color = Color::Rgb(85, 89, 109);
 
 /// Resolution of the sliding window the legend's rates are measured over.
 /// One-second slots keep the rate a true sliding minute instead of resetting
@@ -215,7 +238,10 @@ impl Bucket {
 pub struct LegendEntry {
     pub label: String,
     pub tokens: u64,
+    /// Full-strength tone used for fresh work, labels, and rates.
     pub color: Color,
+    /// Darker companion tone used for the legend dot and cache reads.
+    pub dot_color: Color,
     /// Tokens per second of compute over the last minute, or `None` when
     /// this model did no work in that window. Fractional so a formatter can
     /// tell "computed and produced nothing" from "produced less than a token
@@ -515,6 +541,24 @@ impl TokenMeter {
             .unwrap_or(OTHER_COLOR)
     }
 
+    /// Cache-served companion tone for a series index. It keeps the series'
+    /// hue while lowering perceptual lightness, so cached and fresh remain a
+    /// recognizable pair without relying on a texture glyph.
+    pub fn cached_color(&self, idx: u16) -> Color {
+        CACHED_SERIES_PALETTE
+            .get(idx as usize)
+            .copied()
+            .unwrap_or(CACHED_OTHER_COLOR)
+    }
+
+    /// Resolve one model/part band to the solid tone used to paint it.
+    pub fn band_color(&self, band: Band) -> Color {
+        match band.1 {
+            Part::New => self.color(band.0),
+            Part::Cached => self.cached_color(band.0),
+        }
+    }
+
     /// Legend rows for the visible window, busiest first. Models sharing the
     /// "other" color collapse into one row so the legend can't claim a color
     /// distinguishes them.
@@ -536,6 +580,7 @@ impl TokenMeter {
                 label: self.models[idx].clone(),
                 tokens: *tokens,
                 color: SERIES_PALETTE[idx],
+                dot_color: CACHED_SERIES_PALETTE[idx],
                 rate: self.recent_rate(idx as u16),
             })
             .collect();
@@ -566,6 +611,7 @@ impl TokenMeter {
                 label: format!("other ({count})"),
                 tokens: other,
                 color: OTHER_COLOR,
+                dot_color: CACHED_OTHER_COLOR,
                 rate: other_any.then_some(other_rate),
             });
         }
@@ -583,6 +629,17 @@ impl TokenMeter {
     pub fn is_idle(&self) -> bool {
         self.models.is_empty()
     }
+}
+
+/// Tone pairs that are drawn directly against each other and must survive
+/// terminal palette quantization. The backend repairs a collapsed pair at
+/// 256- and 16-color depths while preserving hue whenever that palette has a
+/// second lightness available.
+pub fn contrast_pairs() -> impl Iterator<Item = (Color, Color)> {
+    CACHED_SERIES_PALETTE
+        .into_iter()
+        .zip(SERIES_PALETTE)
+        .chain(std::iter::once((CACHED_OTHER_COLOR, OTHER_COLOR)))
 }
 
 #[cfg(test)]
@@ -738,6 +795,19 @@ mod tests {
         assert_eq!(m.color(0), SERIES_PALETTE[0]);
         assert_eq!(m.color(1), SERIES_PALETTE[1]);
         assert_eq!(m.model_label(0), "first");
+    }
+
+    /// The legend keeps the original one-dot-per-model treatment, using the
+    /// darker member for the dot and the brighter member for its text.
+    #[test]
+    fn legend_exposes_dark_dot_and_bright_text_tones() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.observe(Some("opus"), 1_000, 700, t0);
+        let entry = &m.legend(1)[0];
+        assert_eq!(entry.color, m.band_color((0, Part::New)));
+        assert_eq!(entry.dot_color, m.band_color((0, Part::Cached)));
+        assert_ne!(entry.color, entry.dot_color);
     }
 
     #[test]
