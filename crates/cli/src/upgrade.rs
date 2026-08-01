@@ -32,6 +32,38 @@ fn update_check_disabled() -> bool {
     std::env::var_os("CONSTRUCT_NO_UPDATE_CHECK").is_some()
 }
 
+/// Return whether `path` is inside a Homebrew-managed installation.
+///
+/// `current_exe` is normally already resolved to the Cellar path on macOS,
+/// but resolving the path here as well covers invocations through the
+/// `/opt/homebrew/bin` or `/usr/local/bin` symlink.
+fn is_homebrew_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some("Cellar") | Some("Caskroom")
+        )
+    })
+}
+
+fn is_homebrew_managed_install() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+
+    if is_homebrew_path(&exe) {
+        return true;
+    }
+
+    std::fs::canonicalize(exe)
+        .map(|resolved| is_homebrew_path(&resolved))
+        .unwrap_or(false)
+}
+
+fn homebrew_upgrade_message() -> &'static str {
+    "construct is managed by Homebrew; run `brew upgrade construct` to update"
+}
+
 /// Parse a `MAJOR.MINOR.PATCH` (optionally `v`-prefixed, optionally with a
 /// pre-release suffix on the patch) into a comparable tuple. Returns `None`
 /// for anything we can't read as a version.
@@ -139,7 +171,7 @@ async fn refresh_cache() {
 ///
 /// Must be called from within a Tokio runtime (it may spawn the refresh).
 pub fn cached_latest_version() -> Option<String> {
-    if update_check_disabled() {
+    if update_check_disabled() || is_homebrew_managed_install() {
         return None;
     }
     let cache = read_cache().unwrap_or_default();
@@ -166,6 +198,10 @@ pub fn log_path() -> PathBuf {
 /// outcome; only I/O failures setting up the child (not the child's own exit
 /// status) surface as `Err`.
 pub async fn spawn_detached_upgrade(version: &str, socket: &Path) -> Result<String> {
+    if is_homebrew_managed_install() {
+        return Ok(homebrew_upgrade_message().to_string());
+    }
+
     let exe = std::env::current_exe().context("resolve current executable")?;
     let log_out = std::fs::OpenOptions::new()
         .create(true)
@@ -234,7 +270,11 @@ fn wants_yes(answer: &str) -> bool {
 /// upgrade now. Returns the original executable path after a successful upgrade
 /// so the caller can re-exec and continue under the newly installed binary.
 pub async fn prompt_and_upgrade_if_available(socket: &Path) -> Result<Option<PathBuf>> {
-    if update_check_disabled() || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+    if update_check_disabled()
+        || is_homebrew_managed_install()
+        || !io::stdin().is_terminal()
+        || !io::stdout().is_terminal()
+    {
         return Ok(None);
     }
 
@@ -277,13 +317,20 @@ pub async fn run(
     socket: &Path,
 ) -> Result<()> {
     let current = current_version();
+    let homebrew_managed = is_homebrew_managed_install();
 
     if check {
         match fetch_latest().await {
             Some(latest) if is_newer(&latest, current) => {
-                println!(
-                    "construct {latest} available (you have {current}). Run `construct upgrade`."
-                );
+                if homebrew_managed {
+                    println!(
+                        "construct {latest} available (you have {current}). Run `brew upgrade construct`."
+                    );
+                } else {
+                    println!(
+                        "construct {latest} available (you have {current}). Run `construct upgrade`."
+                    );
+                }
             }
             Some(latest) => {
                 println!("up to date (construct {current}; latest {latest}).")
@@ -294,6 +341,11 @@ pub async fn run(
                 )
             }
         }
+        return Ok(());
+    }
+
+    if bin_dir.is_none() && homebrew_managed {
+        println!("{}", homebrew_upgrade_message());
         return Ok(());
     }
 
@@ -424,5 +476,18 @@ mod tests {
         assert_eq!(target_display(None, Some("0.12.0")), "v0.12.0");
         // Offline / unresolved latest falls back to the literal "latest".
         assert_eq!(target_display(None, None), "latest");
+    }
+
+    #[test]
+    fn homebrew_paths_are_detected_by_cellar_or_caskroom_component() {
+        assert!(is_homebrew_path(Path::new(
+            "/opt/homebrew/Cellar/construct/0.16.7/bin/construct"
+        )));
+        assert!(is_homebrew_path(Path::new(
+            "/usr/local/Caskroom/construct/0.16.7/construct"
+        )));
+        assert!(!is_homebrew_path(Path::new(
+            "/Users/example/.local/bin/construct"
+        )));
     }
 }

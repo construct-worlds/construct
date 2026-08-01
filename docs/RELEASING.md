@@ -79,3 +79,31 @@ calls the same `construct` binary it was started from when it spawns adapters.
 Run the workflow manually from the Actions tab (`workflow_dispatch`). It runs
 the full build matrix and uploads the tarballs as workflow artifacts, but the
 `release` job is skipped (it only runs for `v*` tags), so nothing is published.
+
+## Homebrew formula
+
+`Formula/construct.rb` is the macOS Homebrew package. It installs the same
+architecture-specific release tarballs produced by the build matrix rather
+than compiling the workspace again. Update its `version` and both macOS
+`sha256` values in the same PR that bumps the workspace version. The checksums
+are available in the generated `SHA256SUMS` asset after the release workflow
+finishes.
+
+Before merging the formula change, run the local style check:
+
+```sh
+brew style Formula/construct.rb
+```
+
+After installing the repository as a tap, Homebrew's full new-formula audit
+can be run with `brew audit --new --tap construct-worlds/construct`.
+
+Until the formula is accepted into Homebrew Core, macOS users can install it
+from this repository as a custom tap:
+
+```sh
+brew tap construct-worlds/construct https://github.com/construct-worlds/construct.git
+brew install construct
+```
+
+Once the formula is in Homebrew Core, the tap command is no longer needed.
