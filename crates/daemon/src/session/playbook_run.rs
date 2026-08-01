@@ -504,6 +504,40 @@ impl SessionManager {
         }
     }
 
+    /// The active run's pending blocks keyed by their *block id* — the part of
+    /// a block ref that survives a semantic edit — with each one's current
+    /// tooltip.
+    ///
+    /// Block refs are `block_id:content_epoch`, and editing a block's text
+    /// advances the epoch, so a pending ref stops matching the block it names
+    /// the moment anyone types in it. That is deliberate for stale agent
+    /// declarations (spec 0053), but it must not settle work that is still in
+    /// flight just because a human annotated the task while the agent worked
+    /// on it (spec 0048: shimmer tracks the work, not the text). Keying by
+    /// block id gives the edit path a way to carry the pending state — and the
+    /// agent's status tooltip — onto the block's new ref.
+    pub(super) fn playbook_run_pending_by_block_id(
+        &self,
+        session_id: &str,
+    ) -> std::collections::HashMap<String, Option<String>> {
+        let Ok(runs) = self.playbook_runs.lock() else {
+            return Default::default();
+        };
+        let Some(run) = runs.get(session_id) else {
+            return Default::default();
+        };
+        run.pending_block_refs
+            .iter()
+            .filter_map(|r| {
+                let block_id = r.split(':').next().filter(|id| !id.is_empty())?;
+                Some((
+                    block_id.to_string(),
+                    run.pending_block_tooltips.get(r).cloned(),
+                ))
+            })
+            .collect()
+    }
+
     pub(super) fn mark_playbook_run_output_seen(&self, session_id: &str) {
         let mut updated = false;
         if let Ok(mut runs) = self.playbook_runs.lock() {
@@ -527,6 +561,7 @@ impl SessionManager {
         state: construct_protocol::SessionState,
     ) {
         use construct_protocol::SessionState;
+        let now_ms = Utc::now().timestamp_millis();
         let mut clear = false;
         let mut updated = false;
         if let Ok(mut runs) = self.playbook_runs.lock() {
@@ -540,12 +575,16 @@ impl SessionManager {
                     }
                     SessionState::Done | SessionState::Errored => {
                         // Terminal: the owning agent is gone and can never
-                        // settle the remaining blocks, so clear authoritatively
-                        // once the run was seen running — whether or not it is
-                        // agent-managed.
-                        if run.seen_running {
-                            clear = true;
-                        }
+                        // settle the remaining blocks, so clear
+                        // authoritatively — whether or not it is
+                        // agent-managed, and whether or not it was ever seen
+                        // running. Gating this on `seen_running` meant a
+                        // session that died before its first Running
+                        // transition (a crashed harness, a rejected prompt, a
+                        // killed session) left the whole playbook shimmering
+                        // for the full inactivity backstop, with nothing left
+                        // alive that could ever settle it (#1090).
+                        clear = true;
                     }
                     SessionState::AwaitingInput => {
                         // Idle but still alive. For an unmanaged run (a
@@ -563,6 +602,28 @@ impl SessionManager {
                             && (!run.agent_managed
                                 || (run.pending_block_refs.is_empty()
                                     && run.pending_block_ids.is_empty()))
+                        {
+                            clear = true;
+                        }
+                        // Idle without ever having reported a turn. Past a
+                        // short debounce this is a dispatch that went nowhere
+                        // — a harness that rejected the prompt or failed
+                        // before starting — and no other stop signal can ever
+                        // fire for it, because they all hang off the session
+                        // reporting something (#1090).
+                        //
+                        // This cannot truncate a long turn. A session actually
+                        // working reports Running, and one that has been seen
+                        // running is handled above and keeps shimmering for
+                        // however many hours the work takes. The debounce
+                        // covers the dispatch window itself, where a trailing
+                        // idle from the previous turn can still arrive before
+                        // this one starts.
+                        if !run.seen_running
+                            && !run.first_output_seen
+                            && !run.agent_managed
+                            && now_ms.saturating_sub(run.started_at_ms)
+                                > PLAYBOOK_RUN_IDLE_WITHOUT_TURN_GRACE_MS
                         {
                             clear = true;
                         }
