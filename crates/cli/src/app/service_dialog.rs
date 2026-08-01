@@ -3,7 +3,6 @@
 use super::*;
 
 const FIELD_COUNT: usize = 8;
-const CHANNEL_FIELD_COUNT: usize = 4;
 pub const SERVICE_PICKER_VISIBLE_ROWS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +54,16 @@ pub struct ServiceChannelDialog {
     pub note: Option<String>,
     pub new_secret: Option<String>,
     pub confirm_delete: bool,
+    pub app_token: String,
+    pub bot_token: String,
+}
+
+fn channel_field_count(editor: &ServiceChannelDialog) -> usize {
+    if editor.channel.kind == "slack" {
+        7
+    } else {
+        4
+    }
 }
 
 impl ServiceDialog {
@@ -296,7 +305,11 @@ impl App {
             .iter()
             .filter_map(|channel| channel.port)
             .collect();
-        used.extend(self.service_channel_catalog.iter().filter_map(|channel| channel.port));
+        used.extend(
+            self.service_channel_catalog
+                .iter()
+                .filter_map(|channel| channel.port),
+        );
         (8787..=u16::MAX)
             .find(|port| !used.contains(port))
             .unwrap_or(8787)
@@ -325,12 +338,20 @@ impl App {
                 enabled: true,
                 port: Some(port),
                 has_credential: false,
+                has_app_token: false,
+                has_bot_token: false,
+                allowed_workspace_count: 0,
+                allowed_channel_count: 0,
+                allowed_workspaces: Vec::new(),
+                allowed_channels: Vec::new(),
                 attached_to: Some(dialog.service.name.clone()),
             },
             selected_field: 0,
             note: Some("HTTP channels bind on loopback as soon as they are saved.".to_string()),
             new_secret: None,
             confirm_delete: false,
+            app_token: String::new(),
+            bot_token: String::new(),
         });
         true
     }
@@ -355,6 +376,8 @@ impl App {
             note: Some("Channel changes bind or unbind the listener immediately.".to_string()),
             new_secret: None,
             confirm_delete: false,
+            app_token: String::new(),
+            bot_token: String::new(),
         });
         true
     }
@@ -393,7 +416,7 @@ impl App {
                 .await
         };
         match result {
-            Ok(_) => {
+            Ok(result) => {
                 self.refresh_services().await;
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     if let Some(service) = self
@@ -405,8 +428,9 @@ impl App {
                         dialog.service = service;
                     }
                     dialog.note = Some(format!(
-                        "Channel `{channel_id}` {}. Restart the daemon to apply.",
-                        if attach { "attached" } else { "detached" }
+                        "Channel `{channel_id}` {}: {}.",
+                        if attach { "attached" } else { "detached" },
+                        result.applied.summary()
                     ));
                 }
             }
@@ -430,10 +454,28 @@ impl App {
         };
         match channel.selected_field {
             0 if channel.mode == ServiceChannelDialogMode::Create => edit(&mut channel.channel.id),
-            2 => {
-                let mut value = channel.channel.port.map(|port| port.to_string()).unwrap_or_default();
+            2 if channel.channel.kind == "http" => {
+                let mut value = channel
+                    .channel
+                    .port
+                    .map(|port| port.to_string())
+                    .unwrap_or_default();
                 edit(&mut value);
                 channel.channel.port = value.parse::<u16>().ok().filter(|port| *port > 0);
+            }
+            2 if channel.channel.kind == "slack" => edit(&mut channel.app_token),
+            3 if channel.channel.kind == "slack" => edit(&mut channel.bot_token),
+            4 if channel.channel.kind == "slack" => {
+                let mut value = channel.channel.allowed_workspaces.join(",");
+                edit(&mut value);
+                channel.channel.allowed_workspaces = split_allowlist(&value);
+                channel.channel.allowed_workspace_count = channel.channel.allowed_workspaces.len();
+            }
+            5 if channel.channel.kind == "slack" => {
+                let mut value = channel.channel.allowed_channels.join(",");
+                edit(&mut value);
+                channel.channel.allowed_channels = split_allowlist(&value);
+                channel.channel.allowed_channel_count = channel.channel.allowed_channels.len();
             }
             _ => return,
         }
@@ -453,10 +495,18 @@ impl App {
         let valid_id = valid_service_name(&editor_snapshot.channel.id);
         let validation_error = if !valid_id {
             Some("Channel ID must be 1–32 lowercase letters, digits, or interior hyphens.")
-        } else if editor_snapshot.channel.kind != "http" {
-            Some("V1 supports HTTP channels only.")
-        } else if editor_snapshot.channel.port.is_none() {
+        } else if editor_snapshot.channel.kind == "http" && editor_snapshot.channel.port.is_none() {
             Some("HTTP port must be between 1 and 65535.")
+        } else if editor_snapshot.channel.kind == "slack"
+            && editor_snapshot.mode == ServiceChannelDialogMode::Create
+            && !editor_snapshot.app_token.starts_with("xapp-")
+        {
+            Some("Slack app token must start with xapp-.")
+        } else if editor_snapshot.channel.kind == "slack"
+            && editor_snapshot.mode == ServiceChannelDialogMode::Create
+            && !editor_snapshot.bot_token.starts_with("xoxb-")
+        {
+            Some("Slack bot token must start with xoxb-.")
         } else {
             None
         };
@@ -477,6 +527,12 @@ impl App {
                     kind: editor_snapshot.channel.kind,
                     enabled: editor_snapshot.channel.enabled,
                     port: editor_snapshot.channel.port,
+                    app_token: (!editor_snapshot.app_token.is_empty())
+                        .then_some(editor_snapshot.app_token),
+                    bot_token: (!editor_snapshot.bot_token.is_empty())
+                        .then_some(editor_snapshot.bot_token),
+                    allowed_workspaces: editor_snapshot.channel.allowed_workspaces,
+                    allowed_channels: editor_snapshot.channel.allowed_channels,
                 },
                 rotate_secret,
             })
@@ -489,6 +545,7 @@ impl App {
                     .iter()
                     .find(|service| service.name == editor_snapshot.service_name)
                     .cloned();
+                let applied = result.applied.summary();
                 let new_secret = result.new_secret;
                 if let Some(parent) = self.service_dialog.as_mut() {
                     if let Some(service) = refreshed_service {
@@ -497,14 +554,15 @@ impl App {
                     if let Some(editor) = parent.channel_editor.as_mut() {
                         editor.mode = ServiceChannelDialogMode::Edit;
                         editor.channel = result.channel;
+                        editor.app_token.clear();
+                        editor.bot_token.clear();
                         let has_new_secret = new_secret.is_some();
                         editor.new_secret = new_secret;
                         editor.confirm_delete = false;
                         editor.note = Some(if has_new_secret {
-                            "Saved. Copy the credential now; it is shown only once. Restart to apply."
-                                .to_string()
+                            format!("{applied}. Copy the credential now; it is shown only once.")
                         } else {
-                            "Saved. Restart the daemon to apply channel changes.".to_string()
+                            applied
                         });
                     }
                 }
@@ -528,15 +586,24 @@ impl App {
         };
         let service_name = editor.service_name.clone();
         let channel_id = editor.channel.id.clone();
-        match self.client.delete_service_channel(&service_name, &channel_id).await {
+        match self
+            .client
+            .delete_service_channel(&service_name, &channel_id)
+            .await
+        {
             Ok(()) => {
                 self.refresh_services().await;
                 if let Some(parent) = self.service_dialog.as_mut() {
-                    if let Some(service) = self.services.iter().find(|service| service.name == service_name).cloned() {
+                    if let Some(service) = self
+                        .services
+                        .iter()
+                        .find(|service| service.name == service_name)
+                        .cloned()
+                    {
                         parent.service = service;
                     }
                     parent.channel_editor = None;
-                    parent.note = Some(format!("Channel `{channel_id}` deleted. Restart to apply."));
+                    parent.note = Some(format!("Channel `{channel_id}` deleted and withdrawn."));
                 }
             }
             Err(error) => {
@@ -559,17 +626,30 @@ impl App {
         };
         let service_name = editor.service_name.clone();
         let channel_id = editor.channel.id.clone();
-        match self.client.rotate_service_channel_secret(&service_name, &channel_id).await {
+        match self
+            .client
+            .rotate_service_channel_secret(&service_name, &channel_id)
+            .await
+        {
             Ok(result) => {
                 self.refresh_services().await;
+                let applied = result.applied.summary();
                 if let Some(parent) = self.service_dialog.as_mut() {
-                    if let Some(service) = self.services.iter().find(|service| service.name == service_name).cloned() {
+                    if let Some(service) = self
+                        .services
+                        .iter()
+                        .find(|service| service.name == service_name)
+                        .cloned()
+                    {
                         parent.service = service;
                     }
                     if let Some(editor) = parent.channel_editor.as_mut() {
                         editor.channel = result.channel;
                         editor.new_secret = result.new_secret;
-                        editor.note = Some("Credential rotated. Copy it now; it is shown only once. Restart to apply.".to_string());
+                        editor.note = Some(format!(
+                            "Credential rotated. Copy it now; it is shown only once. {}.",
+                            applied
+                        ));
                     }
                 }
             }
@@ -758,11 +838,12 @@ impl App {
         {
             Ok(result) => {
                 self.refresh_services().await;
+                let applied = result.applied.summary();
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     dialog.mode = ServiceDialogMode::Edit;
                     dialog.service = result.service;
                     dialog.confirm_delete = false;
-                    dialog.note = Some("Saved. Restart the daemon to apply changes.".to_string());
+                    dialog.note = Some(applied);
                 }
             }
             Err(error) => {
@@ -794,9 +875,7 @@ impl App {
                     self.ensure_selection_valid();
                     self.sync_active_window_selection();
                 }
-                self.set_status(format!(
-                    "{name} deleted; its endpoint is withdrawn"
-                ));
+                self.set_status(format!("{name} deleted; its endpoint is withdrawn"));
             }
             Err(error) => {
                 if let Some(dialog) = self.service_dialog.as_mut() {
@@ -954,7 +1033,9 @@ impl App {
                     if let Some(dialog) = self.service_dialog.as_mut() {
                         if let Some(editor) = dialog.channel_editor.as_mut() {
                             editor.confirm_delete = true;
-                            editor.note = Some("Delete this channel? Enter/y confirms; Esc/n cancels.".to_string());
+                            editor.note = Some(
+                                "Delete this channel? Enter/y confirms; Esc/n cancels.".to_string(),
+                            );
                         }
                     }
                 }
@@ -1023,7 +1104,10 @@ impl App {
                     self.save_service_channel(false).await;
                     return true;
                 }
-                KeyCode::Char('r') if snapshot.mode == ServiceChannelDialogMode::Edit => {
+                KeyCode::Char('r')
+                    if snapshot.mode == ServiceChannelDialogMode::Edit
+                        && snapshot.channel.kind == "http" =>
+                {
                     self.rotate_service_channel_secret().await;
                     return true;
                 }
@@ -1031,7 +1115,9 @@ impl App {
                     if let Some(dialog) = self.service_dialog.as_mut() {
                         if let Some(editor) = dialog.channel_editor.as_mut() {
                             editor.confirm_delete = true;
-                            editor.note = Some("Delete this channel? Enter/y confirms; Esc/n cancels.".to_string());
+                            editor.note = Some(
+                                "Delete this channel? Enter/y confirms; Esc/n cancels.".to_string(),
+                            );
                         }
                     }
                     return true;
@@ -1045,7 +1131,10 @@ impl App {
                 KeyCode::Char('p') => {
                     if let Some(dialog) = self.service_dialog.as_mut() {
                         if let Some(editor) = dialog.channel_editor.as_mut() {
-                            editor.selected_field = editor.selected_field.checked_sub(1).unwrap_or(CHANNEL_FIELD_COUNT - 1);
+                            editor.selected_field = editor
+                                .selected_field
+                                .checked_sub(1)
+                                .unwrap_or(channel_field_count(editor) - 1);
                         }
                     }
                     return true;
@@ -1053,7 +1142,8 @@ impl App {
                 KeyCode::Char('n') => {
                     if let Some(dialog) = self.service_dialog.as_mut() {
                         if let Some(editor) = dialog.channel_editor.as_mut() {
-                            editor.selected_field = (editor.selected_field + 1) % CHANNEL_FIELD_COUNT;
+                            editor.selected_field =
+                                (editor.selected_field + 1) % channel_field_count(editor);
                         }
                     }
                     return true;
@@ -1071,18 +1161,43 @@ impl App {
             KeyCode::Tab | KeyCode::Down => {
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
-                        editor.selected_field = (editor.selected_field + 1) % CHANNEL_FIELD_COUNT;
+                        editor.selected_field =
+                            (editor.selected_field + 1) % channel_field_count(editor);
                     }
                 }
             }
             KeyCode::BackTab | KeyCode::Up => {
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
-                        editor.selected_field = editor.selected_field.checked_sub(1).unwrap_or(CHANNEL_FIELD_COUNT - 1);
+                        editor.selected_field = editor
+                            .selected_field
+                            .checked_sub(1)
+                            .unwrap_or(channel_field_count(editor) - 1);
                     }
                 }
             }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if snapshot.selected_field == 3 => {
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if snapshot.selected_field == 1
+                    && snapshot.mode == ServiceChannelDialogMode::Create =>
+            {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(editor) = dialog.channel_editor.as_mut() {
+                        editor.channel.kind = if editor.channel.kind == "http" {
+                            "slack"
+                        } else {
+                            "http"
+                        }
+                        .to_string();
+                        editor.channel.port = (editor.channel.kind == "http").then_some(8787);
+                        editor.selected_field = 1;
+                        editor.note = None;
+                    }
+                }
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if (snapshot.channel.kind == "http" && snapshot.selected_field == 3)
+                    || (snapshot.channel.kind == "slack" && snapshot.selected_field == 6) =>
+            {
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
                         editor.channel.enabled = !editor.channel.enabled;
@@ -1101,4 +1216,13 @@ impl App {
         }
         true
     }
+}
+
+fn split_allowlist(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }

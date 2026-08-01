@@ -3241,6 +3241,20 @@ pub struct ServiceChannelSummary {
     pub port: Option<u16>,
     #[serde(default)]
     pub has_credential: bool,
+    /// Slack credentials are reported independently without ever returning
+    /// either token to a client.
+    #[serde(default)]
+    pub has_app_token: bool,
+    #[serde(default)]
+    pub has_bot_token: bool,
+    #[serde(default)]
+    pub allowed_workspace_count: usize,
+    #[serde(default)]
+    pub allowed_channel_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_workspaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_channels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_to: Option<String>,
 }
@@ -3411,6 +3425,18 @@ pub struct ServiceChannelPut {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Write-only Slack Socket Mode token. Omitted values preserve an
+    /// existing token; summaries never return it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_token: Option<String>,
+    /// Write-only Slack Web API bot token. Omitted values preserve an
+    /// existing token; summaries never return it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_workspaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_channels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

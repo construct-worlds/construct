@@ -21,7 +21,7 @@
 //! changes. That is also what makes the file watcher safe, since it can catch
 //! an editor mid-write and simply retry on the next tick.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -110,6 +110,12 @@ struct ListenerHandle {
     task: JoinHandle<()>,
 }
 
+struct SlackHandle {
+    config: service::SlackConfig,
+    cancel: CancellationToken,
+    task: JoinHandle<()>,
+}
+
 /// Everything the supervisor owns. Lives in the task's stack frame, so there
 /// is no lock and no way for another task to observe it half-updated.
 #[derive(Default)]
@@ -119,6 +125,7 @@ struct Registry {
     /// session map and the dedup ring.
     shared: BTreeMap<String, Arc<ServiceShared>>,
     listeners: HashMap<ListenerKey, ListenerHandle>,
+    slack: HashMap<ListenerKey, SlackHandle>,
 }
 
 /// What must happen to one channel's socket for the desired state to hold.
@@ -175,6 +182,23 @@ pub fn desired_listeners(
     (desired, conflicts)
 }
 
+fn desired_slack(
+    defs: &BTreeMap<String, ServiceConfig>,
+) -> BTreeMap<ListenerKey, service::SlackConfig> {
+    let mut desired = BTreeMap::new();
+    for (name, config) in defs {
+        if config.paused {
+            continue;
+        }
+        for (channel_id, channel) in &config.channels {
+            if let Some(config) = service::slack_config(name, channel_id, channel) {
+                desired.insert((name.clone(), channel_id.clone()), config);
+            }
+        }
+    }
+    desired
+}
+
 /// The socket work to get from `current` to `desired`.
 ///
 /// Stops are listed before starts so the plan reads in the order it happens.
@@ -189,9 +213,7 @@ pub fn plan(
     for (key, port) in current {
         match desired.get(key) {
             None => stops.push(ListenerAction::Stop(key.clone())),
-            Some(next) if next != port => {
-                stops.push(ListenerAction::Rebind(key.clone(), *next))
-            }
+            Some(next) if next != port => stops.push(ListenerAction::Rebind(key.clone(), *next)),
             Some(_) => {}
         }
     }
@@ -236,6 +258,7 @@ pub async fn run(
                         }
                         ServiceMsg::ListenerDied(key) => {
                             registry.listeners.remove(&key);
+                            registry.slack.remove(&key);
                         }
                     }
                 }
@@ -246,6 +269,7 @@ pub async fn run(
             }
             ServiceMsg::ListenerDied(key) => {
                 registry.listeners.remove(&key);
+                registry.slack.remove(&key);
             }
         }
     }
@@ -261,10 +285,11 @@ async fn reload(
 ) -> Result<ReloadReport> {
     // All or nothing: a definition that does not parse leaves the running
     // configuration untouched rather than half-applied.
-    let defs = service::load_definitions(&paths.services_dir())
-        .context("reload service definitions")?;
+    let defs =
+        service::load_definitions(&paths.services_dir()).context("reload service definitions")?;
 
     let (desired, conflicts) = desired_listeners(&defs);
+    let desired_slack = desired_slack(&defs);
     for conflict in &conflicts {
         tracing::warn!(
             service = %conflict.key.0,
@@ -358,6 +383,49 @@ async fn reload(
         }
     }
 
+    // Socket Mode channels have no local port. A change to either token or an
+    // allowlist replaces the outbound task; unchanged tasks keep their live
+    // connection and backoff state.
+    let stale_slack: Vec<_> = registry
+        .slack
+        .iter()
+        .filter_map(|(key, running)| match desired_slack.get(key) {
+            Some(config) if config == &running.config => None,
+            _ => Some(key.clone()),
+        })
+        .collect();
+    let restarting_slack: HashSet<_> = stale_slack
+        .iter()
+        .filter(|key| desired_slack.contains_key(*key))
+        .cloned()
+        .collect();
+    for key in stale_slack {
+        if let Some(running) = registry.slack.remove(&key) {
+            let rebound = desired_slack.contains_key(&key);
+            running.cancel.cancel();
+            let _ = running.task.await;
+            if !rebound {
+                report.stopped.push(key);
+            }
+        }
+    }
+    for (key, config) in desired_slack {
+        if registry.slack.contains_key(&key) {
+            continue;
+        }
+        let Some(shared) = registry.shared.get(&key.0).cloned() else {
+            continue;
+        };
+        let rebound = restarting_slack.contains(&key);
+        let running = start_slack(handle, shared, key.clone(), config);
+        registry.slack.insert(key.clone(), running);
+        if rebound {
+            report.rebound.push(key);
+        } else {
+            report.started.push(key);
+        }
+    }
+
     // Services that disappeared keep their state file; only the live entry is
     // dropped, and only after its listeners are down.
     registry.shared.retain(|name, _| defs.contains_key(name));
@@ -400,6 +468,33 @@ async fn start_listener(
         }
     });
     Ok(ListenerHandle { port, cancel, task })
+}
+
+fn start_slack(
+    handle: &ServiceHandle,
+    shared: Arc<ServiceShared>,
+    key: ListenerKey,
+    config: service::SlackConfig,
+) -> SlackHandle {
+    let runtime = service::channel_runtime(shared, key.1.clone());
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task_handle = handle.clone();
+    let task_key = key.clone();
+    let running_config = config.clone();
+    let task = tokio::spawn(async move {
+        if let Err(error) = service::serve_slack(runtime, config, task_cancel.clone()).await {
+            tracing::error!(service = %task_key.0, channel = %task_key.1, %error, "Slack service channel stopped");
+        }
+        if !task_cancel.is_cancelled() {
+            let _ = task_handle.0.send(ServiceMsg::ListenerDied(task_key));
+        }
+    });
+    SlackHandle {
+        config: running_config,
+        cancel,
+        task,
+    }
 }
 
 /// Create the supervisor's channel and handle. The caller spawns [`run`].
@@ -495,6 +590,10 @@ mod tests {
                             enabled: *enabled,
                             port: Some(*port),
                             token: Some("secret".into()),
+                            app_token: None,
+                            bot_token: None,
+                            allowed_workspaces: Vec::new(),
+                            allowed_channels: Vec::new(),
                         },
                     )
                 })
@@ -518,8 +617,43 @@ mod tests {
         let (desired, _) = desired_listeners(&defs(&[("a", service(&[("http", 1, true)], true))]));
         assert!(desired.is_empty(), "a paused service frees its port");
 
-        let (desired, _) = desired_listeners(&defs(&[("a", service(&[("http", 1, false)], false))]));
+        let (desired, _) =
+            desired_listeners(&defs(&[("a", service(&[("http", 1, false)], false))]));
         assert!(desired.is_empty(), "a disabled channel does not bind");
+    }
+
+    #[test]
+    fn slack_channels_are_outbound_tasks_and_credential_edits_change_revision() {
+        let slack_service = |app_token: &str, paused: bool| ServiceConfig {
+            instruction: String::new(),
+            harness: "smith".into(),
+            model: None,
+            cwd: ".".into(),
+            routing: ServiceRouting::SessionKey,
+            paused,
+            approval_timeout_secs: 0,
+            sandbox: ServiceSandboxConfig::default(),
+            channels: BTreeMap::from([(
+                "slack".into(),
+                ServiceChannelConfig {
+                    kind: Some("slack".into()),
+                    enabled: true,
+                    port: None,
+                    token: None,
+                    app_token: Some(app_token.into()),
+                    bot_token: Some("xoxb-secret".into()),
+                    allowed_workspaces: vec!["T1".into()],
+                    allowed_channels: vec!["C1".into()],
+                },
+            )]),
+        };
+        let first_defs = defs(&[("chat", slack_service("xapp-first", false))]);
+        assert!(desired_listeners(&first_defs).0.is_empty());
+        let first = desired_slack(&first_defs);
+        assert!(first.contains_key(&key("chat", "slack")));
+        let changed = desired_slack(&defs(&[("chat", slack_service("xapp-second", false))]));
+        assert!(first != changed);
+        assert!(desired_slack(&defs(&[("chat", slack_service("xapp-first", true),)])).is_empty());
     }
 
     #[test]
@@ -581,17 +715,13 @@ mod tests {
                 runtime_dir: tmp.path().join("run"),
             };
             std::fs::create_dir_all(paths.services_dir()).expect("services dir");
-            let storage = Arc::new(
-                crate::storage::Storage::new(paths.data_dir.clone()).expect("storage"),
-            );
+            let storage =
+                Arc::new(crate::storage::Storage::new(paths.data_dir.clone()).expect("storage"));
             let config = Arc::new(crate::config::Config::default());
-            let (manager, _remote_rx, _restart_rx) = SessionManager::new(
-                storage,
-                config,
-                paths.runtime_dir.clone(),
-            )
-            .await
-            .expect("session manager");
+            let (manager, _remote_rx, _restart_rx) =
+                SessionManager::new(storage, config, paths.runtime_dir.clone())
+                    .await
+                    .expect("session manager");
             let (handle, _rx) = channel();
             Self {
                 _tmp: tmp,
@@ -603,11 +733,8 @@ mod tests {
         }
 
         fn write(&self, name: &str, body: &str) {
-            std::fs::write(
-                self.paths.services_dir().join(format!("{name}.toml")),
-                body,
-            )
-            .expect("write definition");
+            std::fs::write(self.paths.services_dir().join(format!("{name}.toml")), body)
+                .expect("write definition");
         }
 
         fn remove(&self, name: &str) {
@@ -646,7 +773,12 @@ mod tests {
 
         fx.write("svc", &definition("per-event", false));
         fx.reload().await.expect("second reload");
-        let second = fx.registry.shared.get("svc").cloned().expect("still registered");
+        let second = fx
+            .registry
+            .shared
+            .get("svc")
+            .cloned()
+            .expect("still registered");
 
         assert!(
             Arc::ptr_eq(&first, &second),
@@ -730,7 +862,10 @@ mod tests {
         fx.write("svc", &with_channel(second_port, true));
         let report = fx.reload().await.expect("reload");
         assert_eq!(report.stopped.len(), 1, "pausing stops the listener");
-        assert!(!port_in_use(second_port).await, "a paused service frees its port");
+        assert!(
+            !port_in_use(second_port).await,
+            "a paused service frees its port"
+        );
     }
 
     #[tokio::test]
@@ -869,4 +1004,3 @@ mod tests {
         );
     }
 }
-

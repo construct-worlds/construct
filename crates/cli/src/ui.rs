@@ -8166,21 +8166,51 @@ fn render_service_channel_editor(
     app: &mut App,
     editor: &crate::app::ServiceChannelDialog,
 ) {
-    let labels = ["Channel ID", "Kind", "Port", "State"];
-    let values = [
-        editor.channel.id.clone(),
-        editor.channel.kind.clone(),
-        editor
-            .channel
-            .port
-            .map(|port| port.to_string())
-            .unwrap_or_default(),
-        if editor.channel.enabled {
-            "enabled".to_string()
-        } else {
-            "disabled".to_string()
-        },
-    ];
+    let state = if editor.channel.enabled {
+        "enabled"
+    } else {
+        "disabled"
+    }
+    .to_string();
+    let fields_data: Vec<(&str, String)> = if editor.channel.kind == "slack" {
+        vec![
+            ("Channel ID", editor.channel.id.clone()),
+            ("Kind", editor.channel.kind.clone()),
+            (
+                "App token",
+                if editor.app_token.is_empty() && editor.channel.has_app_token {
+                    "•••••• (set)".into()
+                } else {
+                    "•".repeat(editor.app_token.len().min(12))
+                },
+            ),
+            (
+                "Bot token",
+                if editor.bot_token.is_empty() && editor.channel.has_bot_token {
+                    "•••••• (set)".into()
+                } else {
+                    "•".repeat(editor.bot_token.len().min(12))
+                },
+            ),
+            ("Workspaces", editor.channel.allowed_workspaces.join(",")),
+            ("Channels", editor.channel.allowed_channels.join(",")),
+            ("State", state),
+        ]
+    } else {
+        vec![
+            ("Channel ID", editor.channel.id.clone()),
+            ("Kind", editor.channel.kind.clone()),
+            (
+                "Port",
+                editor
+                    .channel
+                    .port
+                    .map(|port| port.to_string())
+                    .unwrap_or_default(),
+            ),
+            ("State", state),
+        ]
+    };
     let mut fields = vec![
         Line::from(Span::styled(
             format!("Channel · {}", editor.service_name),
@@ -8190,10 +8220,10 @@ fn render_service_channel_editor(
         )),
         Line::from(""),
     ];
-    for (index, (label, value)) in labels.iter().zip(values.iter()).enumerate() {
+    for (index, (label, value)) in fields_data.iter().enumerate() {
         let selected = editor.selected_field == index;
-        let locked =
-            (index == 0 && editor.mode == crate::app::ServiceChannelDialogMode::Edit) || index == 1;
+        let locked = (index == 0 && editor.mode == crate::app::ServiceChannelDialogMode::Edit)
+            || (index == 1 && editor.mode == crate::app::ServiceChannelDialogMode::Edit);
         let marker = if selected { "›" } else { " " };
         let style = if selected {
             Style::default()
@@ -8223,12 +8253,25 @@ fn render_service_channel_editor(
         f.buffer_mut()
             .set_string(divider_x, y, "│", Style::default().fg(app.theme.border));
     }
-    let (title, body, hint) = match editor.selected_field {
-        0 => ("Channel ID", "Stable name for this channel. It becomes part of the service's local configuration and is locked after creation.", "Type to edit when creating.") ,
-        1 => ("Kind", "The transport implementation. HTTP is the only built-in channel in v1; future channel plugins can add other kinds.", "Fixed to HTTP in v1."),
-        2 => ("HTTP port", "Loopback TCP port for this channel. No two channels on one service may share a port.", "Type a port · rebinds immediately."),
-        3 => ("State", "Disabled channels remain configured but release their port and stop accepting requests.", "Space or ←/→ toggles · applies immediately."),
-        _ => ("Channel", "", ""),
+    let (title, body, hint) = if editor.channel.kind == "slack" {
+        match editor.selected_field {
+            0 => ("Channel ID", "Stable local name for this channel; locked after creation.", "Type to edit when creating."),
+            1 => ("Kind", "Slack uses an outbound Socket Mode connection; it does not open a local listener.", "←/→ or Space switches kind when creating."),
+            2 => ("App token", "Slack Socket Mode app-level token. It is stored locally and never returned by the daemon.", "Paste an xapp- token; blank preserves the current token."),
+            3 => ("Bot token", "Slack bot token used only to post final replies into the originating thread.", "Paste an xoxb- token; blank preserves the current token."),
+            4 => ("Workspace allowlist", "Optional comma-separated Slack team IDs. Empty accepts configured events from any workspace.", "Type workspace IDs separated by commas."),
+            5 => ("Channel allowlist", "Optional comma-separated Slack channel or DM IDs. Empty accepts every channel delivered to the app.", "Type channel IDs separated by commas."),
+            6 => ("State", "Disabled Slack channels close their Socket Mode connection while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
+            _ => ("Channel", "", ""),
+        }
+    } else {
+        match editor.selected_field {
+            0 => ("Channel ID", "Stable name for this channel. It becomes part of the service's local configuration and is locked after creation.", "Type to edit when creating."),
+            1 => ("Kind", "HTTP binds a bearer-authenticated loopback endpoint; Slack connects outbound with Socket Mode.", "←/→ or Space switches kind when creating."),
+            2 => ("HTTP port", "Loopback TCP port for this channel. No two HTTP channels may share a port.", "Type a port · rebinds immediately."),
+            3 => ("State", "Disabled channels remain configured but release their port and stop accepting requests.", "Space or ←/→ toggles · applies immediately."),
+            _ => ("Channel", "", ""),
+        }
     };
     let mut help = vec![
         Line::from(Span::styled(
@@ -8263,6 +8306,8 @@ fn render_service_channel_editor(
     f.render_widget(Paragraph::new(help).wrap(Wrap { trim: false }), columns[2]);
     let footer = if editor.mode == crate::app::ServiceChannelDialogMode::Create {
         "Enter/C-s save · Esc back"
+    } else if editor.channel.kind == "slack" {
+        "Enter/C-s save · C-d delete · Esc back"
     } else {
         "Enter/C-s save · C-r rotate credential · C-d delete · Esc back"
     };
