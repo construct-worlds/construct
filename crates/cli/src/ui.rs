@@ -3900,17 +3900,17 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
         return;
     }
 
-    // The legend names every series, wrapping onto as many rows as that
-    // takes: a colored bar whose model isn't named anywhere is unreadable,
-    // and on a narrow panel a single row only ever fits one name. The graph
-    // keeps the rest of the panel.
+    // The legend names every series, wrapping onto as many rows of aligned
+    // columns as that takes: a colored bar whose model isn't named anywhere
+    // is unreadable, and on a narrow panel a single row only ever fits one
+    // name. The graph keeps the rest of the panel.
     let entries = app.token_meter.legend(area.width as usize);
-    let rows = wrap_legend(
+    let grid = layout_legend(
         &entries,
         area.width as usize,
         legend_max_rows(area.height),
     );
-    let legend_h = rows.len() as u16;
+    let legend_h = grid.rows.len() as u16;
     let graph = Rect {
         x: area.x,
         y: area.y,
@@ -3958,7 +3958,7 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
     }
 
     if legend_h > 0 {
-        render_token_meter_legend(f, area, app, &entries, &rows, legend_h);
+        render_token_meter_legend(f, area, app, &entries, &grid, legend_h);
     }
 }
 
@@ -4081,11 +4081,6 @@ fn stacked_eighths(stacked: &[(u16, u64)], total: u64, filled: usize) -> Vec<(u1
 /// rows of relief above it.
 const GRAPH_MIN_ROWS: u16 = 3;
 
-/// How far an idle series' rate word is pulled toward the dim gray. Most of
-/// the way — enough that live figures win the row at a glance — but short of
-/// all the way, so the series keeps a trace of its own color.
-const IDLE_RATE_DIM: f32 = 0.7;
-
 /// How many rows the legend may take: everything above the graph's floor.
 ///
 /// The earlier rule capped the legend at a third of the panel, which on a
@@ -4123,47 +4118,70 @@ fn legend_rate(rate: Option<f64>) -> String {
 /// Style for a legend entry's rate word.
 ///
 /// A live figure is a reading and stays at the series' full strength. `idle`
-/// is the absence of one, so it recedes toward the same gray the fleet sum
-/// uses — but only toward it: the entry keeps a trace of its own color, since
-/// the row it sits on names the band that color paints in the graph, and a
-/// legend that drops to neutral gray the moment a model goes quiet stops
-/// reading as that model's row.
-fn legend_rate_style(color: Color, dim: Color, rate: Option<f64>) -> Style {
+/// is the absence of one, so it recedes — but on the same color the model
+/// name is drawn in, dimmed by attribute rather than shifted toward a gray.
+/// The row names a band the graph paints in that color, so the whole row
+/// stays one color and only its weight changes.
+fn legend_rate_style(color: Color, rate: Option<f64>) -> Style {
+    let style = Style::default().fg(color);
     if rate.is_some() {
-        return Style::default().fg(color);
+        return style;
     }
-    Style::default().fg(blend_color(color, dim, IDLE_RATE_DIM))
+    style.add_modifier(Modifier::DIM)
 }
 
-/// Pack legend entries into rows of `width` columns. Returns the entry
-/// indices per row. An entry too wide for an entire empty row is placed
-/// alone and truncated at render time; entries past `max_rows` are dropped,
-/// which the caller signals rather than hiding.
-fn wrap_legend(
+/// The legend's column grid: which entries sit on each row, and how wide a
+/// cell is.
+struct LegendGrid {
+    /// Entry indices per row, left to right.
+    rows: Vec<Vec<usize>>,
+    /// Display columns one cell occupies. Every cell is the same width, so
+    /// cell `n` starts at the same x on every row.
+    col_w: usize,
+}
+
+/// Lay the legend out as a grid of equal-width cells.
+///
+/// Flowing entries end-to-end packs more onto a row, but every row then
+/// starts its names at different offsets, and with several models the dots
+/// scatter into a wall of text with no line to read down. A fixed cell width
+/// puts every column's dot and name at the same x on every row, so the legend
+/// scans vertically — which is how you read a list of models — at the cost of
+/// some trailing space in each cell.
+///
+/// The cell is sized to the widest entry so no column has to truncate more
+/// than the widest name demands, and the columns pack left: the slack left
+/// over at the right edge is where the fleet total goes. Entries past
+/// `max_rows` are dropped, which the caller signals rather than hiding.
+fn layout_legend(
     entries: &[crate::token_meter::LegendEntry],
     width: usize,
     max_rows: usize,
-) -> Vec<Vec<usize>> {
+) -> LegendGrid {
     if entries.is_empty() || max_rows == 0 || width == 0 {
-        return Vec::new();
+        return LegendGrid { rows: Vec::new(), col_w: width.max(1) };
     }
-    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
-    let mut used = 0usize;
-    for (i, entry) in entries.iter().enumerate() {
-        let w = UnicodeWidthStr::width(legend_entry_text(entry).as_str());
-        // Only wrap when the row already holds something — otherwise an
-        // over-wide entry would bounce to a fresh row and still not fit.
-        if used + w > width && !rows.last().expect("row").is_empty() {
+    let widest = entries
+        .iter()
+        .map(|e| UnicodeWidthStr::width(legend_entry_text(e).as_str()))
+        .max()
+        .unwrap_or(width)
+        .max(1);
+    // An entry wider than the whole panel still gets one column, truncated
+    // at render time — a name clipped with an ellipsis beats no name.
+    let cols = (width / widest).clamp(1, entries.len());
+    let col_w = widest.min(width);
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    for i in 0..entries.len() {
+        if i % cols == 0 {
             if rows.len() == max_rows {
                 break;
             }
             rows.push(Vec::new());
-            used = 0;
         }
         rows.last_mut().expect("row").push(i);
-        used += w;
     }
-    rows
+    LegendGrid { rows, col_w }
 }
 
 fn render_token_meter_legend(
@@ -4171,23 +4189,32 @@ fn render_token_meter_legend(
     area: Rect,
     app: &mut App,
     entries: &[crate::token_meter::LegendEntry],
-    rows: &[Vec<usize>],
+    grid: &LegendGrid,
     legend_h: u16,
 ) {
     let dim = Style::default().fg(app.theme.dim);
     let top = area.y + area.height.saturating_sub(legend_h);
     let limit = area.x + area.width;
+    let rows = &grid.rows;
     let shown: usize = rows.iter().map(Vec::len).sum();
 
     for (row_idx, row) in rows.iter().enumerate() {
         let y = top + row_idx as u16;
+        // Where the row's content ends, for the trailing "+N" — not the cell
+        // cursor, which steps by whole columns whatever a cell drew.
         let mut x = area.x;
-        for &i in row {
+        for (slot, &i) in row.iter().enumerate() {
             let Some(entry) = entries.get(i) else { continue };
+            let cell_x = area.x + (slot * grid.col_w) as u16;
+            if cell_x >= limit {
+                break;
+            }
             let rate = legend_rate(entry.rate);
-            let room = limit.saturating_sub(x) as usize;
+            // A cell never spills into its neighbour, so the column below it
+            // stays aligned; the last one may use whatever slack is left.
+            let room = grid.col_w.min(limit.saturating_sub(cell_x) as usize);
             // Names identify the series and the rate only quantifies it, so
-            // a cramped row drops the rate before it drops a name — and
+            // a cramped cell drops the rate before it drops a name — and
             // truncates the name before dropping the entry.
             let with_rate = UnicodeWidthStr::width("●  ") + rate.len() + 1;
             let (budget, rate_part) = if room > with_rate + 3 {
@@ -4201,12 +4228,12 @@ fn render_token_meter_legend(
             let label = truncate_label(&entry.label, budget);
             let head = format!("● {label}");
             let style = Style::default().fg(entry.color);
-            f.buffer_mut().set_string(x, y, head.as_str(), style);
-            x += UnicodeWidthStr::width(head.as_str()) as u16;
+            f.buffer_mut().set_string(cell_x, y, head.as_str(), style);
+            let tail_x = cell_x + UnicodeWidthStr::width(head.as_str()) as u16;
             let tail = format!("{rate_part} ");
-            let tail_style = legend_rate_style(entry.color, app.theme.dim, entry.rate);
-            f.buffer_mut().set_string(x, y, tail.as_str(), tail_style);
-            x += UnicodeWidthStr::width(tail.as_str()) as u16;
+            let tail_style = legend_rate_style(entry.color, entry.rate);
+            f.buffer_mut().set_string(tail_x, y, tail.as_str(), tail_style);
+            x = tail_x + UnicodeWidthStr::width(tail.as_str()) as u16;
         }
         if row_idx + 1 != rows.len() {
             continue;
@@ -22718,34 +22745,31 @@ mod tests {
         assert_eq!(legend_rate(Some(0.4)), "<1/s");
     }
 
-    /// `idle` is not a reading, so it must not sit at the same strength as
-    /// the live figures beside it — but it must not go neutral either: the
-    /// row still names a colored band in the graph above.
+    /// `idle` is not a reading, so it must not sit at the same weight as the
+    /// live figures beside it — but it stays on the series' own color, which
+    /// is what ties the row to its band in the graph. Dim by attribute, not
+    /// by moving the color.
     #[test]
-    fn idle_rate_dims_toward_gray_without_losing_the_series_color() {
+    fn idle_rate_dims_the_series_color_rather_than_replacing_it() {
         let color = Color::Rgb(250, 179, 135);
-        let dim = Color::Rgb(80, 80, 80);
 
-        let live = legend_rate_style(color, dim, Some(100.0));
-        assert_eq!(live.fg, Some(color), "a live rate keeps full strength");
+        let live = legend_rate_style(color, Some(100.0));
+        assert_eq!(live.fg, Some(color));
+        assert!(
+            !live.add_modifier.contains(Modifier::DIM),
+            "a live rate keeps full weight"
+        );
 
-        let idle = legend_rate_style(color, dim, None);
-        let Some(Color::Rgb(r, g, b)) = idle.fg else {
-            panic!("idle rate blends to an rgb color: {:?}", idle.fg);
-        };
-        assert_ne!(idle.fg, live.fg, "idle is visibly dimmer than a reading");
-        assert_ne!(idle.fg, Some(dim), "…but keeps a trace of the series color");
-        // Pulled most of the way toward the gray: still warmer on the channel
-        // the series leads with, and darker than it started on every channel.
-        assert!(r > g && g > b, "hue survives the blend: {r},{g},{b}");
-        assert!(r < 250 && g < 179 && b > 80, "moved toward the gray: {r},{g},{b}");
+        let idle = legend_rate_style(color, None);
+        assert_eq!(idle.fg, Some(color), "idle stays the model name's color");
+        assert!(
+            idle.add_modifier.contains(Modifier::DIM),
+            "…and is dimmed by attribute"
+        );
     }
 
-    /// Every series gets named: a legend too wide for one row wraps instead
-    /// of silently showing only the first entry.
-    #[test]
-    fn wrap_legend_spills_onto_further_rows() {
-        let entries: Vec<crate::token_meter::LegendEntry> = ["alpha", "beta", "gamma", "delta"]
+    fn legend_entries(labels: &[&str]) -> Vec<crate::token_meter::LegendEntry> {
+        labels
             .iter()
             .map(|label| crate::token_meter::LegendEntry {
                 label: (*label).to_string(),
@@ -22753,17 +22777,48 @@ mod tests {
                 color: ratatui::style::Color::Reset,
                 rate: Some(100.0),
             })
-            .collect();
-        let rows = wrap_legend(&entries, 30, 4);
-        assert!(rows.len() >= 2, "{rows:?}");
-        let placed: usize = rows.iter().map(Vec::len).sum();
-        assert_eq!(placed, 4, "every series named: {rows:?}");
+            .collect()
+    }
+
+    /// Every series gets named: a legend too wide for one row wraps instead
+    /// of silently showing only the first entry.
+    #[test]
+    fn layout_legend_spills_onto_further_rows() {
+        let entries = legend_entries(&["alpha", "beta", "gamma", "delta"]);
+        let grid = layout_legend(&entries, 30, 4);
+        assert!(grid.rows.len() >= 2, "{:?}", grid.rows);
+        let placed: usize = grid.rows.iter().map(Vec::len).sum();
+        assert_eq!(placed, 4, "every series named: {:?}", grid.rows);
+    }
+
+    /// The point of the grid: entry `n` of every row starts at the same x, so
+    /// the dots and names line up in columns you can read down. A short name
+    /// must not pull its neighbour left.
+    #[test]
+    fn layout_legend_puts_a_columns_entries_at_one_offset() {
+        let entries = legend_entries(&["a", "much-longer-name", "b", "c"]);
+        let grid = layout_legend(&entries, 60, 4);
+        let widest = entries
+            .iter()
+            .map(|e| UnicodeWidthStr::width(legend_entry_text(e).as_str()))
+            .max()
+            .expect("entries");
+        assert_eq!(grid.col_w, widest, "one cell width, sized to the widest");
+        assert!(
+            grid.rows.iter().all(|row| row.len() <= 60 / widest),
+            "no row overflows its columns: {:?}",
+            grid.rows
+        );
+        // Every row starts a fresh run of columns, so the second entry of row
+        // 0 and of row 1 share an offset by construction.
+        assert!(grid.rows.len() >= 2, "{:?}", grid.rows);
+        assert_eq!(grid.rows[0].len(), grid.rows[1].len());
     }
 
     /// The legend may not eat the graph: past its row budget the remaining
     /// entries are dropped, and the caller renders a "+N" marker for them.
     #[test]
-    fn wrap_legend_respects_its_row_budget() {
+    fn layout_legend_respects_its_row_budget() {
         let entries: Vec<crate::token_meter::LegendEntry> = (0..12)
             .map(|i| crate::token_meter::LegendEntry {
                 label: format!("model-number-{i}"),
@@ -22772,9 +22827,20 @@ mod tests {
                 rate: Some(100.0),
             })
             .collect();
-        let rows = wrap_legend(&entries, 30, 2);
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().map(Vec::len).sum::<usize>() < entries.len());
+        let grid = layout_legend(&entries, 30, 2);
+        assert_eq!(grid.rows.len(), 2);
+        assert!(grid.rows.iter().map(Vec::len).sum::<usize>() < entries.len());
+    }
+
+    /// A single entry wider than the whole panel still gets a column — the
+    /// renderer truncates it. Zero columns would name nothing at all.
+    #[test]
+    fn layout_legend_keeps_one_column_when_nothing_fits() {
+        let entries = legend_entries(&["a-model-name-far-wider-than-the-panel"]);
+        let grid = layout_legend(&entries, 10, 3);
+        assert_eq!(grid.rows.len(), 1);
+        assert_eq!(grid.rows[0].len(), 1);
+        assert_eq!(grid.col_w, 10, "the cell is capped at the panel width");
     }
 
     /// The legend may take everything above the graph's three-row floor —
@@ -22802,11 +22868,12 @@ mod tests {
             .collect();
         // A 6-row panel leaves 3 rows for the legend; each entry needs its
         // own row at this width.
-        let rows = wrap_legend(&entries, 14, legend_max_rows(6));
-        assert_eq!(rows.len(), 3);
+        let grid = layout_legend(&entries, 14, legend_max_rows(6));
+        assert_eq!(grid.rows.len(), 3);
         assert!(
-            rows.iter().map(Vec::len).sum::<usize>() < entries.len(),
-            "the rest truncate rather than eating the graph: {rows:?}"
+            grid.rows.iter().map(Vec::len).sum::<usize>() < entries.len(),
+            "the rest truncate rather than eating the graph: {:?}",
+            grid.rows
         );
     }
 

@@ -112,11 +112,23 @@ than showing only what fits on one — a colored bar whose model is named
 nowhere cannot be read. When the rows the legend is allowed to take still
 can't hold them all, the remainder is counted, not silently dropped.
 
-A rate that is a reading carries the series' full strength; `idle` is the
+Those rows are a grid of equal-width cells, not a flow. Packing entries
+end-to-end fits marginally more on a row, but every row then begins its names
+at a different offset, and past a handful of models the dots and names
+scatter into a block of text with no line to read down. A cell wide enough
+for the widest entry puts each column's dot and name at the same offset on
+every row, so the legend is read vertically — the way a list of models is
+read — and a name is found by position rather than by scanning. The trailing
+space this costs inside narrower cells is worth that; a cell never spills
+into its neighbour, because one long name shifting the column below it undoes
+the alignment the grid exists for.
+
+A rate that is a reading carries the series' full weight; `idle` is the
 absence of one and is dimmed, so a glance finds the models actually working.
-It is dimmed only partway toward the neutral gray, never onto it: the row
-still identifies a colored band in the graph, and a name that goes neutral
-the moment its model goes quiet stops pointing at that band.
+The dimming changes weight only — the whole legend row, `idle` included,
+stays on the model's own color, because that color is what ties the row to
+its band in the graph. A rate word shifted toward a neutral gray would stop
+pointing at the band the row exists to name.
 
 ### Series identity and stacking order are stable
 
@@ -181,7 +193,9 @@ inspecting the rest.
 - Every series a client draws must be named somewhere on screen, with the
   throughput it represents. A colored band with no name is unreadable, so a
   legend that cannot fit on one row wraps rather than showing only what fits;
-  what still cannot fit is counted, not silently dropped.
+  what still cannot fit is counted, not silently dropped. Wrapping is into
+  aligned columns, so the cost of naming many models is trailing space rather
+  than a wall of ragged text.
 - Naming series takes priority over graph height, down to a floor that still
   reads as a graph. A legend capped well above that floor strands series
   behind a "+N" while rows sit unused — the cap belongs at the floor, not at
