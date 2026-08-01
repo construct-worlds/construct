@@ -16870,6 +16870,21 @@ mod tests {
         assert!(out.contains(crate::token_meter::UNATTRIBUTED), "{out}");
     }
 
+    /// The switch names the mode currently showing and carries the same swap
+    /// glyph as the session list's `full ⇄ / compact ⇄` toggle, so the two
+    /// controls read as one convention rather than two.
+    #[tokio::test]
+    async fn mode_switch_names_the_current_mode_like_the_list_toggle() {
+        let (mut app, _dir, _server) = token_meter_app(&[]).await;
+        app.matrix_panel_mode = MatrixPanelMode::Rain;
+        let out = rendered(&mut app, 120, 30);
+        assert!(out.contains("rain ⇄"), "{out}");
+        assert!(!out.contains("tokens ⇄"), "names the current mode:\n{out}");
+        app.matrix_panel_mode = MatrixPanelMode::Tokens;
+        let out = rendered(&mut app, 120, 30);
+        assert!(out.contains("tokens ⇄"), "{out}");
+    }
+
     /// The header switch flips the panel body and nothing else — the rain's
     /// own collapse state is untouched.
     #[tokio::test]

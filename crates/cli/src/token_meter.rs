@@ -23,24 +23,32 @@ use std::time::{Duration, Instant};
 
 use ratatui::style::Color;
 
-/// Width of one history bucket. One second reads as a CPU-meter tick and
-/// keeps a full-width panel (~200 columns) inside a few minutes of history.
-pub const BUCKET: Duration = Duration::from_secs(1);
+/// Seconds of wall-clock one column covers. One bar per minute: a turn's
+/// worth of activity lands in a single column, and a full-width panel holds
+/// well over an hour of history, so the graph reads as a session-long trend
+/// rather than a live oscilloscope.
+pub const BUCKET_SECS: u64 = 60;
+
+/// Width of one history bucket.
+pub const BUCKET: Duration = Duration::from_secs(BUCKET_SECS);
 
 /// Hard cap on retained history, independent of panel width — a very wide
 /// terminal still can't grow this unboundedly.
 const MAX_BUCKETS: usize = 600;
 
-/// Per-bucket decay applied to the autoscale ceiling. 0.97/s puts the
-/// half-life around 23 seconds: a burst's peak stays referenced long enough
-/// to compare the next few columns against, then releases so a quiet fleet
-/// doesn't stay pinned to the floor of a spike from minutes ago.
-const PEAK_DECAY: f64 = 0.97;
+/// Per-bucket decay applied to the autoscale ceiling — a half-life of about
+/// three columns. It only governs the ceiling after a burst leaves the
+/// visible window, so it is tuned in columns rather than wall-clock: the
+/// scale settles over the next few bars instead of snapping the moment the
+/// burst scrolls off.
+const PEAK_DECAY: f64 = 0.8;
 
-/// Floor for the autoscale ceiling. Without it, a single 40-token sample on
-/// an otherwise idle fleet would paint a full-height column and read as
+/// Floor for the autoscale ceiling, expressed as a rate so it means the same
+/// thing at any column width. Without it, a single 40-token sample on an
+/// otherwise idle fleet would paint a full-height column and read as
 /// saturation.
-const MIN_SCALE: u64 = 1_000;
+const MIN_SCALE_PER_SEC: u64 = 1_000;
+const MIN_SCALE: u64 = MIN_SCALE_PER_SEC * BUCKET_SECS;
 
 /// Distinct midtone series colors, assigned in first-seen order. Same values
 /// as the context-breakdown palette so a model's color reads as "a series
@@ -208,15 +216,36 @@ impl TokenMeter {
         self.window(width).map(Bucket::total).max().unwrap_or(0)
     }
 
-    /// Tokens-per-bucket value the top of the graph represents, for a
+    /// Tokens-per-*bucket* value the top of the graph represents, for a
     /// `width`-wide render. Always at least the tallest visible column — the
     /// decaying peak only slows the ceiling's *descent* after a burst
     /// scrolls off, so the graph settles instead of snapping between scales.
+    ///
+    /// This is the number bar heights are computed against. For display use
+    /// [`Self::scale_per_second`]: a bucket wider than a second makes the raw
+    /// figure a per-bucket total, which reads as a rate and isn't one.
     pub fn scale(&self, width: usize) -> u64 {
         self.peak
             .max(self.max_in_window(width) as f64)
             .max(MIN_SCALE as f64)
             .ceil() as u64
+    }
+
+    /// Human label for the span one column covers, so a per-column count is
+    /// never read as a rate.
+    pub fn bucket_span_label() -> String {
+        if BUCKET_SECS % 60 == 0 {
+            format!("{}m", BUCKET_SECS / 60)
+        } else {
+            format!("{BUCKET_SECS}s")
+        }
+    }
+
+    /// The ceiling expressed as tokens per second, which is what the legend
+    /// states — the bucket width is an implementation detail of the render,
+    /// not something a reader should have to divide by.
+    pub fn scale_per_second(&self, width: usize) -> u64 {
+        self.scale(width) / BUCKET_SECS
     }
 
     pub fn model_label(&self, idx: u16) -> &str {
@@ -296,8 +325,10 @@ impl TokenMeter {
 mod tests {
     use super::*;
 
-    fn at(base: Instant, secs: u64) -> Instant {
-        base + Duration::from_secs(secs)
+    /// `n` buckets after `base`, so the tests stay correct if the bucket
+    /// width is retuned again.
+    fn buckets_after(base: Instant, n: u64) -> Instant {
+        base + BUCKET * n as u32
     }
 
     #[test]
@@ -305,8 +336,8 @@ mod tests {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
         m.observe(Some("opus"), 100, t0);
-        m.observe(Some("opus"), 50, at(t0, 2));
-        m.advance_to(at(t0, 2));
+        m.observe(Some("opus"), 50, buckets_after(t0, 2));
+        m.advance_to(buckets_after(t0, 2));
         let cols: Vec<u64> = m.window(3).map(Bucket::total).collect();
         assert_eq!(cols, vec![100, 0, 50], "one empty bucket between samples");
     }
@@ -344,37 +375,53 @@ mod tests {
         assert_eq!(m.scale(80), MIN_SCALE, "idle meter uses the floor");
         m.observe(Some("opus"), 40, t0);
         assert_eq!(m.scale(80), MIN_SCALE, "a tiny sample must not saturate");
-        m.observe(Some("opus"), 50_000, t0);
-        assert!(m.scale(80) >= 50_000);
+        m.observe(Some("opus"), 500_000, t0);
+        assert!(m.scale(80) >= 500_000);
     }
 
     #[test]
     fn a_visible_column_always_fits_the_scale() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 100_000, t0);
-        m.advance_to(at(t0, 30));
-        // The spike is 30 buckets back: still on screen at width 80, so the
+        m.observe(Some("opus"), 1_000_000, t0);
+        m.advance_to(buckets_after(t0, 10));
+        // The spike is 10 buckets back: still on screen at width 80, so the
         // ceiling must still contain it however far the peak has decayed.
-        assert!(m.scale(80) >= 100_000, "{}", m.scale(80));
+        assert!(m.scale(80) >= 1_000_000, "{}", m.scale(80));
     }
 
     #[test]
     fn ceiling_descends_gradually_once_a_burst_scrolls_off() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 100_000, t0);
-        m.advance_to(at(t0, 30));
+        m.observe(Some("opus"), 1_000_000, t0);
+        m.advance_to(buckets_after(t0, 3));
         // Narrow render: the spike has scrolled out of view, so only the
         // decayed peak holds the ceiling up.
-        let narrow = m.scale(10);
-        assert!(narrow < 100_000, "ceiling must fall: {narrow}");
+        let narrow = m.scale(2);
+        assert!(narrow < 1_000_000, "ceiling must fall: {narrow}");
         assert!(
             narrow > MIN_SCALE,
             "…but not snap straight to the floor: {narrow}"
         );
-        m.advance_to(at(t0, 600));
-        assert_eq!(m.scale(10), MIN_SCALE, "eventually returns to the floor");
+        m.advance_to(buckets_after(t0, 300));
+        assert_eq!(m.scale(2), MIN_SCALE, "eventually returns to the floor");
+    }
+
+    /// The legend states a per-second rate, so a bucket wider than a second
+    /// must be divided out — otherwise every retune of the bucket width
+    /// silently inflates the number users read as throughput.
+    #[test]
+    fn stated_rate_is_per_second_not_per_bucket() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.observe(Some("opus"), 900_000, t0);
+        assert_eq!(m.scale(80), 900_000, "bars scale against the bucket total");
+        assert_eq!(
+            m.scale_per_second(80),
+            900_000 / BUCKET_SECS,
+            "the label states a rate"
+        );
     }
 
     #[test]
@@ -402,7 +449,7 @@ mod tests {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
         m.observe(Some("opus"), 10, t0);
-        m.advance_to(at(t0, (MAX_BUCKETS as u64) * 3));
+        m.advance_to(buckets_after(t0, (MAX_BUCKETS as u64) * 3));
         assert!(m.buckets.len() <= MAX_BUCKETS, "{}", m.buckets.len());
     }
 
@@ -411,7 +458,7 @@ mod tests {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
         m.observe(Some("opus"), 700, t0);
-        m.advance_to(at(t0, 1));
+        m.advance_to(buckets_after(t0, 1));
         // Two buckets of history in a 10-wide render occupy the last two
         // columns; everything left of them is empty screen, not data.
         assert!(m.bucket_at(0, 10).is_none());

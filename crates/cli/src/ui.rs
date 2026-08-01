@@ -3894,8 +3894,22 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
         return;
     }
 
-    // Bottom row is the legend once there's room for a graph above it.
-    let legend_h = u16::from(area.height >= 3);
+    // The legend names every series, wrapping onto as many rows as that
+    // takes: a colored bar whose model isn't named anywhere is unreadable,
+    // and on a narrow panel a single row only ever fits one name. The graph
+    // keeps the rest of the panel.
+    let entries = app.token_meter.legend(area.width as usize);
+    let head = format!(
+        "peak {}/s ",
+        crate::lineage::format_token_count(app.token_meter.scale_per_second(area.width as usize))
+    );
+    let rows = wrap_legend(
+        &entries,
+        UnicodeWidthStr::width(head.as_str()),
+        area.width as usize,
+        legend_max_rows(area.height),
+    );
+    let legend_h = rows.len() as u16;
     let graph = Rect {
         x: area.x,
         y: area.y,
@@ -3927,35 +3941,108 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
         let filled = filled.clamp(1, eighths_total);
         let segments = stacked_eighths(&bucket.stacked(), total, filled);
         // Paint bottom-up: each series owns a contiguous run of eighths.
-        let mut painted = 0usize;
-        for (model_idx, seg_eighths) in segments {
-            let color = app.token_meter.color(model_idx);
-            let style = Style::default().fg(color);
-            for e in 0..seg_eighths {
-                let abs = painted + e;
-                let row_from_bottom = abs / 8;
-                let within = abs % 8;
-                let y = graph.y + graph.height.saturating_sub(row_from_bottom as u16 + 1);
-                // Only the top-most eighth of a cell needs a partial glyph;
-                // any lower eighth means the cell ends up full.
-                let is_last_in_cell = within == 7 || abs + 1 == painted + seg_eighths;
-                if !is_last_in_cell {
-                    continue;
-                }
-                let glyph = if within == 7 {
-                    "█"
-                } else {
-                    METER_PARTIALS[within + 1]
-                };
-                f.buffer_mut().set_string(x, y, glyph, style);
+        for cell in column_cells(&segments, filled, cells) {
+            let y = graph.y + graph.height.saturating_sub(cell.row + 1);
+            let mut style = Style::default().fg(app.token_meter.color(cell.fg));
+            // A terminal cell holds one glyph, so a boundary landing inside
+            // one is drawn as a partial block whose *filled* part is the
+            // lower series and whose background is the upper one. Painting
+            // both as foreground glyphs would mean the second overwrites the
+            // first, and the lower series would vanish from the stack.
+            if let Some(bg) = cell.bg {
+                style = style.bg(app.token_meter.color(bg));
             }
-            painted += seg_eighths;
+            f.buffer_mut().set_string(x, y, cell.glyph, style);
         }
     }
 
-    if legend_h == 1 {
-        render_token_meter_legend(f, area, app, scale);
+    if legend_h > 0 {
+        render_token_meter_legend(f, area, app, &entries, &head, &rows, legend_h);
     }
+}
+
+/// One painted cell of a stacked column: which glyph, in whose color, over
+/// whose color.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ColumnCell {
+    /// Rows up from the bottom of the graph.
+    row: u16,
+    glyph: &'static str,
+    /// Series drawn as the glyph's filled part.
+    fg: u16,
+    /// Series filling the rest of the cell, when a boundary lands inside it.
+    bg: Option<u16>,
+}
+
+/// Lay a column's stacked segments onto terminal cells.
+///
+/// Cells are 8 eighths tall. A cell wholly owned by one series is a full
+/// block; the column's topmost cell is a partial block; a cell where one
+/// series ends and the next begins is a partial block of the lower series
+/// drawn *over* the upper series as background, which is the only way to get
+/// two series into one cell.
+fn column_cells(segments: &[(u16, usize)], filled: usize, cells: usize) -> Vec<ColumnCell> {
+    let mut out = Vec::new();
+    if segments.is_empty() || filled == 0 {
+        return out;
+    }
+    // Which series owns each eighth, bottom-up.
+    let mut owner: Vec<u16> = Vec::with_capacity(filled);
+    for (model, eighths) in segments {
+        for _ in 0..*eighths {
+            owner.push(*model);
+        }
+    }
+    for row in 0..cells {
+        let base = row * 8;
+        if base >= filled.min(owner.len()) {
+            break;
+        }
+        let top = ((row + 1) * 8).min(filled).min(owner.len());
+        let fill = top - base;
+        let bottom_series = owner[base];
+        // How far the bottom series reaches within this cell.
+        let bottom_run = owner[base..top]
+            .iter()
+            .take_while(|m| **m == bottom_series)
+            .count();
+        let cell = if bottom_run == fill {
+            // One series owns everything filled here.
+            ColumnCell {
+                row: row as u16,
+                glyph: if fill == 8 { "█" } else { METER_PARTIALS[fill] },
+                fg: bottom_series,
+                bg: None,
+            }
+        } else if fill == 8 {
+            // A boundary inside a full cell: lower series as the glyph's
+            // filled part, whatever tops the cell as its background.
+            ColumnCell {
+                row: row as u16,
+                glyph: METER_PARTIALS[bottom_run],
+                fg: bottom_series,
+                bg: Some(owner[top - 1]),
+            }
+        } else {
+            // Partially-filled top cell with a boundary in it. The empty part
+            // above must stay the panel background, so there is no room to
+            // encode both series — the larger share takes the cell.
+            let upper = owner[top - 1];
+            let upper_run = fill - bottom_run;
+            ColumnCell {
+                row: row as u16,
+                glyph: METER_PARTIALS[fill],
+                fg: if upper_run > bottom_run {
+                    upper
+                } else {
+                    bottom_series
+                },
+                bg: None,
+            }
+        };
+        out.push(cell);
+    }
+    out
 }
 
 /// Split a column's `filled` eighths across its series in proportion to
@@ -3988,49 +4075,129 @@ fn stacked_eighths(stacked: &[(u16, u64)], total: u64, filled: usize) -> Vec<(u1
     out
 }
 
-fn render_token_meter_legend(f: &mut Frame, area: Rect, app: &mut App, scale: u64) {
-    let y = area.y + area.height.saturating_sub(1);
-    let width = area.width as usize;
+/// How many rows the legend may take. The graph is the point of the panel,
+/// so the legend never grows past a third of it — beyond that the remaining
+/// series are dropped rather than squeezing the bars into nothing.
+fn legend_max_rows(panel_h: u16) -> usize {
+    match panel_h {
+        0..=2 => 0,
+        h => usize::from(h / 3).clamp(1, 4),
+    }
+}
+
+/// One legend entry's rendered text: a dot, the model, and its total.
+fn legend_entry_text(entry: &crate::token_meter::LegendEntry) -> String {
+    format!(
+        "● {} {} ",
+        entry.label,
+        crate::lineage::format_token_count(entry.tokens)
+    )
+}
+
+/// Pack legend entries into rows of `width` columns, reserving `indent`
+/// columns on the first row for the scale readout. Returns the entry indices
+/// per row. An entry too wide for an entire empty row is placed alone and
+/// truncated at render time; entries past `max_rows` are dropped, which the
+/// caller signals rather than hiding.
+fn wrap_legend(
+    entries: &[crate::token_meter::LegendEntry],
+    indent: usize,
+    width: usize,
+    max_rows: usize,
+) -> Vec<Vec<usize>> {
+    if entries.is_empty() || max_rows == 0 || width == 0 {
+        return Vec::new();
+    }
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut used = indent.min(width);
+    for (i, entry) in entries.iter().enumerate() {
+        let w = UnicodeWidthStr::width(legend_entry_text(entry).as_str());
+        // Only wrap when the row already holds something — otherwise an
+        // over-wide entry would bounce to a fresh row and still not fit.
+        if used + w > width && !rows.last().expect("row").is_empty() {
+            if rows.len() == max_rows {
+                break;
+            }
+            rows.push(Vec::new());
+            used = 0;
+        }
+        rows.last_mut().expect("row").push(i);
+        used += w;
+    }
+    // The scale readout owns the first row even when no entry joined it.
+    if rows.len() > 1 && rows.last().is_some_and(Vec::is_empty) {
+        rows.pop();
+    }
+    rows
+}
+
+fn render_token_meter_legend(
+    f: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    entries: &[crate::token_meter::LegendEntry],
+    head: &str,
+    rows: &[Vec<usize>],
+    legend_h: u16,
+) {
     let dim = Style::default().fg(app.theme.dim);
+    let top = area.y + area.height.saturating_sub(legend_h);
+    let limit = area.x + area.width;
     // The ceiling is stated because it moves: without it, two columns of the
     // same height minutes apart would look like the same throughput.
-    let head = format!("peak {}/s ", crate::lineage::format_token_count(scale));
-    f.buffer_mut().set_string(area.x, y, head.as_str(), dim);
-    let mut x = area.x + UnicodeWidthStr::width(head.as_str()) as u16;
-    let limit = area.x + area.width;
-    // Which series a color stands for is the legend's whole job, so a name
-    // that doesn't fit is truncated rather than dropped — a colored bar with
-    // no name anywhere is unreadable.
-    for entry in app.token_meter.legend(width) {
-        let count = crate::lineage::format_token_count(entry.tokens);
-        let room = limit.saturating_sub(x) as usize;
-        // Names identify the series and counts only quantify it, so a narrow
-        // panel drops the count before it drops a name — and truncates the
-        // name before dropping the entry entirely.
-        let with_count = UnicodeWidthStr::width("●  ") + count.len() + 1;
-        let (budget, count_part) = if room > with_count + 3 {
-            (room - with_count, format!(" {count}"))
-        } else {
-            (room.saturating_sub(4), String::new())
-        };
-        if budget < 2 {
-            break;
+    f.buffer_mut().set_string(area.x, top, head, dim);
+    let head_w = UnicodeWidthStr::width(head) as u16;
+
+    let shown: usize = rows.iter().map(Vec::len).sum();
+    for (row_idx, row) in rows.iter().enumerate() {
+        let y = top + row_idx as u16;
+        let mut x = if row_idx == 0 { area.x + head_w } else { area.x };
+        for &i in row {
+            let Some(entry) = entries.get(i) else { continue };
+            let count = crate::lineage::format_token_count(entry.tokens);
+            let room = limit.saturating_sub(x) as usize;
+            // Names identify the series and counts only quantify it, so a
+            // cramped row drops the count before it drops a name — and
+            // truncates the name before dropping the entry.
+            let with_count = UnicodeWidthStr::width("●  ") + count.len() + 1;
+            let (budget, count_part) = if room > with_count + 3 {
+                (room - with_count, format!(" {count}"))
+            } else {
+                (room.saturating_sub(4), String::new())
+            };
+            if budget < 2 {
+                break;
+            }
+            let label = truncate_label(&entry.label, budget);
+            let text = format!("● {label}{count_part} ");
+            f.buffer_mut()
+                .set_string(x, y, text.as_str(), Style::default().fg(entry.color));
+            x += UnicodeWidthStr::width(text.as_str()) as u16;
         }
-        let label = truncate_label(&entry.label, budget);
-        let text = format!("● {label}{count_part} ");
-        f.buffer_mut()
-            .set_string(x, y, text.as_str(), Style::default().fg(entry.color));
-        x += UnicodeWidthStr::width(text.as_str()) as u16;
-    }
-    // Window total, only if it costs no legend space.
-    let total = format!(
-        " Σ {}",
-        crate::lineage::format_token_count(app.token_meter.window_total(width))
-    );
-    let total_w = UnicodeWidthStr::width(total.as_str()) as u16;
-    if x + total_w < limit {
-        f.buffer_mut()
-            .set_string(limit - total_w, y, total.as_str(), dim);
+        // Anything the rows couldn't hold is counted, not silently dropped.
+        if row_idx + 1 == rows.len() && shown < entries.len() {
+            let more = format!("+{}", entries.len() - shown);
+            let w = UnicodeWidthStr::width(more.as_str()) as u16;
+            if x + w <= limit {
+                f.buffer_mut().set_string(x, y, more.as_str(), dim);
+                x += w;
+            }
+        }
+        // Window total, only on the last row and only if it costs no legend
+        // space.
+        if row_idx + 1 == rows.len() {
+            let total = format!(
+                " Σ {}",
+                crate::lineage::format_token_count(
+                    app.token_meter.window_total(area.width as usize)
+                )
+            );
+            let total_w = UnicodeWidthStr::width(total.as_str()) as u16;
+            if x + total_w < limit {
+                f.buffer_mut()
+                    .set_string(limit - total_w, y, total.as_str(), dim);
+            }
+        }
     }
 }
 
@@ -4077,7 +4244,8 @@ fn render_matrix_token_tooltip(f: &mut Frame, app: &App) {
         return;
     }
     let mut parts: Vec<String> = vec![format!(
-        "{} tok",
+        "{} · {} tok",
+        crate::token_meter::TokenMeter::bucket_span_label(),
         crate::lineage::format_token_count(bucket.total())
     )];
     for (model, tokens) in bucket.stacked() {
@@ -4523,11 +4691,11 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
         f.buffer_mut()
             .set_string(separator_x, area.y, "─", line_style);
     }
-    // Mode switch, right-aligned just inside the collapse button. Labeled
-    // with the mode it will switch *to*, in plain words rather than a glyph —
-    // an unexplained icon here would be the only unlabeled control in the
-    // panel (spec 0167).
-    let mode_label = format!(" {} ", app.matrix_panel_mode.toggled().label());
+    // Mode switch, right-aligned just inside the collapse button. Names the
+    // *current* mode plus a swap glyph, exactly like the session list's
+    // ` compact ⇄ ` toggle (`list_mode_button_label`) — same control shape,
+    // same reading, so one convention covers both (spec 0167).
+    let mode_label = format!(" {} \u{21c4} ", app.matrix_panel_mode.label());
     let mode_w = UnicodeWidthStr::width(mode_label.as_str()) as u16;
     let mode_x = toggle_x.saturating_sub(mode_w + 1);
     let mode_hovered = app
@@ -22458,6 +22626,93 @@ mod tests {
                 y: 2,
             })
         );
+    }
+
+    /// Two series sharing one terminal cell must both survive it: the lower
+    /// one as the partial glyph's filled part, the upper one as its
+    /// background. Painting both as foreground glyphs made the second
+    /// overwrite the first, so a dominant model erased everything under it.
+    #[test]
+    fn column_cells_encode_a_boundary_inside_one_cell() {
+        // Series 0 takes 3 eighths, series 1 the next 5 — one full cell.
+        let cells = column_cells(&[(0, 3), (1, 5)], 8, 4);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(
+            cells[0],
+            ColumnCell {
+                row: 0,
+                glyph: METER_PARTIALS[3],
+                fg: 0,
+                bg: Some(1),
+            }
+        );
+    }
+
+    /// A cell wholly owned by one series is a plain full block with no
+    /// background — a background there would tint the panel behind the bar.
+    #[test]
+    fn column_cells_leave_single_series_cells_unblended() {
+        let cells = column_cells(&[(2, 16)], 16, 4);
+        assert_eq!(cells.len(), 2);
+        assert!(cells.iter().all(|c| c.glyph == "█" && c.bg.is_none()));
+        assert!(cells.iter().all(|c| c.fg == 2));
+    }
+
+    /// The column's topmost cell is partially filled, so the space above the
+    /// glyph has to stay panel background — there is nowhere to encode a
+    /// second series, and the larger share takes the cell.
+    #[test]
+    fn column_cells_give_the_partial_top_cell_to_the_larger_share() {
+        // Cell 0 full (series 0), cell 1 has 1 eighth of series 0 and 4 of
+        // series 1.
+        let cells = column_cells(&[(0, 9), (1, 4)], 13, 4);
+        let top = cells.last().expect("top cell");
+        assert_eq!(top.row, 1);
+        assert_eq!(top.fg, 1, "series 1 owns 4 of the 5 filled eighths");
+        assert_eq!(top.bg, None);
+    }
+
+    /// Every series gets named: a legend too wide for one row wraps instead
+    /// of silently showing only the first entry.
+    #[test]
+    fn wrap_legend_spills_onto_further_rows() {
+        let entries: Vec<crate::token_meter::LegendEntry> = ["alpha", "beta", "gamma", "delta"]
+            .iter()
+            .map(|label| crate::token_meter::LegendEntry {
+                label: (*label).to_string(),
+                tokens: 1_000,
+                color: ratatui::style::Color::Reset,
+            })
+            .collect();
+        // ~11 cells per entry, 11 of indent: one entry on row 0, two after.
+        let rows = wrap_legend(&entries, 11, 30, 4);
+        assert!(rows.len() >= 2, "{rows:?}");
+        let placed: usize = rows.iter().map(Vec::len).sum();
+        assert_eq!(placed, 4, "every series named: {rows:?}");
+    }
+
+    /// The legend may not eat the graph: past its row budget the remaining
+    /// entries are dropped, and the caller renders a "+N" marker for them.
+    #[test]
+    fn wrap_legend_respects_its_row_budget() {
+        let entries: Vec<crate::token_meter::LegendEntry> = (0..12)
+            .map(|i| crate::token_meter::LegendEntry {
+                label: format!("model-number-{i}"),
+                tokens: 1_000,
+                color: ratatui::style::Color::Reset,
+            })
+            .collect();
+        let rows = wrap_legend(&entries, 11, 30, 2);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().map(Vec::len).sum::<usize>() < entries.len());
+    }
+
+    #[test]
+    fn legend_never_outgrows_a_third_of_the_panel() {
+        assert_eq!(legend_max_rows(2), 0);
+        assert_eq!(legend_max_rows(3), 1);
+        assert_eq!(legend_max_rows(9), 3);
+        assert_eq!(legend_max_rows(60), 4, "capped so the graph keeps the panel");
     }
 
     /// A column's segments sum to exactly the column's height — no drift

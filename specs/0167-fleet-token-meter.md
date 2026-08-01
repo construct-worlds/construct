@@ -37,11 +37,17 @@ and two colors, which reads as two models running.
 
 Token throughput has no capacity to divide by. The meter therefore
 autoscales: the ceiling is the tallest column currently visible, and the
-rendered scale value is stated alongside the graph. It falls back to a floor
-so a single small sample on an idle fleet cannot paint a full-height column
-and read as saturation. After a burst scrolls out of view the ceiling
-descends gradually rather than snapping, so consecutive frames stay
-comparable — but it may never fall below a column still on screen.
+rendered scale value is stated alongside the graph — as a per-second rate,
+normalized out of whatever span a column covers. A column wider than a
+second makes the raw per-column figure read as a rate without being one, so
+retuning the column width must not silently change the number users read.
+
+The ceiling falls back to a floor so a single small sample on an idle fleet
+cannot paint a full-height column and read as saturation. After a burst
+scrolls out of view the ceiling descends gradually rather than snapping, so
+consecutive frames stay comparable — but it may never fall below a column
+still on screen. That descent is tuned in wall-clock, so a change to the
+column width has to carry it along or the ceiling falls faster for free.
 
 No percentage is shown, and no fixed ceiling is assumed. A percentage here
 would require inventing a denominator.
@@ -54,6 +60,20 @@ call reports once, at the end, so its entire payload lands in one bucket and
 the graph is bursty by nature. Smoothing by smearing a sample backwards
 would look better and would be a fabrication — the no-estimating rule of
 spec 0103 applies here too.
+
+### The stack must survive the cell grid
+
+A terminal cell holds one glyph, so a series boundary that lands inside a
+cell cannot be drawn as two glyphs — the second overwrites the first and the
+lower series disappears from that column. A boundary inside a cell is drawn
+as a partial block whose filled part is the lower series and whose
+background is the upper one. Only the column's topmost cell, whose empty
+part must stay panel background, may hand the cell to a single series.
+
+The legend must name every series it drew, wrapping onto further rows rather
+than showing only what fits on one — a colored bar whose model is named
+nowhere cannot be read. When the rows the legend is allowed to take still
+can't hold them all, the remainder is counted, not silently dropped.
 
 ### Series identity is stable
 
@@ -93,8 +113,13 @@ inspecting the rest.
 - The model on a usage report is optional and additive: records written
   before it existed must keep loading, and a report that omits it must
   serialize the same way it always did.
-- Any client rendering the meter must state the scale it drew against.
-  Bars without a stated ceiling are unreadable once the ceiling moves.
+- Any client rendering the meter must state the scale it drew against, as a
+  rate rather than a per-column total. Bars without a stated ceiling are
+  unreadable once the ceiling moves, and a per-column total labeled as a rate
+  is worse than no label.
+- The span a column covers is a tuning choice, not a fixed part of the
+  design; per-column detail should name it so an absolute count is never
+  mistaken for a rate.
 - Attribution is a client concern. A session's own lifetime tally stays
   model-agnostic; per-model accounting is derived at the display, not
   accumulated per session.
@@ -120,9 +145,9 @@ inspecting the rest.
 
 ## Examples
 
-- Three sessions on two models run for a minute: the meter shows one column
-  per second, each stacked in two colors, with a legend naming both models
-  and their totals over the visible window, and a stated peak.
+- Three sessions on two models run for a minute: the meter shows a column
+  per interval, each stacked in two colors, with a legend naming both models
+  and their totals over the visible window, and a stated peak rate.
 - A session's harness reports usage without naming a model, and the session
   has reported a model change earlier: the sample is attributed to that
   model, not to `unattributed`.
