@@ -153,3 +153,7 @@ say "If config.toml.template is not there yet, run construct once to let the dae
 
 say ""
 say "Done. Try:  construct"
+# A fresh machine is the likeliest one to be missing a harness CLI, a login,
+# or a writable directory. `doctor` reports all of it without starting a
+# daemon, and exits 0 on a healthy install, so this is safe to suggest here.
+say "If anything looks off:  construct doctor"
