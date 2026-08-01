@@ -413,6 +413,7 @@ enabled = true
 # codex-oauth  = ["gpt-5.6-sol", "gpt-5.5"]
 # grok-oauth   = "grok-4.5"
 # kimi-oauth   = "k3"
+#
 "#;
 
 /// Kept for backwards-compat: `construct daemon default-config` and any

@@ -11400,6 +11400,7 @@ mod tests {
         construct_protocol::LayoutNode::Leaf {
             id,
             session_id: session.map(str::to_string),
+            service_name: None,
         }
     }
 

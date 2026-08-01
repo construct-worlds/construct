@@ -474,6 +474,7 @@ impl App {
                     Selection::ArchivedRow(
                         ArchiveSection::Ungrouped | ArchiveSection::Children(_),
                     )
+                    | Selection::Service(_)
                     | Selection::None => None,
                 };
                 let params = construct_protocol::CreateSessionParams {
@@ -793,6 +794,21 @@ impl App {
             MinibufferIntent::CommandPalette => {
                 let cmd = input.trim();
                 self.run_palette_command(cmd).await;
+            }
+            MinibufferIntent::ServiceDeleteConfirm { name } => {
+                if !matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    self.set_status("service delete cancelled".to_string());
+                    return;
+                }
+                match self.client.delete_service(name.clone()).await {
+                    Ok(()) => {
+                        self.refresh_services().await;
+                        self.set_status(format!(
+                            "{name} deleted; restart daemon to withdraw endpoint"
+                        ));
+                    }
+                    Err(error) => self.set_status(format!("service delete failed: {error}")),
+                }
             }
             MinibufferIntent::Orchestrator => {
                 // Unreachable in PTY-orchestrator mode — the

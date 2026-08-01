@@ -455,6 +455,21 @@ impl App {
             }
         }
         match &items[idx] {
+            ListItem::Service {
+                summary,
+                session_count,
+                ..
+            } => {
+                if first_line && *session_count > 0 && col == list.x + 1 {
+                    let key = crate::app::service_children_key(&summary.name);
+                    if !self.children_collapsed.insert(key.clone()) {
+                        self.children_collapsed.remove(&key);
+                    }
+                    return;
+                }
+                self.select_service(summary.name.clone());
+                self.sync_active_window_selection();
+            }
             ListItem::Session { summary, .. } => {
                 self.select_session(summary.id.clone());
                 self.sync_active_window_selection();

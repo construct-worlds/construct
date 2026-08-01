@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 use construct_client::Client;
 use construct_protocol::{
     EventNotificationPayload, GroupSummary, HarnessInfo, MessageRole, Notification, Request,
-    SessionEvent, SessionSummary, StateNotificationPayload, TimestampedEvent,
+    ServiceChannelSummary, ServiceSummary, SessionEvent, SessionSummary, StateNotificationPayload,
+    TimestampedEvent,
 };
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -38,6 +39,8 @@ mod minibuffer;
 mod mouse;
 mod playbook_popup;
 pub mod route_menu;
+mod service_dialog;
+mod service_title_menu;
 mod session_picker;
 mod session_title_menu;
 mod session_title_rename;
@@ -49,6 +52,10 @@ pub use configure::{
 };
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
+};
+pub use service_dialog::{
+    ServiceChannelDialog, ServiceChannelDialogMode, ServiceDialog, ServiceDialogMode,
+    ServiceDialogPickerKind, SERVICE_PICKER_VISIBLE_ROWS,
 };
 #[cfg(test)]
 pub use tutorial::Step1Phase;
@@ -185,10 +192,20 @@ const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
 /// bounds client-side IPC chatter, so it can stay short.
 const HARNESS_USAGE_QUERY_INTERVAL: Duration = Duration::from_secs(2);
 
-/// A row in the rendered list view. Sessions and group headers share the
-/// list; key dispatch and selection are typed.
+/// A row in the rendered list view. Sessions, services, and group headers
+/// share the list; key dispatch and selection are typed.
 #[derive(Debug, Clone)]
 pub enum ListItem {
+    /// A service is a top-level fleet item. It has no PTY or transcript, but
+    /// selecting it opens the service view in exactly the same split-pane
+    /// lifecycle as selecting a session.
+    Service {
+        summary: ServiceSummary,
+        /// Number of active routed sessions shown beneath this service when
+        /// its disclosure is expanded.
+        session_count: usize,
+        sessions_expanded: bool,
+    },
     Session {
         summary: SessionSummary,
         indented: bool,
@@ -293,10 +310,23 @@ fn is_subagent_session(s: &SessionSummary) -> bool {
     matches!(s.kind, construct_protocol::SessionKind::Subagent)
 }
 
+fn service_session_matches(s: &SessionSummary, service_name: &str) -> bool {
+    let Some(title) = s.title.as_deref() else {
+        return false;
+    };
+    let prefix = format!("service:{service_name}");
+    title == prefix || title.starts_with(&format!("{prefix}:"))
+}
+
+fn service_children_key(service_name: &str) -> String {
+    format!("service:{service_name}")
+}
+
 fn selection_is_valid_for_sessions(
     selection: &Selection,
     sessions: &[SessionSummary],
     groups: &[GroupSummary],
+    services: &[ServiceSummary],
 ) -> bool {
     match selection {
         Selection::None => true,
@@ -305,6 +335,7 @@ fn selection_is_valid_for_sessions(
         // long as the session still exists; pruning only fires once it's gone.
         Selection::Session(id) => sessions.iter().any(|s| s.id == *id),
         Selection::Group(id) => groups.iter().any(|g| g.id == *id),
+        Selection::Service(name) => services.iter().any(|service| service.name == *name),
         Selection::ArchivedRow(section) => match section {
             ArchiveSection::Ungrouped => sessions
                 .iter()
@@ -327,12 +358,13 @@ fn prune_window_tree(
     tree: MainWindowTree,
     sessions: &[SessionSummary],
     groups: &[GroupSummary],
+    services: &[ServiceSummary],
     fallback: &Selection,
 ) -> MainWindowTree {
     match tree {
         MainWindowTree::Leaf { id, selection } => MainWindowTree::Leaf {
             id,
-            selection: if selection_is_valid_for_sessions(&selection, sessions, groups) {
+            selection: if selection_is_valid_for_sessions(&selection, sessions, groups, services) {
                 selection
             } else {
                 fallback.clone()
@@ -346,8 +378,8 @@ fn prune_window_tree(
         } => MainWindowTree::Split {
             direction,
             ratio_percent,
-            first: Box::new(prune_window_tree(*first, sessions, groups, fallback)),
-            second: Box::new(prune_window_tree(*second, sessions, groups, fallback)),
+            first: Box::new(prune_window_tree(*first, sessions, groups, services, fallback)),
+            second: Box::new(prune_window_tree(*second, sessions, groups, services, fallback)),
         },
     }
 }
@@ -594,6 +626,9 @@ pub(crate) fn list_archive_indent_cells(
 impl ListItem {
     pub fn matches(&self, sel: &Selection) -> bool {
         match (self, sel) {
+            (ListItem::Service { summary, .. }, Selection::Service(name)) => {
+                summary.name == *name
+            }
             (ListItem::Session { summary, .. }, Selection::Session(id)) => summary.id == *id,
             (ListItem::GroupHeader { group, .. }, Selection::Group(id)) => group.id == *id,
             (ListItem::ArchivedRow { section, .. }, Selection::ArchivedRow(sel)) => section == sel,
@@ -608,6 +643,7 @@ pub enum Selection {
     #[default]
     None,
     Session(String),
+    Service(String),
     Group(String),
     /// A section's "N archived" disclosure row. Selectable like a group header
     /// so keyboard nav can land on it and left/right expand/collapse it.
@@ -625,6 +661,13 @@ impl Selection {
     pub fn group_id(&self) -> Option<&str> {
         if let Self::Group(id) = self {
             Some(id)
+        } else {
+            None
+        }
+    }
+    pub fn service_name(&self) -> Option<&str> {
+        if let Self::Service(name) = self {
+            Some(name)
         } else {
             None
         }
@@ -691,6 +734,7 @@ impl MainWindowTree {
             Self::Leaf { id, selection } => construct_protocol::LayoutNode::Leaf {
                 id: *id,
                 session_id: selection.session_id().map(str::to_string),
+                service_name: selection.service_name().map(str::to_string),
             },
             Self::Split {
                 direction,
@@ -714,12 +758,13 @@ impl MainWindowTree {
     /// its own empty state.
     pub fn from_shared(node: &construct_protocol::LayoutNode) -> Self {
         match node {
-            construct_protocol::LayoutNode::Leaf { id, session_id } => Self::Leaf {
+            construct_protocol::LayoutNode::Leaf { id, session_id, service_name } => Self::Leaf {
                 id: *id,
-                selection: session_id
-                    .as_ref()
-                    .map(|s| Selection::Session(s.clone()))
-                    .unwrap_or(Selection::None),
+                selection: match (session_id, service_name) {
+                    (Some(s), _) => Selection::Session(s.clone()),
+                    (None, Some(name)) => Selection::Service(name.clone()),
+                    (None, None) => Selection::None,
+                },
             },
             construct_protocol::LayoutNode::Split {
                 direction,
@@ -748,10 +793,11 @@ impl MainWindowTree {
     /// leaf id still exists locally; an incoming session always wins.
     pub fn merge_shared(&self, incoming: &construct_protocol::LayoutNode) -> Self {
         match incoming {
-            construct_protocol::LayoutNode::Leaf { id, session_id } => {
-                let selection = match session_id {
-                    Some(s) => Selection::Session(s.clone()),
-                    None => match self.find_selection(*id) {
+            construct_protocol::LayoutNode::Leaf { id, session_id, service_name } => {
+                let selection = match (session_id, service_name) {
+                    (Some(s), _) => Selection::Session(s.clone()),
+                    (None, Some(name)) => Selection::Service(name.clone()),
+                    (None, None) => match self.find_selection(*id) {
                         // Only a non-session selection is worth preserving:
                         // an empty pane that used to show a session means the
                         // session was cleared, and that must be honored.
@@ -846,6 +892,19 @@ impl MainWindowTree {
         }
     }
 
+    fn find_window_with_service_except(&self, target_name: &str, except_id: u64) -> Option<u64> {
+        match self {
+            Self::Leaf {
+                id,
+                selection: Selection::Service(name),
+            } if *id != except_id && name == target_name => Some(*id),
+            Self::Leaf { .. } => None,
+            Self::Split { first, second, .. } => first
+                .find_window_with_service_except(target_name, except_id)
+                .or_else(|| second.find_window_with_service_except(target_name, except_id)),
+        }
+    }
+
     fn replace_session_selection(&mut self, target_id: &str, replacement: &Selection) {
         match self {
             Self::Leaf { selection, .. } => {
@@ -856,6 +915,24 @@ impl MainWindowTree {
             Self::Split { first, second, .. } => {
                 first.replace_session_selection(target_id, replacement);
                 second.replace_session_selection(target_id, replacement);
+            }
+        }
+    }
+
+    fn clear_service(&mut self, service_name: &str) -> bool {
+        match self {
+            Self::Leaf { selection, .. } => {
+                if selection.service_name() == Some(service_name) {
+                    *selection = Selection::None;
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::Split { first, second, .. } => {
+                let a = first.clear_service(service_name);
+                let b = second.clear_service(service_name);
+                a || b
             }
         }
     }
@@ -1144,6 +1221,9 @@ pub enum MinibufferIntent {
         group_id: String,
     },
     CommandPalette,
+    ServiceDeleteConfirm {
+        name: String,
+    },
     /// Persistent orchestrator session input. Unlike other intents
     /// this one stays open across Enter — the panel re-opens with an
     /// empty input after each submission. Slash-prefixed input is
@@ -1408,6 +1488,42 @@ pub enum SessionTitleMenuAction {
     Delete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceTitleMenuAction {
+    Edit,
+    RotateToken,
+    PauseResume,
+    SplitHorizontal,
+    SplitVertical,
+    CloseSplit,
+    Delete,
+}
+
+impl ServiceTitleMenuAction {
+    pub const ALL: [Self; 7] = [
+        Self::Edit,
+        Self::RotateToken,
+        Self::PauseResume,
+        Self::SplitHorizontal,
+        Self::SplitVertical,
+        Self::CloseSplit,
+        Self::Delete,
+    ];
+
+    pub fn label(self, paused: bool) -> &'static str {
+        match self {
+            Self::Edit => "edit service",
+            Self::RotateToken => "rotate HTTP token",
+            Self::PauseResume if paused => "resume service",
+            Self::PauseResume => "pause service",
+            Self::SplitHorizontal => "split horizontal",
+            Self::SplitVertical => "split vertical",
+            Self::CloseSplit => "close split",
+            Self::Delete => "delete service",
+        }
+    }
+}
+
 impl SessionTitleMenuAction {
     pub const ALL: [Self; 9] = [
         Self::Rename,
@@ -1444,6 +1560,43 @@ pub struct SessionTitleMenu {
     /// visible on parents so the menu teaches the workflow without allowing a
     /// dead-end click.
     pub merge_enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceTitleMenu {
+    pub name: String,
+    pub area: ratatui::layout::Rect,
+}
+
+impl ServiceTitleMenu {
+    pub fn item_at(&self, col: u16, row: u16) -> Option<ServiceTitleMenuAction> {
+        if col <= self.area.x
+            || col
+                >= self
+                    .area
+                    .x
+                    .saturating_add(self.area.width)
+                    .saturating_sub(1)
+            || row <= self.area.y
+            || row
+                >= self
+                    .area
+                    .y
+                    .saturating_add(self.area.height)
+                    .saturating_sub(1)
+        {
+            return None;
+        }
+        let idx = row.saturating_sub(self.area.y).saturating_sub(1) as usize;
+        ServiceTitleMenuAction::ALL.get(idx).copied()
+    }
+
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        col >= self.area.x
+            && col < self.area.x.saturating_add(self.area.width)
+            && row >= self.area.y
+            && row < self.area.y.saturating_add(self.area.height)
+    }
 }
 
 /// In-progress inline rename of a session's title, edited directly in its
@@ -1539,6 +1692,11 @@ pub struct App {
     last_reported_view: Option<(String, construct_protocol::ClientView)>,
     pub sessions: Vec<SessionSummary>,
     pub groups: Vec<GroupSummary>,
+    pub services: Vec<ServiceSummary>,
+    /// Daemon-wide channel catalog. Service views use this list to make
+    /// attachment ownership visible and to keep attach/detach a selection
+    /// operation rather than a per-service create/delete operation.
+    pub service_channel_catalog: Vec<ServiceChannelSummary>,
     pub selection: Selection,
     pub focus: PaneFocus,
     pub main_windows: MainWindowTree,
@@ -1595,6 +1753,10 @@ pub struct App {
     /// `features/state` notification. Drives the configure dialog's
     /// Features tab and the modeline degradation notice.
     pub features: Vec<construct_protocol::FeatureInfo>,
+    /// Route/model catalog used by service-definition model pickers. This is
+    /// the same catalog the pin-router picker receives, but service editing
+    /// stores only the selected model override.
+    pub service_route_catalog: Vec<construct_protocol::RouteOption>,
     /// Whether the daemon has actually skipped ambient work (auto-title,
     /// suggestions) for lack of a smith credential this run — the gate for
     /// showing the modeline degradation notice at all.
@@ -1859,6 +2021,8 @@ pub struct App {
     pub layout: LayoutSnapshot,
     /// Session-view title hamburger dropdown.
     pub session_title_menu: Option<SessionTitleMenu>,
+    /// Service-view title actions dropdown.
+    pub service_title_menu: Option<ServiceTitleMenu>,
     /// Open fleet-tally panel listing the rows one tally counted (spec 0169).
     pub fleet_panel: Option<FleetTallyPanel>,
     /// A session or group the list should scroll into view on the next
@@ -2028,6 +2192,8 @@ pub struct App {
     /// the command palette, or automatically on first run / when no agent
     /// harness is available. Captures all input while open.
     pub configure_popup: Option<ConfigurePopup>,
+    /// Inline create/edit state for the first-class service view.
+    pub service_dialog: Option<ServiceDialog>,
     /// Reusable session-picker dialog (spec 0063): `None` = closed. Opened by
     /// `C-x b` (switch the active window's session) and by the playbook view's
     /// `@`→session path (insert a session clip). Captures all input while open.
@@ -3767,6 +3933,21 @@ impl LineageBoxHit {
     }
 }
 
+/// A routed session row rendered inside a service view. The whole row is a
+/// navigation target so the operator can jump from service configuration to
+/// the live conversation without first finding it in the global session list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceSessionHit {
+    pub session_id: String,
+    pub area: ratatui::layout::Rect,
+}
+
+impl ServiceSessionHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        App::rect_contains(self.area, col, row)
+    }
+}
+
 /// Last-frame geometry for hit-testing mouse clicks.
 #[derive(Debug, Clone, Default)]
 pub struct LayoutSnapshot {
@@ -3909,6 +4090,8 @@ pub struct LayoutSnapshot {
     /// screen coordinates — hover brightens a box's border, click jumps to
     /// that session. Rebuilt every frame the section renders.
     pub lineage_box_hits: Vec<LineageBoxHit>,
+    /// Clickable routed-session rows inside the focused service view.
+    pub service_session_hits: Vec<ServiceSessionHit>,
     /// The "▸/▾ N subagents" group-toggle rows — click toggles that
     /// parent's group between collapsed and expanded.
     pub lineage_subagent_toggle_hits: Vec<LineageBoxHit>,
@@ -4229,6 +4412,7 @@ impl LayoutSnapshot {
             lineage_vscrollbar,
             lineage_hscrollbar,
             lineage_box_hits,
+            service_session_hits,
             lineage_subagent_toggle_hits,
             playbook_title_run_hit,
             playbook_title_toggle_hit,
@@ -4324,7 +4508,6 @@ impl LayoutSnapshot {
         shift.opt_rect(dynamic_ui_dropdown_area);
         shift.opt_rect(playbook_resize_hit);
         shift.opt_rect(playbook_pinned_card_rect);
-
         // The list's row map is indexed by offset from the items area's top
         // row, so rows clipped off the top have to leave the map too.
         if let Some(items) = list_items_area.as_mut() {
@@ -4374,6 +4557,7 @@ impl LayoutSnapshot {
         shift.retain_rows(playbook_action_link_hits, |hit| &mut hit.row);
         shift.retain_rows(dynamic_ui_triggers, |hit| &mut hit.2);
         shift.retain_rects(lineage_box_hits, |hit| &mut hit.area);
+        shift.retain_rects(service_session_hits, |hit| &mut hit.area);
         shift.retain_rects(lineage_subagent_toggle_hits, |hit| &mut hit.area);
 
         *dynamic_ui_inline_hit = dynamic_ui_inline_hit.take().and_then(|mut hit| {
@@ -4878,7 +5062,19 @@ async fn run_with_socket_initial_selection(
     // Initial fetches.
     let sessions = client.list().await.unwrap_or_default();
     let groups = client.list_projects().await.unwrap_or_default();
+    let mut services = client.list_services().await.unwrap_or_default();
+    services.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut service_channel_catalog = client
+        .list_service_channel_catalog()
+        .await
+        .unwrap_or_default();
+    service_channel_catalog.sort_by(|a, b| a.id.cmp(&b.id));
     let harnesses = client.harnesses().await.unwrap_or_default();
+    let service_route_catalog = client
+        .list_routes(None)
+        .await
+        .map(|result| result.routes)
+        .unwrap_or_default();
     let features_status = client.features_status().await.ok();
     let plugin_actions = client.plugin_actions().await.unwrap_or_default();
     let playbook_templates = client
@@ -4964,7 +5160,7 @@ async fn run_with_socket_initial_selection(
         _ => match persisted.main_windows.clone() {
             Some(tree) => {
                 seed_shared_layout = true;
-                prune_window_tree(tree, &sessions, &groups, &initial_sel)
+                prune_window_tree(tree, &sessions, &groups, &services, &initial_sel)
             }
             None => MainWindowTree::single(1, initial_sel.clone()),
         },
@@ -5031,6 +5227,8 @@ async fn run_with_socket_initial_selection(
         last_reported_view: None,
         sessions,
         groups,
+        services,
+        service_channel_catalog,
         selection: initial_window_sel,
         // Default focus is the view — the selected session is usually
         // what the user wants to interact with first. List navigation
@@ -5060,6 +5258,7 @@ async fn run_with_socket_initial_selection(
             .as_ref()
             .map(|s| s.features.clone())
             .unwrap_or_default(),
+        service_route_catalog,
         features_degradation_observed: features_status
             .as_ref()
             .is_some_and(|s| s.degradation_observed),
@@ -5119,6 +5318,7 @@ async fn run_with_socket_initial_selection(
         lineage_follow_selection: false,
         lineage_subagents_expanded: HashSet::new(),
         configure_popup: None,
+        service_dialog: None,
         session_picker: None,
         playbook_popup: None,
         playbook_popups: HashMap::new(),
@@ -5157,6 +5357,7 @@ async fn run_with_socket_initial_selection(
         start_instant: now,
         layout: LayoutSnapshot::default(),
         session_title_menu: None,
+        service_title_menu: None,
         fleet_panel: None,
         list_scroll_target: None,
         route_menu: None,
@@ -6504,6 +6705,10 @@ impl App {
             return;
         }
 
+        if self.insert_service_dialog_text(&text) {
+            return;
+        }
+
         if self.playbook_search_active() {
             self.append_playbook_search_query_text(&text);
             return;
@@ -6991,6 +7196,24 @@ impl App {
         self.select_session_inner(id, true, true);
     }
 
+    /// Select a service as the active split-pane view. Services share the
+    /// session pane lifecycle (including split/focus/layout synchronization)
+    /// but deliberately do not participate in session transcript or PTY
+    /// state.
+    pub fn select_service(&mut self, name: String) {
+        self.reset_vim_mode();
+        if self.selection.service_name() != Some(name.as_str()) {
+            self.start_session_transition();
+        }
+        self.selection = Selection::Service(name);
+        self.focus = PaneFocus::View;
+        self.lineage_focused = false;
+        self.transcript.clear();
+        self.transcript_session = None;
+        self.set_scrollback_for_window(Some(self.active_window_id), 0);
+        self.sync_active_window_selection();
+    }
+
     /// Select a session immediately after creation. The create RPC can finish
     /// before the daemon's state notification reaches this client, so the
     /// session summary (and its `has_pty` flag) may not be available yet.
@@ -7008,6 +7231,9 @@ impl App {
 
     fn select_session_inner(&mut self, id: String, transition: bool, sync_window: bool) {
         self.reset_vim_mode();
+        if self.selection.service_name().is_some() {
+            self.service_dialog = None;
+        }
         let previous_id = self.selection.session_id().map(str::to_owned);
         if transition && self.selection.session_id() != Some(id.as_str()) {
             self.start_session_transition();
@@ -7217,6 +7443,9 @@ impl App {
 
     pub fn select_group(&mut self, id: String) {
         self.reset_vim_mode();
+        if self.selection.service_name().is_some() {
+            self.service_dialog = None;
+        }
         if self.selection.group_id() != Some(id.as_str()) {
             self.start_session_transition();
         }
@@ -7346,6 +7575,19 @@ impl App {
                     || s.forked_from.as_ref().map(|f| f.session_id.as_str()) == Some(id)
             })
             .then(|| id.to_string())
+    }
+
+    fn selected_service_children_key(&self) -> Option<String> {
+        let name = self.selection.service_name()?;
+        self.sessions
+            .iter()
+            .any(|session| {
+                is_user_list_session(session)
+                    && !session.archived
+                    && session.forked_from.is_none()
+                    && service_session_matches(session, name)
+            })
+            .then(|| service_children_key(name))
     }
 
     pub fn selected_id(&self) -> Option<String> {
@@ -7635,6 +7877,13 @@ impl App {
     pub fn list_items(&self) -> Vec<ListItem> {
         let mut out: Vec<ListItem> = Vec::new();
 
+        // Services are ordinary top-level list rows rather than a separate
+        // sidebar section. Keep their order stable even if a notification
+        // arrives with an unsorted service vector. Their routed sessions are
+        // inserted below each row after the session-tree indexes exist.
+        let mut services = self.services.clone();
+        services.sort_by(|a, b| a.name.cmp(&b.name));
+
         let orch_id = self.orchestrator_id.as_deref();
         let mut subagents_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
         for s in self.sessions.iter().filter(|s| is_subagent_session(s)) {
@@ -7848,6 +8097,39 @@ impl App {
             );
         };
 
+        for service in &services {
+            let mut routed: Vec<&SessionSummary> = self
+                .sessions
+                .iter()
+                .filter(|session| {
+                    is_user_list_session(session)
+                        && !session.archived
+                        && session.forked_from.is_none()
+                        && service_session_matches(session, &service.name)
+                })
+                .collect();
+            routed.sort_by(|a, b| {
+                a.position
+                    .cmp(&b.position)
+                    .then_with(|| b.created_at.cmp(&a.created_at))
+            });
+            let session_count = routed.len();
+            let sessions_expanded = session_count > 0
+                && !self
+                    .children_collapsed
+                    .contains(&service_children_key(&service.name));
+            out.push(ListItem::Service {
+                summary: service.clone(),
+                session_count,
+                sessions_expanded,
+            });
+            if sessions_expanded {
+                for session in routed {
+                    push_session(&mut out, session, true);
+                }
+            }
+        }
+
         let mut ungrouped: Vec<&SessionSummary> = self
             .sessions
             .iter()
@@ -7858,6 +8140,7 @@ impl App {
             .filter(|s| Some(s.id.as_str()) != orch_id)
             .filter(|s| is_user_list_session(s))
             .filter(|s| s.forked_from.is_none())
+            .filter(|s| !services.iter().any(|service| service_session_matches(s, &service.name)))
             .collect();
         ungrouped.sort_by(|a, b| {
             a.position
@@ -7895,6 +8178,7 @@ impl App {
                 .filter(|s| s.group_id.as_deref() == Some(g.id.as_str()))
                 .filter(|s| is_user_list_session(s))
                 .filter(|s| s.forked_from.is_none())
+                .filter(|s| !services.iter().any(|service| service_session_matches(s, &service.name)))
                 .collect();
             members.sort_by_key(|s| s.position);
             let (active, archived): (Vec<&SessionSummary>, Vec<&SessionSummary>) =
@@ -8003,6 +8287,7 @@ impl App {
                 .and_then(|s| s.group_id.clone())
                 .map(ArchiveSection::Group)
                 .unwrap_or(ArchiveSection::Ungrouped),
+            Selection::Service(_) => ArchiveSection::Ungrouped,
             Selection::None => ArchiveSection::Ungrouped,
         };
         self.toggle_archive_section(&section);
@@ -8281,6 +8566,7 @@ impl App {
             Selection::None => {
                 self.set_status("nothing selected".into());
             }
+            Selection::Service(_) => {}
             // The "N archived" disclosure row isn't a pin target.
             Selection::ArchivedRow(_) => {}
         }
@@ -8319,6 +8605,7 @@ impl App {
                     self.set_status(format!("move failed: {e}"));
                 }
             }
+            Selection::Service(_) => {}
             Selection::None => self.set_status("nothing selected".into()),
             // The "N archived" disclosure row isn't reorderable.
             Selection::ArchivedRow(_) => {}
@@ -8367,6 +8654,17 @@ impl App {
                 if let Some(other_id) = self
                     .main_windows
                     .find_window_with_session_except(next_session_id, active_id)
+                {
+                    self.main_windows.set_selection(other_id, previous.clone());
+                    self.set_scrollback_for_window(Some(other_id), 0);
+                }
+            }
+        }
+        if let (Some(previous), Selection::Service(next_service_name)) = (&previous, &replacement) {
+            if previous.service_name() != Some(next_service_name.as_str()) {
+                if let Some(other_id) = self
+                    .main_windows
+                    .find_window_with_service_except(next_service_name, active_id)
                 {
                     self.main_windows.set_selection(other_id, previous.clone());
                     self.set_scrollback_for_window(Some(other_id), 0);
@@ -8837,6 +9135,7 @@ impl App {
             }
         }
         match &items[next] {
+            ListItem::Service { summary, .. } => self.select_service(summary.name.clone()),
             ListItem::Session { summary, .. } => self.select_session(summary.id.clone()),
             ListItem::GroupHeader { group, .. } => self.select_group(group.id.clone()),
             ListItem::ArchivedRow { section, .. } => self.select_archive_row(section.clone()),
@@ -8856,10 +9155,12 @@ impl App {
     }
 
     fn is_primary_list_target(item: &ListItem) -> bool {
-        matches!(
-            item,
-            ListItem::Session { summary, .. } if !summary.archived
-        ) || matches!(item, ListItem::GroupHeader { .. })
+        match item {
+            ListItem::Service { .. } => true,
+            ListItem::Session { summary, .. } => !summary.archived,
+            ListItem::GroupHeader { .. } => true,
+            ListItem::ArchivedRow { .. } => false,
+        }
     }
 
     /// After any list mutation, make sure `self.selection` still refers to
@@ -8938,6 +9239,11 @@ impl App {
                 return;
             }
         }
+        if let Selection::Service(name) = &self.selection {
+            if self.services.iter().any(|service| service.name == *name) {
+                return;
+            }
+        }
         let items = self.list_items();
         if items.iter().any(|it| it.matches(&self.selection)) {
             return;
@@ -8947,6 +9253,7 @@ impl App {
         self.selection = items
             .iter()
             .find_map(|it| match it {
+                ListItem::Service { summary, .. } => Some(Selection::Service(summary.name.clone())),
                 ListItem::Session { summary, .. } => Some(Selection::Session(summary.id.clone())),
                 ListItem::GroupHeader { group, .. } => Some(Selection::Group(group.id.clone())),
                 ListItem::ArchivedRow { .. } => None,
@@ -10591,8 +10898,8 @@ impl App {
                 }
                 // Lineage section header: like the operator panel's title
                 // bar, dragging it adjusts the section height (the section
-                // is bottom-anchored above the operator, so dragging the
-                // header up grows it). The header's own buttons (collapse,
+                // is bottom-anchored above the operator panel, so dragging
+                // the header up grows it). The header's own buttons (collapse,
                 // mode toggle) are excluded so their clicks stay clicks.
                 if self.is_on_lineage_header_bar(ev.column, ev.row) {
                     let cur_h = self.layout.lineage_area.map(|a| a.height).unwrap_or(1);
@@ -10834,6 +11141,16 @@ impl App {
         fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
             c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
         }
+        if let Some(menu) = self.service_title_menu.clone() {
+            if let Some(action) = menu.item_at(col, row) {
+                self.run_service_title_menu_action(menu.name, action).await;
+                return;
+            }
+            if menu.contains(col, row) {
+                return;
+            }
+            self.service_title_menu = None;
+        }
         // The fleet-tally panel is sized to its content and overhangs the
         // sidebar into the view pane, so it has to claim its own cells
         // before any pane branch below sees them.
@@ -10962,6 +11279,17 @@ impl App {
                 self.dismiss_modal();
                 return;
             } else {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    // The dialog's eight editable rows start immediately
+                    // inside the one-cell border. Clicking a row selects it;
+                    // keyboard typing/cycling then edits that field.
+                    let field = row.saturating_sub(modal.y.saturating_add(1)) as usize;
+                    if field < 8 {
+                        dialog.selected_field = field;
+                        dialog.confirm_delete = false;
+                    }
+                    return;
+                }
                 // The /remote-control dialog is the one informational modal
                 // with live controls: dispatch a click that lands on one of
                 // its registered buttons / key hints before the swallow below.
@@ -11138,6 +11466,45 @@ impl App {
                     }
                     return;
                 }
+                if row == close_y && col >= close_x_start && col < close_x_end {
+                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                        self.open_service_title_menu(name, view);
+                        return;
+                    }
+                }
+                if let Some(hit) = self
+                    .layout
+                    .service_session_hits
+                    .iter()
+                    .find(|hit| hit.contains(col, row))
+                    .cloned()
+                {
+                    self.select_session(hit.session_id);
+                    return;
+                }
+                if self.service_dialog.is_none() {
+                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                        self.open_edit_service_view(&name);
+                        return;
+                    }
+                }
+                if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                    if self.service_dialog.is_some() {
+                        let channel_start = view.y.saturating_add(15);
+                        if row >= channel_start {
+                            let index = row.saturating_sub(channel_start) as usize;
+                            let channel_count = self
+                                .services
+                                .iter()
+                                .find(|service| service.name == name)
+                                .map(|service| service.channels.len())
+                                .unwrap_or(0);
+                            if index < channel_count && self.open_edit_service_channel(index) {
+                                return;
+                            }
+                        }
+                    }
+                }
                 if self.handle_dynamic_ui_overlay_click(col, row).await {
                     return;
                 }
@@ -11170,6 +11537,12 @@ impl App {
     }
 
     fn dismiss_modal(&mut self) {
+        if self.service_dialog.take().is_some() {
+            return;
+        }
+        if self.configure_popup.take().is_some() {
+            return;
+        }
         if self.playbook_popup.is_some() {
             // Remember caret + scroll so reopening restores them, matching the
             // toggle-close path.
@@ -11370,6 +11743,7 @@ impl App {
     /// disclosure rows, every compact-mode row) takes one.
     pub(crate) fn list_item_display_height(&self, item: &ListItem) -> usize {
         match item {
+            ListItem::Service { .. } => 1,
             ListItem::Session { .. } if self.list_mode == SessionListViewMode::Full => 2,
             _ => 1,
         }
@@ -11714,6 +12088,11 @@ impl App {
             self.handle_session_picker_key(key);
             return;
         }
+        // The service view's inline editor owns text/navigation until saved
+        // or dismissed. C-x remains escapable so global chords keep working.
+        if self.service_dialog.is_some() && self.handle_service_dialog_key(key).await {
+            return;
+        }
         // The `/configure` dialog (spec 0069) owns the keys it uses for its
         // own navigation. Anything else closes it and falls through to
         // ordinary routing below — same keystroke, re-dispatched exactly
@@ -11803,6 +12182,54 @@ impl App {
             self.handle_minibuffer_key(key).await;
             return;
         }
+        // Service-view commands are a normal pane-level fast path, but they
+        // must run only after every transient keyboard surface above has had
+        // first claim. Otherwise a service's default `return` path consumes
+        // keys from an already-open remote-control dialog or minibuffer.
+        if self.focus == PaneFocus::View
+            && self.selection.service_name().is_some()
+            && self.service_dialog.is_none()
+        {
+            match key.code {
+                KeyCode::Char('e') | KeyCode::Enter => {
+                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                        self.open_edit_service_view(&name);
+                    }
+                    return;
+                }
+                KeyCode::Char('a') => {
+                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                        if self.open_edit_service_view(&name) {
+                            self.open_new_service_channel();
+                        }
+                    }
+                    return;
+                }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                        self.open_edit_service_view(&name);
+                        if let Some(dialog) = self.service_dialog.as_mut() {
+                            dialog.confirm_delete = true;
+                            dialog.note = Some(
+                                "Delete this service? Enter/y confirms; Esc/n cancels."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            let is_ctrl_x = matches!(key.code, KeyCode::Char('x'))
+                && key.modifiers.contains(KeyModifiers::CONTROL);
+            // Once C-x has started a chord, let its continuation reach the
+            // global keymap. Without this guard the service-view fast path
+            // returns on the second key, so bindings such as C-x . appear to
+            // do nothing while a service is focused.
+            if !is_ctrl_x && self.chord_state.is_empty() {
+                return;
+            }
+        }
         if self.handle_inline_dynamic_ui_key(key).await {
             return;
         }
@@ -11849,20 +12276,17 @@ impl App {
                 }
             }
             // Bare `Tab`, with the list pane focused, moves keyboard focus
-            // from the session rows into the sidebar's lineage section (the
-            // reverse direction — section back to sessions — is the `Tab`
-            // arm in `handle_lineage_focus_key`, which runs before this).
-            // Inert when the selected session has no lineage section, so Tab
-            // keeps meaning nothing in a bare list. View-focused panes never
-            // reach here with a bare Tab (PTY capture forwards it), keeping
-            // terminal Tab-completion untouched.
+            // through the sidebar's sections: rows → lineage → rows.
+            // View-focused panes never reach here with a bare
+            // Tab (PTY capture forwards it), keeping terminal completion.
             if key.modifiers.is_empty()
                 && matches!(key.code, KeyCode::Tab)
                 && self.focus == PaneFocus::List
-                && self.activate_lineage_focus()
             {
-                self.chord_label.clear();
-                return;
+                if self.activate_lineage_focus() {
+                    self.chord_label.clear();
+                    return;
+                }
             }
             // `Shift+Arrow` moves focus to the spatially adjacent split window.
             // Scoped to an unzoomed, view-focused split layout so it only
@@ -12195,6 +12619,7 @@ impl App {
                         error: None,
                     });
                 }
+                Selection::Service(_) => self.set_status("edit the service view directly".into()),
                 Selection::None => self.set_status("nothing selected".into()),
                 // The "N archived" disclosure row has no name to rename.
                 Selection::ArchivedRow(_) => {}
@@ -12236,6 +12661,7 @@ impl App {
                         error: None,
                     });
                 }
+                Selection::Service(_) => self.set_status("delete the service from its view (C-d)".into()),
                 Selection::None => {}
                 // The "N archived" disclosure row cascade-deletes every
                 // archived session it stands in for (each with the subagent
@@ -12309,7 +12735,16 @@ impl App {
             TogglePlaybookTerminalFocus => {
                 self.toggle_playbook_terminal_focus();
             }
-            OpenSuggestions => self.toggle_suggest_deck().await,
+            OpenSuggestions => {
+                if self.selection.service_name().is_some() {
+                    self.set_status(
+                        "prompt suggestions are available in session views, not service views"
+                            .to_string(),
+                    );
+                } else {
+                    self.toggle_suggest_deck().await;
+                }
+            }
             OpenDiff => {
                 if let Some(id) = self.selected_id() {
                     match self.client.diff(&id).await {
@@ -12526,6 +12961,8 @@ impl App {
                     if let Err(e) = self.client.set_project_collapsed(&id, false).await {
                         self.set_status(format!("expand failed: {e}"));
                     }
+                } else if let Some(key) = self.selected_service_children_key() {
+                    self.children_collapsed.remove(&key);
                 } else if self.focus == PaneFocus::List {
                     if let Some(id) = self.selected_session_has_children() {
                         self.children_collapsed.remove(&id);
@@ -12540,6 +12977,8 @@ impl App {
                     if let Err(e) = self.client.set_project_collapsed(&id, true).await {
                         self.set_status(format!("collapse failed: {e}"));
                     }
+                } else if let Some(key) = self.selected_service_children_key() {
+                    self.children_collapsed.insert(key);
                 } else if self.focus == PaneFocus::List {
                     if let Some(id) = self.selected_session_has_children() {
                         self.children_collapsed.insert(id);
@@ -13283,6 +13722,110 @@ impl App {
             }
             "tasks" => {
                 self.open_tasks_popup().await;
+            }
+            "serve" => {
+                let suggested = arg
+                    .split_whitespace()
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("service")
+                    .to_string();
+                self.open_new_service_view(suggested);
+            }
+            "services" => {
+                self.refresh_services().await;
+                if self.services.is_empty() {
+                    self.set_status("services: none — run /serve to create one".to_string())
+                } else {
+                    self.set_status(format!(
+                        "services: {}",
+                        self.services
+                        .iter()
+                        .map(|service| format!(
+                            "{}{}",
+                            service.name,
+                            if service.paused { " (paused)" } else { "" }
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                    ));
+                }
+            }
+            "service" => {
+                let mut words = arg.split_whitespace();
+                let action = words.next().unwrap_or("");
+                let name = words.next().unwrap_or("");
+                self.refresh_services().await;
+                let found = self
+                    .services
+                    .iter()
+                    .find(|service| service.name == name)
+                    .cloned();
+                match (action, found) {
+                    ("edit", Some(service)) => {
+                        self.open_edit_service_view(&service.name);
+                    }
+                    ("pause" | "resume", Some(mut service)) => {
+                        service.paused = action == "pause";
+                        match self
+                            .client
+                            .put_service(construct_protocol::ServicePutParams {
+                                service,
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                self.refresh_services().await;
+                                self.set_status(format!(
+                                    "{} saved; restart daemon to apply",
+                                    result.service.name
+                                ));
+                            }
+                            Err(error) => self.set_status(format!("service update failed: {error}")),
+                        }
+                    }
+                    ("rotate-token", Some(service)) => {
+                        let channel_id = service
+                            .channels
+                            .iter()
+                            .find(|channel| channel.kind == "http")
+                            .map(|channel| channel.id.clone());
+                        let Some(channel_id) = channel_id else {
+                            self.set_status(format!("service {} has no HTTP channel", service.name));
+                            return;
+                        };
+                        match self
+                            .client
+                            .rotate_service_channel_secret(&service.name, &channel_id)
+                            .await
+                        {
+                        Ok(result) => {
+                            self.refresh_services().await;
+                            self.set_status(format!(
+                                "new credential for {} / {}: {} (shown once; restart to apply)",
+                                service.name,
+                                result.channel.id,
+                                result.new_secret.unwrap_or_default()
+                            ));
+                        }
+                        Err(error) => self.set_status(format!("credential rotation failed: {error}")),
+                        }
+                    }
+                    ("delete", Some(service)) => {
+                        self.minibuffer = Some(Minibuffer {
+                            prompt: format!("Delete service {}? [y/N] ", service.name),
+                            input: String::new(),
+                            cursor: 0,
+                            intent: MinibufferIntent::ServiceDeleteConfirm {
+                                name: service.name,
+                            },
+                            error: None,
+                        });
+                    }
+                    _ => self.set_status(
+                        "service: use edit|pause|resume|rotate-token|delete <name>".to_string(),
+                    ),
+                }
             }
             "remote-control" | "remote-connect" | "remote" => {
                 // Subcommand dispatch. `stop`, `debug`, and provider names
@@ -15580,6 +16123,7 @@ mod tests {
             lineage_vscrollbar: None,
             lineage_hscrollbar: None,
             lineage_box_hits: Vec::new(),
+            service_session_hits: Vec::new(),
             lineage_subagent_toggle_hits: Vec::new(),
             lineage_segment_tooltip: None,
             playbook_title_run_hit: None,
@@ -15648,6 +16192,13 @@ mod tests {
     }
 
     #[test]
+    fn shared_round_trip_preserves_service_panes() {
+        let tree = MainWindowTree::single(1, Selection::Service("assistant".into()));
+        let back = MainWindowTree::from_shared(&tree.to_shared());
+        assert_eq!(back, tree);
+    }
+
+    #[test]
     fn a_group_selection_projects_as_an_empty_pane() {
         // The wire has no notion of a group header, so it must not pretend to.
         let tree = MainWindowTree::single(1, Selection::Group("g1".into()));
@@ -15678,6 +16229,7 @@ mod tests {
         let incoming = construct_protocol::LayoutNode::Leaf {
             id: 1,
             session_id: None,
+            service_name: None,
         };
         assert_eq!(
             local.merge_shared(&incoming),
@@ -15694,10 +16246,12 @@ mod tests {
             first: Box::new(construct_protocol::LayoutNode::Leaf {
                 id: 1,
                 session_id: Some("a".into()),
+                service_name: None,
             }),
             second: Box::new(construct_protocol::LayoutNode::Leaf {
                 id: 2,
                 session_id: Some("b".into()),
+                service_name: None,
             }),
         };
         let merged = local.merge_shared(&incoming);
@@ -15713,6 +16267,8 @@ mod tests {
             last_reported_view: None,
             sessions,
             groups: Vec::new(),
+            services: Vec::new(),
+            service_channel_catalog: Vec::new(),
             selection: Selection::Session("s1".into()),
             focus: PaneFocus::View,
             main_windows: MainWindowTree::single(1, Selection::Session("s1".into())),
@@ -15738,6 +16294,7 @@ mod tests {
             minibuffer_hint_context: None,
             harnesses: Vec::new(),
             features: Vec::new(),
+            service_route_catalog: Vec::new(),
             features_degradation_observed: false,
             plugin_actions: Vec::new(),
             playbook_templates: Vec::new(),
@@ -15811,6 +16368,7 @@ mod tests {
             start_instant: now,
             layout: LayoutSnapshot::default(),
             session_title_menu: None,
+            service_title_menu: None,
             fleet_panel: None,
             list_scroll_target: None,
             route_menu: None,
@@ -15848,6 +16406,7 @@ mod tests {
             lineage_follow_selection: false,
             lineage_subagents_expanded: HashSet::new(),
             configure_popup: None,
+            service_dialog: None,
             session_picker: None,
             playbook_popup: None,
             playbook_popups: HashMap::new(),
@@ -29859,7 +30418,7 @@ mod tests {
             }),
         };
 
-        let restored = prune_window_tree(tree, &[s2], &[], &Selection::Session("s2".into()));
+        let restored = prune_window_tree(tree, &[s2], &[], &[], &Selection::Session("s2".into()));
 
         match restored {
             MainWindowTree::Split {
@@ -39782,6 +40341,821 @@ mod tests {
             app.layout.lineage_area.is_some(),
             "a session with a message gets a lineage section even before it forks"
         );
+        server.abort();
+    }
+
+    fn service_summary_for_test(name: &str) -> construct_protocol::ServiceSummary {
+        construct_protocol::ServiceSummary {
+            name: name.to_string(),
+            instruction: "Answer briefly.".to_string(),
+            harness: "smith".to_string(),
+            model: Some("test-model".to_string()),
+            cwd: "/tmp".to_string(),
+            routing: "session-key".to_string(),
+            paused: false,
+            channels: vec![construct_protocol::ServiceChannelSummary {
+                id: "http".to_string(),
+                kind: "http".to_string(),
+                enabled: true,
+                port: Some(8787),
+                has_credential: true,
+                attached_to: Some(name.to_string()),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn services_render_as_distinct_rows_in_the_session_list() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        app.services.push(service_summary_for_test("assistant"));
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        assert!(matches!(
+            app.list_items().first(),
+            Some(ListItem::Service { summary, .. }) if summary.name == "assistant"
+        ));
+        let rendered = term
+            .backend()
+            .buffer()
+            .content()
+            .chunks(term.backend().buffer().area.width as usize)
+            .flat_map(|row| row.iter().map(|cell| cell.symbol()))
+            .collect::<String>();
+        assert!(rendered.contains("◈"));
+        assert!(rendered.contains("assistant"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn bare_tab_follows_sidebar_visual_order() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.select_session("s1".to_string());
+        app.services.push(service_summary_for_test("assistant"));
+        app.focus = PaneFocus::List;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        assert!(app.lineage_focused);
+
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        assert!(!app.lineage_focused);
+        assert_eq!(app.focus, PaneFocus::List);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_list_row_opens_service_view_and_serve_starts_creation() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let row = app.layout.list_items_area.expect("session list");
+        app.click_list(app.layout.list_area.expect("list"), row.x + 1, row.y).await;
+        assert!(app.service_dialog.is_none());
+        assert_eq!(
+            app.selection,
+            Selection::Service("assistant".into())
+        );
+        assert_eq!(app.focus, PaneFocus::View);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+            .await;
+        assert!(matches!(
+            app.service_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(ServiceDialogMode::Edit)
+        ));
+        app.service_dialog = None;
+        app.open_new_service_view("service");
+        assert!(matches!(
+            app.service_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(ServiceDialogMode::Create)
+        ));
+        assert_eq!(app.selection, Selection::Service("service".into()));
+        assert_eq!(app.focus, PaneFocus::View);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_renders_definition_help_channels_and_sessions() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".to_string());
+        app.session_transitions.clear();
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let text = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("service: assistant"));
+        assert!(text.contains("☰"), "service view should expose title actions");
+        assert!(text.contains("Instruction"));
+        assert!(text.contains("Service name"));
+        assert!(text.contains("Channels"));
+        assert!(text.contains("Sessions"));
+        assert!(!text.contains("Activity"));
+        assert!(app.layout.modal_area.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_session_rows_show_channel_and_select_session_on_click() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = captured_app().await;
+        let mut routed = summary_with_kind(construct_protocol::SessionKind::User);
+        routed.id = "service-session".into();
+        routed.title = Some("service:assistant:http:demo-conversation".into());
+        routed.state = construct_protocol::SessionState::AwaitingInput;
+        app.sessions.push(routed);
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".into());
+        app.session_transitions.clear();
+
+        let backend = ratatui::backend::TestBackend::new(120, 60);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let text = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("channel: http"), "rendered service view:\n{text}");
+        assert!(text.contains("demo-conversation"));
+
+        let hit = app
+            .layout
+            .service_session_hits
+            .first()
+            .cloned()
+            .expect("routed service session row hit");
+        let event = |kind| MouseEvent {
+            kind,
+            column: hit.area.x + 1,
+            row: hit.area.y,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.on_mouse(event(MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(event(MouseEventKind::Up(MouseButton::Left)))
+            .await;
+        assert_eq!(app.selection, Selection::Session("service-session".into()));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_title_menu_opens_and_edits_service() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let view = app.layout.view_area.expect("service view");
+        let (button_x, _, button_y) = crate::ui::view_close_button_range(view);
+        let click = |kind| MouseEvent {
+            kind,
+            column: button_x + 1,
+            row: button_y,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.on_mouse(click(MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(click(MouseEventKind::Up(MouseButton::Left)))
+            .await;
+        let menu = app
+            .service_title_menu
+            .clone()
+            .expect("service actions menu should open");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw menu");
+        let menu_text = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(menu_text.contains("rotate HTTP token"));
+        assert!(menu_text.contains("pause service"));
+        let edit_index = ServiceTitleMenuAction::ALL
+            .iter()
+            .position(|action| *action == ServiceTitleMenuAction::Edit)
+            .expect("edit action");
+        app.handle_left_click(menu.area.x + 2, menu.area.y + 1 + edit_index as u16)
+            .await;
+        assert!(matches!(
+            app.service_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(ServiceDialogMode::Edit)
+        ));
+        assert!(app.service_title_menu.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_yields_keys_to_open_transient_surfaces() {
+        use construct_protocol::{RemoteProviderInfo, TunnelProvider};
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".into());
+
+        app.remote_control_popup = Some(RemoteControlPopup::Choose(RemoteControlChoose {
+            base: remote_ok_fixture(false),
+            options: vec![
+                RemoteProviderInfo {
+                    provider: TunnelProvider::Cloudflare,
+                    available: true,
+                    detail: None,
+                },
+                RemoteProviderInfo {
+                    provider: TunnelProvider::Construct,
+                    available: true,
+                    detail: None,
+                },
+            ],
+            selected: 0,
+            active: None,
+        }));
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.remote_control_popup
+                .as_ref()
+                .and_then(|popup| match popup {
+                    RemoteControlPopup::Choose(choose) => Some(choose.selected),
+                    _ => None,
+                }),
+            Some(1),
+            "an open remote-control dialog must own keys over the service view"
+        );
+
+        app.remote_control_popup = None;
+        app.harnesses = vec![construct_protocol::HarnessInfo {
+            name: "shell".into(),
+            available: true,
+            detail: None,
+            binary: None,
+            description: None,
+            capabilities: Default::default(),
+        }];
+        app.run_action(KeyAction::OpenNewSession).await;
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.minibuffer.as_ref().map(|minibuffer| minibuffer.input.as_str()),
+            Some("s"),
+            "an open minibuffer must own keys over the service view"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn clicking_service_view_starts_editing() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let view = app.layout.view_area.expect("service view");
+        let click = |kind| MouseEvent {
+            kind,
+            column: view.x + 8,
+            row: view.y + 4,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.on_mouse(click(MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(click(MouseEventKind::Up(MouseButton::Left)))
+            .await;
+
+        assert!(matches!(
+            app.service_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(ServiceDialogMode::Edit)
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_editor_ctrl_n_and_ctrl_p_navigate_fields() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.open_edit_service_view("assistant");
+        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 1);
+
+        let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+        app.on_key(ctrl('n')).await;
+        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 2);
+        app.on_key(ctrl('p')).await;
+        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_editor_harness_and_model_use_pickers() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.harnesses = vec![
+            construct_protocol::HarnessInfo {
+                name: "smith".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("Built-in agent harness".to_string()),
+                capabilities: construct_protocol::Capabilities::default(),
+            },
+            construct_protocol::HarnessInfo {
+                name: "shell".to_string(),
+                available: true,
+                detail: Some("ready".to_string()),
+                binary: None,
+                description: Some("Generic shell runner".to_string()),
+                capabilities: construct_protocol::Capabilities {
+                    models: vec!["gpt-5".to_string()],
+                    ..Default::default()
+                },
+            },
+        ];
+        app.open_edit_service_view("assistant");
+
+        let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+        app.on_key(ctrl('n')).await;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().picker,
+            Some(ServiceDialogPickerKind::Harness)
+        );
+        app.session_transitions.clear();
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let picker_text = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(picker_text.contains("Choose harness"));
+        assert!(picker_text.contains("shell"));
+
+        app.on_key(ctrl('n')).await;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().service.harness,
+            "shell"
+        );
+
+        if let Some(dialog) = app.service_dialog.as_mut() {
+            dialog.selected_field = 3;
+            dialog.service.model = None;
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().picker,
+            Some(ServiceDialogPickerKind::Model)
+        );
+        app.on_key(ctrl('n')).await;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().service.model.as_deref(),
+            Some("gpt-5")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_editor_harness_and_model_ignore_typed_or_pasted_text() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.open_edit_service_view("assistant");
+
+        if let Some(dialog) = app.service_dialog.as_mut() {
+            dialog.selected_field = 2;
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().service.harness,
+            "smith",
+            "harness is changed only through its picker"
+        );
+
+        if let Some(dialog) = app.service_dialog.as_mut() {
+            dialog.selected_field = 3;
+            dialog.service.model = Some("gpt-5".to_string());
+        }
+        assert!(app.insert_service_dialog_text("-typed"));
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .service
+                .model
+                .as_deref(),
+            Some("gpt-5"),
+            "model is changed only through its picker"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_channel_editor_supports_multiple_http_channels() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.service_channel_catalog = app.services[0].channels.clone();
+        app.open_edit_service_view("assistant");
+        app.service_dialog.as_mut().unwrap().selected_field = 6;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        let editor = app
+            .service_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.channel_editor.as_ref())
+            .expect("channel editor opens from the Channels field");
+        assert_eq!(editor.mode, ServiceChannelDialogMode::Edit);
+        assert_eq!(editor.channel.id, "http");
+        assert_eq!(editor.channel.port, Some(8787));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .channel_editor
+                .as_ref()
+                .unwrap()
+                .selected_field,
+            3
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .channel_editor
+                .as_ref()
+                .unwrap()
+                .selected_field,
+            2
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert!(app
+            .service_dialog
+            .as_ref()
+            .unwrap()
+            .channel_editor
+            .is_none());
+
+        app.open_new_service_channel();
+        let editor = app
+            .service_dialog
+            .as_ref()
+            .unwrap()
+            .channel_editor
+            .as_ref()
+            .unwrap();
+        assert_eq!(editor.mode, ServiceChannelDialogMode::Create);
+        assert_eq!(editor.channel.id, "http-2");
+        assert_eq!(editor.channel.port, Some(8788));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_lists_available_and_owned_catalog_channels() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.service_channel_catalog = vec![
+            app.services[0].channels[0].clone(),
+            construct_protocol::ServiceChannelSummary {
+                id: "shared".to_string(),
+                kind: "http".to_string(),
+                enabled: true,
+                port: Some(8788),
+                has_credential: true,
+                attached_to: None,
+            },
+            construct_protocol::ServiceChannelSummary {
+                id: "busy".to_string(),
+                kind: "http".to_string(),
+                enabled: true,
+                port: Some(8789),
+                has_credential: true,
+                attached_to: Some("other-service".to_string()),
+            },
+        ];
+        app.select_service("assistant".to_string());
+        app.session_transitions.clear();
+        let backend = ratatui::backend::TestBackend::new(160, 50);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let text = rendered_text(term.backend().buffer());
+        assert!(text.contains("▣"), "attached catalog channel should be checked");
+        assert!(text.contains("▢"), "available catalog channels should be selectable");
+        assert!(text.contains("http"));
+        assert!(text.contains("shared"));
+        assert!(text.contains("busy"));
+        assert!(text.contains("attached to other-service"));
+        assert!(text.contains("Sessions"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_model_picker_uses_the_pin_router_catalog() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.services[0].model = None;
+        app.service_route_catalog = vec![
+            construct_protocol::RouteOption {
+                name: "openai".to_string(),
+                dialect: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                models: vec!["gpt-5".to_string(), "gpt-5-mini".to_string()],
+                efforts: Default::default(),
+                base_url: "https://api.openai.com".to_string(),
+                unavailable_reason: None,
+                login_command: None,
+            },
+            construct_protocol::RouteOption {
+                name: "anthropic".to_string(),
+                dialect: "anthropic".to_string(),
+                model: "claude-sonnet".to_string(),
+                models: vec!["claude-sonnet".to_string()],
+                efforts: Default::default(),
+                base_url: "https://api.anthropic.com".to_string(),
+                unavailable_reason: None,
+                login_command: None,
+            },
+        ];
+        app.open_edit_service_view("assistant");
+        app.service_dialog.as_mut().unwrap().selected_field = 3;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().picker,
+            Some(ServiceDialogPickerKind::Model)
+        );
+        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 3);
+
+        let dialog = app.service_dialog.as_ref().unwrap();
+        let options = dialog.picker_options(&app);
+        assert_eq!(options[0].label, "Default");
+        assert!(options.iter().any(|option| option.label == "openai / gpt-5"));
+        assert!(options
+            .iter()
+            .any(|option| option.label == "openai / gpt-5-mini"));
+        assert!(options
+            .iter()
+            .any(|option| option.label == "anthropic / claude-sonnet"));
+        assert!(!app.service_dialog.as_ref().unwrap().confirm_delete);
+
+        // The first move leaves Default and selects the same first model that
+        // the pin router would show under the openai target.
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().picker_selected,
+            1,
+            "C-n should advance the model picker"
+        );
+        let selected = app.service_dialog.as_ref().unwrap().clone();
+        assert_eq!(
+            selected.picker_options(&app)[selected.picker_selected].value,
+            "gpt-5"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .service
+                .model
+                .as_deref(),
+            Some("gpt-5")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_rows_group_and_toggle_routed_sessions() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        let mut routed = summary_with_kind(construct_protocol::SessionKind::User);
+        routed.id = "service-session".into();
+        routed.title = Some("service:assistant:demo".into());
+        routed.position = 0;
+        app.sessions.push(routed);
+        app.services.push(service_summary_for_test("assistant"));
+
+        let items = app.list_items();
+        assert!(matches!(
+            &items[0],
+            ListItem::Service {
+                summary,
+                session_count: 1,
+                sessions_expanded: true,
+            } if summary.name == "assistant"
+        ));
+        assert!(matches!(
+            &items[1],
+            ListItem::Session { summary, indented: true, .. }
+                if summary.id == "service-session"
+        ));
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    ListItem::Session { summary, .. } if summary.id == "service-session"
+                ))
+                .count(),
+            1,
+            "service sessions must not also appear in the ungrouped list"
+        );
+
+        app.selection = Selection::Service("assistant".into());
+        app.focus = PaneFocus::List;
+        app.run_action(KeyAction::CollapseGroup).await;
+        assert!(matches!(
+            &app.list_items()[0],
+            ListItem::Service {
+                session_count: 1,
+                sessions_expanded: false,
+                ..
+            }
+        ));
+        assert!(!app
+            .list_items()
+            .iter()
+            .any(|item| matches!(item, ListItem::Session { summary, .. } if summary.id == "service-session")));
+
+        app.run_action(KeyAction::ExpandGroup).await;
+        assert!(matches!(
+            &app.list_items()[0],
+            ListItem::Service {
+                session_count: 1,
+                sessions_expanded: true,
+                ..
+            }
+        ));
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let list = app.layout.list_area.expect("session list");
+        let rows = app.layout.list_items_area.expect("list rows");
+        app.click_list(list, list.x + 1, rows.y).await;
+        assert!(matches!(
+            &app.list_items()[0],
+            ListItem::Service {
+                sessions_expanded: false,
+                ..
+            }
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_cx_dot_explains_suggestions_are_session_only() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".to_string());
+
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+            .await;
+
+        assert_eq!(
+            app.status.as_ref().map(|(text, _)| text.as_str()),
+            Some("prompt suggestions are available in session views, not service views")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_is_padded_and_describes_the_focused_field() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.open_edit_service_view("assistant");
+        app.service_dialog.as_mut().unwrap().selected_field = 6;
+        app.session_transitions.clear();
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let view = app.layout.view_area.expect("service view");
+        let field_y = view.y + 2;
+        let buffer = term.backend().buffer();
+        for x in view.x + 1..view.x + 3 {
+            assert_eq!(
+                buffer.cell((x, field_y)).map(|cell| cell.symbol()),
+                Some(" "),
+                "service fields keep a padded inset inside the pane"
+            );
+        }
+        assert_eq!(
+            buffer.cell((view.x + 3, field_y)).map(|cell| cell.symbol()),
+            Some(" "),
+            "the selected field marker starts after the inset"
+        );
+        assert!(
+            (view.x + 3..view.right().saturating_sub(4)).any(|x| {
+                buffer
+                    .cell((x, field_y))
+                    .is_some_and(|cell| cell.symbol() == "│")
+            }),
+            "a divider separates fields from contextual help"
+        );
+        let view_text = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .skip(view.y as usize)
+            .take(view.height as usize)
+            .flat_map(|row| row.iter().map(|cell| cell.symbol()))
+            .collect::<String>();
+        assert!(view_text.contains("Channels"));
+        assert!(view_text.contains("catalog"));
+        let view_rows = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .skip(view.y as usize)
+            .take(view.height as usize)
+            .map(|row| {
+                row[view.x as usize + 1..view.right() as usize - 1]
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let note_row = view_rows
+            .iter()
+            .position(|row| row.contains("Changes apply after the daemon restarts."))
+            .expect("service restart note is visible");
+        assert!(
+            note_row > 0 && view_rows[note_row - 1].trim().is_empty(),
+            "restart note has a spacer above it"
+        );
+        let footer_row = view_rows
+            .iter()
+            .position(|row| row.contains("Enter/C-s save · Space attach"))
+            .expect("service editor footer is visible");
+        assert!(
+            footer_row > 0 && view_rows[footer_row - 1].trim().is_empty(),
+            "service editor footer has a spacer above it"
+        );
+
+        app.service_dialog.as_mut().unwrap().selected_field = 5;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let view_text = term
+            .backend()
+            .buffer()
+            .content()
+            .chunks(term.backend().buffer().area.width as usize)
+            .skip(view.y as usize)
+            .take(view.height as usize)
+            .flat_map(|row| row.iter().map(|cell| cell.symbol()))
+            .collect::<String>();
+        assert!(view_text.contains("Reuses one session"));
+        assert!(!view_text.contains("Loopback port"));
         server.abort();
     }
 

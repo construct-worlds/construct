@@ -13,8 +13,8 @@
 //!   or whenever it has lineage to show — no hover trigger, no pin. It follows
 //!   the list selection like a detail panel (master–detail), and a click on its
 //!   header collapses it to just that header row.
-//! - `Tab`, while the list pane holds focus, moves keyboard focus between
-//!   the session rows and the lineage section.
+//! - `Tab`, while the list pane holds focus, moves keyboard focus through
+//!   session rows, the lineage section, and services in visual order.
 
 use super::*;
 use crate::lineage::LineageRow;
@@ -96,10 +96,8 @@ impl App {
         true
     }
 
-    /// Whether the session ROWS (not the lineage section) should read as
-    /// the keyboard-focused sidebar region. Exactly one of the two sidebar
-    /// regions highlights at a time: focusing the lineage section takes the
-    /// highlight off the sessions title bar, and vice versa.
+    /// Whether the unified session/service rows should read as the
+    /// keyboard-focused sidebar region.
     pub(crate) fn session_rows_focused(&self) -> bool {
         self.focus == PaneFocus::List && !self.lineage_focused
     }
@@ -290,10 +288,9 @@ impl App {
     /// the "a closing overlay never eats a live keystroke" rule, so e.g.
     /// `C-x C-c` still quits while the section is focused.
     ///
-    /// Esc and bare Tab both hand focus back to the session rows: Esc as the
-    /// universal "back out one level", Tab as the sessions⇄lineage focus
-    /// switch (its `App::on_key` intercept handles the sessions→lineage
-    /// direction).
+    /// Esc hands focus back to the session rows. Bare Tab advances back to
+    /// the unified rows because services no longer have a separate focus
+    /// region.
     pub(super) async fn handle_lineage_focus_key(&mut self, key: KeyEvent) -> bool {
         if self.lineage_section_session().is_none() {
             // The section vanished under the focus (selection moved to a
@@ -333,9 +330,10 @@ impl App {
             // before its second key arrives would prevent global focus and
             // session commands such as `C-x o` from completing.
             KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => false,
-            // Bare Tab hands focus back to the session rows.
+            // Bare Tab advances back to the unified session/service rows.
             KeyCode::Tab => {
                 self.lineage_focused = false;
+                self.focus = PaneFocus::List;
                 true
             }
             _ => {

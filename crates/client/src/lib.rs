@@ -454,6 +454,106 @@ impl Client {
         self.request(ipc_method::SESSION_LIST, &serde_json::Value::Null)
             .await
     }
+    pub async fn list_services(&self) -> Result<Vec<construct_protocol::ServiceSummary>> {
+        self.request(ipc_method::SERVICE_LIST, &serde_json::Value::Null)
+            .await
+    }
+    pub async fn put_service(
+        &self,
+        params: construct_protocol::ServicePutParams,
+    ) -> Result<construct_protocol::ServicePutResult> {
+        self.request(ipc_method::SERVICE_PUT, &params).await
+    }
+    pub async fn delete_service(&self, name: String) -> Result<()> {
+        self.request(
+            ipc_method::SERVICE_DELETE,
+            &construct_protocol::ServiceNameParams { name },
+        )
+        .await
+    }
+    pub async fn list_service_channels(
+        &self,
+        service_name: &str,
+    ) -> Result<Vec<construct_protocol::ServiceChannelSummary>> {
+        self.request(
+            ipc_method::SERVICE_CHANNEL_LIST,
+            &construct_protocol::ServiceNameParams {
+                name: service_name.to_string(),
+            },
+        )
+        .await
+    }
+    pub async fn list_service_channel_catalog(
+        &self,
+    ) -> Result<Vec<construct_protocol::ServiceChannelSummary>> {
+        self.request(
+            ipc_method::SERVICE_CHANNEL_CATALOG_LIST,
+            &serde_json::Value::Null,
+        )
+        .await
+    }
+    pub async fn put_service_channel(
+        &self,
+        params: construct_protocol::ServiceChannelPutParams,
+    ) -> Result<construct_protocol::ServiceChannelPutResult> {
+        self.request(ipc_method::SERVICE_CHANNEL_PUT, &params).await
+    }
+    pub async fn delete_service_channel(
+        &self,
+        service_name: &str,
+        channel_id: &str,
+    ) -> Result<()> {
+        self.request(
+            ipc_method::SERVICE_CHANNEL_DELETE,
+            &construct_protocol::ServiceChannelNameParams {
+                service_name: service_name.to_string(),
+                channel_id: channel_id.to_string(),
+            },
+        )
+        .await
+    }
+    pub async fn attach_service_channel(
+        &self,
+        service_name: &str,
+        channel_id: &str,
+    ) -> Result<construct_protocol::ServiceChannelPutResult> {
+        self.request(
+            ipc_method::SERVICE_CHANNEL_ATTACH,
+            &construct_protocol::ServiceChannelAttachParams {
+                service_name: service_name.to_string(),
+                channel_id: channel_id.to_string(),
+            },
+        )
+        .await
+    }
+    pub async fn detach_service_channel(
+        &self,
+        service_name: &str,
+        channel_id: &str,
+    ) -> Result<construct_protocol::ServiceChannelPutResult> {
+        self.request(
+            ipc_method::SERVICE_CHANNEL_DETACH,
+            &construct_protocol::ServiceChannelAttachParams {
+                service_name: service_name.to_string(),
+                channel_id: channel_id.to_string(),
+            },
+        )
+        .await
+    }
+    pub async fn rotate_service_channel_secret(
+        &self,
+        service_name: &str,
+        channel_id: &str,
+    ) -> Result<construct_protocol::ServiceChannelPutResult> {
+        self.request(
+            ipc_method::SERVICE_CHANNEL_ROTATE_SECRET,
+            &construct_protocol::ServiceChannelNameParams {
+                service_name: service_name.to_string(),
+                channel_id: channel_id.to_string(),
+            },
+        )
+        .await
+    }
     pub async fn get(&self, id: &str) -> Result<SessionDetail> {
         self.request(
             ipc_method::SESSION_GET,

@@ -1224,6 +1224,16 @@ pub mod ipc_method {
     /// result back into the document once the subagent completes.
     pub const PLAYBOOK_VERB_EXECUTE: &str = "playbook.verb_execute";
     pub const SESSION_LIST: &str = "session.list";
+    pub const SERVICE_LIST: &str = "service.list";
+    pub const SERVICE_PUT: &str = "service.put";
+    pub const SERVICE_DELETE: &str = "service.delete";
+    pub const SERVICE_CHANNEL_LIST: &str = "service.channel.list";
+    pub const SERVICE_CHANNEL_CATALOG_LIST: &str = "service.channel.catalog.list";
+    pub const SERVICE_CHANNEL_PUT: &str = "service.channel.put";
+    pub const SERVICE_CHANNEL_DELETE: &str = "service.channel.delete";
+    pub const SERVICE_CHANNEL_ATTACH: &str = "service.channel.attach";
+    pub const SERVICE_CHANNEL_DETACH: &str = "service.channel.detach";
+    pub const SERVICE_CHANNEL_ROTATE_SECRET: &str = "service.channel.rotate_secret";
     pub const SESSION_CREATE: &str = "session.create";
     pub const SESSION_GET: &str = "session.get";
     pub const SESSION_INPUT: &str = "session.input";
@@ -3207,6 +3217,94 @@ pub struct CreateSessionParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceSummary {
+    pub name: String,
+    pub instruction: String,
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub cwd: String,
+    pub routing: String,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub channels: Vec<ServiceChannelSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelSummary {
+    pub id: String,
+    pub kind: String,
+    #[serde(default = "default_service_channel_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub has_credential: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_to: Option<String>,
+}
+
+fn default_service_channel_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServicePutParams {
+    pub service: ServiceSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServicePutResult {
+    pub service: ServiceSummary,
+    /// V1 persists atomically; the current daemon adopts changes on restart.
+    pub restart_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceNameParams {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelPutParams {
+    pub service_name: String,
+    pub channel: ServiceChannelPut,
+    #[serde(default)]
+    pub rotate_secret: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelPut {
+    pub id: String,
+    pub kind: String,
+    #[serde(default = "default_service_channel_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelPutResult {
+    pub channel: ServiceChannelSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_secret: Option<String>,
+    pub restart_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelNameParams {
+    pub service_name: String,
+    pub channel_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelAttachParams {
+    pub service_name: String,
+    pub channel_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMergeParams {
     pub session_id: String,
     pub mode: ForkMergeMode,
@@ -3723,15 +3821,16 @@ pub enum LayoutSplitDirection {
 
 /// The shared split layout: a recursive binary tree of panes.
 ///
-/// A leaf is a *pane*, and a pane shows at most one session. Ratios are
+/// A leaf is a *pane*, and a pane shows at most one session or service. Ratios are
 /// percentages rather than absolute sizes precisely so the tree is
 /// client-agnostic — the same 60/40 split is meaningful in an 80-column
 /// terminal and in a 3440px browser window.
 ///
-/// `session_id` is optional because a pane can legitimately be empty: a TUI
-/// window whose selection is a group header or an archived-row disclosure
-/// has no session to show, and a freshly split pane may not have picked one
-/// yet. Clients must treat `None` as "empty pane", never as an error.
+/// `session_id` and `service_name` are optional because a pane can
+/// legitimately be empty: a TUI window whose selection is a group header or
+/// an archived-row disclosure has no view to show, and a freshly split pane
+/// may not have picked one yet. At most one is present. Clients must treat
+/// both absent as "empty pane", never as an error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LayoutNode {
@@ -3742,6 +3841,8 @@ pub enum LayoutNode {
         id: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service_name: Option<String>,
     },
     Split {
         direction: LayoutSplitDirection,
@@ -3757,6 +3858,7 @@ impl Default for LayoutNode {
         Self::Leaf {
             id: 1,
             session_id: None,
+            service_name: None,
         }
     }
 }
@@ -3826,11 +3928,21 @@ impl LayoutNode {
 
     pub fn session_for_leaf(&self, target: u64) -> Option<&str> {
         match self {
-            Self::Leaf { id, session_id } if *id == target => session_id.as_deref(),
+            Self::Leaf { id, session_id, .. } if *id == target => session_id.as_deref(),
             Self::Leaf { .. } => None,
             Self::Split { first, second, .. } => first
                 .session_for_leaf(target)
                 .or_else(|| second.session_for_leaf(target)),
+        }
+    }
+
+    pub fn service_for_leaf(&self, target: u64) -> Option<&str> {
+        match self {
+            Self::Leaf { id, service_name, .. } if *id == target => service_name.as_deref(),
+            Self::Leaf { .. } => None,
+            Self::Split { first, second, .. } => first
+                .service_for_leaf(target)
+                .or_else(|| second.service_for_leaf(target)),
         }
     }
 
@@ -4322,6 +4434,7 @@ mod layout_tests {
         LayoutNode::Leaf {
             id,
             session_id: session.map(str::to_string),
+            service_name: None,
         }
     }
 
@@ -4344,6 +4457,20 @@ mod layout_tests {
         assert!(!json.contains("null"));
         let back: LayoutNode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, tree);
+    }
+
+    #[test]
+    fn service_leaf_round_trips_and_is_not_a_session() {
+        let tree = LayoutNode::Leaf {
+            id: 4,
+            session_id: None,
+            service_name: Some("assistant".to_string()),
+        };
+        let json = serde_json::to_string(&tree).unwrap();
+        assert!(json.contains("service_name"));
+        let back: LayoutNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.service_for_leaf(4), Some("assistant"));
+        assert_eq!(back.session_for_leaf(4), None);
     }
 
     #[test]

@@ -4,7 +4,8 @@ use crate::app::{
     feature_guidance, harness_guidance, harness_picker_entries, smith_method_guidance, App,
     ConfigureTab, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
     MinibufferChoiceAction, MinibufferChoiceHit, MinibufferIntent, PaneFocus, RemoteControlHit,
-    RemoteControlHitAction, ScreenPoint, Selection, SessionTitleMenuAction, TextSelectionRange,
+    RemoteControlHitAction, ScreenPoint, Selection, ServiceTitleMenuAction,
+    SessionTitleMenuAction, TextSelectionRange,
     TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit, WindowSplitDirection, ZoomMode,
     CONFIGURE_TABS, PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS, PLAYBOOK_CLIP_HOVER_PREVIEW_COLS,
     PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS, PLAYBOOK_COLLAB_CURSOR_TTL_MS, PLAYBOOK_CONTENT_PADDING_X,
@@ -320,6 +321,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.lineage_vscrollbar = None;
     app.layout.lineage_hscrollbar = None;
     app.layout.lineage_box_hits.clear();
+    app.layout.service_session_hits.clear();
     app.layout.lineage_subagent_toggle_hits.clear();
     app.layout.lineage_segment_tooltip = None;
     app.window_pane_sizes.clear();
@@ -490,6 +492,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
         app.layout.modal_area = Some(help_popup);
     }
     render_session_title_menu(f, app);
+    render_service_title_menu(f, app);
     render_route_menu(f, app);
     render_fleet_tally_panel(f, app);
     render_tutorial_card(f, app);
@@ -516,10 +519,10 @@ fn finish_frame(f: &mut Frame, app: &mut App) {
     render_suggest_deck_card_preview(f, app);
     render_suggest_affordance_tooltip(f, app);
 
-    // The session-picker dialog and the `/configure` dialog are the topmost
+    // Session picker and configure are topmost modals.
     // modals — drawn last so they sit over every base view (including
     // zoomed layouts, which return through here) and before
-    // `capture_frame_text` so they land in the frame snapshot. The two are
+    // `capture_frame_text` so they land in the frame snapshot. They are
     // mutually exclusive in practice (nothing opens one while the other is
     // already up), so render order between them doesn't matter.
     render_session_picker(f, app);
@@ -528,6 +531,71 @@ fn finish_frame(f: &mut Frame, app: &mut App) {
     render_hovered_url(f, app);
     render_text_selection(f, app);
     paint_default_backgrounds(f, app.theme.background);
+}
+
+fn service_dialog_field_help(
+    dialog: &crate::app::ServiceDialog,
+) -> (&'static str, &'static str, &'static str) {
+    match dialog.selected_field {
+        0 => (
+            "Service name",
+            "Stable identifier used in the webhook URL and TOML filename. Use 1–32 lowercase letters, digits, or interior hyphens.",
+            if dialog.mode == crate::app::ServiceDialogMode::Edit {
+                "Locked after creation."
+            } else {
+                "Type to edit."
+            },
+        ),
+        1 => (
+            "Instruction",
+            "Prepended to every incoming message. Define the service's role, boundaries, and response behavior here.",
+            "Type to edit · applies after restart.",
+        ),
+        2 => (
+            "Harness",
+            "Agent harness used for new service sessions, such as smith, claude, or codex.",
+            "Enter opens the picker · applies after restart.",
+        ),
+        3 => (
+            "Model",
+            "Optional model override passed to the harness. Leave it blank to use that harness's default model.",
+            "Enter opens the picker · applies after restart.",
+        ),
+        4 => (
+            "Working directory",
+            "Directory where service sessions start and from which relative paths are resolved.",
+            "Type to edit · applies after restart.",
+        ),
+        5 => {
+            let explanation = match dialog.service.routing.as_str() {
+                "per-event" => {
+                    "Creates a fresh session for every accepted request. Requests never share conversation history."
+                }
+                "single" => {
+                    "Routes every request into one shared session so all callers contribute to the same conversation."
+                }
+                _ => {
+                    "Reuses one session for each caller-supplied session_key. Equal keys continue the same conversation."
+                }
+            };
+            (
+                "Routing",
+                explanation,
+                "←/→ or Space cycles · applies after restart.",
+            )
+        }
+        6 => (
+            "Channels",
+            "The daemon-wide channel catalog. A filled square is attached here; an empty square is available to attach. Channels owned by another service are unavailable.",
+            "Space attaches/detaches · Enter edits an attached channel · a creates a channel.",
+        ),
+        7 => (
+            "State",
+            "Serving starts the listener. Paused keeps the definition but does not start its listener after restart.",
+            "Space or ←/→ toggles · applies after restart.",
+        ),
+        _ => ("Service field", "", ""),
+    }
 }
 
 fn paint_default_backgrounds(f: &mut Frame, background: Option<Color>) {
@@ -1364,14 +1432,18 @@ fn render_view_close_tooltip(f: &mut Frame, app: &App) {
     let Some(view_area) = app.layout.view_area else {
         return;
     };
-    if app.session_title_menu.is_some() {
+    if app.session_title_menu.is_some() || app.service_title_menu.is_some() {
         return;
     }
     if !hovered_view_close_button(app, view_area) {
         return;
     }
     let (cx, _, cy) = view_close_button_range(view_area);
-    let label = " Session actions ";
+    let label = if app.selection.service_name().is_some() {
+        " Service actions "
+    } else {
+        " Session actions "
+    };
     let total = f.area();
     let inner_w = UnicodeWidthStr::width(label) as u16;
     let w = inner_w + 2;
@@ -2873,6 +2945,10 @@ pub(crate) fn fleet_status_buckets(items: &[AppListItem]) -> FleetStatusBuckets 
                 }
             }
             AppListItem::ArchivedRow { .. } => {}
+            // Services are navigable list rows, but their aggregate state is
+            // represented by the routed-session rows rather than the fleet
+            // tally itself.
+            AppListItem::Service { .. } => {}
         }
     }
     buckets
@@ -2943,9 +3019,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     // Tutorial pane highlight (spec 0077, step 4 "get around"): reuses
     // `pane_border_style`'s focused styling as the highlight rather than
     // inventing new styling.
-    // Exactly one sidebar region reads as keyboard-focused at a time: the
-    // session rows OR the lineage section (whose header highlights via
-    // `lineage_focused` in `render_lineage_section`).
+    // Exactly one sidebar region reads as keyboard-focused at a time:
+    // the unified session/service rows or lineage.
     let focused = app.session_rows_focused() || app.tutorial_wants_list_highlight();
     // Collapsed render path: a thin column with a `»` expand glyph
     // on the top border. Anywhere inside the pane click-expands. Keyed off
@@ -3113,6 +3188,45 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 selected_idx = Some(i);
             }
             match item {
+                AppListItem::Service {
+                    summary: service,
+                    session_count,
+                    sessions_expanded,
+                } => {
+                    // Services use a deliberately distinct type glyph rather
+                    // than borrowing session state glyphs. Their harness (or
+                    // paused state) remains right-aligned like a session's
+                    // harness label, so service rows still scan with the
+                    // rest of the fleet.
+                    let disclosure = if *session_count > 0 {
+                        if *sessions_expanded { "▼ " } else { "▶ " }
+                    } else {
+                        "  "
+                    };
+                    let suffix = if service.paused {
+                        format!("{} · paused", service.harness)
+                    } else {
+                        service.harness.clone()
+                    };
+                    let suffix_w = suffix.chars().count();
+                    let prefix_w = 5; // disclosure + `◈ ` plus the name's gap
+                    let name_avail = row_w.saturating_sub(prefix_w + 1 + suffix_w);
+                    let name = fit_name(&service.name, name_avail, None);
+                    let name_w = name.chars().count();
+                    let gap = row_w.saturating_sub(prefix_w + name_w + suffix_w);
+                    let name_style = if service.paused {
+                        Style::default().fg(app.theme.dim)
+                    } else {
+                        Style::default().fg(app.theme.text)
+                    };
+                    vec![Line::from(vec![
+                        Span::styled(disclosure, Style::default().fg(app.theme.group)),
+                        Span::styled("◈ ", Style::default().fg(app.theme.accent)),
+                        Span::styled(name, name_style),
+                        Span::raw(" ".repeat(gap)),
+                        Span::styled(suffix, session_list_secondary_style(&app.theme)),
+                    ])]
+                }
                 AppListItem::Session {
                     summary: s,
                     indented,
@@ -3304,8 +3418,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     let (list_items_area, matrix_area) =
         split_list_pane(inner, app.matrix_rain_hidden, app.matrix_rain_h);
     // Lineage section (spec 0081): the selected session's fork/subagent
-    // tree, carved from the bottom of the rows region so it sits between
-    // the session rows and the operator/matrix-rain panel.
+    // tree. Services are ordinary rows in the list above; they do not claim
+    // a separate sidebar region.
     let lineage = app
         .lineage_section_session()
         .map(|id| (id.clone(), app.lineage_section_rows(&id)));
@@ -3339,6 +3453,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
             AppListItem::Session { summary, .. } => summary.id == target,
             AppListItem::GroupHeader { group, .. } => group.id == target,
             AppListItem::ArchivedRow { .. } => false,
+            AppListItem::Service { .. } => false,
         }) {
             app.list_scroll_offset = app.list_scroll_offset_for_visible(
                 &app_items,
@@ -3547,7 +3662,8 @@ fn split_lineage_section(
 
 /// Render the sidebar's lineage section: a header bar (a `─` rule carrying
 /// the `⑂ lineage` label, the view-mode toggle, and a `−`/`+` collapse
-/// button — the same furniture as the operator panel's title bar below it)
+/// button — the same furniture as the operator panel's title bar lower in
+/// the sidebar)
 /// above the selected session's lineage diagram. Reuses
 /// `App::lineage_section_rows` (`crate::lineage::build_tree`/`flatten`
 /// underneath) for the tree and `render_lineage_row` for each row's
@@ -5807,6 +5923,7 @@ fn render_main_transitions(f: &mut Frame, app: &App) {
             Some(Selection::Session(id)) => hash_str(&id),
             Some(Selection::Group(id)) => hash_str(&id) ^ 0x67726f7570,
             Some(Selection::ArchivedRow(_)) => 0x617263,
+            Some(Selection::Service(id)) => hash_str(&id) ^ 0x73657276696365,
             Some(Selection::None) | None => 0x5e5510,
         };
         render_glitch_overlay(f, pane.inner_area, &app.theme, seed, amount);
@@ -7500,6 +7617,79 @@ fn render_session_title_menu(f: &mut Frame, app: &App) {
     }
 }
 
+fn render_service_title_menu(f: &mut Frame, app: &App) {
+    let Some(menu) = &app.service_title_menu else {
+        return;
+    };
+    let paused = app
+        .services
+        .iter()
+        .find(|service| service.name == menu.name)
+        .is_some_and(|service| service.paused);
+
+    let area = menu.area;
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.border))
+        .title(Span::styled(
+            " service ",
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Clear, area);
+    f.render_widget(block, area);
+    for (idx, action) in ServiceTitleMenuAction::ALL.iter().copied().enumerate() {
+        let row = area.y.saturating_add(1).saturating_add(idx as u16);
+        if row >= area.y.saturating_add(area.height).saturating_sub(1) {
+            break;
+        }
+        let hovered = app.mouse_pos.is_some_and(|(mx, my)| {
+            my == row && mx > area.x && mx < area.x.saturating_add(area.width).saturating_sub(1)
+        });
+        let style = if hovered {
+            Style::default()
+                .fg(app.theme.text)
+                .bg(app.theme.inactive_highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else if matches!(action, ServiceTitleMenuAction::Delete) {
+            Style::default().fg(app.theme.danger)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        render_session_title_menu_row(
+            f,
+            area,
+            row,
+            action.label(paused),
+            service_title_menu_action_binding(app, action),
+            style,
+        );
+    }
+}
+
+fn service_title_menu_action_binding(
+    app: &App,
+    action: ServiceTitleMenuAction,
+) -> Option<&'static str> {
+    match (action, app.profile) {
+        (ServiceTitleMenuAction::Edit, Profile::Emacs)
+        | (ServiceTitleMenuAction::Edit, Profile::Vim) => Some("e"),
+        (ServiceTitleMenuAction::SplitHorizontal, Profile::Emacs) => Some("C-x 3"),
+        (ServiceTitleMenuAction::SplitHorizontal, Profile::Vim) => Some("C-w v"),
+        (ServiceTitleMenuAction::SplitVertical, Profile::Emacs) => Some("C-x 2"),
+        (ServiceTitleMenuAction::SplitVertical, Profile::Vim) => Some("C-w s"),
+        (ServiceTitleMenuAction::CloseSplit, Profile::Emacs) => Some("C-x 0"),
+        (ServiceTitleMenuAction::CloseSplit, Profile::Vim) => Some("C-w c"),
+        (ServiceTitleMenuAction::Delete, _) => Some("C-d"),
+        (ServiceTitleMenuAction::RotateToken, _)
+        | (ServiceTitleMenuAction::PauseResume, _) => None,
+    }
+}
+
 fn render_session_title_menu_row(
     f: &mut Frame,
     area: Rect,
@@ -7597,6 +7787,14 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
             .wrap(Wrap { trim: false });
         f.render_widget(para, area);
         clear_pane_side_borders(f, area, app);
+        return;
+    }
+    if let Some(name) = app.selection.service_name().map(str::to_owned) {
+        // A service is a real split pane, so its frame follows pane focus just
+        // like a session frame. `last_focused` is intentionally retained for
+        // title affordances, but must not keep an inactive service border
+        // highlighted while focus is in the list or another split.
+        render_service_view(f, area, app, &name, focused);
         return;
     }
     let summary = app.selected_session().cloned();
@@ -7723,6 +7921,471 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         ViewMode::Terminal => render_terminal_for_window(f, inner, app, window_id),
         ViewMode::Chat => render_chat(f, inner, app),
     }
+}
+
+fn service_picker_lines(
+    dialog: &crate::app::ServiceDialog,
+    app: &App,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let title = match dialog.picker {
+        Some(crate::app::ServiceDialogPickerKind::Harness) => "Choose harness",
+        Some(crate::app::ServiceDialogPickerKind::Model) => "Choose model",
+        None => "",
+    };
+    let options = dialog.picker_options(app);
+    let mut lines = vec![Line::from(Span::styled(
+        title,
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    if options.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No options available.",
+            Style::default().fg(app.theme.dim),
+        )));
+    } else {
+        for (index, option) in options
+            .iter()
+            .enumerate()
+            .skip(dialog.picker_scroll)
+            .take(crate::app::SERVICE_PICKER_VISIBLE_ROWS)
+        {
+            let marker = if index == dialog.picker_selected { "›" } else { " " };
+            let detail = if option.available {
+                option.detail.as_str()
+            } else {
+                "unavailable"
+            };
+            let text = if detail.is_empty() {
+                format!("{marker} {}", option.label)
+            } else {
+                format!("{marker} {}  {detail}", option.label)
+            };
+            let mut style = if option.available {
+                Style::default().fg(app.theme.text)
+            } else {
+                Style::default().fg(app.theme.dim)
+            };
+            if index == dialog.picker_selected {
+                style = style
+                    .fg(app.theme.highlight_fg)
+                    .bg(app.theme.highlight_bg);
+            }
+            lines.push(Line::from(Span::styled(
+                truncate_to_width(&text, width.saturating_sub(1) as usize),
+                style,
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ C-p/C-n move · Enter choose · Esc cancel",
+        Style::default().fg(app.theme.dim),
+    )));
+    lines
+}
+
+/// Recover the channel and caller-facing key from a service session title.
+/// Current runtimes encode `service:<name>:<channel>[:<key>]`; older v1
+/// sessions encoded only `service:<name>:<key>`, so an unambiguous sole
+/// attached channel remains a useful fallback for those sessions.
+fn service_session_route_label(
+    session: &SessionSummary,
+    service_name: &str,
+    catalog: &[construct_protocol::ServiceChannelSummary],
+    service_channels: &[construct_protocol::ServiceChannelSummary],
+) -> (String, String) {
+    let attached: Vec<&str> = catalog
+        .iter()
+        .filter(|channel| channel.attached_to.as_deref() == Some(service_name))
+        .map(|channel| channel.id.as_str())
+        .chain(
+            service_channels
+                .iter()
+                .filter(|channel| channel.attached_to.as_deref() == Some(service_name))
+                .map(|channel| channel.id.as_str()),
+        )
+        .collect();
+    let fallback = attached.first().copied().unwrap_or("unknown");
+    let prefix = format!("service:{service_name}");
+    let suffix = session
+        .title
+        .as_deref()
+        .and_then(|title| title.strip_prefix(&format!("{prefix}:")))
+        .unwrap_or("");
+
+    let (channel, key) = match suffix.split_once(':') {
+        Some((candidate, key)) if attached.is_empty() || attached.contains(&candidate) => {
+            (candidate, key)
+        }
+        Some(_) => (fallback, suffix),
+        None if attached.contains(&suffix) => (suffix, ""),
+        None => (fallback, suffix),
+    };
+    let label = if key.is_empty() {
+        "event".to_string()
+    } else {
+        key.to_string()
+    };
+    (channel.to_string(), label)
+}
+
+/// Render a service as a normal split-pane surface. The editor state is the
+/// same editor state used before the service view existed, but the service now owns the whole
+/// pane: its definition and contextual help stay visible while the operator
+/// edits it, and the lower section gives the service's routed sessions a
+/// direct entry point.
+fn render_service_view(
+    f: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    name: &str,
+    focused: bool,
+) {
+    let Some(summary) = app
+        .services
+        .iter()
+        .find(|service| service.name == name)
+        .cloned()
+        .or_else(|| {
+            app.service_dialog
+                .as_ref()
+                .filter(|dialog| dialog.service.name == name)
+                .map(|dialog| dialog.service.clone())
+        })
+    else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(pane_border_style(&app.theme, focused))
+            .title(format!(" service: {name} "));
+        f.render_widget(
+            Paragraph::new("service definition is no longer available")
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    };
+
+    let fallback = crate::app::ServiceDialog {
+        mode: crate::app::ServiceDialogMode::Edit,
+        service: summary.clone(),
+        selected_field: 0,
+        note: None,
+        confirm_delete: false,
+        picker: None,
+        picker_selected: 0,
+        picker_scroll: 0,
+        selected_channel: 0,
+        channel_editor: None,
+    };
+    let dialog = app
+        .service_dialog
+        .as_ref()
+        .filter(|dialog| dialog.service.name == name)
+        .cloned()
+        .unwrap_or(fallback);
+    let border_style = pane_border_style(&app.theme, focused);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .padding(ratatui::widgets::Padding::new(2, 2, 1, 1))
+        .title(format!(" service: {} ", summary.name));
+    let block = apply_pane_title_right_cluster(
+        app,
+        area,
+        None,
+        border_style,
+        true,
+        true,
+        focused,
+        app.theme.matrix_close,
+        block,
+    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 36 || inner.height < 8 {
+        return;
+    }
+
+    if let Some(channel) = dialog.channel_editor.as_ref() {
+        render_service_channel_editor(f, inner, app, channel);
+        return;
+    }
+
+    let labels = [
+        "Name",
+        "Instruction",
+        "Harness",
+        "Model",
+        "Working dir",
+        "Routing",
+        "Channels",
+        "State",
+    ];
+    let mut field_lines = Vec::with_capacity(labels.len());
+    for (index, label) in labels.iter().enumerate() {
+        let selected = app.service_dialog.as_ref().is_some_and(|current| {
+            current.service.name == name && current.selected_field == index
+        });
+        let locked = index == 0 && dialog.mode == crate::app::ServiceDialogMode::Edit;
+        let value = dialog.field_value(index);
+        let marker = if selected { "›" } else { " " };
+        let mut style = Style::default().fg(if locked {
+            app.theme.dim
+        } else {
+            app.theme.text
+        });
+        if selected {
+            style = style.fg(app.theme.highlight_fg).bg(app.theme.highlight_bg);
+        }
+        field_lines.push(Line::from(Span::styled(
+            format!("{marker} {label:<12} {value}"),
+            style,
+        )));
+    }
+
+    let top_h = 9.min(inner.height.saturating_sub(4));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top_h),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
+        .split(inner);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(56),
+            Constraint::Length(3),
+            Constraint::Min(20),
+        ])
+        .split(chunks[0]);
+    let help_lines = if dialog.picker.is_some() {
+        service_picker_lines(&dialog, app, columns[2].width)
+    } else {
+        let (help_title, help_body, help_hint) = service_dialog_field_help(&dialog);
+        vec![
+            Line::from(Span::styled(
+                help_title,
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(help_body, Style::default().fg(app.theme.text))),
+            Line::from(""),
+            Line::from(Span::styled(help_hint, Style::default().fg(app.theme.dim))),
+        ]
+    };
+    f.render_widget(Paragraph::new(field_lines), columns[0]);
+    let divider_x = columns[1].x.saturating_add(columns[1].width / 2);
+    for y in columns[1].top()..columns[1].bottom() {
+        f.buffer_mut()
+            .set_string(divider_x, y, "│", Style::default().fg(app.theme.border));
+    }
+    f.render_widget(
+        Paragraph::new(help_lines).wrap(Wrap { trim: false }),
+        columns[2],
+    );
+
+    let service_prefix = format!("service:{}", name);
+    let routed: Vec<_> = app
+        .sessions
+        .iter()
+        .filter(|session| {
+            session
+                .title
+                .as_deref()
+                .is_some_and(|title| title == service_prefix || title.starts_with(&format!("{service_prefix}:")))
+        })
+        .collect();
+    let catalog = &app.service_channel_catalog;
+    let attached_count = catalog.iter().filter(|channel| {
+        channel.attached_to.as_deref() == Some(summary.name.as_str())
+    }).count();
+    let mut activity = vec![Line::from(vec![
+        Span::styled(
+            "Channels  ",
+            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} attached · {} in catalog", attached_count, catalog.len()),
+            Style::default().fg(app.theme.text),
+        ),
+    ])];
+    if catalog.is_empty() {
+        activity.push(Line::from(Span::styled(
+            "  No channels in the catalog. Press a after entering edit mode to create HTTP.",
+            Style::default().fg(app.theme.dim),
+        )));
+    } else {
+        for (index, channel) in catalog.iter().enumerate() {
+            let selected = dialog.selected_field == 6 && dialog.selected_channel == index;
+            let marker = if selected { "›" } else { " " };
+            let attached = channel.attached_to.as_deref() == Some(summary.name.as_str());
+            let owned_by_other = channel.attached_to.is_some() && !attached;
+            let checkbox = if attached { "▣" } else { "▢" };
+            let state = if channel.enabled { "enabled" } else { "disabled" };
+            let endpoint = channel
+                .port
+                .map(|port| format!("127.0.0.1:{port}"))
+                .unwrap_or_else(|| "no port".to_string());
+            let owner = channel
+                .attached_to
+                .as_deref()
+                .filter(|owner| *owner != summary.name.as_str())
+                .map(|owner| format!("  [attached to {owner}]"))
+                .unwrap_or_default();
+            let style = if selected {
+                Style::default().fg(app.theme.highlight_fg).bg(app.theme.highlight_bg)
+            } else if owned_by_other {
+                Style::default().fg(app.theme.dim)
+            } else {
+                Style::default().fg(app.theme.text)
+            };
+            activity.push(Line::from(Span::styled(
+                format!("{marker} {checkbox} {}  {:<5} {endpoint}  {state}{owner}", channel.id, channel.kind),
+                style,
+            )));
+        }
+    }
+    activity.push(Line::from(""));
+    activity.push(Line::from(vec![
+        Span::styled(
+            "Sessions  ",
+            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} routed", routed.len()),
+            Style::default().fg(app.theme.text),
+        ),
+    ]));
+    if routed.is_empty() {
+        activity.push(Line::from(Span::styled(
+            "No requests have created a session yet.",
+            Style::default().fg(app.theme.dim),
+        )));
+    } else {
+        let mut session_hits = Vec::new();
+        for session in routed.iter().take(chunks[2].height.saturating_sub(3) as usize) {
+            let (channel, label) = service_session_route_label(
+                session,
+                &summary.name,
+                catalog,
+                &summary.channels,
+            );
+            let row = chunks[2].y + activity.len() as u16;
+            activity.push(Line::from(vec![
+                Span::styled(format!("  {} ", session_status_glyph(app, session)), state_style(&app.theme, session.state)),
+                Span::styled(format!("channel: {channel:<10} "), Style::default().fg(app.theme.accent)),
+                Span::styled(label, Style::default().fg(app.theme.text)),
+                Span::styled(format!("  {}", session.state.label()), Style::default().fg(app.theme.dim)),
+            ]));
+            if row < chunks[2].bottom() {
+                session_hits.push(crate::app::ServiceSessionHit {
+                    session_id: session.id.clone(),
+                    area: Rect::new(chunks[2].x, row, chunks[2].width, 1),
+                });
+            }
+        }
+        app.layout.service_session_hits.extend(session_hits);
+    }
+    if let Some(note) = &dialog.note {
+        activity.push(Line::from(""));
+        activity.push(Line::from(Span::styled(
+            note.clone(),
+            Style::default().fg(if dialog.confirm_delete { app.theme.danger } else { app.theme.dim }),
+        )));
+    }
+    let editing = app
+        .service_dialog
+        .as_ref()
+        .is_some_and(|current| current.service.name == name);
+    let footer = if !editing {
+        "Enter/e edit · C-x keeps global commands"
+    } else if dialog.mode == crate::app::ServiceDialogMode::Create {
+        "Enter/C-s save · Space attach · a create channel · Esc close · C-x keeps global commands"
+    } else {
+        "Enter/C-s save · Space attach/detach · Enter edit · a create · Esc close"
+    };
+    activity.push(Line::from(""));
+    activity.push(Line::from(Span::styled(footer, Style::default().fg(app.theme.dim))));
+    f.render_widget(
+        Paragraph::new(activity).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+}
+
+fn render_service_channel_editor(
+    f: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    editor: &crate::app::ServiceChannelDialog,
+) {
+    let labels = ["Channel ID", "Kind", "Port", "State"];
+    let values = [
+        editor.channel.id.clone(),
+        editor.channel.kind.clone(),
+        editor.channel.port.map(|port| port.to_string()).unwrap_or_default(),
+        if editor.channel.enabled { "enabled".to_string() } else { "disabled".to_string() },
+    ];
+    let mut fields = vec![Line::from(Span::styled(
+        format!("Channel · {}", editor.service_name),
+        Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+    )), Line::from("")];
+    for (index, (label, value)) in labels.iter().zip(values.iter()).enumerate() {
+        let selected = editor.selected_field == index;
+        let locked = (index == 0 && editor.mode == crate::app::ServiceChannelDialogMode::Edit) || index == 1;
+        let marker = if selected { "›" } else { " " };
+        let style = if selected {
+            Style::default().fg(app.theme.highlight_fg).bg(app.theme.highlight_bg)
+        } else if locked {
+            Style::default().fg(app.theme.dim)
+        } else {
+            Style::default().fg(app.theme.text)
+        };
+        fields.push(Line::from(Span::styled(
+            format!("{marker} {label:<12} {value}"),
+            style,
+        )));
+    }
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(56), Constraint::Length(3), Constraint::Min(20)])
+        .split(area);
+    f.render_widget(Paragraph::new(fields), columns[0]);
+    let divider_x = columns[1].x.saturating_add(columns[1].width / 2);
+    for y in columns[1].top()..columns[1].bottom() {
+        f.buffer_mut().set_string(divider_x, y, "│", Style::default().fg(app.theme.border));
+    }
+    let (title, body, hint) = match editor.selected_field {
+        0 => ("Channel ID", "Stable name for this channel. It becomes part of the service's local configuration and is locked after creation.", "Type to edit when creating.") ,
+        1 => ("Kind", "The transport implementation. HTTP is the only built-in channel in v1; future channel plugins can add other kinds.", "Fixed to HTTP in v1."),
+        2 => ("HTTP port", "Loopback TCP port for this channel. No two channels on one service may share a port.", "Type a port · applies after restart."),
+        3 => ("State", "Disabled channels remain configured but do not accept requests after the daemon restarts.", "Space or ←/→ toggles."),
+        _ => ("Channel", "", ""),
+    };
+    let mut help = vec![Line::from(Span::styled(title, Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD))), Line::from(""), Line::from(Span::styled(body, Style::default().fg(app.theme.text))), Line::from(""), Line::from(Span::styled(hint, Style::default().fg(app.theme.dim)))];
+    if let Some(secret) = &editor.new_secret {
+        help.push(Line::from(""));
+        help.push(Line::from(Span::styled(format!("Credential (shown once): {secret}"), Style::default().fg(app.theme.warning))));
+    }
+    if let Some(note) = &editor.note {
+        help.push(Line::from(""));
+        help.push(Line::from(Span::styled(note, Style::default().fg(if editor.confirm_delete { app.theme.danger } else { app.theme.dim }))));
+    }
+    f.render_widget(Paragraph::new(help).wrap(Wrap { trim: false }), columns[2]);
+    let footer = if editor.mode == crate::app::ServiceChannelDialogMode::Create {
+        "Enter/C-s save · Esc back"
+    } else {
+        "Enter/C-s save · C-r rotate credential · C-d delete · Esc back"
+    };
+    let footer_y = area.bottom().saturating_sub(1);
+    f.render_widget(Paragraph::new(Line::from(Span::styled(footer, Style::default().fg(app.theme.dim)))), Rect { x: area.x, y: footer_y, width: area.width, height: 1 });
 }
 
 fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
