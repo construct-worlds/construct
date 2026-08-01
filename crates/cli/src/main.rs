@@ -7,6 +7,7 @@ use std::path::PathBuf;
 mod acp;
 mod app;
 mod clipboard_bridge;
+mod doctor;
 mod color;
 mod keymap;
 mod lineage;
@@ -56,6 +57,16 @@ enum Command {
     },
     /// Print resolved paths.
     Paths,
+    /// Check this machine's construct install and report what is wrong.
+    ///
+    /// Read-only: it never starts a daemon, creates directories, or edits
+    /// config. Works with the daemon down. Exits non-zero only when
+    /// construct genuinely cannot run here (spec 0168).
+    Doctor {
+        /// Emit the full report as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Ping the daemon.
     Ping,
     /// List registered harnesses.
@@ -423,6 +434,9 @@ async fn main() -> Result<()> {
     }
 
     init_tracing();
+    // Read before `cli.socket` is consumed: doctor reports which socket it
+    // looked at, and whether that was the user's choice or the default.
+    let socket_overridden = cli.socket.is_some();
     let socket = cli.socket.unwrap_or_else(|| Paths::discover().socket());
 
     if command_allows_upgrade_prompt(&command) {
@@ -439,6 +453,7 @@ async fn main() -> Result<()> {
             construct_daemon::print_paths();
             Ok(())
         }
+        Command::Doctor { json } => doctor::run(&socket, socket_overridden, json).await,
         Command::Ping => {
             let c = connect(&socket).await?;
             let r = c.ping().await?;
@@ -842,6 +857,7 @@ fn command_allows_upgrade_prompt(command: &Command) -> bool {
             | Command::AskGate
             | Command::Mcp
             | Command::Adapter { .. }
+            | Command::Doctor { .. }
     )
 }
 
@@ -1043,7 +1059,7 @@ async fn ensure_daemon_running(socket: &std::path::Path) {
 
 /// Cheap readiness probe: can we open the IPC socket? A stale socket file
 /// (the daemon is gone) fails to connect, so this correctly reports "not live".
-fn socket_is_live(socket: &std::path::Path) -> bool {
+pub(crate) fn socket_is_live(socket: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 

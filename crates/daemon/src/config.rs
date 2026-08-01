@@ -950,28 +950,35 @@ impl Config {
         } else {
             Self::default()
         };
-        // Layer in built-ins so users don't have to declare them.
-        // Important: we layer at the FIELD level, not the entry level
-        // — a user who declared `[adapters.smith] env = {...}` (only
-        // to set per-harness env defaults) still needs the builtin
-        // `binary` + `description` to fill in. Without this,
-        // declaring an `[adapters.<name>]` block to set ONE field
-        // would silently drop the builtin's binary path and the
-        // daemon would fail with "adapter binary not found" on
-        // session create.
-        for b in BUILTIN_ADAPTERS {
-            let entry = cfg.adapters.entry(b.name.to_string()).or_default();
-            if entry.binary.is_none() {
-                entry.binary = Some(b.binary.to_string());
-            }
-            if entry.args.is_empty() {
-                entry.args = b.args.iter().map(|s| s.to_string()).collect();
-            }
-            if entry.description.is_none() {
-                entry.description = Some(b.description.to_string());
-            }
-        }
+        merge_builtin_adapters(&mut cfg);
         Ok(cfg)
+    }
+}
+
+/// Layer in built-ins so users don't have to declare them.
+///
+/// Important: we layer at the FIELD level, not the entry level — a user who
+/// declared `[adapters.smith] env = {...}` (only to set per-harness env
+/// defaults) still needs the builtin `binary` + `description` to fill in.
+/// Without this, declaring an `[adapters.<name>]` block to set ONE field
+/// would silently drop the builtin's binary path and the daemon would fail
+/// with "adapter binary not found" on session create.
+///
+/// Separate from [`Config::load_or_default`] so `doctor` can apply the same
+/// layering to a `Config::default()` when the user's file failed to parse,
+/// and still report on the harnesses that would exist (spec 0168).
+pub(crate) fn merge_builtin_adapters(cfg: &mut Config) {
+    for b in BUILTIN_ADAPTERS {
+        let entry = cfg.adapters.entry(b.name.to_string()).or_default();
+        if entry.binary.is_none() {
+            entry.binary = Some(b.binary.to_string());
+        }
+        if entry.args.is_empty() {
+            entry.args = b.args.iter().map(|s| s.to_string()).collect();
+        }
+        if entry.description.is_none() {
+            entry.description = Some(b.description.to_string());
+        }
     }
 }
 

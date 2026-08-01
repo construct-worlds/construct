@@ -19,6 +19,7 @@ mod adapter;
 mod availability;
 mod config;
 mod cost_history;
+pub mod doctor;
 mod loops;
 pub mod plugins;
 mod program_verbs;
@@ -608,15 +609,15 @@ fn warn_legacy_paths(current: &Paths) {
     }
 }
 
-fn shell_quote(path: &std::path::Path) -> String {
+pub(crate) fn shell_quote(path: &std::path::Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
-fn legacy_migration_notice(current: &Paths) -> Option<String> {
+pub(crate) fn legacy_migration_notice(current: &Paths) -> Option<String> {
     legacy_migration_notice_with_paths(current, &Paths::discover_legacy())
 }
 
-fn legacy_migration_notice_with_paths(current: &Paths, legacy: &Paths) -> Option<String> {
+pub(crate) fn legacy_migration_notice_with_paths(current: &Paths, legacy: &Paths) -> Option<String> {
     let mut found = Vec::<(&str, &std::path::Path)>::new();
     let legacy_items = [
         ("config directory", legacy.config_dir.as_path()),

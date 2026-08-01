@@ -621,7 +621,9 @@ fn copy_executable_perms(path: &Path) -> Result<()> {
 /// directory. Honors `CARGO_TARGET_DIR` first, then falls back
 /// to walking up two levels from `CARGO_MANIFEST_DIR`
 /// (`crates/e2e` → workspace root).
-fn construct_bin_path() -> Result<PathBuf> {
+/// The workspace's built `construct` binary. Public so tests that drive the
+/// CLI as a subprocess (rather than over IPC) can find it.
+pub fn construct_bin_path() -> Result<PathBuf> {
     bin_path("construct")
 }
 
