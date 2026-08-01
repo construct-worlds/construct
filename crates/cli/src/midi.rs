@@ -642,6 +642,11 @@ pub struct MidiConfig {
 }
 
 impl MidiConfig {
+    pub(crate) fn is_configured(&self) -> bool {
+        let op_xy_enabled = self.op_xy.as_ref().is_some_and(|profile| profile.enabled);
+        !self.mappings.is_empty() || op_xy_enabled
+    }
+
     fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(raw) => toml::from_str(&raw).with_context(|| format!("parse {}", path.display())),
@@ -682,8 +687,7 @@ type MidiEventReceiver = mpsc::UnboundedReceiver<MidiInputEvent>;
 pub(crate) fn start_listener() -> Result<Option<(MidiListener, MidiEventReceiver)>> {
     let path = Paths::discover().midi_file();
     let config = MidiConfig::load(&path)?;
-    let op_xy_enabled = config.op_xy.as_ref().is_some_and(|profile| profile.enabled);
-    if config.mappings.is_empty() && !op_xy_enabled {
+    if !config.is_configured() {
         return Ok(None);
     }
     let device = config.device.as_deref().context(format!(
@@ -757,6 +761,11 @@ pub(crate) fn start_listener() -> Result<Option<(MidiListener, MidiEventReceiver
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn start_listener() -> Result<Option<(MidiListener, MidiEventReceiver)>> {
+    let path = Paths::discover().midi_file();
+    let config = MidiConfig::load(&path)?;
+    if !config.is_configured() {
+        return Ok(None);
+    }
     anyhow::bail!("native MIDI control is currently supported on macOS")
 }
 
@@ -2767,4 +2776,70 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn midi_config_is_configured_checks_mappings_and_op_xy() {
+        let mut config = MidiConfig::default();
+        assert!(!config.is_configured());
+
+        config.op_xy = Some(OpXyConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        assert!(!config.is_configured());
+
+        config.op_xy = Some(OpXyConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        assert!(config.is_configured());
+
+        config.op_xy = None;
+        config.mappings.push(MidiMapping {
+            kind: MidiMessageKind::Note,
+            channel: 1,
+            number: 60,
+            trigger: MidiTrigger::Press,
+            action: MidiAction::NewSession,
+        });
+        assert!(config.is_configured());
+    }
+
+    #[test]
+    fn start_listener_when_unconfigured_returns_ok_none() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_dir = temp_dir.path().to_path_buf();
+        std::env::set_var("CONSTRUCT_CONFIG_DIR", &config_dir);
+
+        let listener = start_listener();
+        #[cfg(target_os = "macos")]
+        assert!(listener.unwrap().is_none());
+        #[cfg(not(target_os = "macos"))]
+        assert!(listener.unwrap().is_none());
+
+        // Now write a midi.toml with a mapping
+        let midi_path = config_dir.join("midi.toml");
+        let mut config = MidiConfig::default();
+        config.mappings.push(MidiMapping {
+            kind: MidiMessageKind::Note,
+            channel: 1,
+            number: 60,
+            trigger: MidiTrigger::Press,
+            action: MidiAction::NewSession,
+        });
+        config.save(&midi_path).unwrap();
+
+        let _listener_with_config = start_listener();
+        #[cfg(not(target_os = "macos"))]
+        {
+            let err = _listener_with_config.unwrap_err().to_string();
+            assert!(
+                err.contains("native MIDI control is currently supported on macOS"),
+                "expected unsupported platform error, got: {err}"
+            );
+        }
+
+        std::env::remove_var("CONSTRUCT_CONFIG_DIR");
+    }
 }
+
