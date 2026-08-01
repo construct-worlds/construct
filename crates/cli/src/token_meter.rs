@@ -288,9 +288,17 @@ impl TokenMeter {
         }
     }
 
-    /// Wall-clock seconds the visible window spans. The legend divides by
-    /// this to state rates, so the numbers stay comparable as the panel is
-    /// resized and don't change meaning when the column width is retuned.
+    /// Wall-clock seconds the visible window spans — the columns actually on
+    /// screen, not the ring's full retention.
+    ///
+    /// The legend divides by this, so its rates are averages over exactly
+    /// what is being displayed. Two consequences worth keeping in mind
+    /// before "fixing" either: a narrower panel averages a shorter, more
+    /// recent window and therefore reports a different number for unchanged
+    /// throughput; and a burst's contribution shrinks as the window grows
+    /// around it, rather than dropping out at some cutoff. What the divisor
+    /// does guarantee is that the figure is a rate in seconds regardless of
+    /// how [`BUCKET_SECS`] is tuned.
     pub fn window_seconds(&self, width: usize) -> u64 {
         (self.window(width).count() as u64).max(1) * BUCKET_SECS
     }
