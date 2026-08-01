@@ -82,13 +82,20 @@ impl SessionManager {
     /// stale-or-missing and nothing is already running for this harness, a
     /// background probe is spawned and this call still returns immediately.
     /// Record one usage sample into the fleet history (spec 0167).
-    pub(crate) fn record_cost_sample(&self, model: Option<String>, tokens: u64, at_ms: i64) {
+    pub(crate) fn record_cost_sample(
+        &self,
+        model: Option<String>,
+        tokens: u64,
+        cached: u64,
+        at_ms: i64,
+    ) {
         if let Ok(mut history) = self.cost_history.lock() {
             history.push(
                 construct_protocol::TokenSample {
                     at_ms,
                     model,
                     tokens,
+                    cached,
                 },
                 at_ms,
             );

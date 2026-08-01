@@ -95,6 +95,7 @@ mod tests {
             at_ms,
             model: Some("opus".into()),
             tokens,
+            cached: 0,
         }
     }
 
