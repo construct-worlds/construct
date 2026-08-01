@@ -64,9 +64,15 @@ at each column boundary.
 
 A model with no compute time in the window has no throughput, and must be
 reported as such rather than as zero — "did no work" and "worked slowly" are
-different claims. The same applies to the aggregate figure, which uses the
-same basis (total tokens over total compute) so that concurrent sessions
-cannot push it above what any of them achieved.
+different claims. A fleet where nothing computed likewise has no rate.
+
+The aggregate figure is the **sum** of the per-model rates, not the pooled
+ratio of total tokens to total compute. Pooling yields a weighted average,
+which can never exceed the fastest single model however many run at once —
+blind to exactly the parallelism a fleet exists to provide, and arithmetically
+inconsistent with the per-model figures displayed beside it. Any collapsed
+legend row standing in for several models must sum them for the same reason:
+whatever a client shows as a total has to be one.
 
 The bars themselves carry shape and mix; they are comparable within a frame,
 and the legend is what makes them comparable to anything else.
@@ -212,6 +218,9 @@ inspecting the rest.
   60k; the rate shows how fast they arrived.
 - A model has bars on screen but did nothing in the last minute: it is
   listed as idle, not as 0/s.
+- Two models run concurrently at 2k/s and 1k/s: the fleet reads 3k/s — what
+  it is actually producing — not the 1.5k/s that pooling their tokens and
+  compute would give.
 - A session's harness reports usage without naming a model, and the session
   has reported a model change earlier: the sample is attributed to that
   model, not to `unattributed`.

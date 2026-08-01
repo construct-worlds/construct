@@ -310,22 +310,29 @@ impl TokenMeter {
         Some(tokens.saturating_mul(1_000) / busy_ms)
     }
 
-    /// Fleet throughput over the rate window, on the same basis: total
-    /// tokens over total compute time. Concurrent sessions each contribute
-    /// their own compute time, so this is per second of *work*, not of
-    /// wall-clock, and does not exceed the sum of the per-model rates.
+    /// Fleet throughput over the rate window: the sum of the per-model
+    /// rates.
+    ///
+    /// Deliberately a sum and not a pooled `total tokens / total compute`.
+    /// Pooling produces a weighted *average* of the per-model rates, so it
+    /// can never exceed the fastest single model however many run at once —
+    /// which makes it blind to the parallelism that is the whole point of a
+    /// fleet, and leaves a figure labeled `Σ` that the rates above it visibly
+    /// don't add up to.
+    ///
+    /// The sum reads as "what the fleet produces per second with everything
+    /// running at once". Models that did no work contribute nothing, and a
+    /// fleet where none did has no rate at all rather than zero.
     pub fn recent_fleet_rate(&self) -> Option<u64> {
-        let mut tokens = 0u64;
-        let mut busy = 0u64;
-        for slot in &self.recent {
-            for (_, t) in &slot.tokens {
-                tokens = tokens.saturating_add(*t);
-            }
-            for (_, ms) in &slot.busy_ms {
-                busy = busy.saturating_add(*ms);
+        let mut total = 0u64;
+        let mut any = false;
+        for idx in 0..self.models.len() {
+            if let Some(rate) = self.recent_rate(idx as u16) {
+                total = total.saturating_add(rate);
+                any = true;
             }
         }
-        (busy > 0).then(|| tokens.saturating_mul(1_000) / busy)
+        any.then_some(total)
     }
 
     /// Record one usage sample. `model` is the label to group under —
@@ -464,20 +471,22 @@ impl TokenMeter {
                 .skip(SERIES_PALETTE.len())
                 .filter(|t| **t > 0)
                 .count();
-            let (other_tokens, other_busy) = totals
-                .iter()
-                .enumerate()
-                .skip(SERIES_PALETTE.len())
-                .fold((0u64, 0u64), |(t, b), (idx, _)| {
-                    let (rt, rb) = self.recent_totals(idx as u16);
-                    (t.saturating_add(rt), b.saturating_add(rb))
-                });
+            // Summed, not pooled, for the same reason as the fleet figure:
+            // this row stands in for several models, and the column has to
+            // add up.
+            let mut other_rate = 0u64;
+            let mut other_any = false;
+            for idx in SERIES_PALETTE.len()..totals.len() {
+                if let Some(rate) = self.recent_rate(idx as u16) {
+                    other_rate = other_rate.saturating_add(rate);
+                    other_any = true;
+                }
+            }
             named.push(LegendEntry {
                 label: format!("other ({count})"),
                 tokens: other,
                 color: OTHER_COLOR,
-                rate: (other_busy > 0)
-                    .then(|| other_tokens.saturating_mul(1_000) / other_busy),
+                rate: other_any.then_some(other_rate),
             });
         }
         named
@@ -656,11 +665,12 @@ mod tests {
         assert_eq!(m.recent_rate(0), Some(3_000), "still inside the window");
     }
 
-    /// The fleet figure uses the same basis as the per-model ones — total
-    /// tokens over total compute — so two sessions working concurrently
-    /// can't make it exceed what any of them actually achieved.
+    /// The fleet figure is the sum of the rates shown above it, so the
+    /// legend column adds up. Pooling the tokens and compute instead would
+    /// average them — 1.5k/s here — which no amount of added parallelism
+    /// could ever push past the fastest single model.
     #[test]
-    fn fleet_rate_is_tokens_over_total_compute() {
+    fn fleet_rate_sums_the_per_model_rates() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
         m.observe(Some("a"), 20_000, t0);
@@ -669,7 +679,17 @@ mod tests {
         m.observe_busy(Some("b"), 10_000, t0);
         assert_eq!(m.recent_rate(0), Some(2_000));
         assert_eq!(m.recent_rate(1), Some(1_000));
-        assert_eq!(m.recent_fleet_rate(), Some(1_500), "30k over 20s of work");
+        assert_eq!(m.recent_fleet_rate(), Some(3_000));
+    }
+
+    /// A fleet where nothing computed has no throughput to state, the same
+    /// way an individual model doesn't.
+    #[test]
+    fn fleet_rate_is_absent_when_nothing_computed() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.observe(Some("a"), 20_000, t0);
+        assert_eq!(m.recent_fleet_rate(), None);
     }
 
     #[test]
