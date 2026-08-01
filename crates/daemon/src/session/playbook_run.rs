@@ -538,6 +538,24 @@ impl SessionManager {
             .collect()
     }
 
+    /// Drop a session's active run, for a dispatch that never left the
+    /// building — the fork failed to spawn, or the prompt could not be
+    /// delivered. Without this the playbook would shimmer for a turn that is
+    /// never going to happen (#1122).
+    pub(super) fn clear_playbook_run(&self, session_id: &str) {
+        let removed = self
+            .playbook_runs
+            .lock()
+            .ok()
+            .and_then(|mut runs| runs.remove(session_id))
+            .is_some();
+        if removed {
+            if let Ok(playbook) = self.storage.read_playbook(session_id) {
+                self.broadcast_playbook_state(playbook);
+            }
+        }
+    }
+
     pub(super) fn mark_playbook_run_output_seen(&self, session_id: &str) {
         let mut updated = false;
         if let Ok(mut runs) = self.playbook_runs.lock() {
