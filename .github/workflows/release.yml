@@ -125,7 +125,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Check formula version and macOS checksums
+      - name: Check formula version and update macOS checksums
         run: |
           set -eu
           cargo_ver=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
@@ -135,14 +135,20 @@ jobs:
             exit 1
           fi
 
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            checksum_file="dist/construct-${target}.tar.gz.sha256"
-            expected=$(awk '{print $1}' "$checksum_file")
-            if ! grep -Fq "$expected" Formula/construct.rb; then
-              echo "::error::Formula/construct.rb is missing the checksum for $target ($expected)."
-              exit 1
-            fi
-          done
+          arm_sha=$(awk '{print $1}' dist/construct-aarch64-apple-darwin.tar.gz.sha256)
+          x86_sha=$(awk '{print $1}' dist/construct-x86_64-apple-darwin.tar.gz.sha256)
+
+          sed -i.bak -e "/construct-aarch64-apple-darwin.tar.gz/{n;s/sha256 \".*\"/sha256 \"$arm_sha\"/;}" -e "/construct-x86_64-apple-darwin.tar.gz/{n;s/sha256 \".*\"/sha256 \"$x86_sha\"/;}" Formula/construct.rb
+          rm -f Formula/construct.rb.bak
+
+          if ! git diff --quiet Formula/construct.rb; then
+            echo "Updating Formula/construct.rb with release checksums..."
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add Formula/construct.rb
+            git commit -m "chore(release): update Homebrew formula checksums for v${cargo_ver}"
+            git push origin HEAD:main || true
+          fi
 
   release:
     name: Publish GitHub Release
