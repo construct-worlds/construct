@@ -8178,19 +8178,11 @@ fn render_service_channel_editor(
             ("Kind", editor.channel.kind.clone()),
             (
                 "App token",
-                if editor.app_token.is_empty() && editor.channel.has_app_token {
-                    "•••••• (set)".into()
-                } else {
-                    "•".repeat(editor.app_token.len().min(12))
-                },
+                redacted_channel_token(&editor.app_token, editor.channel.has_app_token),
             ),
             (
                 "Bot token",
-                if editor.bot_token.is_empty() && editor.channel.has_bot_token {
-                    "•••••• (set)".into()
-                } else {
-                    "•".repeat(editor.bot_token.len().min(12))
-                },
+                redacted_channel_token(&editor.bot_token, editor.channel.has_bot_token),
             ),
             ("Workspaces", editor.channel.allowed_workspaces.join(",")),
             ("Channels", editor.channel.allowed_channels.join(",")),
@@ -8324,6 +8316,14 @@ fn render_service_channel_editor(
             height: 1,
         },
     );
+}
+
+fn redacted_channel_token(value: &str, stored: bool) -> String {
+    if value.is_empty() && stored {
+        "•••••• (set)".to_string()
+    } else {
+        "•".repeat(value.len().min(12))
+    }
 }
 
 fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
@@ -27287,6 +27287,15 @@ mod tests {
         assert_eq!(table_cell_text("[Run](agentd:action/run)"), "Run");
         assert_eq!(table_cell_text("see [x](y) end"), "see x end");
         assert_eq!(table_cell_text("[keep] me"), "[keep] me");
+    }
+
+    #[test]
+    fn slack_channel_tokens_are_always_redacted_for_tui_rendering() {
+        assert_eq!(redacted_channel_token("", false), "");
+        assert_eq!(redacted_channel_token("", true), "•••••• (set)");
+        let rendered = redacted_channel_token("xapp-super-secret", false);
+        assert_eq!(rendered, "••••••••••••");
+        assert!(!rendered.contains("xapp"));
     }
 
     #[test]

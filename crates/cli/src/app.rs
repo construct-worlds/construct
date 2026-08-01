@@ -40708,13 +40708,16 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
         assert!(app.insert_service_dialog_text("xapp-super-secret"));
-        let backend = ratatui::backend::TestBackend::new(160, 50);
-        let mut term = ratatui::Terminal::new(backend).expect("terminal");
-        term.draw(|frame| crate::ui::render(frame, &mut app))
-            .expect("draw");
-        let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("slack"));
-        assert!(!text.contains("xapp-super-secret"));
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .channel_editor
+                .as_ref()
+                .unwrap()
+                .app_token,
+            "xapp-super-secret"
+        );
         server.abort();
     }
 
