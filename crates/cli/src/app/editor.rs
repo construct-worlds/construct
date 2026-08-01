@@ -380,7 +380,21 @@ impl App {
                 .find(|hit| hit.contains(ev.column, ev.row))
                 .cloned()
             {
+                // Publishes like every other mutation (spec 0171). This is
+                // the same defect paste had: filling an empty Playbook from
+                // a template button replaced the buffer and returned, so a
+                // brand-new Playbook — the very first thing a user does with
+                // one — existed only in this client until something else
+                // happened to save it.
+                let before = self
+                    .playbook_popup
+                    .as_ref()
+                    .map(|popup| popup.buffer.clone());
                 self.apply_playbook_template(hit.template_id, hit.markdown);
+                self.publish_playbook_cursor().await;
+                if let Some(before) = before {
+                    self.flush_playbook_live_edit(before).await;
+                }
                 return true;
             }
         }
@@ -1523,8 +1537,25 @@ impl App {
             note: None,
             shimmer: Vec::new(),
         };
-        let Ok(result) = self.client.playbook_edit(params).await else {
-            return;
+        let result = match self.client.playbook_edit(params).await {
+            Ok(result) => result,
+            Err(_) => {
+                // The anchor no longer exists in the daemon's document: an
+                // agent rewrote the region between two keystrokes, or a local
+                // mutation never published. Dropping this on the floor is what
+                // used to strand the buffer — `saved_markdown` stays stale, so
+                // `on_playbook_state` stops adopting remote changes to protect
+                // the unsaved edit, and every later keystroke re-derives its
+                // anchor from the same stale base and fails identically. The
+                // document silently stops both publishing and receiving.
+                //
+                // Fall back to the save path, which is the same 3-way merge
+                // `C-x C-s` performs: it rebases onto the latest document,
+                // keeps both sides, and re-arms `saved_markdown`. It sets its
+                // own status, so the user sees that a merge happened.
+                self.save_playbook_popup().await;
+                return;
+            }
         };
         let Some(popup) = self.playbook_popup.as_mut() else {
             return;
@@ -2532,6 +2563,25 @@ impl App {
         }
     }
 
+    /// Insert `text` into the open Playbook and publish it, exactly like a
+    /// typed character. Paste is the reason this exists: `on_paste` used to
+    /// insert without publishing, so the pasted block lived only in the client
+    /// — and since the next keystroke's anchored edit is derived from a base
+    /// the daemon never received, everything typed afterwards failed to apply
+    /// and was swallowed too (#1103).
+    pub(super) async fn insert_playbook_text_synced(&mut self, text: &str) {
+        let before = self
+            .playbook_popup
+            .as_ref()
+            .map(|popup| popup.buffer.clone());
+        self.insert_playbook_text(text);
+        self.follow_playbook_scroll();
+        self.publish_playbook_cursor().await;
+        if let Some(before) = before {
+            self.flush_playbook_live_edit(before).await;
+        }
+    }
+
     pub(super) fn insert_playbook_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
@@ -2539,6 +2589,22 @@ impl App {
         if self.playbook_popup.is_none() {
             return;
         }
+        // Terminals routinely deliver the line breaks inside a bracketed
+        // paste as CR — it is what a tty expects for Enter, and what tmux's
+        // own `paste-buffer` sends unless given `-r`. Stored verbatim they
+        // are not line breaks to anything downstream: the renderer paints
+        // them as nothing (so the block collapses to one visible line) and
+        // block splitting is newline-based (so it collapses to one
+        // addressable block). Normalize on the way in, for every path that
+        // puts text in the buffer — bracketed paste, clipboard yank, and
+        // clip insertion alike (#1104).
+        let normalized;
+        let text = if text.contains('\r') {
+            normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+            normalized.as_str()
+        } else {
+            text
+        };
         let had_selection = self
             .playbook_popup
             .as_ref()

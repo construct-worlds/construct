@@ -6779,11 +6779,12 @@ impl App {
                     } else {
                         path.clone()
                     };
-                    self.insert_playbook_text(&format!("![{name}]({target})"));
+                    self.insert_playbook_text_synced(&format!("![{name}]({target})"))
+                        .await;
                     return;
                 }
             }
-            self.insert_playbook_text(&text);
+            self.insert_playbook_text_synced(&text).await;
             // Pasted text can extend (or tear down) the live `@<typeahead>`
             // token backing the `@`→session picker's effective query; keep
             // the tier-2 content search in step with it (spec 0076).
