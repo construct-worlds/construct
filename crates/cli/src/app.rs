@@ -5143,7 +5143,7 @@ async fn run_with_socket_initial_selection(
                     history
                         .samples
                         .into_iter()
-                        .map(|s| (history.now_ms - s.at_ms, s.model, s.tokens)),
+                        .map(|s| (history.now_ms - s.at_ms, s.model, s.tokens, s.cached)),
                 );
             }
             meter
@@ -8889,6 +8889,7 @@ impl App {
         let SessionEvent::Cost {
             tokens_in,
             tokens_out,
+            tokens_cached,
             model,
             ..
         } = event
@@ -8896,7 +8897,8 @@ impl App {
             return;
         };
         // Cached input is a subset of `tokens_in` (see the Cost contract), so
-        // adding it would double-count the cheapest part of the sample.
+        // adding it would double-count the cheapest part of the sample. It
+        // rides along instead, to shade its share of the model's band.
         let tokens = tokens_in.saturating_add(*tokens_out);
         let label = model.clone().or_else(|| {
             self.sessions
@@ -8905,7 +8907,7 @@ impl App {
                 .and_then(|s| s.model.clone())
         });
         self.token_meter
-            .observe(label.as_deref(), tokens, Instant::now());
+            .observe(label.as_deref(), tokens, *tokens_cached, Instant::now());
     }
 
     /// Feed the token meter the compute time that elapsed since the last
@@ -17028,6 +17030,11 @@ mod tests {
         );
         // Cached input is a subset of tokens_in and must not be re-added.
         assert_eq!(app.token_meter.window_total(64), 1_500);
+        // It rides along as the shaded share of that model's band, so the
+        // bar's height is billed volume and its shading says how much of it
+        // the provider served from cache.
+        let bucket = app.token_meter.window(1).next().expect("current bucket");
+        assert_eq!(bucket.by_model(), vec![(0, 1_500, 900)]);
         let out = rendered(&mut app, 120, 30);
         assert!(out.contains("kimi-k3"), "{out}");
     }

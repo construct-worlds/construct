@@ -89,6 +89,37 @@ column width has to carry it along or the ceiling falls faster for free.
 No percentage is shown, and no fixed ceiling is assumed. A percentage here
 would require inventing a denominator.
 
+### Cached input is a subset, and it shades a band rather than growing it
+
+A usage report's prompt side already contains whatever the provider served
+from its prompt cache; the cached figure names part of that side, it does not
+sit beside it. A sample's volume is therefore the prompt side plus the output
+side, and adding the cached figure on top would count the cheapest tokens in
+the report twice and inflate every total on the panel.
+
+The cached figure is still worth showing, because most of a turn's prompt is
+context the provider has already seen: a column that is mostly cache-read is a
+much smaller amount of real work than the same column of fresh input. So each
+model's band splits in two — the part processed fresh at the base, the
+cache-served remainder directly above it — and the model stays one contiguous
+run of one hue, with the cached part recessed. Height keeps meaning billed
+volume, and shading answers how much of that volume was new work.
+
+Both parts must be the same hue. Two distinguishable colors would read as two
+models, which is exactly the thing series colors exist to prevent. And the
+recessed shade must be a color rather than a dimming attribute: one cell can
+hold a model's own new/cached boundary, and there the two parts are a glyph's
+foreground and its background, which an attribute cannot separate.
+
+A part with no volume draws no band at all, rather than a hairline that
+rounds up to a visible slice. A harness that reports more cached than prompt
+tokens is clamped to the subset contract instead of underflowing.
+
+The rates in the legend are unaffected: they quantify billed volume over
+compute time, and netting cache reads out of them would report a throughput
+no bill and no provider agrees with. Exact per-model cached figures belong in
+the hover detail, which is where a shaded band gets a number.
+
 ### Buckets are arrival time
 
 A sample lands in the bucket in which its report *arrived*, not spread over
@@ -100,12 +131,14 @@ spec 0103 applies here too.
 
 ### The stack must survive the cell grid
 
-A terminal cell holds one glyph, so a series boundary that lands inside a
+A terminal cell holds one glyph, so a band boundary that lands inside a
 cell cannot be drawn as two glyphs — the second overwrites the first and the
-lower series disappears from that column. A boundary inside a cell is drawn
-as a partial block whose filled part is the lower series and whose
-background is the upper one. Only the column's topmost cell, whose empty
-part must stay panel background, may hand the cell to a single series.
+lower band disappears from that column. A boundary inside a cell is drawn
+as a partial block whose filled part is the lower band and whose
+background is the upper one. This holds for a boundary between two models
+and for one between a model's own new and cached parts alike. Only the
+column's topmost cell, whose empty part must stay panel background, may hand
+the cell to a single band.
 
 The legend must name every series it drew, wrapping onto further rows rather
 than showing only what fits on one — a colored bar whose model is named
@@ -122,6 +155,11 @@ read — and a name is found by position rather than by scanning. The trailing
 space this costs inside narrower cells is worth that; a cell never spills
 into its neighbour, because one long name shifting the column below it undoes
 the alignment the grid exists for.
+
+Each cell carries a margin past its widest entry, so adjacent columns are
+separated by blank space rather than by a single column. A rate ends one cell
+and a dot opens the next; with nothing between them the row reads as one run
+of text and the grid stops looking like columns at all.
 
 Within a cell the name starts it and the rate ends it, against the cell's
 right edge. A rate that trails its name begins wherever that name happens to
@@ -235,6 +273,12 @@ inspecting the rest.
   stack; the column's height and the legend totals still account for it.
   Promoting it to a visible slice would take that space from a series that
   earned it.
+- A sample's cached figure is a subset of its prompt side and must never be
+  added to a total. Any surface that carries it — the wire record, the
+  daemon's window, a client's buckets — has to carry it alongside the volume
+  rather than folded into it, or the split can only be recovered by guessing.
+  It is additive on the wire: records written before it existed load as zero
+  cached, which is indistinguishable from a provider that cached nothing.
 
 ## Non-Goals
 
@@ -272,3 +316,10 @@ inspecting the rest.
   fresh start.
 - A session ran on one model this morning and another this afternoon: after
   a daemon restart the morning's columns still credit the morning's model.
+- A turn re-sends a 90k-token context and adds 2k of new input: the column
+  grows by the whole prompt side, but nine tenths of that model's band is
+  drawn recessed, so a glance separates a long conversation being replayed
+  from the same volume of genuinely new work.
+- A harness reports no cache figure at all: its bands are drawn entirely as
+  new work, which is what "nothing was cached" looks like — the meter does
+  not infer a cached share from the size of the prompt.

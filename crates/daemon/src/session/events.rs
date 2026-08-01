@@ -456,11 +456,14 @@ impl SessionManager {
                     s.tokens.add(*tokens_in, *tokens_out, *tokens_cached);
                     // The fleet history is not: it resolves the sample's
                     // model here, while the session's current model is still
-                    // the one that produced it (spec 0167). Cached input is a
-                    // subset of the prompt side and would double-count.
+                    // the one that produced it (spec 0167). Cached input
+                    // rides along as the subset of the total it is, rather
+                    // than being added on top of a prompt side that already
+                    // contains it.
                     self.record_cost_sample(
                         model.clone().or_else(|| s.model.clone()),
                         tokens_in.saturating_add(*tokens_out),
+                        *tokens_cached,
                         now.timestamp_millis(),
                     );
                 }

@@ -17,6 +17,10 @@
 //!   order changes constantly on a live fleet; if color followed rank, a
 //!   column painted 30 seconds ago would change color under the user and
 //!   history would misreport itself.
+//! - **Cached tokens are a subset, never an addend.** A report's prompt side
+//!   already contains what the provider served from its cache, so the cached
+//!   figure splits a model's band in two rather than growing it. Adding it
+//!   would inflate every total on the panel.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -88,11 +92,36 @@ const RECENT_SLOTS: usize = 60;
 /// the graph never silently drops volume it did measure.
 pub const UNATTRIBUTED: &str = "unattributed";
 
-/// One time bucket: sparse (model index, tokens) pairs. Most buckets hold
-/// zero or one entry, so a dense per-model vector would be mostly padding.
+/// Which part of a model's band a segment carries. A turn's prompt side
+/// mostly re-sends context the provider already has; separating the two says
+/// how much of a column was actually new work without hiding either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Part {
+    /// Tokens the provider processed fresh: output, plus the prompt side it
+    /// had not already cached.
+    New,
+    /// Prompt tokens served from the provider's cache.
+    Cached,
+}
+
+/// One drawable band of a column: whose it is, and which part of that model's
+/// usage it represents.
+pub type Band = (u16, Part);
+
+/// One model's share of one bucket. `cached` is a subset of `tokens`, mirroring
+/// the usage report it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Slice {
+    model: u16,
+    tokens: u64,
+    cached: u64,
+}
+
+/// One time bucket: a sparse per-model slice. Most buckets hold zero or one
+/// entry, so a dense per-model vector would be mostly padding.
 #[derive(Debug, Default, Clone)]
 pub struct Bucket {
-    entries: Vec<(u16, u64)>,
+    entries: Vec<Slice>,
 }
 
 /// One slot of the rate window: tokens produced, and how long any session on
@@ -114,28 +143,64 @@ fn add_sparse(entries: &mut Vec<(u16, u64)>, key: u16, amount: u64) {
 
 impl Bucket {
     pub fn total(&self) -> u64 {
-        self.entries.iter().map(|(_, t)| *t).sum()
+        self.entries.iter().map(|s| s.tokens).sum()
     }
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Model-index/token pairs in series order — first-seen, which is also
-    /// palette order — so every column stacks the same way.
+    /// Per-model totals — `(model, tokens, cached)` — in series order.
+    pub fn by_model(&self) -> Vec<(u16, u64, u64)> {
+        let mut out: Vec<Slice> = self.entries.clone();
+        out.sort_by_key(|s| s.model);
+        out.iter()
+            .map(|s| (s.model, s.tokens, s.cached.min(s.tokens)))
+            .collect()
+    }
+
+    /// The column's bands, bottom-up, in series order — first-seen, which is
+    /// also palette order — so every column stacks the same way.
     ///
     /// Ordering by size instead would reshuffle the bands whenever the
     /// leader changed, and a stacked graph whose layers swap places
     /// column-to-column can't be read as layers at all: the eye tracks a
     /// band's continuity, not its rank.
-    pub fn stacked(&self) -> Vec<(u16, u64)> {
-        let mut out = self.entries.clone();
-        out.sort_by_key(|(model, _)| *model);
+    ///
+    /// Each model contributes up to two adjacent bands: its new work sits at
+    /// the base of its own band and the cache-served remainder directly on
+    /// top, so a model is still one contiguous run of its color. A part that
+    /// is zero produces no band at all rather than a hairline that rounds up
+    /// to a visible slice.
+    pub fn stacked(&self) -> Vec<(Band, u64)> {
+        let mut slices: Vec<Slice> = self.entries.clone();
+        slices.sort_by_key(|s| s.model);
+        let mut out = Vec::with_capacity(slices.len() * 2);
+        for slice in slices {
+            let cached = slice.cached.min(slice.tokens);
+            let fresh = slice.tokens - cached;
+            if fresh > 0 {
+                out.push(((slice.model, Part::New), fresh));
+            }
+            if cached > 0 {
+                out.push(((slice.model, Part::Cached), cached));
+            }
+        }
         out
     }
 
-    fn add(&mut self, model: u16, tokens: u64) {
-        add_sparse(&mut self.entries, model, tokens);
+    fn add(&mut self, model: u16, tokens: u64, cached: u64) {
+        match self.entries.iter_mut().find(|s| s.model == model) {
+            Some(slot) => {
+                slot.tokens = slot.tokens.saturating_add(tokens);
+                slot.cached = slot.cached.saturating_add(cached);
+            }
+            None => self.entries.push(Slice {
+                model,
+                tokens,
+                cached,
+            }),
+        }
     }
 }
 
@@ -195,8 +260,8 @@ impl TokenMeter {
     /// retains are dropped; the rest land in the bucket their age selects,
     /// which is why they are passed as ages rather than wall-clock instants —
     /// the meter's own clock is monotonic and cannot be compared to one.
-    pub fn seed(&mut self, samples: impl IntoIterator<Item = (i64, Option<String>, u64)>) {
-        for (age_ms, model, tokens) in samples {
+    pub fn seed(&mut self, samples: impl IntoIterator<Item = (i64, Option<String>, u64, u64)>) {
+        for (age_ms, model, tokens, cached) in samples {
             if tokens == 0 || age_ms < 0 {
                 continue;
             }
@@ -209,7 +274,7 @@ impl TokenMeter {
             };
             let idx = self.intern(model.as_deref().unwrap_or(UNATTRIBUTED));
             if let Some(bucket) = self.buckets.get_mut(index) {
-                bucket.add(idx, tokens);
+                bucket.add(idx, tokens, cached);
                 let total = bucket.total() as f64;
                 if total > self.peak {
                     self.peak = total;
@@ -344,8 +409,11 @@ impl TokenMeter {
 
     /// Record one usage sample. `model` is the label to group under —
     /// callers resolve it from the report first, then the session's tracked
-    /// model, and pass `None` only when neither is known.
-    pub fn observe(&mut self, model: Option<&str>, tokens: u64, now: Instant) {
+    /// model, and pass `None` only when neither is known. `cached` is the
+    /// part of `tokens` the provider served from its prompt cache, and is a
+    /// subset of it: the rate and the column height both stay the volume the
+    /// call actually billed.
+    pub fn observe(&mut self, model: Option<&str>, tokens: u64, cached: u64, now: Instant) {
         if tokens == 0 {
             return;
         }
@@ -355,7 +423,7 @@ impl TokenMeter {
             .buckets
             .back_mut()
             .expect("meter always holds a current bucket");
-        bucket.add(idx, tokens);
+        bucket.add(idx, tokens, cached);
         let total = bucket.total() as f64;
         if total > self.peak {
             self.peak = total;
@@ -448,9 +516,9 @@ impl TokenMeter {
     pub fn legend(&self, width: usize) -> Vec<LegendEntry> {
         let mut totals: Vec<u64> = vec![0; self.models.len()];
         for bucket in self.window(width) {
-            for (idx, tokens) in &bucket.entries {
-                if let Some(slot) = totals.get_mut(*idx as usize) {
-                    *slot = slot.saturating_add(*tokens);
+            for slice in &bucket.entries {
+                if let Some(slot) = totals.get_mut(slice.model as usize) {
+                    *slot = slot.saturating_add(slice.tokens);
                 }
             }
         }
@@ -526,8 +594,8 @@ mod tests {
     fn samples_land_in_arrival_buckets() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 100, t0);
-        m.observe(Some("opus"), 50, buckets_after(t0, 2));
+        m.observe(Some("opus"), 100, 0, t0);
+        m.observe(Some("opus"), 50, 0, buckets_after(t0, 2));
         m.advance_to(buckets_after(t0, 2));
         let cols: Vec<u64> = m.window(3).map(Bucket::total).collect();
         assert_eq!(cols, vec![100, 0, 50], "one empty bucket between samples");
@@ -537,11 +605,89 @@ mod tests {
     fn distinct_models_stack_within_one_bucket() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 100, t0);
-        m.observe(Some("codex"), 300, t0);
+        m.observe(Some("opus"), 100, 0, t0);
+        m.observe(Some("codex"), 300, 0, t0);
         let bucket = m.window(1).next().expect("current bucket");
         assert_eq!(bucket.total(), 400);
         assert_eq!(bucket.stacked().len(), 2);
+    }
+
+    /// A model's cache-served share splits its band instead of growing it:
+    /// the column is the same height it would be without the split, and the
+    /// two parts sit next to each other so the model stays one run.
+    #[test]
+    fn cached_tokens_split_a_model_band_without_changing_its_height() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.observe(Some("opus"), 1_000, 700, t0);
+        let bucket = m.window(1).next().expect("current bucket");
+        assert_eq!(bucket.total(), 1_000, "cached must not be added on top");
+        assert_eq!(
+            bucket.stacked(),
+            vec![((0, Part::New), 300), ((0, Part::Cached), 700)],
+            "new work at the base, cache-served directly above it"
+        );
+        assert_eq!(bucket.by_model(), vec![(0, 1_000, 700)]);
+    }
+
+    /// Each model splits within its own run, so two models never interleave
+    /// their new and cached parts up the column.
+    #[test]
+    fn each_model_keeps_its_two_parts_adjacent() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.observe(Some("opus"), 100, 40, t0);
+        m.observe(Some("codex"), 100, 60, t0);
+        let bucket = m.window(1).next().expect("current bucket");
+        assert_eq!(
+            bucket.stacked(),
+            vec![
+                ((0, Part::New), 60),
+                ((0, Part::Cached), 40),
+                ((1, Part::New), 40),
+                ((1, Part::Cached), 60),
+            ]
+        );
+    }
+
+    /// A part with no volume draws no band at all — a zero-width slice would
+    /// round up to a visible eighth and claim work that never happened.
+    #[test]
+    fn an_empty_part_produces_no_band() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.observe(Some("opus"), 100, 0, t0);
+        m.observe(Some("codex"), 100, 100, t0);
+        let bucket = m.window(1).next().expect("current bucket");
+        assert_eq!(
+            bucket.stacked(),
+            vec![((0, Part::New), 100), ((1, Part::Cached), 100)]
+        );
+    }
+
+    /// A harness that reports more cached than prompt tokens would otherwise
+    /// underflow the new-work subtraction. The subset contract wins.
+    #[test]
+    fn cached_larger_than_the_sample_is_clamped() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.observe(Some("opus"), 100, 900, t0);
+        let bucket = m.window(1).next().expect("current bucket");
+        assert_eq!(bucket.total(), 100);
+        assert_eq!(bucket.stacked(), vec![((0, Part::Cached), 100)]);
+        assert_eq!(bucket.by_model(), vec![(0, 100, 100)]);
+    }
+
+    /// Seeded history carries its cached share too, so a restarted client
+    /// draws the same two-tone columns it had before.
+    #[test]
+    fn seeded_samples_keep_their_cached_share() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.reserve_history(BUCKET_SECS * 3);
+        m.seed([(0, Some("opus".to_string()), 1_000, 250)]);
+        let bucket = m.window(1).next().expect("current bucket");
+        assert_eq!(bucket.by_model(), vec![(0, 1_000, 250)]);
     }
 
     /// Every column stacks its series in the same order, whatever the
@@ -552,26 +698,26 @@ mod tests {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
         // Column 1: "opus" dominates. Column 2: "codex" does.
-        m.observe(Some("opus"), 900, t0);
-        m.observe(Some("codex"), 100, t0);
+        m.observe(Some("opus"), 900, 0, t0);
+        m.observe(Some("codex"), 100, 0, t0);
         let first: Vec<u16> = m
             .window(1)
             .next()
             .expect("bucket")
             .stacked()
             .iter()
-            .map(|(model, _)| *model)
+            .map(|((model, _), _)| *model)
             .collect();
         m.advance_to(buckets_after(t0, 1));
-        m.observe(Some("opus"), 100, buckets_after(t0, 1));
-        m.observe(Some("codex"), 900, buckets_after(t0, 1));
+        m.observe(Some("opus"), 100, 0, buckets_after(t0, 1));
+        m.observe(Some("codex"), 900, 0, buckets_after(t0, 1));
         let second: Vec<u16> = m
             .window(1)
             .next()
             .expect("bucket")
             .stacked()
             .iter()
-            .map(|(model, _)| *model)
+            .map(|((model, _), _)| *model)
             .collect();
         assert_eq!(first, second, "layer order must not follow rank");
         assert_eq!(m.model_label(first[0]), "opus", "first seen sits at the base");
@@ -581,8 +727,8 @@ mod tests {
     fn colors_follow_first_seen_order_not_rank() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("first"), 10, t0);
-        m.observe(Some("second"), 10_000, t0);
+        m.observe(Some("first"), 10, 0, t0);
+        m.observe(Some("second"), 10_000, 0, t0);
         // "second" dominates every ranking, but "first" keeps palette slot 0.
         assert_eq!(m.color(0), SERIES_PALETTE[0]);
         assert_eq!(m.color(1), SERIES_PALETTE[1]);
@@ -594,9 +740,9 @@ mod tests {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
         assert_eq!(m.scale(80), MIN_SCALE, "idle meter uses the floor");
-        m.observe(Some("opus"), 40, t0);
+        m.observe(Some("opus"), 40, 0, t0);
         assert_eq!(m.scale(80), MIN_SCALE, "a tiny sample must not saturate");
-        m.observe(Some("opus"), 500_000, t0);
+        m.observe(Some("opus"), 500_000, 0, t0);
         assert!(m.scale(80) >= 500_000);
     }
 
@@ -604,7 +750,7 @@ mod tests {
     fn a_visible_column_always_fits_the_scale() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 1_000_000, t0);
+        m.observe(Some("opus"), 1_000_000, 0, t0);
         m.advance_to(buckets_after(t0, 10));
         // The spike is 10 buckets back: still on screen at width 80, so the
         // ceiling must still contain it however far the peak has decayed.
@@ -615,7 +761,7 @@ mod tests {
     fn ceiling_descends_gradually_once_a_burst_scrolls_off() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 1_000_000, t0);
+        m.observe(Some("opus"), 1_000_000, 0, t0);
         m.advance_to(buckets_after(t0, 3));
         // Narrow render: the spike has scrolled out of view, so only the
         // decayed peak holds the ceiling up.
@@ -636,7 +782,7 @@ mod tests {
     fn rate_divides_by_compute_time_not_wall_clock() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 60_000, t0);
+        m.observe(Some("opus"), 60_000, 0, t0);
         m.observe_busy(Some("opus"), 20_000, t0);
         assert_eq!(m.recent_rate(0), Some(3_000.0));
     }
@@ -647,7 +793,7 @@ mod tests {
     fn a_model_with_no_compute_time_has_no_rate() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 5_000, t0);
+        m.observe(Some("opus"), 5_000, 0, t0);
         assert_eq!(m.recent_rate(0), None, "tokens but no measured compute");
     }
 
@@ -658,7 +804,7 @@ mod tests {
     fn rate_window_slides_across_a_column_boundary() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 30_000, t0);
+        m.observe(Some("opus"), 30_000, 0, t0);
         m.observe_busy(Some("opus"), 10_000, t0);
         // Well into the next column, but still inside the rate window.
         let later = t0 + Duration::from_secs(BUCKET_SECS + 5);
@@ -666,7 +812,7 @@ mod tests {
         assert_eq!(m.recent_rate(0), None, "…and out of it once a minute passes");
 
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 30_000, t0);
+        m.observe(Some("opus"), 30_000, 0, t0);
         m.observe_busy(Some("opus"), 10_000, t0);
         m.advance_to(t0 + Duration::from_secs(30));
         assert_eq!(m.recent_rate(0), Some(3_000.0), "still inside the window");
@@ -680,9 +826,9 @@ mod tests {
     fn fleet_rate_sums_the_per_model_rates() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("a"), 20_000, t0);
+        m.observe(Some("a"), 20_000, 0, t0);
         m.observe_busy(Some("a"), 10_000, t0);
-        m.observe(Some("b"), 10_000, t0);
+        m.observe(Some("b"), 10_000, 0, t0);
         m.observe_busy(Some("b"), 10_000, t0);
         assert_eq!(m.recent_rate(0), Some(2_000.0));
         assert_eq!(m.recent_rate(1), Some(1_000.0));
@@ -695,7 +841,7 @@ mod tests {
     fn fleet_rate_is_absent_when_nothing_computed() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("a"), 20_000, t0);
+        m.observe(Some("a"), 20_000, 0, t0);
         assert_eq!(m.recent_fleet_rate(), None);
     }
 
@@ -703,7 +849,7 @@ mod tests {
     fn unattributed_samples_are_counted_not_dropped() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(None, 500, t0);
+        m.observe(None, 500, 0, t0);
         assert_eq!(m.window_total(8), 500);
         assert_eq!(m.legend(8)[0].label, UNATTRIBUTED);
     }
@@ -717,8 +863,8 @@ mod tests {
         m.reserve_history(BUCKET_SECS * 5);
         let bucket_ms = (BUCKET_SECS * 1_000) as i64;
         m.seed([
-            (0, Some("opus".to_string()), 10),
-            (bucket_ms * 2, Some("opus".to_string()), 20),
+            (0, Some("opus".to_string()), 10, 0),
+            (bucket_ms * 2, Some("opus".to_string()), 20, 0),
         ]);
         let cols: Vec<u64> = m.window(6).map(Bucket::total).collect();
         assert_eq!(cols, vec![0, 0, 0, 20, 0, 10], "newest column is last");
@@ -732,7 +878,7 @@ mod tests {
         let mut m = TokenMeter::new(t0);
         m.reserve_history(BUCKET_SECS * 2);
         let bucket_ms = (BUCKET_SECS * 1_000) as i64;
-        m.seed([(bucket_ms * 100, Some("opus".to_string()), 999)]);
+        m.seed([(bucket_ms * 100, Some("opus".to_string()), 999, 0)]);
         assert_eq!(m.window_total(64), 0);
     }
 
@@ -743,8 +889,8 @@ mod tests {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
         m.reserve_history(BUCKET_SECS * 3);
-        m.seed([((BUCKET_SECS * 1_000) as i64, Some("opus".to_string()), 5)]);
-        m.observe(Some("opus"), 7, t0);
+        m.seed([((BUCKET_SECS * 1_000) as i64, Some("opus".to_string()), 5, 0)]);
+        m.observe(Some("opus"), 7, 0, t0);
         let cols: Vec<u64> = m.window(4).map(Bucket::total).collect();
         assert_eq!(cols, vec![0, 0, 5, 7]);
     }
@@ -755,7 +901,7 @@ mod tests {
         let mut m = TokenMeter::new(t0);
         // A dollar-only Cost (claude's run-level `result`) carries no tokens
         // and must not register a series or a column.
-        m.observe(Some("opus"), 0, t0);
+        m.observe(Some("opus"), 0, 0, t0);
         assert!(m.is_idle());
         assert_eq!(m.window_total(8), 0);
     }
@@ -764,7 +910,7 @@ mod tests {
     fn history_is_capped() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 10, t0);
+        m.observe(Some("opus"), 10, 0, t0);
         m.advance_to(buckets_after(t0, (MAX_BUCKETS as u64) * 3));
         assert!(m.buckets.len() <= MAX_BUCKETS, "{}", m.buckets.len());
     }
@@ -773,7 +919,7 @@ mod tests {
     fn partial_history_is_right_aligned_for_hover() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        m.observe(Some("opus"), 700, t0);
+        m.observe(Some("opus"), 700, 0, t0);
         m.advance_to(buckets_after(t0, 1));
         // Two buckets of history in a 10-wide render occupy the last two
         // columns; everything left of them is empty screen, not data.
@@ -788,7 +934,7 @@ mod tests {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
         for i in 0..(SERIES_PALETTE.len() + 3) {
-            m.observe(Some(&format!("m{i}")), 100, t0);
+            m.observe(Some(&format!("m{i}")), 100, 0, t0);
         }
         let legend = m.legend(8);
         assert_eq!(legend.len(), SERIES_PALETTE.len() + 1);

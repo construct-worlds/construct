@@ -2422,9 +2422,16 @@ pub struct TokenSample {
     /// that moment. `None` only when the session had never named one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Prompt-side plus output tokens. Cached input is excluded — it is a
-    /// subset of the prompt side and would double-count.
+    /// Prompt-side plus output tokens. Cached input is not added on top — it
+    /// is already inside the prompt side, and adding it would double-count.
     pub tokens: u64,
+    /// The part of `tokens` the provider served from its prompt cache rather
+    /// than processing fresh. A subset of `tokens`, so `tokens - cached` is
+    /// the new work in this sample (spec 0167). 0 when the harness reports no
+    /// cache figure, and additive on the wire: records written before it
+    /// existed load as 0.
+    #[serde(default)]
+    pub cached: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

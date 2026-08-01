@@ -3941,17 +3941,17 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
         let filled = ((total as f64 / scale as f64) * eighths_total as f64).round() as usize;
         let filled = filled.clamp(1, eighths_total);
         let segments = stacked_eighths(&bucket.stacked(), total, filled);
-        // Paint bottom-up: each series owns a contiguous run of eighths.
+        // Paint bottom-up: each band owns a contiguous run of eighths.
         for cell in column_cells(&segments, filled, cells) {
             let y = graph.y + graph.height.saturating_sub(cell.row + 1);
-            let mut style = Style::default().fg(app.token_meter.color(cell.fg));
+            let mut style = Style::default().fg(band_color(&app.token_meter, cell.fg));
             // A terminal cell holds one glyph, so a boundary landing inside
             // one is drawn as a partial block whose *filled* part is the
-            // lower series and whose background is the upper one. Painting
+            // lower band and whose background is the upper one. Painting
             // both as foreground glyphs would mean the second overwrites the
-            // first, and the lower series would vanish from the stack.
+            // first, and the lower band would vanish from the stack.
             if let Some(bg) = cell.bg {
-                style = style.bg(app.token_meter.color(bg));
+                style = style.bg(band_color(&app.token_meter, bg));
             }
             f.buffer_mut().set_string(x, y, cell.glyph, style);
         }
@@ -3962,36 +3962,64 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
     }
 }
 
+/// How much of a model's hue survives in its cache-read band. Low enough to
+/// read as recessed at a glance, high enough that the hue still identifies
+/// which model the shaded part belongs to.
+const CACHED_BAND_MIX: f32 = 0.45;
+
+/// Resolve a band to its color: a model's new work in its own color, and the
+/// part the provider served from cache in the same hue pushed toward black.
+/// Same hue because the two bands are one model's bar; recessed because
+/// cache-read work is the cheap part of it.
+///
+/// This has to be a color rather than [`Modifier::DIM`]: one cell can hold a
+/// model's new/cached boundary, and there the two bands are the glyph's
+/// foreground and its background — an attribute would dim both or neither.
+fn band_color(
+    meter: &crate::token_meter::TokenMeter,
+    (model, part): crate::token_meter::Band,
+) -> Color {
+    let base = meter.color(model);
+    match part {
+        crate::token_meter::Part::New => base,
+        crate::token_meter::Part::Cached => blend_color(Color::Black, base, CACHED_BAND_MIX),
+    }
+}
+
 /// One painted cell of a stacked column: which glyph, in whose color, over
 /// whose color.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ColumnCell {
+struct ColumnCell<K> {
     /// Rows up from the bottom of the graph.
     row: u16,
     glyph: &'static str,
-    /// Series drawn as the glyph's filled part.
-    fg: u16,
-    /// Series filling the rest of the cell, when a boundary lands inside it.
-    bg: Option<u16>,
+    /// Band drawn as the glyph's filled part.
+    fg: K,
+    /// Band filling the rest of the cell, when a boundary lands inside it.
+    bg: Option<K>,
 }
 
 /// Lay a column's stacked segments onto terminal cells.
 ///
-/// Cells are 8 eighths tall. A cell wholly owned by one series is a full
+/// Cells are 8 eighths tall. A cell wholly owned by one band is a full
 /// block; the column's topmost cell is a partial block; a cell where one
-/// series ends and the next begins is a partial block of the lower series
-/// drawn *over* the upper series as background, which is the only way to get
-/// two series into one cell.
-fn column_cells(segments: &[(u16, usize)], filled: usize, cells: usize) -> Vec<ColumnCell> {
+/// band ends and the next begins is a partial block of the lower band
+/// drawn *over* the upper band as background, which is the only way to get
+/// two bands into one cell.
+fn column_cells<K: Copy + PartialEq>(
+    segments: &[(K, usize)],
+    filled: usize,
+    cells: usize,
+) -> Vec<ColumnCell<K>> {
     let mut out = Vec::new();
     if segments.is_empty() || filled == 0 {
         return out;
     }
-    // Which series owns each eighth, bottom-up.
-    let mut owner: Vec<u16> = Vec::with_capacity(filled);
-    for (model, eighths) in segments {
+    // Which band owns each eighth, bottom-up.
+    let mut owner: Vec<K> = Vec::with_capacity(filled);
+    for (band, eighths) in segments {
         for _ in 0..*eighths {
-            owner.push(*model);
+            owner.push(*band);
         }
     }
     for row in 0..cells {
@@ -4002,13 +4030,13 @@ fn column_cells(segments: &[(u16, usize)], filled: usize, cells: usize) -> Vec<C
         let top = ((row + 1) * 8).min(filled).min(owner.len());
         let fill = top - base;
         let bottom_series = owner[base];
-        // How far the bottom series reaches within this cell.
+        // How far the bottom band reaches within this cell.
         let bottom_run = owner[base..top]
             .iter()
             .take_while(|m| **m == bottom_series)
             .count();
         let cell = if bottom_run == fill {
-            // One series owns everything filled here.
+            // One band owns everything filled here.
             ColumnCell {
                 row: row as u16,
                 glyph: if fill == 8 { "█" } else { METER_PARTIALS[fill] },
@@ -4016,7 +4044,7 @@ fn column_cells(segments: &[(u16, usize)], filled: usize, cells: usize) -> Vec<C
                 bg: None,
             }
         } else if fill == 8 {
-            // A boundary inside a full cell: lower series as the glyph's
+            // A boundary inside a full cell: lower band as the glyph's
             // filled part, whatever tops the cell as its background.
             ColumnCell {
                 row: row as u16,
@@ -4027,7 +4055,7 @@ fn column_cells(segments: &[(u16, usize)], filled: usize, cells: usize) -> Vec<C
         } else {
             // Partially-filled top cell with a boundary in it. The empty part
             // above must stay the panel background, so there is no room to
-            // encode both series — the larger share takes the cell.
+            // encode both bands — the larger share takes the cell.
             let upper = owner[top - 1];
             let upper_run = fill - bottom_run;
             ColumnCell {
@@ -4046,20 +4074,20 @@ fn column_cells(segments: &[(u16, usize)], filled: usize, cells: usize) -> Vec<C
     out
 }
 
-/// Split a column's `filled` eighths across its series in proportion to
+/// Split a column's `filled` eighths across its bands in proportion to
 /// their tokens, largest-remainder so the parts sum to exactly `filled` and
-/// no visible series rounds away to nothing.
-fn stacked_eighths(stacked: &[(u16, u64)], total: u64, filled: usize) -> Vec<(u16, usize)> {
+/// no visible band rounds away to nothing.
+fn stacked_eighths<K: Copy>(stacked: &[(K, u64)], total: u64, filled: usize) -> Vec<(K, usize)> {
     if total == 0 || filled == 0 {
         return Vec::new();
     }
-    let mut out: Vec<(u16, usize)> = Vec::with_capacity(stacked.len());
+    let mut out: Vec<(K, usize)> = Vec::with_capacity(stacked.len());
     let mut remainders: Vec<(usize, f64)> = Vec::with_capacity(stacked.len());
     let mut assigned = 0usize;
-    for (i, (model, tokens)) in stacked.iter().enumerate() {
+    for (i, (band, tokens)) in stacked.iter().enumerate() {
         let exact = (*tokens as f64 / total as f64) * filled as f64;
         let floor = exact.floor() as usize;
-        out.push((*model, floor));
+        out.push((*band, floor));
         remainders.push((i, exact - floor as f64));
         assigned += floor;
     }
@@ -4095,8 +4123,14 @@ fn legend_max_rows(panel_h: u16) -> usize {
 
 /// One legend entry's rendered text: a dot, the model, and how fast it ran.
 fn legend_entry_text(entry: &crate::token_meter::LegendEntry) -> String {
-    format!("● {} {} ", entry.label, legend_rate(entry.rate))
+    format!("● {} {}", entry.label, legend_rate(entry.rate))
 }
+
+/// Blank columns between one legend cell and the next. A rate sits against
+/// its cell's right edge and the following cell opens with a dot, so a single
+/// space of separation reads as one run of text; this is the margin that
+/// makes the columns look like columns.
+const LEGEND_COL_GAP: usize = 3;
 
 /// Format a throughput figure. Three distinct states, because collapsing any
 /// two of them misreports what happened: `idle` (nothing computed — `None`),
@@ -4167,10 +4201,13 @@ fn layout_legend(
         .max()
         .unwrap_or(width)
         .max(1);
-    // An entry wider than the whole panel still gets one column, truncated
-    // at render time — a name clipped with an ellipsis beats no name.
-    let cols = (width / widest).clamp(1, entries.len());
-    let col_w = widest.min(width);
+    // Each cell carries its own right-hand margin, so the count is of
+    // gapped cells. An entry wider than the whole panel still gets one
+    // column, truncated at render time — a name clipped with an ellipsis
+    // beats no name.
+    let gapped = widest + LEGEND_COL_GAP;
+    let cols = (width / gapped).clamp(1, entries.len());
+    let col_w = gapped.min(width);
     let mut rows: Vec<Vec<usize>> = Vec::new();
     for i in 0..entries.len() {
         if i % cols == 0 {
@@ -4204,11 +4241,11 @@ fn legend_cell(
 ) -> Option<(String, usize, String)> {
     let rate = legend_rate(entry.rate);
     let rate_w = UnicodeWidthStr::width(rate.as_str());
-    let with_rate = UnicodeWidthStr::width("●  ") + rate_w + 1;
+    let with_rate = UnicodeWidthStr::width("●  ") + rate_w + LEGEND_COL_GAP;
     let (budget, rate) = if room > with_rate + 3 {
         (room - with_rate, rate)
     } else {
-        (room.saturating_sub(4), String::new())
+        (room.saturating_sub(2 + LEGEND_COL_GAP), String::new())
     };
     if budget < 2 {
         return None;
@@ -4217,10 +4254,12 @@ fn legend_cell(
     if rate.is_empty() {
         return Some((head, 0, rate));
     }
-    // One column of gutter keeps a rate off the next cell's dot; the rest of
-    // the slack goes between the name and the rate.
+    // The cell's right-hand margin keeps a rate clear of the next cell's dot;
+    // the rest of the slack goes between the name and the rate.
     let head_w = UnicodeWidthStr::width(head.as_str());
-    let gap = room.saturating_sub(1).saturating_sub(head_w + rate_w);
+    let gap = room
+        .saturating_sub(LEGEND_COL_GAP)
+        .saturating_sub(head_w + rate_w);
     Some((head, gap, rate))
 }
 
@@ -4313,7 +4352,10 @@ fn truncate_label(label: &str, max: usize) -> String {
 }
 
 /// Hover detail for one meter column: what that second consumed, split by
-/// model. Mirrors the context gauge's hover-for-exact-numbers idiom.
+/// model and — where the provider served part of it from cache — by how much
+/// of that model's share was cached. Mirrors the context gauge's
+/// hover-for-exact-numbers idiom, and is the only place the shaded part of a
+/// bar gets an exact figure.
 fn render_matrix_token_tooltip(f: &mut Frame, app: &App) {
     if app.matrix_panel_mode != crate::app::MatrixPanelMode::Tokens {
         return;
@@ -4339,12 +4381,19 @@ fn render_matrix_token_tooltip(f: &mut Frame, app: &App) {
         crate::token_meter::TokenMeter::bucket_span_label(),
         crate::lineage::format_token_count(bucket.total())
     )];
-    for (model, tokens) in bucket.stacked() {
-        parts.push(format!(
+    for (model, tokens, cached) in bucket.by_model() {
+        let mut part = format!(
             "{} {}",
             app.token_meter.model_label(model),
             crate::lineage::format_token_count(tokens)
-        ));
+        );
+        if cached > 0 {
+            part.push_str(&format!(
+                " ({} cached)",
+                crate::lineage::format_token_count(cached)
+            ));
+        }
+        parts.push(part);
     }
     let label = format!(" {} ", parts.join(" · "));
     render_button_tooltip(f, &app.theme, &label, mx, my.saturating_sub(2));
@@ -22763,6 +22812,54 @@ mod tests {
         assert_eq!(top.bg, None);
     }
 
+    /// A model's cached band must be the same hue as its new work — that is
+    /// what says the two parts belong to one bar — but visibly recessed, or
+    /// the split says nothing at all.
+    #[test]
+    fn cached_bands_are_a_recessed_shade_of_the_model_color() {
+        let mut meter = crate::token_meter::TokenMeter::new(Instant::now());
+        meter.observe(Some("opus"), 100, 40, Instant::now());
+        let new = band_color(&meter, (0, crate::token_meter::Part::New));
+        let cached = band_color(&meter, (0, crate::token_meter::Part::Cached));
+        assert_eq!(new, meter.color(0), "new work keeps the series color");
+        assert_ne!(cached, new, "the cached part has to read as different");
+        let (Color::Rgb(nr, ng, nb), Color::Rgb(cr, cg, cb)) = (new, cached) else {
+            panic!("series palette is rgb");
+        };
+        assert!(
+            cr < nr && cg < ng && cb < nb,
+            "cached must be darker on every channel: {cached:?} vs {new:?}"
+        );
+        // Same hue, i.e. the channels stay in proportion rather than sliding
+        // toward gray — a blend toward black scales them all by one factor.
+        let ratio = |c: u8, n: u8| c as f32 / n as f32;
+        let base = ratio(cr, nr);
+        for (c, n) in [(cg, ng), (cb, nb)] {
+            assert!(
+                (ratio(c, n) - base).abs() < 0.05,
+                "hue drifted: {cached:?} vs {new:?}"
+            );
+        }
+    }
+
+    /// Two bands of the *same* model sharing a cell still have to be encoded
+    /// as fg-over-bg — the split is invisible otherwise, exactly where a
+    /// column is short enough that it matters most.
+    #[test]
+    fn column_cells_encode_a_new_cached_boundary_like_any_other() {
+        use crate::token_meter::Part;
+        let cells = column_cells(&[((0u16, Part::New), 5), ((0u16, Part::Cached), 3)], 8, 4);
+        assert_eq!(
+            cells,
+            vec![ColumnCell {
+                row: 0,
+                glyph: METER_PARTIALS[5],
+                fg: (0, Part::New),
+                bg: Some((0, Part::Cached)),
+            }]
+        );
+    }
+
     #[test]
     fn legend_rate_formats_throughput() {
         assert_eq!(legend_rate(Some(100.0)), "100/s");
@@ -22823,7 +22920,11 @@ mod tests {
             let used = UnicodeWidthStr::width(head.as_str())
                 + gap
                 + UnicodeWidthStr::width(rate.as_str());
-            assert_eq!(used, room - 1, "rate ends one gutter short of the edge");
+            assert_eq!(
+                used,
+                room - LEGEND_COL_GAP,
+                "rate ends one margin short of the edge"
+            );
             assert!(gap >= 1, "name and rate never touch: {head:?} {rate:?}");
         }
     }
@@ -22863,9 +22964,13 @@ mod tests {
             .map(|e| UnicodeWidthStr::width(legend_entry_text(e).as_str()))
             .max()
             .expect("entries");
-        assert_eq!(grid.col_w, widest, "one cell width, sized to the widest");
+        assert_eq!(
+            grid.col_w,
+            widest + LEGEND_COL_GAP,
+            "one cell width, sized to the widest plus its margin"
+        );
         assert!(
-            grid.rows.iter().all(|row| row.len() <= 60 / widest),
+            grid.rows.iter().all(|row| row.len() <= 60 / grid.col_w),
             "no row overflows its columns: {:?}",
             grid.rows
         );
@@ -22972,8 +23077,8 @@ mod tests {
 
     #[test]
     fn stacked_eighths_is_empty_without_volume() {
-        assert!(stacked_eighths(&[], 0, 8).is_empty());
-        assert!(stacked_eighths(&[(0, 5)], 5, 0).is_empty());
+        assert!(stacked_eighths::<u16>(&[], 0, 8).is_empty());
+        assert!(stacked_eighths(&[(0u16, 5u64)], 5, 0).is_empty());
     }
 
     /// Truncation must mark itself — a clipped model name that looks like a

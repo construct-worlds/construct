@@ -1732,8 +1732,12 @@ impl SessionManager {
                                             model: model.clone().or_else(|| scan_model.clone()),
                                             // Cached input is a subset of the
                                             // prompt side; adding it would
-                                            // double-count.
+                                            // double-count. It is carried
+                                            // alongside so the recovered
+                                            // history can still tell new work
+                                            // from re-served context.
                                             tokens: tokens_in.saturating_add(tokens_out),
+                                            cached: tokens_cached,
                                         });
                                     }
                                     tally.add(tokens_in, tokens_out, tokens_cached);
