@@ -37,7 +37,64 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub paused: bool,
     #[serde(default)]
+    pub sandbox: ServiceSandboxConfig,
+    #[serde(default)]
     pub channels: BTreeMap<String, ServiceChannelConfig>,
+}
+
+/// Capability limits applied to every session a service creates.
+///
+/// A service session is prompted by a third party, so it is confined by
+/// default and widened only by explicit configuration. Filesystem and network
+/// confinement are not represented here: the harness sandbox already limits
+/// writes to the session's working directory and denies egress, and a service
+/// must not be able to relax that from its own definition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub struct ServiceSandboxConfig {
+    /// Allow tools that reach other sessions or the daemon itself.
+    #[serde(default)]
+    pub fleet_control: bool,
+    /// Allow the construct MCP server to be injected into harnesses that
+    /// take their fleet access that way.
+    #[serde(default)]
+    pub mcp: bool,
+    /// Allow the harness to load skills.
+    #[serde(default = "default_sandbox_skills")]
+    pub skills: bool,
+}
+
+fn default_sandbox_skills() -> bool {
+    true
+}
+
+impl Default for ServiceSandboxConfig {
+    fn default() -> Self {
+        Self {
+            fleet_control: false,
+            mcp: false,
+            skills: default_sandbox_skills(),
+        }
+    }
+}
+
+impl ServiceSandboxConfig {
+    /// Environment applied at session creation. Each entry withholds a
+    /// capability; an allowed capability adds nothing, so a service session
+    /// with everything enabled is indistinguishable from an ordinary one.
+    pub fn session_env(&self) -> HashMap<String, String> {
+        let mut env = HashMap::new();
+        if !self.fleet_control {
+            env.insert("CONSTRUCT_SMITH_FLEET_TOOLS".to_string(), "off".to_string());
+        }
+        if !self.mcp {
+            env.insert("CONSTRUCT_INJECT_MCP".to_string(), "0".to_string());
+        }
+        if !self.skills {
+            env.insert("CONSTRUCT_SMITH_SKILLS".to_string(), "off".to_string());
+        }
+        env
+    }
 }
 
 fn default_service_harness() -> String {
@@ -116,6 +173,13 @@ pub fn put_definition(
         .as_ref()
         .map(|config| config.channels.clone())
         .unwrap_or_default();
+    // Sandbox limits are not part of the edit surface, so an edit must carry
+    // the stored ones forward. Rebuilding them from defaults would silently
+    // re-grant (or revoke) capabilities on an unrelated field change.
+    let sandbox = existing
+        .as_ref()
+        .map(|config| config.sandbox.clone())
+        .unwrap_or_default();
     let routing = match params.service.routing.as_str() {
         "per-event" => ServiceRouting::PerEvent,
         "session-key" => ServiceRouting::SessionKey,
@@ -129,6 +193,7 @@ pub fn put_definition(
         cwd: params.service.cwd,
         routing,
         paused: params.service.paused,
+        sandbox,
         channels,
     };
     write_definition(dir, &params.service.name, &config)?;
@@ -795,7 +860,7 @@ impl ServiceRuntime {
                 mode: Some("headless".to_string()),
                 pty_size: None,
                 worktree: false,
-                env: HashMap::new(),
+                env: self.shared.config.sandbox.session_env(),
                 args: Vec::new(),
                 kind: SessionKind::User,
                 parent_session_id: None,
@@ -1103,6 +1168,73 @@ mod tests {
         ];
         assert_eq!(latest_assistant_reply(events.iter()), None);
         assert_eq!(latest_assistant_reply([].iter()), None);
+    }
+
+    #[test]
+    fn services_withhold_fleet_access_unless_asked() {
+        // The default matters on its own: a service is prompted by whoever can
+        // reach its channel, so an omitted [sandbox] section must not hand that
+        // caller the fleet.
+        let env = ServiceSandboxConfig::default().session_env();
+        assert_eq!(
+            env.get("CONSTRUCT_SMITH_FLEET_TOOLS").map(String::as_str),
+            Some("off")
+        );
+        assert_eq!(env.get("CONSTRUCT_INJECT_MCP").map(String::as_str), Some("0"));
+        assert!(!env.contains_key("CONSTRUCT_SMITH_SKILLS"));
+
+        let opened = ServiceSandboxConfig {
+            fleet_control: true,
+            mcp: true,
+            skills: false,
+        };
+        let env = opened.session_env();
+        assert!(!env.contains_key("CONSTRUCT_SMITH_FLEET_TOOLS"));
+        assert!(!env.contains_key("CONSTRUCT_INJECT_MCP"));
+        assert_eq!(
+            env.get("CONSTRUCT_SMITH_SKILLS").map(String::as_str),
+            Some("off")
+        );
+    }
+
+    #[test]
+    fn sandbox_limits_survive_an_unrelated_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = ServiceConfig {
+            instruction: "hi".into(),
+            harness: "smith".into(),
+            model: None,
+            cwd: ".".into(),
+            routing: ServiceRouting::SessionKey,
+            paused: false,
+            sandbox: ServiceSandboxConfig::default(),
+            channels: BTreeMap::new(),
+        };
+        config.sandbox.fleet_control = true;
+        write_definition(dir.path(), "svc", &config).unwrap();
+
+        // An edit that never mentions the sandbox must not re-confine (or
+        // re-open) the service behind the operator's back.
+        put_definition(
+            dir.path(),
+            construct_protocol::ServicePutParams {
+                service: construct_protocol::ServiceSummary {
+                    name: "svc".into(),
+                    instruction: "changed".into(),
+                    harness: "smith".into(),
+                    model: None,
+                    cwd: ".".into(),
+                    routing: "session-key".into(),
+                    paused: false,
+                    channels: Vec::new(),
+                },
+            },
+        )
+        .unwrap();
+
+        let stored = load_definitions(dir.path()).unwrap();
+        assert!(stored["svc"].sandbox.fleet_control);
+        assert_eq!(stored["svc"].instruction, "changed");
     }
 
     #[test]

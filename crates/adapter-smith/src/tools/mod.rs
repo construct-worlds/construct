@@ -190,9 +190,21 @@ pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
 }
 
+/// Whether this session may use tools that reach outside itself — the
+/// daemon-control surface and smith-owned subagents.
+///
+/// Denied by setting `CONSTRUCT_SMITH_FLEET_TOOLS=off`. A session whose
+/// prompts come from an untrusted third party (a service endpoint) runs with
+/// these withheld, so a request body cannot talk the agent into enumerating,
+/// driving, or destroying the rest of the fleet. Every other session keeps
+/// them: the orchestrator in particular *is* the fleet dispatcher.
+fn fleet_tools_enabled() -> bool {
+    std::env::var("CONSTRUCT_SMITH_FLEET_TOOLS").as_deref() != Ok("off")
+}
+
 impl ToolRegistry {
     pub fn with_defaults() -> Self {
-        let tools: Vec<Box<dyn Tool>> = vec![
+        let mut tools: Vec<Box<dyn Tool>> = vec![
             // Codex-style minimal coding surface: a shell (for reads,
             // search, tests — `cat`/`rg`/`ls`/...), a multi-hunk patch
             // editor, and stdin for interactive sessions the shell starts.
@@ -204,6 +216,16 @@ impl ToolRegistry {
             Box::new(browser::BrowserInspect),
             Box::new(browser::BrowserScreenshot),
             Box::new(browser::BrowserEval),
+        ];
+        if fleet_tools_enabled() {
+            tools.extend(Self::fleet_tools());
+        }
+        Self { tools }
+    }
+
+    /// Tools that act on the daemon or on sessions other than this one.
+    fn fleet_tools() -> Vec<Box<dyn Tool>> {
+        vec![
             // agentd-control tools
             Box::new(construct_daemon::Context),
             Box::new(construct_daemon::Whoami),
@@ -241,8 +263,7 @@ impl ToolRegistry {
             Box::new(subagent::Enqueue),
             Box::new(subagent::Cancel),
             Box::new(subagent::Delete),
-        ];
-        Self { tools }
+        ]
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -306,6 +327,31 @@ fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialized with the other env-reading test below: `set_var` is
+    /// process-global.
+    #[test]
+    fn fleet_tools_are_withheld_when_denied() {
+        let names = |r: &ToolRegistry| -> Vec<String> {
+            r.specs().into_iter().map(|s| s.name).collect()
+        };
+
+        std::env::remove_var("CONSTRUCT_SMITH_FLEET_TOOLS");
+        let open = names(&ToolRegistry::with_defaults());
+        assert!(open.iter().any(|n| n == "agentd_list_sessions"));
+        assert!(open.iter().any(|n| n == "agentd_send_input"));
+
+        std::env::set_var("CONSTRUCT_SMITH_FLEET_TOOLS", "off");
+        let confined = names(&ToolRegistry::with_defaults());
+        std::env::remove_var("CONSTRUCT_SMITH_FLEET_TOOLS");
+
+        // Nothing that reaches another session or the daemon survives...
+        assert!(!confined.iter().any(|n| n.starts_with("agentd_")));
+        assert!(!confined.iter().any(|n| n.starts_with("subagent_")));
+        // ...while the session's own working tools are untouched.
+        assert!(confined.iter().any(|n| n == "shell"));
+        assert!(confined.iter().any(|n| n == "edit_file"));
+    }
 
     #[test]
     fn truncate_small_passthrough() {
