@@ -32880,18 +32880,35 @@ mod tests {
         app.focus = PaneFocus::List;
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let bar = app.layout.list_scrollbar.expect("focused scrollbar");
-        assert_eq!(
-            term.backend()
-                .buffer()
-                .cell(ratatui::layout::Position {
-                    x: bar.thumb.x,
-                    y: bar.thumb.y,
-                })
-                .expect("thumb cell")
-                .symbol(),
+        // Transparent overlay: background is tinted, but the row's glyph is
+        // preserved (must not replace the last column with a bar character).
+        let buf = term.backend().buffer();
+        let thumb_cell = buf
+            .cell(ratatui::layout::Position {
+                x: bar.thumb.x,
+                y: bar.thumb.y,
+            })
+            .expect("thumb cell");
+        assert_ne!(
+            thumb_cell.symbol(),
             "▕",
-            "the list scrollbar uses a slim right-edge glyph"
+            "list scrollbar must not overwrite the last column with a bar glyph"
         );
+        if let Some(track_y) = (bar.area.y..bar.area.y + bar.area.height).find(|&y| {
+            y < bar.thumb.y || y >= bar.thumb.y.saturating_add(bar.thumb.height)
+        }) {
+            let track_cell = buf
+                .cell(ratatui::layout::Position {
+                    x: bar.area.x,
+                    y: track_y,
+                })
+                .expect("track cell");
+            assert_ne!(
+                thumb_cell.bg,
+                track_cell.bg,
+                "thumb and track should use distinct background tints"
+            );
+        }
 
         // Clicking near the track's bottom jumps the viewport toward the end.
         app.on_mouse(MouseEvent {
@@ -38966,18 +38983,36 @@ mod tests {
                 .collect()
         };
         let bottom = area.y + area.height - 1;
-        assert!(
-            row_syms(bottom).trim().chars().all(|ch| ch == '▁'),
-            "the scrollbar row carries only the slim scrollbar, no diagram content"
+        assert_eq!(
+            row_syms(bottom).trim(),
+            "",
+            "the transparent scrollbar row preserves its blank glyphs"
         );
-        assert!(
-            (area.x..area.x + area.width).any(|x| {
-                buf.cell((x, bottom))
-                    .map(|c| c.symbol() == "▁" && c.style().fg.is_some())
-                    .unwrap_or(false)
-            }),
-            "the bottom row shows the slim scrollbar"
+        let hbar = app
+            .layout
+            .lineage_hscrollbar
+            .as_ref()
+            .expect("horizontal scrollbar");
+        let thumb_cell = buf
+            .cell((hbar.thumb.x, hbar.thumb.y))
+            .expect("horizontal thumb cell");
+        assert_ne!(
+            thumb_cell.symbol(),
+            "▁",
+            "the transparent scrollbar must not paint a bottom-edge glyph"
         );
+        if let Some(track_x) = (hbar.area.x..hbar.area.x + hbar.area.width).find(|&x| {
+            x < hbar.thumb.x || x >= hbar.thumb.x.saturating_add(hbar.thumb.width)
+        }) {
+            let track_cell = buf
+                .cell((track_x, hbar.area.y))
+                .expect("horizontal track cell");
+            assert_ne!(
+                thumb_cell.bg,
+                track_cell.bg,
+                "horizontal thumb and track should use distinct background tints"
+            );
+        }
         assert_eq!(
             row_syms(bottom - 1).trim(),
             "",
@@ -39046,28 +39081,59 @@ mod tests {
         let vbar = app.layout.lineage_vscrollbar.expect("vertical scrollbar");
         let hbar = app.layout.lineage_hscrollbar.expect("horizontal scrollbar");
         let buffer = term.backend().buffer();
-        assert_eq!(
-            buffer
-                .cell(ratatui::layout::Position {
-                    x: vbar.thumb.x,
-                    y: vbar.thumb.y,
-                })
-                .expect("vertical thumb cell")
-                .symbol(),
+        let vertical_thumb = buffer
+            .cell(ratatui::layout::Position {
+                x: vbar.thumb.x,
+                y: vbar.thumb.y,
+            })
+            .expect("vertical thumb cell");
+        assert_ne!(
+            vertical_thumb.symbol(),
             "▕",
-            "the vertical lineage scrollbar uses a slim right-edge glyph"
+            "vertical lineage scrollbar must not overwrite the diagram glyph"
         );
-        assert_eq!(
-            buffer
+        if let Some(track_y) = (vbar.area.y..vbar.area.y + vbar.area.height).find(|&y| {
+            y < vbar.thumb.y || y >= vbar.thumb.y.saturating_add(vbar.thumb.height)
+        }) {
+            let vertical_track = buffer
                 .cell(ratatui::layout::Position {
-                    x: hbar.thumb.x,
-                    y: hbar.thumb.y,
+                    x: vbar.area.x,
+                    y: track_y,
                 })
-                .expect("horizontal thumb cell")
-                .symbol(),
+                .expect("vertical track cell");
+            assert_ne!(
+                vertical_thumb.bg,
+                vertical_track.bg,
+                "vertical lineage thumb and track should use distinct background tints"
+            );
+        }
+
+        let horizontal_thumb = buffer
+            .cell(ratatui::layout::Position {
+                x: hbar.thumb.x,
+                y: hbar.thumb.y,
+            })
+            .expect("horizontal thumb cell");
+        assert_ne!(
+            horizontal_thumb.symbol(),
             "▁",
-            "the horizontal lineage scrollbar uses a slim bottom-edge glyph"
+            "horizontal lineage scrollbar must not overwrite the diagram glyph"
         );
+        if let Some(track_x) = (hbar.area.x..hbar.area.x + hbar.area.width).find(|&x| {
+            x < hbar.thumb.x || x >= hbar.thumb.x.saturating_add(hbar.thumb.width)
+        }) {
+            let horizontal_track = buffer
+                .cell(ratatui::layout::Position {
+                    x: track_x,
+                    y: hbar.area.y,
+                })
+                .expect("horizontal track cell");
+            assert_ne!(
+                horizontal_thumb.bg,
+                horizontal_track.bg,
+                "horizontal lineage thumb and track should use distinct background tints"
+            );
+        }
         assert_eq!(
             app.layout.lineage_area.expect("lineage section").height,
             resting_height,

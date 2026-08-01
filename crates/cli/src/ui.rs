@@ -3016,9 +3016,10 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.list_scroll_offset = visible_start + state.offset();
     app.list_scroll_offset = app.layout.list_scroll_offset;
     // Session rows keep their full width; the scrollbar is an auto-hidden
-    // slim edge glyph over the rightmost column, matching lineage. Hovering
-    // the session-list header or rows reveals it, while lineage/operator
-    // hover does not. An active drag keeps its bar alive until mouse-up.
+    // transparent overlay over the rightmost column (background tint only,
+    // matching the session-view terminal scrollbar). Hovering the
+    // session-list header or rows reveals it, while lineage/operator hover
+    // does not. An active drag keeps its bar alive until mouse-up.
     let list_hover_area = Rect {
         x: area.x,
         y: area.y,
@@ -3069,8 +3070,11 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     x,
                     y: list_items_area.y + row as u16,
                 }) {
-                    cell.set_symbol("▕");
-                    cell.set_fg(if row >= top && row < top + thumb_h {
+                    // Keep the row glyph/foreground intact and tint only the
+                    // cell background — same opacity approximation as the
+                    // terminal scrollbar, so the last column of session text
+                    // stays readable under the bar.
+                    cell.set_bg(if row >= top && row < top + thumb_h {
                         thumb_color
                     } else {
                         track_color
@@ -3482,8 +3486,8 @@ fn render_lineage_section(
         .collect();
     f.render_widget(Paragraph::new(lines), inner);
 
-    // Scrollbars when the diagram overflows the viewport — slim edge glyphs
-    // with the same opacity approximation as the terminal scrollbar.
+    // Scrollbars when the diagram overflows the viewport — transparent edge
+    // overlays with the same opacity approximation as the terminal scrollbar.
     // Vertical runs along the right edge; horizontal along the bottom edge.
     let track_color = blend_color(Color::Black, app.theme.text, 0.30);
     let thumb_color = blend_color(Color::Black, app.theme.text, 0.80);
@@ -3519,8 +3523,9 @@ fn render_lineage_section(
                 x,
                 y: inner.y + r as u16,
             }) {
-                cell.set_symbol("▕");
-                cell.set_fg(if r >= top && r < top + thumb_h {
+                // Preserve the diagram glyph and foreground; tint only the
+                // cell background so the rightmost character remains visible.
+                cell.set_bg(if r >= top && r < top + thumb_h {
                     thumb_color
                 } else {
                     track_color
@@ -3568,8 +3573,9 @@ fn render_lineage_section(
                 x: inner.x + cidx as u16,
                 y,
             }) {
-                cell.set_symbol("▁");
-                cell.set_fg(if cidx >= left && cidx < left + thumb_w {
+                // Preserve the diagram glyph and foreground; tint only the
+                // cell background so the bottom row remains readable.
+                cell.set_bg(if cidx >= left && cidx < left + thumb_w {
                     thumb_color
                 } else {
                     track_color
