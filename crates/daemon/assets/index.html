@@ -3182,8 +3182,6 @@
       <div class="list-create-actions">
         <button type="button" class="new-session-btn" id="newSessionBtn"
                 aria-label="new session">+ new session</button>
-        <button type="button" class="new-session-btn" id="newServiceBtn"
-                aria-label="create service">+ service</button>
       </div>
       <span class="session-list-sr-label">sessions</span>
       <aside class="session-list" id="sessionList">
@@ -3612,7 +3610,6 @@ const transcriptEl = $("transcript");
 let activeTranscriptEl = null;
 const mainEl = document.querySelector("main");
 const sessionListEl = $("sessionList");
-const newServiceBtn = $("newServiceBtn");
 const sessionListResizerEl = $("sessionListResizer");
 const sessionTitleEl = $("sessionTitle");
 const sessionRuntimeEl = $("sessionRuntime");
@@ -5154,7 +5151,6 @@ function beginNewService() {
   renderSessions();
 }
 
-newServiceBtn.addEventListener("click", beginNewService);
 serviceEditBtn.addEventListener("click", () => {
   if (!state.currentServiceName) return;
   if (state.serviceEditing) {
