@@ -39063,28 +39063,59 @@ mod tests {
         let vbar = app.layout.lineage_vscrollbar.expect("vertical scrollbar");
         let hbar = app.layout.lineage_hscrollbar.expect("horizontal scrollbar");
         let buffer = term.backend().buffer();
-        assert_eq!(
-            buffer
-                .cell(ratatui::layout::Position {
-                    x: vbar.thumb.x,
-                    y: vbar.thumb.y,
-                })
-                .expect("vertical thumb cell")
-                .symbol(),
+        let vertical_thumb = buffer
+            .cell(ratatui::layout::Position {
+                x: vbar.thumb.x,
+                y: vbar.thumb.y,
+            })
+            .expect("vertical thumb cell");
+        assert_ne!(
+            vertical_thumb.symbol(),
             "▕",
-            "the vertical lineage scrollbar uses a slim right-edge glyph"
+            "vertical lineage scrollbar must not overwrite the diagram glyph"
         );
-        assert_eq!(
-            buffer
+        if let Some(track_y) = (vbar.area.y..vbar.area.y + vbar.area.height).find(|&y| {
+            y < vbar.thumb.y || y >= vbar.thumb.y.saturating_add(vbar.thumb.height)
+        }) {
+            let vertical_track = buffer
                 .cell(ratatui::layout::Position {
-                    x: hbar.thumb.x,
-                    y: hbar.thumb.y,
+                    x: vbar.area.x,
+                    y: track_y,
                 })
-                .expect("horizontal thumb cell")
-                .symbol(),
+                .expect("vertical track cell");
+            assert_ne!(
+                vertical_thumb.bg,
+                vertical_track.bg,
+                "vertical lineage thumb and track should use distinct background tints"
+            );
+        }
+
+        let horizontal_thumb = buffer
+            .cell(ratatui::layout::Position {
+                x: hbar.thumb.x,
+                y: hbar.thumb.y,
+            })
+            .expect("horizontal thumb cell");
+        assert_ne!(
+            horizontal_thumb.symbol(),
             "▁",
-            "the horizontal lineage scrollbar uses a slim bottom-edge glyph"
+            "horizontal lineage scrollbar must not overwrite the diagram glyph"
         );
+        if let Some(track_x) = (hbar.area.x..hbar.area.x + hbar.area.width).find(|&x| {
+            x < hbar.thumb.x || x >= hbar.thumb.x.saturating_add(hbar.thumb.width)
+        }) {
+            let horizontal_track = buffer
+                .cell(ratatui::layout::Position {
+                    x: track_x,
+                    y: hbar.area.y,
+                })
+                .expect("horizontal track cell");
+            assert_ne!(
+                horizontal_thumb.bg,
+                horizontal_track.bg,
+                "horizontal lineage thumb and track should use distinct background tints"
+            );
+        }
         assert_eq!(
             app.layout.lineage_area.expect("lineage section").height,
             resting_height,

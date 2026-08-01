@@ -38,8 +38,9 @@ been observed in the current run, hover can never trigger the reveal, so
 needed scrollbars stay visible whenever the diagram overflows. The
 horizontal scrollbar's row stays reserved while its bar is hidden,
 preventing hover from shifting the diagram vertically. Both scrollbars
-render as slim edge indicators rather than full-cell bands, while their
-full-cell tracks remain mouse-interactive.
+render as transparent, background-only edge indicators that preserve the
+diagram glyph beneath them, while their full-cell tracks remain
+mouse-interactive.
 
 The section's header is a one-row horizontal rule carrying its label and
 controls — the same visual furniture as the operator panel's title bar

@@ -25,7 +25,8 @@ drawn as a transparent bar — only the cell background is tinted, so the
 underlying session-row glyph stays visible (matching the session-view
 terminal scrollbar). Its thumb and track retain a full-cell mouse target
 for dragging and jumping, while the existing mouse-wheel and keyboard
-scrolling behavior remains unchanged.
+scrolling behavior remains unchanged. This background-only treatment is
+shared with the session-view and lineage scrollbars.
 
 ## Reason
 
