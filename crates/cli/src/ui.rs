@@ -19247,7 +19247,7 @@ fn playbook_rendered_line_text(
             .nth(leading)
             .map(|(idx, _)| &raw[idx..])
             .unwrap_or("");
-        let mut out: String = raw.chars().take(leading).collect();
+        let mut out = playbook_painted_indent(raw, leading);
         out.push_str(&playbook_inline_rendered_text(
             app,
             body,
@@ -19256,6 +19256,40 @@ fn playbook_rendered_line_text(
         ));
         out
     }
+}
+
+/// The first `leading` characters of `raw` as the renderer paints them, with
+/// tabs standing in as one space each.
+///
+/// The playbook's cursor math measures a line's leading whitespace by counting
+/// characters, and every other part of the editor — click-to-caret, selection
+/// rects, wrapping — is derived from the painted text. A literal `\t` breaks
+/// that agreement: the terminal paints it as nothing, so the caret drifted one
+/// column right of the real edit point for every character after it, and a
+/// tab-indented line rendered flush left with its indentation invisible
+/// (#1105). Painting one space per tab restores the agreement and shows the
+/// indentation, and is what the list-item branch has always done with the same
+/// `" ".repeat(leading)` shape.
+///
+/// Only tabs are substituted; every other leading character is painted as
+/// itself, so this cannot change how an ordinary space-indented line looks.
+fn playbook_painted_indent(raw: &str, leading: usize) -> String {
+    raw.chars()
+        .take(leading)
+        .map(|ch| if ch == '\t' { ' ' } else { ch })
+        .collect()
+}
+
+/// `raw` with its leading tabs painted as spaces — the whole line, for the
+/// span builders that take one string and index into it by source offset.
+///
+/// One character in, one character out, so every offset the editor carries
+/// (selection, search, action ranges, caret) is unaffected.
+fn playbook_painted_indent_line(raw: &str) -> String {
+    let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
+    let mut out = playbook_painted_indent(raw, leading);
+    out.extend(raw.chars().skip(leading));
+    out
 }
 
 /// A local-file Markdown link found in playbook text: `![name](path)` for
@@ -19761,7 +19795,7 @@ fn playbook_rendered_line_with_clips(
             .nth(leading)
             .map(|(idx, _)| &raw[idx..])
             .unwrap_or("");
-        let lead: String = raw.chars().take(leading).collect();
+        let lead = playbook_painted_indent(raw, leading);
         let (body_text, clips) =
             playbook_inline_with_clips(app, body, leading, Some(line_instance), width);
         (format!("{lead}{body_text}"), clips)
@@ -20267,9 +20301,21 @@ fn render_playbook_markdown_lines<'a>(
                 &[],
             )));
         } else {
-            let spans = render_playbook_inline_spans(
+            // Paint one space per leading tab (#1105). The substitution is
+            // 1:1 in characters, so every offset this surface indexes by —
+            // selection bounds, search matches, action ranges, the caret —
+            // still lines up with the source; only the glyph changes. A
+            // literal tab paints as nothing, which both hid the line's
+            // indentation and put the caret one column right of the real edit
+            // point for the rest of the line, because the cursor math counts
+            // the leading run by character. The list-item branch above has
+            // always painted its indent this way.
+            let painted = playbook_painted_indent_line(raw);
+            // The spans borrow from `painted`, which is local to this
+            // iteration, so take ownership of their text before it drops.
+            let spans: Vec<Span> = render_playbook_inline_spans(
                 app,
-                raw,
+                painted.as_ref(),
                 line_start,
                 Style::default().fg(app.theme.text),
                 selection,
@@ -20278,7 +20324,10 @@ fn render_playbook_markdown_lines<'a>(
                 &action_ranges,
                 Some(li),
                 width,
-            );
+            )
+            .into_iter()
+            .map(|span| Span::styled(span.content.into_owned(), span.style))
+            .collect();
             out.push(Line::from(spans));
         }
         line_start += raw.chars().count() + 1;
@@ -23581,6 +23630,68 @@ mod tests {
         assert_eq!(
             playbook_cursor_position(None, "abc", 1, 0, area),
             Some(Position { x: 11, y: 2 })
+        );
+    }
+
+    /// Regression for #1105: the caret sits on the character a keystroke
+    /// would push right, on a line indented with a tab.
+    ///
+    /// The cursor math counts a line's leading whitespace by character, so a
+    /// literal `\t` — which the terminal paints as nothing — put the caret one
+    /// column right of the real edit point for every character after it. The
+    /// renderer now paints one space per leading tab, which both restores the
+    /// agreement and makes the indentation visible.
+    #[test]
+    fn playbook_cursor_position_matches_the_paint_on_a_tab_indented_line() {
+        let area = Rect::new(0, 0, 40, 4);
+        let markdown = "\tTABbed";
+
+        // Rendered as " TABbed": one space for the tab, then the text. The
+        // caret for the offset just before `A` must land on `A`'s cell.
+        let rendered = playbook_rendered_line_text(None, markdown, 40, 0);
+        assert_eq!(rendered, " TABbed", "a leading tab paints as one space");
+
+        let a_cell = rendered.find('A').expect("rendered A") as u16;
+        let before_a = markdown.chars().position(|c| c == 'A').expect("source A");
+        assert_eq!(
+            playbook_cursor_position(None, markdown, before_a, 0, area),
+            Some(Position { x: a_cell, y: 0 }),
+            "caret must sit on the cell holding the next character"
+        );
+
+        // End of line: one past the last painted cell.
+        assert_eq!(
+            playbook_cursor_position(None, markdown, markdown.chars().count(), 0, area),
+            Some(Position {
+                x: rendered.chars().count() as u16,
+                y: 0
+            })
+        );
+    }
+
+    /// Mixed tabs and spaces indent by one column per character, and a
+    /// space-indented line is untouched by the substitution.
+    #[test]
+    fn playbook_rendered_indent_substitutes_only_tabs() {
+        assert_eq!(playbook_rendered_line_text(None, "\t \tx", 40, 0), "   x");
+        assert_eq!(playbook_rendered_line_text(None, "   x", 40, 0), "   x");
+    }
+
+    /// A tab-indented list item keeps paint and math in step too — the list
+    /// branch already painted one space per leading character, so this pins
+    /// the behaviour rather than changing it.
+    #[test]
+    fn playbook_cursor_position_matches_the_paint_on_a_tab_indented_list_item() {
+        let area = Rect::new(0, 0, 40, 4);
+        let markdown = "\t- item";
+        let rendered = playbook_rendered_line_text(None, markdown, 40, 0);
+        assert_eq!(rendered, "   • item");
+        assert_eq!(
+            playbook_cursor_position(None, markdown, markdown.chars().count(), 0, area),
+            Some(Position {
+                x: rendered.chars().count() as u16,
+                y: 0
+            })
         );
     }
 
