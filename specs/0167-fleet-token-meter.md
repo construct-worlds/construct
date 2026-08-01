@@ -89,7 +89,7 @@ column width has to carry it along or the ceiling falls faster for free.
 No percentage is shown, and no fixed ceiling is assumed. A percentage here
 would require inventing a denominator.
 
-### Cached input is a subset, and it shades a band rather than growing it
+### Cached input is a subset, and it tones a band rather than growing it
 
 A usage report's prompt side already contains whatever the provider served
 from its prompt cache; the cached figure names part of that side, it does not
@@ -105,21 +105,24 @@ processed fresh directly above it — and the model stays one contiguous run.
 Height keeps meaning billed volume, and the split answers how much of that
 volume was new work.
 
-A model owns exactly one color, the one on its legend dot, and both of its
-parts are drawn in it. Two distinguishable colors would read as two models,
-which is exactly the thing series colors exist to prevent. The split is
-carried by *fill* instead: the cache-served part fills its cells at half
-density, the new-work part solidly. Fill is also what a reader can name
-without a swatch to compare against — "faded" is a property of one band, where
-"darker" is only meaningful next to something else.
+A model owns exactly one **hue**, and both parts are solid tones of it: the
+cache-served part is darker and the fresh part is full-strength. The cached
+tone is authored in perceptual color space by lowering lightness while
+retaining hue and most chroma. It is not a generic terminal `dim` attribute or
+an alpha blend toward the panel background; either can wash a cyan into gray
+teal or a peach into brown, making one model look like two.
 
-Ordering the cache-served part at the base is a rendering requirement, not
-just a reading of the data. Two bands of one model share a color, so their
-boundary cannot be drawn as foreground-over-background, and no glyph is half
-shaded and half solid — the one cell where the two meet has to go to whichever
-owns more of it. Putting new work on top aims that cell at the band that wants
-a solid block anyway, so the fallback and the correct rendering coincide
-everywhere except that single cell.
+The legend swatch shows both tones together, fresh above cached, and the graph
+uses that same order within every model's run. Lightness is therefore taught
+as a part marker before a reader has to infer it from the bars. On reduced
+terminal palettes each pair is contrast-repaired as a pair, rather than
+allowed to quantize onto one indistinguishable entry.
+
+Ordering the cache-served part at the base remains a reading requirement: the
+foundation of re-sent context sits under the work actually done on it. Since
+the parts now have distinct solid tones, a boundary cell can draw the lower
+tone as a partial foreground block over the upper tone as background without
+changing either part's meaning.
 
 A part with no volume draws no band at all, rather than a hairline that
 rounds up to a visible slice. A harness that reports more cached than prompt
@@ -128,7 +131,7 @@ tokens is clamped to the subset contract instead of underflowing.
 The rates in the legend are unaffected: they quantify billed volume over
 compute time, and netting cache reads out of them would report a throughput
 no bill and no provider agrees with. Exact per-model cached figures belong in
-the hover detail, which is where a shaded band gets a number.
+the hover detail, which is where a darker band gets a number.
 
 ### Buckets are arrival time
 
@@ -147,12 +150,11 @@ lower band disappears from that column. A boundary inside a cell is drawn
 as a partial block whose filled part is the lower band and whose
 background is the upper one.
 
-Two boundaries cannot be encoded that way, and both hand the cell to whichever
-band owns more of it. The column's topmost cell must leave its empty part as
-panel background, so there is nowhere to put a second band. And a model's own
-new/cached boundary has one color on both sides, so only fill could separate
-them, and a block cannot be partially shaded. Cache-first ordering keeps the
-second case from compounding the first.
+The partially-filled cell at the top of a column still cannot encode a second
+boundary: its empty part must remain panel background, so there is nowhere to
+put an upper tone. That cell goes to whichever band owns more of its filled
+height. Every full cell can carry one boundary, including a model's own
+cached/fresh split, because both parts are solid tones.
 
 The legend must name every series it drew, wrapping onto further rows rather
 than showing only what fits on one — a colored bar whose model is named
@@ -161,9 +163,9 @@ can't hold them all, the remainder is counted, not silently dropped.
 
 Those rows are a grid of equal-width cells, not a flow. Packing entries
 end-to-end fits marginally more on a row, but every row then begins its names
-at a different offset, and past a handful of models the dots and names
+at a different offset, and past a handful of models the swatches and names
 scatter into a block of text with no line to read down. A cell wide enough
-for the widest entry puts each column's dot and name at the same offset on
+for the widest entry puts each column's swatch and name at the same offset on
 every row, so the legend is read vertically — the way a list of models is
 read — and a name is found by position rather than by scanning. The trailing
 space this costs inside narrower cells is worth that; a cell never spills
@@ -172,7 +174,7 @@ the alignment the grid exists for.
 
 Each cell carries a margin past its widest entry, so adjacent columns are
 separated by blank space rather than by a single column. A rate ends one cell
-and a dot opens the next; with nothing between them the row reads as one run
+and a swatch opens the next; with nothing between them the row reads as one run
 of text and the grid stops looking like columns at all.
 
 Within a cell the name starts it and the rate ends it, against the cell's
@@ -264,6 +266,10 @@ inspecting the rest.
   models a legend can name, and it is the only reason to collapse any of
   them. Listing more names than there are colors produces rows that cannot be
   matched to a band, which is worse than an honest collapsed row.
+- Cached/fresh tones are an authored pair, not two independently chosen
+  colors. Their perceptual hue must stay aligned, the split swatch must show
+  both, and reduced-color clients must keep the pair distinguishable after
+  quantization.
 - The span a column covers is a tuning choice, not a fixed part of the
   design. Anything stating an absolute count for one column must name that
   span, so the count is never mistaken for a rate.
@@ -307,7 +313,7 @@ inspecting the rest.
 ## Examples
 
 - Three sessions on two models run for a minute: the meter shows a column
-  per interval, each stacked in two colors, with a legend naming both models
+  per interval, each stacked in two model hues, with a legend naming both models
   and the throughput each achieved while computing.
 - A model produced 60k tokens during 20 seconds of work and then sat idle
   for the rest of the minute: it reads as 3k/s, not 1k/s. The bar shows the
@@ -332,8 +338,8 @@ inspecting the rest.
   a daemon restart the morning's columns still credit the morning's model.
 - A turn re-sends a 90k-token context and adds 2k of new input: the column
   grows by the whole prompt side, but nine tenths of that model's band is
-  drawn at half fill, so a glance separates a long conversation being replayed
-  from the same volume of genuinely new work.
+  drawn in its darker cached tone, so a glance separates a long conversation
+  being replayed from the same volume of genuinely new work.
 - A harness reports no cache figure at all: its bands are drawn solid, entirely
   as new work, which is what "nothing was cached" looks like — the meter does
   not infer a cached share from the size of the prompt.

@@ -924,6 +924,25 @@ mod tests {
         }
     }
 
+    /// Cached/fresh token bands are both solid, so a reduced terminal palette
+    /// must retain two lightnesses of each model hue. If a pair collapsed,
+    /// cache state would disappear entirely instead of merely losing polish.
+    #[test]
+    fn token_meter_tone_pairs_survive_reduced_color_depths() {
+        let pairs: Vec<_> = crate::token_meter::contrast_pairs().collect();
+        for depth in [ColorDepth::Ansi256, ColorDepth::Ansi16] {
+            let mut q = Quantizer::new(depth);
+            q.keep_apart(&pairs);
+            for (cached, fresh) in &pairs {
+                assert_ne!(
+                    q.map(*cached),
+                    q.map(*fresh),
+                    "{depth:?}: {cached:?} and {fresh:?} collapsed together"
+                );
+            }
+        }
+    }
+
     #[test]
     fn keeping_pairs_apart_is_a_no_op_without_a_collision() {
         let theme = crate::theme::Theme::dark();
