@@ -68,6 +68,18 @@ pub fn published_model_id_for_harness(harness: &str, route: &str, model: &str) -
     published_model_id_with_prefix(prefix, route, model)
 }
 
+/// Translate a canonical or harness-specific Construct model id to the form
+/// accepted by `harness`.
+///
+/// Durable configuration stores the ordinary `construct-` form so changing a
+/// service's harness does not leave a Claude-only prefix behind. Session
+/// creation materializes that stable selection for the actual harness. Native
+/// model ids return `Ok(None)` and must pass through unchanged.
+pub fn published_model_id_for_harness_from_id(harness: &str, id: &str) -> Result<Option<String>> {
+    Ok(decode_published_model_id(id)?
+        .map(|(route, model)| published_model_id_for_harness(harness, &route, &model)))
+}
+
 /// Decode an id in Construct's namespace back to `(route, model)`.
 ///
 /// `Ok(None)` means the id is not ours at all (a native model id).
@@ -113,6 +125,28 @@ mod tests {
         assert_eq!(
             decode_published_model_id(&id).unwrap(),
             Some(("review".into(), "vendor/model".into()))
+        );
+    }
+
+    #[test]
+    fn durable_ids_are_materialized_for_the_selected_harness() {
+        let canonical = published_model_id("claude-oauth", "sonnet");
+        assert_eq!(
+            published_model_id_for_harness_from_id("codex", &canonical).unwrap(),
+            Some("construct-claude-oauth/sonnet".into())
+        );
+        assert_eq!(
+            published_model_id_for_harness_from_id("claude", &canonical).unwrap(),
+            Some("claude-construct-claude-oauth/sonnet".into())
+        );
+        assert_eq!(
+            published_model_id_for_harness_from_id("codex", "claude-construct-claude-oauth/sonnet")
+                .unwrap(),
+            Some("construct-claude-oauth/sonnet".into())
+        );
+        assert_eq!(
+            published_model_id_for_harness_from_id("codex", "gpt-native").unwrap(),
+            None
         );
     }
 

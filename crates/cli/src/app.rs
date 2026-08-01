@@ -41066,9 +41066,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_model_picker_uses_the_pin_router_catalog() {
+    async fn service_model_picker_preserves_the_native_catalog_route() {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
+        app.services[0].harness = "codex".into();
         app.services[0].model = None;
         app.service_route_catalog = vec![
             construct_protocol::RouteOption {
@@ -41128,7 +41129,7 @@ mod tests {
         let selected = app.service_dialog.as_ref().unwrap().clone();
         assert_eq!(
             selected.picker_options(&app)[selected.picker_selected].value,
-            "gpt-5"
+            "construct-openai/gpt-5"
         );
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
@@ -41139,7 +41140,11 @@ mod tests {
                 .service
                 .model
                 .as_deref(),
-            Some("gpt-5")
+            Some("construct-openai/gpt-5")
+        );
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().field_value(3),
+            "gpt-5 · openai"
         );
         server.abort();
     }
