@@ -120,6 +120,24 @@ struct WidgetFrontmatter {
     title: Option<String>,
 }
 
+/// Normalize CRLF and lone CR line endings to LF before a Playbook is
+/// persisted.
+///
+/// A Playbook is Markdown, and a lone `\r` is not a line break to anything
+/// that reads one back: block splitting is newline-based, so a CR document
+/// parses as a single opaque block — one shimmer target, one selection-Run
+/// target, one line for the owning agent. Terminals routinely send CR for the
+/// line breaks inside a paste, so the clients normalize on input; doing it
+/// here as well makes "a stored Playbook contains no lone CR" an invariant of
+/// the store rather than a promise each client has to keep (#1104).
+fn normalize_playbook_newlines(markdown: String) -> String {
+    if markdown.contains('\r') {
+        markdown.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        markdown
+    }
+}
+
 /// Apply anchored edits to `base` in order, returning the new content.
 ///
 /// Each edit replaces `old_string` with `new_string`. An empty `old_string`
@@ -629,6 +647,7 @@ impl Storage {
         template_id: Option<String>,
         note: Option<String>,
     ) -> Result<PlaybookDocument> {
+        let markdown = normalize_playbook_newlines(markdown);
         let current = self.read_playbook(id)?;
         if let Some(base) = base_version {
             if base != current.version {
@@ -686,7 +705,7 @@ impl Storage {
             return self.read_playbook(id);
         }
         let current = self.read_playbook(id)?;
-        let markdown = apply_playbook_edits(&current.markdown, edits)?;
+        let markdown = normalize_playbook_newlines(apply_playbook_edits(&current.markdown, edits)?);
         if markdown == current.markdown {
             return Ok(current);
         }

@@ -8,22 +8,13 @@
 //!
 //! Coverage:
 //!
-//! - A paste reaches the daemon at all (issue #1103). Today `on_paste`
-//!   mutates the client buffer and returns without the flush every
-//!   keystroke path performs, so the pasted text never leaves the TUI.
+//! - A paste reaches the daemon at all (issue #1103). `on_paste` used
+//!   to mutate the client buffer and return without the flush every
+//!   keystroke path performs, so the pasted text never left the TUI.
 //! - A paste whose line breaks arrive as CR keeps its line structure
 //!   (issue #1104). Terminals routinely send `\r` rather than `\n`
-//!   inside a bracketed paste; nothing on the client, protocol, or
-//!   daemon side normalizes them, so the block collapses into a single
-//!   line and a single addressable block.
-//!
-//! Both are marked `#[ignore]` until their fix lands — they fail on
-//! `main` today, and a red `main` blocks every other PR in the repo.
-//! Run them explicitly with:
-//!
-//! ```text
-//! cargo test -p construct-e2e --test playbook_paste -- --ignored --nocapture
-//! ```
+//!   inside a bracketed paste; nothing normalized them, so the block
+//!   collapsed into a single line and a single addressable block.
 
 use std::time::{Duration, Instant};
 
@@ -138,7 +129,6 @@ async fn playbook_open_with_seed(d: &Daemon, name: &'static str) -> (String, Tui
 /// the TUI screen: the screen is already correct today, which is
 /// exactly why the bug is invisible.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "fails on main: paste never reaches the daemon (#1103)"]
 async fn playbook_paste_reaches_the_daemon() {
     let d = Daemon::spawn().await.expect("spawn daemon");
     let (session, mut tui) = playbook_open_with_seed(&d, "playbook_paste_reaches_the_daemon").await;
@@ -195,7 +185,6 @@ async fn playbook_paste_reaches_the_daemon() {
 /// the paste-sync fix lands, and keep passing once CR normalization
 /// lands regardless of which fix comes first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "fails on main: CR line breaks in a paste are stored verbatim (#1104)"]
 async fn playbook_paste_normalizes_carriage_returns() {
     let d = Daemon::spawn().await.expect("spawn daemon");
     let (session, mut tui) =
@@ -244,6 +233,56 @@ async fn playbook_paste_normalizes_carriage_returns() {
         "pasted list should parse as separate blocks, got {list_items} list \
          block(s) from {:?}",
         blocks.iter().map(|b| &b.text).collect::<Vec<_>>()
+    );
+}
+
+/// Regression for #1089: a live edit the daemon rejects must re-converge,
+/// not strand the buffer.
+///
+/// The anchored live edit fails whenever the daemon's document no longer
+/// contains the anchor the client derived. The failure used to be
+/// swallowed, which left `saved_markdown` stale — so remote changes
+/// stopped being adopted (to protect the "unsaved" edit) and every later
+/// keystroke re-derived its anchor from the same stale base and failed
+/// identically. The document silently stopped both publishing and
+/// receiving.
+///
+/// `C-x u` is the deterministic way to open that gap today: undo mutates
+/// the buffer without publishing (#1088). The assertion is written to hold
+/// either way — once undo publishes, there is simply no divergence to
+/// recover from, and the document still ends up carrying what was typed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn playbook_recovers_from_a_diverged_buffer() {
+    let d = Daemon::spawn().await.expect("spawn daemon");
+    let (session, mut tui) =
+        playbook_open_with_seed(&d, "playbook_recovers_from_a_diverged_buffer").await;
+
+    tui.send(b"XYZ").expect("type XYZ");
+    wait_for_playbook(&d, &session, Duration::from_secs(10), |md| {
+        md.contains("seedXYZ")
+    })
+    .await
+    .expect("plain typing never reached the daemon");
+
+    // Open the gap: mutate the buffer in a way that may not publish.
+    tui.send(b"\x18u").expect("send C-x u");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // The next keystroke's anchor is now derived from a base the daemon
+    // may never have seen. It must still end up in the document.
+    tui.send(b"Q").expect("type after undo");
+
+    let stored = wait_for_playbook(&d, &session, Duration::from_secs(10), |md| md.contains('Q'))
+        .await
+        .unwrap_or_else(|last| {
+            panic!(
+                "editing never re-converged after a rejected live edit: the \
+                 daemon is still on {last:?}"
+            )
+        });
+    assert!(
+        !stored.contains("seedXYZQ"),
+        "expected the undo to have removed a character before Q: {stored:?}"
     );
 }
 
