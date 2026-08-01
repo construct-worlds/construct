@@ -386,15 +386,9 @@ impl App {
                 // brand-new Playbook — the very first thing a user does with
                 // one — existed only in this client until something else
                 // happened to save it.
-                let before = self
-                    .playbook_popup
-                    .as_ref()
-                    .map(|popup| popup.buffer.clone());
+                let before = self.playbook_buffer_snapshot();
                 self.apply_playbook_template(hit.template_id, hit.markdown);
-                self.publish_playbook_cursor().await;
-                if let Some(before) = before {
-                    self.flush_playbook_live_edit(before).await;
-                }
+                self.publish_playbook_mutation(before).await;
                 return true;
             }
         }
@@ -2563,23 +2557,38 @@ impl App {
         }
     }
 
-    /// Insert `text` into the open Playbook and publish it, exactly like a
-    /// typed character. Paste is the reason this exists: `on_paste` used to
-    /// insert without publishing, so the pasted block lived only in the client
-    /// — and since the next keystroke's anchored edit is derived from a base
-    /// the daemon never received, everything typed afterwards failed to apply
-    /// and was swallowed too (#1103).
-    pub(super) async fn insert_playbook_text_synced(&mut self, text: &str) {
-        let before = self
-            .playbook_popup
+    /// Snapshot the open Playbook's buffer before mutating it, to be handed
+    /// back to [`Self::publish_playbook_mutation`]. Paired, these are how a
+    /// mutation outside the keystroke path meets spec 0171: every local change
+    /// publishes on the same gesture.
+    ///
+    /// `handle_playbook_key` does this inline for every key it dispatches.
+    /// Anything else that changes the buffer — paste, a clicked template
+    /// button, undo — has to say so explicitly, and each one that forgot was
+    /// its own silent-divergence bug (#1103, #1088).
+    pub(super) fn playbook_buffer_snapshot(&self) -> Option<String> {
+        self.playbook_popup
             .as_ref()
-            .map(|popup| popup.buffer.clone());
-        self.insert_playbook_text(text);
+            .map(|popup| popup.buffer.clone())
+    }
+
+    /// Publish whatever changed since `before`, and keep the caret on screen
+    /// and the collaborators' view of it current — the same tail
+    /// `handle_playbook_key` runs after dispatching a key.
+    pub(super) async fn publish_playbook_mutation(&mut self, before: Option<String>) {
         self.follow_playbook_scroll();
         self.publish_playbook_cursor().await;
         if let Some(before) = before {
             self.flush_playbook_live_edit(before).await;
         }
+    }
+
+    /// Insert `text` into the open Playbook and publish it, exactly like a
+    /// typed character.
+    pub(super) async fn insert_playbook_text_synced(&mut self, text: &str) {
+        let before = self.playbook_buffer_snapshot();
+        self.insert_playbook_text(text);
+        self.publish_playbook_mutation(before).await;
     }
 
     pub(super) fn insert_playbook_text(&mut self, text: &str) {
