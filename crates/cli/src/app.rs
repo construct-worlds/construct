@@ -12704,7 +12704,17 @@ impl App {
                 self.toggle_playbook_popup().await;
             }
             UndoPlaybook => {
+                // Undo is an edit like any other and publishes on the same
+                // gesture (spec 0171). It used to mutate the buffer and
+                // return: the undone document never left this client, and
+                // because the next keystroke's anchored edit was then derived
+                // from a base the daemon had never seen, everything typed
+                // afterwards failed to apply as well (#1088). The in-editor
+                // `C-/` alias never had the bug — it goes through
+                // `handle_playbook_key`, which publishes for every key.
+                let before = self.playbook_buffer_snapshot();
                 self.undo_playbook_edit();
+                self.publish_playbook_mutation(before).await;
             }
             SavePlaybook => {
                 self.save_playbook_popup().await;

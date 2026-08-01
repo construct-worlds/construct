@@ -1,10 +1,12 @@
-//! End-to-end regressions for pasting into the TUI Playbook editor.
+//! End-to-end regressions for editing the TUI Playbook: every local
+//! mutation has to reach the daemon on the gesture that made it, and
+//! arrive intact (spec 0171).
 //!
-//! Both tests drive the real `construct` TUI inside a pseudo-terminal
-//! against a real daemon, deliver a genuine bracketed paste (the same
-//! `ESC [ 200 ~ … ESC [ 201 ~` framing a terminal emitter sends), and
-//! then assert against the *daemon's* stored document — the copy the
-//! owning agent and every other client actually see.
+//! These drive the real `construct` TUI inside a pseudo-terminal against
+//! a real daemon and assert against the *daemon's* stored document — the
+//! copy the owning agent and every other client see. Asserting on the TUI
+//! screen would have passed throughout, which is exactly why this family
+//! of bugs was invisible in use.
 //!
 //! Coverage:
 //!
@@ -15,6 +17,8 @@
 //!   (issue #1104). Terminals routinely send `\r` rather than `\n`
 //!   inside a bracketed paste; nothing normalized them, so the block
 //!   collapsed into a single line and a single addressable block.
+//! - Undo reaches the daemon on its own gesture (issue #1088), with no
+//!   following keystroke to carry it.
 
 use std::time::{Duration, Instant};
 
@@ -236,8 +240,48 @@ async fn playbook_paste_normalizes_carriage_returns() {
     );
 }
 
-/// Regression for #1089: a live edit the daemon rejects must re-converge,
-/// not strand the buffer.
+/// Regression for #1088: undo publishes on its own gesture.
+///
+/// `C-x u` used to mutate the buffer and return, so the undone document
+/// never left the client — and since the next keystroke's anchored edit
+/// was then derived from a base the daemon had never seen, everything
+/// typed afterwards failed to apply too.
+///
+/// The assertion deliberately follows the undo with no further input:
+/// the recovery path added for #1089 would eventually reconcile this on
+/// the *next* keystroke, which is a different guarantee. Undo has to
+/// stand on its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn playbook_undo_reaches_the_daemon() {
+    let d = Daemon::spawn().await.expect("spawn daemon");
+    let (session, mut tui) = playbook_open_with_seed(&d, "playbook_undo_reaches_the_daemon").await;
+
+    tui.send(b"XYZ").expect("type XYZ");
+    wait_for_playbook(&d, &session, Duration::from_secs(10), |md| {
+        md.contains("seedXYZ")
+    })
+    .await
+    .expect("plain typing never reached the daemon");
+
+    tui.send(b"\x18u").expect("send C-x u");
+
+    let stored = wait_for_playbook(&d, &session, Duration::from_secs(10), |md| {
+        !md.contains("seedXYZ")
+    })
+    .await
+    .unwrap_or_else(|last| {
+        panic!("undo never reached the daemon: it is still on {last:?}")
+    });
+    assert!(
+        stored.contains("seedXY"),
+        "undo should have removed exactly the last character: {stored:?}"
+    );
+}
+
+/// Undo, then the keystroke after it, both reach the daemon.
+///
+/// Originally the #1089 regression: a live edit the daemon rejects must
+/// re-converge rather than strand the buffer.
 ///
 /// The anchored live edit fails whenever the daemon's document no longer
 /// contains the anchor the client derived. The failure used to be
@@ -247,10 +291,14 @@ async fn playbook_paste_normalizes_carriage_returns() {
 /// identically. The document silently stopped both publishing and
 /// receiving.
 ///
-/// `C-x u` is the deterministic way to open that gap today: undo mutates
-/// the buffer without publishing (#1088). The assertion is written to hold
-/// either way — once undo publishes, there is simply no divergence to
-/// recover from, and the document still ends up carrying what was typed.
+/// `C-x u` was the deterministic way to open that gap when this was
+/// written, because undo mutated the buffer without publishing (#1088).
+/// That is fixed, so this no longer reaches the recovery path — it now
+/// guards the weaker but still worthwhile end-to-end property that an
+/// undo and the keystroke after it both land in the document. The
+/// recovery path itself has no deterministic e2e trigger left: it fires
+/// on a genuine race between an agent's write and a keystroke. It is
+/// exercised indirectly, being the same merge `C-x C-s` performs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn playbook_recovers_from_a_diverged_buffer() {
     let d = Daemon::spawn().await.expect("spawn daemon");
