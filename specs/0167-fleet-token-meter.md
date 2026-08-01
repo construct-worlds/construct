@@ -123,6 +123,14 @@ space this costs inside narrower cells is worth that; a cell never spills
 into its neighbour, because one long name shifting the column below it undoes
 the alignment the grid exists for.
 
+Within a cell the name starts it and the rate ends it, against the cell's
+right edge. A rate that trails its name begins wherever that name happens to
+stop, so the figures sit at a different offset on every row and comparing
+them means finding each one first. Anchored to the edge they form a column of
+their own, which is what a column of numbers is for. The slack lands between
+name and rate, where it separates two things that are read differently rather
+than misaligning either.
+
 A rate that is a reading carries the series' full weight; `idle` is the
 absence of one and is dimmed, so a glance finds the models actually working.
 The dimming changes weight only — the whole legend row, `idle` included,
