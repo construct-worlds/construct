@@ -846,6 +846,7 @@
   .service-session-link { display: flex; gap: 10px; padding: 6px 0; color: var(--fg-dim); cursor: pointer; border-bottom: 1px solid var(--border-faint); }
   .service-session-link:hover { color: var(--fg); }
   .service-session-link .service-session-state { color: var(--ok); }
+  .service-session-link .service-session-channel { color: var(--accent); font-family: var(--mono); }
   .service-channel-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border-faint); color: var(--fg-dim); }
   .service-channel-row.unavailable { opacity: .48; }
   .service-channel-row .channel-toggle { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
@@ -4932,6 +4933,35 @@ async function rotateServiceChannel(id) {
   }
 }
 
+function serviceSessionRouteLabel(session, serviceName, catalog, serviceChannels) {
+  const attached = (catalog || [])
+    .filter((channel) => channel.attached_to === serviceName)
+    .map((channel) => channel.id)
+    .concat((serviceChannels || [])
+      .filter((channel) => channel.attached_to === serviceName)
+      .map((channel) => channel.id));
+  const fallback = attached[0] || "unknown";
+  const prefix = `service:${serviceName}:`;
+  const suffix = (session.title || "").startsWith(prefix)
+    ? session.title.slice(prefix.length)
+    : "";
+  const pieces = suffix.split(":");
+  let channel;
+  let key;
+  if (pieces.length > 1 && (attached.length === 0 || attached.includes(pieces[0]))) {
+    channel = pieces.shift();
+    key = pieces.join(":");
+  } else if (pieces.length === 1 && attached.includes(pieces[0])) {
+    channel = pieces[0];
+    key = "";
+  } else {
+    // Legacy v1 titles used the session key directly after the service name.
+    channel = fallback;
+    key = suffix;
+  }
+  return { channel, label: key || "event" };
+}
+
 function renderServiceView() {
   if (!serviceViewEl) return;
   const name = state.currentServiceName;
@@ -4994,7 +5024,10 @@ function renderServiceView() {
   const channelEditor = channelDraft ? `<div class="service-channel-editor"><div class="service-channel-editor-grid"><label>Channel ID<input data-channel-field="id" value="${attr(channelDraft.id || "")}" ${channelDraft.mode === "edit" ? "readonly" : ""}></label><label>Kind<select data-channel-field="kind" disabled><option selected>http</option></select></label><label>HTTP port<input data-channel-field="port" type="number" min="1" max="65535" value="${attr(channelDraft.port ?? "")}"></label><label>State<select data-channel-field="enabled"><option value="true" ${channelDraft.enabled ? "selected" : ""}>enabled</option><option value="false" ${channelDraft.enabled ? "" : "selected"}>disabled</option></select></label></div><div class="channel-editor-actions"><button type="button" data-channel-save>Save channel</button><button type="button" data-channel-cancel>Cancel</button></div></div>` : "";
   const attachedCount = channels.filter((channel) => channel.attached_to === name).length;
   serviceActivityEl.innerHTML = `<h3>Channels · ${attachedCount} attached · ${channels.length} in catalog</h3>${channelRows}<div class="channel-editor-actions"><button type="button" data-channel-add ${service ? "" : "disabled"}>Add HTTP channel</button></div>${channelEditor}<h3 style="margin-top:18px">Sessions · ${routed.length} routed session${routed.length === 1 ? "" : "s"}</h3>` +
-    (routed.length ? routed.map((session) => `<div class="service-session-link" data-session-id="${attr(session.id)}"><span class="service-session-state">${escape(session.state || "idle")}</span><span>${escape(session.title || session.id)}</span></div>`).join("") : `<div class="service-view-footer">No requests have created a session yet.</div>`);
+    (routed.length ? routed.map((session) => {
+      const route = serviceSessionRouteLabel(session, name, channels, service?.channels || []);
+      return `<div class="service-session-link" data-session-id="${attr(session.id)}"><span class="service-session-state">${escape(session.state || "idle")}</span><span class="service-session-channel">channel: ${escape(route.channel)}</span><span>${escape(route.label)}</span></div>`;
+    }).join("") : `<div class="service-view-footer">No requests have created a session yet.</div>`);
   const tokenNote = state.serviceNewToken ? `Token (shown once): ${state.serviceNewToken}` : "";
   serviceViewFooterEl.textContent = editing
     ? `Enter saves · Esc cancels${tokenNote ? `\n${tokenNote}` : ""}`

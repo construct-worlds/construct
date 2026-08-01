@@ -3933,6 +3933,21 @@ impl LineageBoxHit {
     }
 }
 
+/// A routed session row rendered inside a service view. The whole row is a
+/// navigation target so the operator can jump from service configuration to
+/// the live conversation without first finding it in the global session list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceSessionHit {
+    pub session_id: String,
+    pub area: ratatui::layout::Rect,
+}
+
+impl ServiceSessionHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        App::rect_contains(self.area, col, row)
+    }
+}
+
 /// Last-frame geometry for hit-testing mouse clicks.
 #[derive(Debug, Clone, Default)]
 pub struct LayoutSnapshot {
@@ -4075,6 +4090,8 @@ pub struct LayoutSnapshot {
     /// screen coordinates — hover brightens a box's border, click jumps to
     /// that session. Rebuilt every frame the section renders.
     pub lineage_box_hits: Vec<LineageBoxHit>,
+    /// Clickable routed-session rows inside the focused service view.
+    pub service_session_hits: Vec<ServiceSessionHit>,
     /// The "▸/▾ N subagents" group-toggle rows — click toggles that
     /// parent's group between collapsed and expanded.
     pub lineage_subagent_toggle_hits: Vec<LineageBoxHit>,
@@ -4395,6 +4412,7 @@ impl LayoutSnapshot {
             lineage_vscrollbar,
             lineage_hscrollbar,
             lineage_box_hits,
+            service_session_hits,
             lineage_subagent_toggle_hits,
             playbook_title_run_hit,
             playbook_title_toggle_hit,
@@ -4539,6 +4557,7 @@ impl LayoutSnapshot {
         shift.retain_rows(playbook_action_link_hits, |hit| &mut hit.row);
         shift.retain_rows(dynamic_ui_triggers, |hit| &mut hit.2);
         shift.retain_rects(lineage_box_hits, |hit| &mut hit.area);
+        shift.retain_rects(service_session_hits, |hit| &mut hit.area);
         shift.retain_rects(lineage_subagent_toggle_hits, |hit| &mut hit.area);
 
         *dynamic_ui_inline_hit = dynamic_ui_inline_hit.take().and_then(|mut hit| {
@@ -11453,6 +11472,16 @@ impl App {
                         return;
                     }
                 }
+                if let Some(hit) = self
+                    .layout
+                    .service_session_hits
+                    .iter()
+                    .find(|hit| hit.contains(col, row))
+                    .cloned()
+                {
+                    self.select_session(hit.session_id);
+                    return;
+                }
                 if self.service_dialog.is_none() {
                     if let Some(name) = self.selection.service_name().map(str::to_owned) {
                         self.open_edit_service_view(&name);
@@ -16090,6 +16119,7 @@ mod tests {
             lineage_vscrollbar: None,
             lineage_hscrollbar: None,
             lineage_box_hits: Vec::new(),
+            service_session_hits: Vec::new(),
             lineage_subagent_toggle_hits: Vec::new(),
             lineage_segment_tooltip: None,
             playbook_title_run_hit: None,
@@ -40411,7 +40441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_view_renders_definition_help_and_activity() {
+    async fn service_view_renders_definition_help_channels_and_sessions() {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
         app.select_service("assistant".to_string());
@@ -40430,8 +40460,57 @@ mod tests {
         assert!(text.contains("☰"), "service view should expose title actions");
         assert!(text.contains("Instruction"));
         assert!(text.contains("Service name"));
-        assert!(text.contains("Activity"));
+        assert!(text.contains("Channels"));
+        assert!(text.contains("Sessions"));
+        assert!(!text.contains("Activity"));
         assert!(app.layout.modal_area.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_session_rows_show_channel_and_select_session_on_click() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = captured_app().await;
+        let mut routed = summary_with_kind(construct_protocol::SessionKind::User);
+        routed.id = "service-session".into();
+        routed.title = Some("service:assistant:http:demo-conversation".into());
+        routed.state = construct_protocol::SessionState::AwaitingInput;
+        app.sessions.push(routed);
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".into());
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let text = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("channel: http"));
+        assert!(text.contains("demo-conversation"));
+
+        let hit = app
+            .layout
+            .service_session_hits
+            .first()
+            .cloned()
+            .expect("routed service session row hit");
+        let event = |kind| MouseEvent {
+            kind,
+            column: hit.area.x + 1,
+            row: hit.area.y,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.on_mouse(event(MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(event(MouseEventKind::Up(MouseButton::Left)))
+            .await;
+        assert_eq!(app.selection, Selection::Session("service-session".into()));
         server.abort();
     }
 

@@ -321,6 +321,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.lineage_vscrollbar = None;
     app.layout.lineage_hscrollbar = None;
     app.layout.lineage_box_hits.clear();
+    app.layout.service_session_hits.clear();
     app.layout.lineage_subagent_toggle_hits.clear();
     app.layout.lineage_segment_tooltip = None;
     app.window_pane_sizes.clear();
@@ -7981,6 +7982,51 @@ fn service_picker_lines(
     lines
 }
 
+/// Recover the channel and caller-facing key from a service session title.
+/// Current runtimes encode `service:<name>:<channel>[:<key>]`; older v1
+/// sessions encoded only `service:<name>:<key>`, so an unambiguous sole
+/// attached channel remains a useful fallback for those sessions.
+fn service_session_route_label(
+    session: &SessionSummary,
+    service_name: &str,
+    catalog: &[construct_protocol::ServiceChannelSummary],
+    service_channels: &[construct_protocol::ServiceChannelSummary],
+) -> (String, String) {
+    let attached: Vec<&str> = catalog
+        .iter()
+        .filter(|channel| channel.attached_to.as_deref() == Some(service_name))
+        .map(|channel| channel.id.as_str())
+        .chain(
+            service_channels
+                .iter()
+                .filter(|channel| channel.attached_to.as_deref() == Some(service_name))
+                .map(|channel| channel.id.as_str()),
+        )
+        .collect();
+    let fallback = attached.first().copied().unwrap_or("unknown");
+    let prefix = format!("service:{service_name}");
+    let suffix = session
+        .title
+        .as_deref()
+        .and_then(|title| title.strip_prefix(&format!("{prefix}:")))
+        .unwrap_or("");
+
+    let (channel, key) = match suffix.split_once(':') {
+        Some((candidate, key)) if attached.is_empty() || attached.contains(&candidate) => {
+            (candidate, key)
+        }
+        Some(_) => (fallback, suffix),
+        None if attached.contains(&suffix) => (suffix, ""),
+        None => (fallback, suffix),
+    };
+    let label = if key.is_empty() {
+        "event".to_string()
+    } else {
+        key.to_string()
+    };
+    (channel.to_string(), label)
+}
+
 /// Render a service as a normal split-pane surface. The editor state is the
 /// same editor state used before the service view existed, but the service now owns the whole
 /// pane: its definition and contextual help stay visible while the operator
@@ -8152,21 +8198,11 @@ fn render_service_view(
                 .is_some_and(|title| title == service_prefix || title.starts_with(&format!("{service_prefix}:")))
         })
         .collect();
-    let mut activity = vec![Line::from(vec![
-        Span::styled(
-            "Activity  ",
-            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{} routed session{}", routed.len(), if routed.len() == 1 { "" } else { "s" }),
-            Style::default().fg(app.theme.text),
-        ),
-    ])];
     let catalog = &app.service_channel_catalog;
     let attached_count = catalog.iter().filter(|channel| {
         channel.attached_to.as_deref() == Some(summary.name.as_str())
     }).count();
-    activity.push(Line::from(vec![
+    let mut activity = vec![Line::from(vec![
         Span::styled(
             "Channels  ",
             Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
@@ -8175,7 +8211,7 @@ fn render_service_view(
             format!("{} attached · {} in catalog", attached_count, catalog.len()),
             Style::default().fg(app.theme.text),
         ),
-    ]));
+    ])];
     if catalog.is_empty() {
         activity.push(Line::from(Span::styled(
             "  No channels in the catalog. Press a after entering edit mode to create HTTP.",
@@ -8229,14 +8265,29 @@ fn render_service_view(
             Style::default().fg(app.theme.dim),
         )));
     } else {
+        let mut session_hits = Vec::new();
         for session in routed.iter().take(chunks[2].height.saturating_sub(3) as usize) {
-            let label = session.title.as_deref().unwrap_or(&session.id);
+            let (channel, label) = service_session_route_label(
+                session,
+                &summary.name,
+                catalog,
+                &summary.channels,
+            );
+            let row = chunks[2].y + activity.len() as u16;
             activity.push(Line::from(vec![
                 Span::styled(format!("  {} ", session_status_glyph(app, session)), state_style(&app.theme, session.state)),
+                Span::styled(format!("channel: {channel:<10} "), Style::default().fg(app.theme.accent)),
                 Span::styled(label, Style::default().fg(app.theme.text)),
                 Span::styled(format!("  {}", session.state.label()), Style::default().fg(app.theme.dim)),
             ]));
+            if row < chunks[2].bottom() {
+                session_hits.push(crate::app::ServiceSessionHit {
+                    session_id: session.id.clone(),
+                    area: Rect::new(chunks[2].x, row, chunks[2].width, 1),
+                });
+            }
         }
+        app.layout.service_session_hits.extend(session_hits);
     }
     if let Some(note) = &dialog.note {
         activity.push(Line::from(""));

@@ -33,8 +33,13 @@ selection as a session, and opens a first-class service view in the active
 split rather than a modal. The view presents fields and focused-field guidance
 side by side with a padded interior, stacking the guidance below the fields
 only when the terminal is too narrow for two readable columns. The same view
-exposes routed-session activity and keeps create/edit/delete actions in the
-view's normal focus lifecycle.
+exposes two related sections—`Channels` and `Sessions`—and keeps
+create/edit/delete actions in the view's normal focus lifecycle. `Activity` is
+not a third section: its aggregate count is represented by the `Sessions`
+header. Each routed session row identifies the channel that created it and the
+caller-facing session key (or `event` for per-event sessions). Selecting a row
+with the pointer jumps directly to that ordinary session view; the row remains
+the navigation bridge between service configuration and the live conversation.
 
 The service view uses the same top-right title-actions affordance as a session
 view. Its menu is service-specific: edit the selected HTTP channel credential,
@@ -63,7 +68,8 @@ same list model as sessions, using the same `◈` glyph and row selection. Its
 wide service view uses the same definition/help columns, and narrow layouts
 stack those columns. A service may occupy a shared split pane alongside a
 session; a pane identity therefore carries either a session id or a service
-name, never an ambiguous URL or display label.
+name, never an ambiguous URL or display label. Its `Sessions` rows expose the
+same channel association and select the matching session when clicked.
 
 The HTTP channel accepts authenticated JSON deliveries and routes them into
 ordinary headless Construct sessions. `session-key` routing persists the
