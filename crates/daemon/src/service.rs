@@ -147,6 +147,80 @@ pub fn delete_definition(dir: &std::path::Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct ChannelCatalog {
+    #[serde(default)]
+    channels: BTreeMap<String, ServiceChannelConfig>,
+}
+
+fn channel_catalog_path(dir: &std::path::Path) -> PathBuf {
+    dir.parent()
+        .unwrap_or(dir)
+        .join("channels.toml")
+}
+
+fn load_channel_catalog(dir: &std::path::Path) -> Result<ChannelCatalog> {
+    let path = channel_catalog_path(dir);
+    if !path.exists() {
+        return Ok(ChannelCatalog::default());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("read channel catalog {}", path.display()))?;
+    toml::from_str(&raw).with_context(|| format!("parse channel catalog {}", path.display()))
+}
+
+fn write_channel_catalog(dir: &std::path::Path, catalog: &ChannelCatalog) -> Result<()> {
+    let path = channel_catalog_path(dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let encoded = toml::to_string_pretty(catalog)?;
+    let temporary = path.with_extension("toml.tmp");
+    std::fs::write(&temporary, encoded)
+        .with_context(|| format!("write {}", temporary.display()))?;
+    std::fs::rename(&temporary, &path).with_context(|| format!("replace {}", path.display()))?;
+    Ok(())
+}
+
+fn channel_owners(
+    services: &BTreeMap<String, ServiceConfig>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (service_name, service) in services {
+        for channel_id in service.channels.keys() {
+            owners
+                .entry(channel_id.clone())
+                .or_default()
+                .push(service_name.clone());
+        }
+    }
+    owners
+}
+
+fn owner_label(owners: &BTreeMap<String, Vec<String>>, channel_id: &str) -> Option<String> {
+    owners.get(channel_id).map(|services| services.join(", "))
+}
+
+fn migrate_legacy_channels(
+    dir: &std::path::Path,
+    services: &BTreeMap<String, ServiceConfig>,
+    catalog: &mut ChannelCatalog,
+) -> Result<()> {
+    let mut changed = false;
+    for service in services.values() {
+        for (id, config) in &service.channels {
+            if !catalog.channels.contains_key(id) {
+                catalog.channels.insert(id.clone(), config.clone());
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        write_channel_catalog(dir, catalog)?;
+    }
+    Ok(())
+}
+
 pub fn list_channel_summaries(
     dir: &std::path::Path,
     service_name: &str,
@@ -159,7 +233,21 @@ pub fn list_channel_summaries(
     Ok(service
         .channels
         .iter()
-        .map(|(id, channel)| channel_summary(id.clone(), channel))
+        .map(|(id, channel)| channel_summary(id.clone(), channel, Some(service_name.to_string())))
+        .collect())
+}
+
+pub fn list_channel_catalog(
+    dir: &std::path::Path,
+) -> Result<Vec<construct_protocol::ServiceChannelSummary>> {
+    let services = load_definitions(dir)?;
+    let mut catalog = load_channel_catalog(dir)?;
+    migrate_legacy_channels(dir, &services, &mut catalog)?;
+    let owners = channel_owners(&services);
+    Ok(catalog
+        .channels
+        .iter()
+        .map(|(id, channel)| channel_summary(id.clone(), channel, owner_label(&owners, id)))
         .collect())
 }
 
@@ -181,15 +269,30 @@ pub fn put_channel(
         .filter(|port| *port > 0)
         .ok_or_else(|| anyhow!("HTTP channel port must be between 1 and 65535"))?;
     let mut services = load_definitions(dir)?;
-    let service = services
-        .get_mut(&params.service_name)
-        .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
-    if service.channels.iter().any(|(id, channel)| {
+    let mut catalog = load_channel_catalog(dir)?;
+    migrate_legacy_channels(dir, &services, &mut catalog)?;
+    let owners = channel_owners(&services);
+    if let Some(owner) = owner_label(&owners, &params.channel.id) {
+        if owner != params.service_name {
+            return Err(anyhow!(
+                "channel `{}` is already attached to service `{owner}`",
+                params.channel.id
+            ));
+        }
+    }
+    if catalog.channels.iter().any(|(id, channel)| {
         id != &params.channel.id && channel.port == Some(port)
     }) {
         return Err(anyhow!("HTTP port {port} is already used by this service"));
     }
-    let existing = service.channels.get(&params.channel.id).cloned();
+    let service = services
+        .get_mut(&params.service_name)
+        .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
+    let existing = service
+        .channels
+        .get(&params.channel.id)
+        .cloned()
+        .or_else(|| catalog.channels.get(&params.channel.id).cloned());
     if let Some(existing) = &existing {
         let existing_kind = channel_kind(&params.channel.id, existing);
         if existing_kind != params.channel.kind {
@@ -223,8 +326,16 @@ pub fn put_channel(
     service
         .channels
         .insert(params.channel.id.clone(), config.clone());
-    let summary = channel_summary(params.channel.id, &config);
+    catalog
+        .channels
+        .insert(params.channel.id.clone(), config.clone());
+    let summary = channel_summary(
+        params.channel.id,
+        &config,
+        Some(params.service_name.clone()),
+    );
     write_definition(dir, &params.service_name, service)?;
+    write_channel_catalog(dir, &catalog)?;
     Ok(construct_protocol::ServiceChannelPutResult {
         channel: summary,
         new_secret,
@@ -236,19 +347,99 @@ pub fn delete_channel(
     dir: &std::path::Path,
     params: construct_protocol::ServiceChannelNameParams,
 ) -> Result<()> {
+    detach_channel(
+        dir,
+        construct_protocol::ServiceChannelAttachParams {
+            service_name: params.service_name,
+            channel_id: params.channel_id,
+        },
+    )
+    .map(|_| ())
+}
+
+pub fn attach_channel(
+    dir: &std::path::Path,
+    params: construct_protocol::ServiceChannelAttachParams,
+) -> Result<construct_protocol::ServiceChannelPutResult> {
     validate_service_name(&params.service_name)?;
     validate_channel_id(&params.channel_id)?;
     let mut services = load_definitions(dir)?;
+    let mut catalog = load_channel_catalog(dir)?;
+    migrate_legacy_channels(dir, &services, &mut catalog)?;
+    let owners = channel_owners(&services);
+    if let Some(owner) = owner_label(&owners, &params.channel_id) {
+        if owner != params.service_name {
+            return Err(anyhow!(
+                "channel `{}` is already attached to service `{owner}`",
+                params.channel_id
+            ));
+        }
+    }
+    let config = catalog
+        .channels
+        .get(&params.channel_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("channel `{}` not found in catalog", params.channel_id))?;
     let service = services
         .get_mut(&params.service_name)
         .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
-    if service.channels.remove(&params.channel_id).is_none() {
+    if service
+        .channels
+        .iter()
+        .any(|(id, channel)| id != &params.channel_id && channel.port == config.port)
+    {
         return Err(anyhow!(
-            "channel `{}` not found on service `{}`",
-            params.channel_id, params.service_name
+            "HTTP port {:?} is already used by this service",
+            config.port
         ));
     }
-    write_definition(dir, &params.service_name, service)
+    service
+        .channels
+        .insert(params.channel_id.clone(), config.clone());
+    write_definition(dir, &params.service_name, service)?;
+    Ok(construct_protocol::ServiceChannelPutResult {
+        channel: channel_summary(
+            params.channel_id,
+            &config,
+            Some(params.service_name),
+        ),
+        new_secret: None,
+        restart_required: true,
+    })
+}
+
+pub fn detach_channel(
+    dir: &std::path::Path,
+    params: construct_protocol::ServiceChannelAttachParams,
+) -> Result<construct_protocol::ServiceChannelPutResult> {
+    validate_service_name(&params.service_name)?;
+    validate_channel_id(&params.channel_id)?;
+    let mut services = load_definitions(dir)?;
+    let mut catalog = load_channel_catalog(dir)?;
+    migrate_legacy_channels(dir, &services, &mut catalog)?;
+    let service = services
+        .get_mut(&params.service_name)
+        .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
+    let config = service
+        .channels
+        .remove(&params.channel_id)
+        .ok_or_else(|| {
+            anyhow!(
+                "channel `{}` is not attached to service `{}`",
+                params.channel_id, params.service_name
+            )
+        })?;
+    catalog
+        .channels
+        .entry(params.channel_id.clone())
+        .or_insert_with(|| config.clone());
+    write_definition(dir, &params.service_name, service)?;
+    write_channel_catalog(dir, &catalog)?;
+    Ok(construct_protocol::ServiceChannelPutResult {
+        channel: channel_summary(params.channel_id, &config, None),
+        new_secret: None,
+        restart_required: true,
+    })
 }
 
 pub fn rotate_channel_secret(
@@ -258,6 +449,8 @@ pub fn rotate_channel_secret(
     validate_service_name(&params.service_name)?;
     validate_channel_id(&params.channel_id)?;
     let mut services = load_definitions(dir)?;
+    let mut catalog = load_channel_catalog(dir)?;
+    migrate_legacy_channels(dir, &services, &mut catalog)?;
     let service = services
         .get_mut(&params.service_name)
         .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
@@ -275,8 +468,17 @@ pub fn rotate_channel_secret(
     }
     let secret = generate_channel_secret();
     channel.token = Some(secret.clone());
-    let summary = channel_summary(params.channel_id, channel);
+    catalog
+        .channels
+        .insert(params.channel_id.clone(), channel.clone());
+    let config = channel.clone();
+    let summary = channel_summary(
+        params.channel_id.clone(),
+        &config,
+        Some(params.service_name.clone()),
+    );
     write_definition(dir, &params.service_name, service)?;
+    write_channel_catalog(dir, &catalog)?;
     Ok(construct_protocol::ServiceChannelPutResult {
         channel: summary,
         new_secret: Some(secret),
@@ -323,6 +525,7 @@ fn generate_channel_secret() -> String {
 fn channel_summary(
     id: String,
     config: &ServiceChannelConfig,
+    attached_to: Option<String>,
 ) -> construct_protocol::ServiceChannelSummary {
     construct_protocol::ServiceChannelSummary {
         id: id.clone(),
@@ -330,10 +533,12 @@ fn channel_summary(
         enabled: config.enabled,
         port: config.port,
         has_credential: config.token.as_ref().is_some_and(|token| !token.is_empty()),
+        attached_to,
     }
 }
 
 fn summary(name: String, config: &ServiceConfig) -> construct_protocol::ServiceSummary {
+    let service_name = name.clone();
     construct_protocol::ServiceSummary {
         name,
         instruction: config.instruction.clone(),
@@ -350,7 +555,7 @@ fn summary(name: String, config: &ServiceConfig) -> construct_protocol::ServiceS
         channels: config
             .channels
             .iter()
-            .map(|(id, channel)| channel_summary(id.clone(), channel))
+            .map(|(id, channel)| channel_summary(id.clone(), channel, Some(service_name.clone())))
             .collect(),
     }
 }
@@ -863,7 +1068,9 @@ mod tests {
 
     #[test]
     fn service_put_preserves_channels_and_channel_crud_rotates_credentials() {
-        let dir = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let services = config.path().join("services");
+        std::fs::create_dir_all(&services).unwrap();
         let service = construct_protocol::ServiceSummary {
             name: "alerts".into(),
             instruction: "triage".into(),
@@ -875,7 +1082,7 @@ mod tests {
             channels: Vec::new(),
         };
         let first = put_definition(
-            dir.path(),
+            &services,
             construct_protocol::ServicePutParams {
                 service: service.clone(),
             },
@@ -883,7 +1090,7 @@ mod tests {
         .unwrap();
         assert!(first.service.channels.is_empty());
         let first_channel = put_channel(
-            dir.path(),
+            &services,
             construct_protocol::ServiceChannelPutParams {
                 service_name: "alerts".into(),
                 channel: construct_protocol::ServiceChannelPut {
@@ -898,20 +1105,20 @@ mod tests {
         .unwrap();
         let original = first_channel.new_secret.unwrap();
         let second = put_definition(
-            dir.path(),
+            &services,
             construct_protocol::ServicePutParams {
                 service: service.clone(),
             },
         )
         .unwrap();
         assert_eq!(second.service.channels.len(), 1);
-        let stored = load_definitions(dir.path()).unwrap();
+        let stored = load_definitions(&services).unwrap();
         assert_eq!(
             stored["alerts"].channels["http"].token.as_deref(),
             Some(original.as_str())
         );
         let rotated = rotate_channel_secret(
-            dir.path(),
+            &services,
             construct_protocol::ServiceChannelNameParams {
                 service_name: "alerts".into(),
                 channel_id: "http".into(),
@@ -920,14 +1127,14 @@ mod tests {
         .unwrap();
         assert_ne!(rotated.new_secret.as_deref(), Some(original.as_str()));
         delete_channel(
-            dir.path(),
+            &services,
             construct_protocol::ServiceChannelNameParams {
                 service_name: "alerts".into(),
                 channel_id: "http".into(),
             },
         )
         .unwrap();
-        assert!(load_definitions(dir.path())
+        assert!(load_definitions(&services)
             .unwrap()
             .get("alerts")
             .unwrap()
@@ -937,9 +1144,11 @@ mod tests {
 
     #[test]
     fn channel_ports_are_unique_within_a_service() {
-        let dir = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let services = config.path().join("services");
+        std::fs::create_dir_all(&services).unwrap();
         put_definition(
-            dir.path(),
+            &services,
             construct_protocol::ServicePutParams {
                 service: construct_protocol::ServiceSummary {
                     name: "alerts".into(),
@@ -955,7 +1164,7 @@ mod tests {
         )
         .unwrap();
         put_channel(
-            dir.path(),
+            &services,
             construct_protocol::ServiceChannelPutParams {
                 service_name: "alerts".into(),
                 channel: construct_protocol::ServiceChannelPut {
@@ -969,7 +1178,7 @@ mod tests {
         )
         .unwrap();
         let duplicate = put_channel(
-            dir.path(),
+            &services,
             construct_protocol::ServiceChannelPutParams {
                 service_name: "alerts".into(),
                 channel: construct_protocol::ServiceChannelPut {
@@ -982,5 +1191,124 @@ mod tests {
             },
         );
         assert!(duplicate.unwrap_err().to_string().contains("already used"));
+    }
+
+    #[test]
+    fn channel_catalog_migrates_and_controls_exclusive_attachments() {
+        let config = tempfile::tempdir().unwrap();
+        let services = config.path().join("services");
+        std::fs::create_dir_all(&services).unwrap();
+        std::fs::write(
+            services.join("alerts.toml"),
+            "harness = \"smith\"\n[channels.http]\nport = 8787\ntoken = \"secret\"\n",
+        )
+        .unwrap();
+        put_definition(
+            &services,
+            construct_protocol::ServicePutParams {
+                service: construct_protocol::ServiceSummary {
+                    name: "backup".into(),
+                    instruction: String::new(),
+                    harness: "smith".into(),
+                    model: None,
+                    cwd: ".".into(),
+                    routing: "session-key".into(),
+                    paused: false,
+                    channels: Vec::new(),
+                },
+            },
+        )
+        .unwrap();
+
+        let catalog = list_channel_catalog(&services).unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].attached_to.as_deref(), Some("alerts"));
+        assert!(config.path().join("channels.toml").exists());
+
+        let rejected = attach_channel(
+            &services,
+            construct_protocol::ServiceChannelAttachParams {
+                service_name: "backup".into(),
+                channel_id: "http".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(rejected.to_string().contains("already attached"));
+
+        delete_channel(
+            &services,
+            construct_protocol::ServiceChannelNameParams {
+                service_name: "alerts".into(),
+                channel_id: "http".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            list_channel_catalog(&services).unwrap()[0].attached_to,
+            None
+        );
+
+        attach_channel(
+            &services,
+            construct_protocol::ServiceChannelAttachParams {
+                service_name: "backup".into(),
+                channel_id: "http".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            list_channel_catalog(&services).unwrap()[0]
+                .attached_to
+                .as_deref(),
+            Some("backup")
+        );
+    }
+
+    #[test]
+    fn rotating_an_attached_channel_updates_the_catalog_credential() {
+        let config = tempfile::tempdir().unwrap();
+        let services = config.path().join("services");
+        std::fs::create_dir_all(&services).unwrap();
+        put_definition(
+            &services,
+            construct_protocol::ServicePutParams {
+                service: construct_protocol::ServiceSummary {
+                    name: "alerts".into(),
+                    instruction: String::new(),
+                    harness: "smith".into(),
+                    model: None,
+                    cwd: ".".into(),
+                    routing: "session-key".into(),
+                    paused: false,
+                    channels: Vec::new(),
+                },
+            },
+        )
+        .unwrap();
+        let created = put_channel(
+            &services,
+            construct_protocol::ServiceChannelPutParams {
+                service_name: "alerts".into(),
+                channel: construct_protocol::ServiceChannelPut {
+                    id: "http".into(),
+                    kind: "http".into(),
+                    enabled: true,
+                    port: Some(8787),
+                },
+                rotate_secret: false,
+            },
+        )
+        .unwrap();
+        let original = created.new_secret.unwrap();
+        let rotated = rotate_channel_secret(
+            &services,
+            construct_protocol::ServiceChannelNameParams {
+                service_name: "alerts".into(),
+                channel_id: "http".into(),
+            },
+        )
+        .unwrap();
+        assert_ne!(rotated.new_secret.as_deref(), Some(original.as_str()));
+        assert!(list_channel_catalog(&services).unwrap()[0].has_credential);
     }
 }

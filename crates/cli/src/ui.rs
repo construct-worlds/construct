@@ -585,8 +585,8 @@ fn service_dialog_field_help(
         }
         6 => (
             "Channels",
-            "Transport endpoints attached to this service. Each channel has its own kind, loopback port, enabled state, and credential.",
-            "Enter edits the selected channel · a adds a channel.",
+            "The daemon-wide channel catalog. A filled square is attached here; an empty square is available to attach. Channels owned by another service are unavailable.",
+            "Space attaches/detaches · Enter edits an attached channel · a creates a channel.",
         ),
         7 => (
             "State",
@@ -8162,43 +8162,67 @@ fn render_service_view(
             Style::default().fg(app.theme.text),
         ),
     ])];
-    activity.push(Line::from("") );
+    let catalog = &app.service_channel_catalog;
+    let attached_count = catalog.iter().filter(|channel| {
+        channel.attached_to.as_deref() == Some(summary.name.as_str())
+    }).count();
     activity.push(Line::from(vec![
         Span::styled(
             "Channels  ",
             Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{} attached", summary.channels.len()),
+            format!("{} attached · {} in catalog", attached_count, catalog.len()),
             Style::default().fg(app.theme.text),
         ),
     ]));
-    if summary.channels.is_empty() {
+    if catalog.is_empty() {
         activity.push(Line::from(Span::styled(
-            "  No channels. Press a after entering edit mode to add HTTP.",
+            "  No channels in the catalog. Press a after entering edit mode to create HTTP.",
             Style::default().fg(app.theme.dim),
         )));
     } else {
-        for (index, channel) in summary.channels.iter().enumerate() {
+        for (index, channel) in catalog.iter().enumerate() {
             let selected = dialog.selected_field == 6 && dialog.selected_channel == index;
             let marker = if selected { "›" } else { " " };
+            let attached = channel.attached_to.as_deref() == Some(summary.name.as_str());
+            let owned_by_other = channel.attached_to.is_some() && !attached;
+            let checkbox = if attached { "▣" } else { "▢" };
             let state = if channel.enabled { "enabled" } else { "disabled" };
             let endpoint = channel
                 .port
                 .map(|port| format!("127.0.0.1:{port}"))
                 .unwrap_or_else(|| "no port".to_string());
+            let owner = channel
+                .attached_to
+                .as_deref()
+                .filter(|owner| *owner != summary.name.as_str())
+                .map(|owner| format!("  [attached to {owner}]"))
+                .unwrap_or_default();
             let style = if selected {
                 Style::default().fg(app.theme.highlight_fg).bg(app.theme.highlight_bg)
+            } else if owned_by_other {
+                Style::default().fg(app.theme.dim)
             } else {
                 Style::default().fg(app.theme.text)
             };
             activity.push(Line::from(Span::styled(
-                format!("{marker}   {}  {:<5} {endpoint}  {state}", channel.id, channel.kind),
+                format!("{marker} {checkbox} {}  {:<5} {endpoint}  {state}{owner}", channel.id, channel.kind),
                 style,
             )));
         }
     }
     activity.push(Line::from(""));
+    activity.push(Line::from(vec![
+        Span::styled(
+            "Sessions  ",
+            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} routed", routed.len()),
+            Style::default().fg(app.theme.text),
+        ),
+    ]));
     if routed.is_empty() {
         activity.push(Line::from(Span::styled(
             "No requests have created a session yet.",
@@ -8228,9 +8252,9 @@ fn render_service_view(
     let footer = if !editing {
         "Enter/e edit · C-x keeps global commands"
     } else if dialog.mode == crate::app::ServiceDialogMode::Create {
-        "Enter/C-s save · a add channel · Esc close · C-x keeps global commands"
+        "Enter/C-s save · Space attach · a create channel · Esc close · C-x keeps global commands"
     } else {
-        "Enter/C-s save · a add · Enter channel edit · Esc close"
+        "Enter/C-s save · Space attach/detach · Enter edit · a create · Esc close"
     };
     activity.push(Line::from(""));
     activity.push(Line::from(Span::styled(footer, Style::default().fg(app.theme.dim))));

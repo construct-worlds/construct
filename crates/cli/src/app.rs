@@ -1693,6 +1693,10 @@ pub struct App {
     pub sessions: Vec<SessionSummary>,
     pub groups: Vec<GroupSummary>,
     pub services: Vec<ServiceSummary>,
+    /// Daemon-wide channel catalog. Service views use this list to make
+    /// attachment ownership visible and to keep attach/detach a selection
+    /// operation rather than a per-service create/delete operation.
+    pub service_channel_catalog: Vec<ServiceChannelSummary>,
     pub selection: Selection,
     pub focus: PaneFocus,
     pub main_windows: MainWindowTree,
@@ -5041,6 +5045,11 @@ async fn run_with_socket_initial_selection(
     let groups = client.list_projects().await.unwrap_or_default();
     let mut services = client.list_services().await.unwrap_or_default();
     services.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut service_channel_catalog = client
+        .list_service_channel_catalog()
+        .await
+        .unwrap_or_default();
+    service_channel_catalog.sort_by(|a, b| a.id.cmp(&b.id));
     let harnesses = client.harnesses().await.unwrap_or_default();
     let service_route_catalog = client
         .list_routes(None)
@@ -5200,6 +5209,7 @@ async fn run_with_socket_initial_selection(
         sessions,
         groups,
         services,
+        service_channel_catalog,
         selection: initial_window_sel,
         // Default focus is the view — the selected session is usually
         // what the user wants to interact with first. List navigation
@@ -16224,6 +16234,7 @@ mod tests {
             sessions,
             groups: Vec::new(),
             services: Vec::new(),
+            service_channel_catalog: Vec::new(),
             selection: Selection::Session("s1".into()),
             focus: PaneFocus::View,
             main_windows: MainWindowTree::single(1, Selection::Session("s1".into())),
@@ -40314,6 +40325,7 @@ mod tests {
                 enabled: true,
                 port: Some(8787),
                 has_credential: true,
+                attached_to: Some(name.to_string()),
             }],
         }
     }
@@ -40637,6 +40649,7 @@ mod tests {
     async fn service_channel_editor_supports_multiple_http_channels() {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
+        app.service_channel_catalog = app.services[0].channels.clone();
         app.open_edit_service_view("assistant");
         app.service_dialog.as_mut().unwrap().selected_field = 6;
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -40699,6 +40712,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_view_lists_available_and_owned_catalog_channels() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.service_channel_catalog = vec![
+            app.services[0].channels[0].clone(),
+            construct_protocol::ServiceChannelSummary {
+                id: "shared".to_string(),
+                kind: "http".to_string(),
+                enabled: true,
+                port: Some(8788),
+                has_credential: true,
+                attached_to: None,
+            },
+            construct_protocol::ServiceChannelSummary {
+                id: "busy".to_string(),
+                kind: "http".to_string(),
+                enabled: true,
+                port: Some(8789),
+                has_credential: true,
+                attached_to: Some("other-service".to_string()),
+            },
+        ];
+        app.select_service("assistant".to_string());
+        app.session_transitions.clear();
+        let backend = ratatui::backend::TestBackend::new(160, 50);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let text = rendered_text(term.backend().buffer());
+        assert!(text.contains("▣"), "attached catalog channel should be checked");
+        assert!(text.contains("▢"), "available catalog channels should be selectable");
+        assert!(text.contains("http"));
+        assert!(text.contains("shared"));
+        assert!(text.contains("busy"));
+        assert!(text.contains("attached to other-service"));
+        assert!(text.contains("Sessions"));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn service_model_picker_uses_the_pin_router_catalog() {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
@@ -40709,6 +40761,7 @@ mod tests {
                 dialect: "openai".to_string(),
                 model: "gpt-5".to_string(),
                 models: vec!["gpt-5".to_string(), "gpt-5-mini".to_string()],
+                efforts: Default::default(),
                 base_url: "https://api.openai.com".to_string(),
                 unavailable_reason: None,
                 login_command: None,
@@ -40718,6 +40771,7 @@ mod tests {
                 dialect: "anthropic".to_string(),
                 model: "claude-sonnet".to_string(),
                 models: vec!["claude-sonnet".to_string()],
+                efforts: Default::default(),
                 base_url: "https://api.anthropic.com".to_string(),
                 unavailable_reason: None,
                 login_command: None,
@@ -40917,7 +40971,7 @@ mod tests {
             .flat_map(|row| row.iter().map(|cell| cell.symbol()))
             .collect::<String>();
         assert!(view_text.contains("Channels"));
-        assert!(view_text.contains("Transport endpoints"));
+        assert!(view_text.contains("catalog"));
         let view_rows = buffer
             .content()
             .chunks(buffer.area.width as usize)
@@ -40940,7 +40994,7 @@ mod tests {
         );
         let footer_row = view_rows
             .iter()
-            .position(|row| row.contains("Enter/C-s save · a add"))
+            .position(|row| row.contains("Enter/C-s save · Space attach"))
             .expect("service editor footer is visible");
         assert!(
             footer_row > 0 && view_rows[footer_row - 1].trim().is_empty(),

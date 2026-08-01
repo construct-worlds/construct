@@ -210,6 +210,18 @@ impl App {
             }
             Err(error) => self.set_status(format!("services refresh failed: {error}")),
         }
+        match self.client.list_service_channel_catalog().await {
+            Ok(mut channels) => {
+                channels.sort_by(|a, b| a.id.cmp(&b.id));
+                self.service_channel_catalog = channels;
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    dialog.selected_channel = dialog
+                        .selected_channel
+                        .min(self.service_channel_catalog.len().saturating_sub(1));
+                }
+            }
+            Err(error) => self.set_status(format!("channel catalog refresh failed: {error}")),
+        }
     }
 
     pub fn open_new_service_view(&mut self, suggested: impl Into<String>) {
@@ -259,33 +271,50 @@ impl App {
         true
     }
 
-    fn suggested_channel_id(service: &ServiceSummary) -> String {
-        if !service.channels.iter().any(|channel| channel.id == "http") {
+    fn suggested_channel_id(&self, _service: &ServiceSummary) -> String {
+        if !self
+            .service_channel_catalog
+            .iter()
+            .any(|channel| channel.id == "http")
+        {
             return "http".to_string();
         }
         (2..=99)
             .map(|index| format!("http-{index}"))
-            .find(|id| !service.channels.iter().any(|channel| channel.id == *id))
-            .unwrap_or_else(|| format!("http-{}", service.channels.len() + 1))
+            .find(|id| {
+                !self
+                    .service_channel_catalog
+                    .iter()
+                    .any(|channel| channel.id == *id)
+            })
+            .unwrap_or_else(|| format!("http-{}", self.service_channel_catalog.len() + 1))
     }
 
-    fn suggested_channel_port(service: &ServiceSummary) -> u16 {
-        let used: std::collections::HashSet<u16> = service
+    fn suggested_channel_port(&self, service: &ServiceSummary) -> u16 {
+        let mut used: std::collections::HashSet<u16> = service
             .channels
             .iter()
             .filter_map(|channel| channel.port)
             .collect();
+        used.extend(self.service_channel_catalog.iter().filter_map(|channel| channel.port));
         (8787..=u16::MAX)
             .find(|port| !used.contains(port))
             .unwrap_or(8787)
     }
 
     pub fn open_new_service_channel(&mut self) -> bool {
+        let Some(service) = self
+            .service_dialog
+            .as_ref()
+            .map(|dialog| dialog.service.clone())
+        else {
+            return false;
+        };
+        let id = self.suggested_channel_id(&service);
+        let port = self.suggested_channel_port(&service);
         let Some(dialog) = self.service_dialog.as_mut() else {
             return false;
         };
-        let id = Self::suggested_channel_id(&dialog.service);
-        let port = Self::suggested_channel_port(&dialog.service);
         dialog.selected_field = 6;
         dialog.channel_editor = Some(ServiceChannelDialog {
             mode: ServiceChannelDialogMode::Create,
@@ -296,6 +325,7 @@ impl App {
                 enabled: true,
                 port: Some(port),
                 has_credential: false,
+                attached_to: Some(dialog.service.name.clone()),
             },
             selected_field: 0,
             note: Some("HTTP channels listen on loopback after the daemon restarts.".to_string()),
@@ -309,9 +339,12 @@ impl App {
         let Some(dialog) = self.service_dialog.as_mut() else {
             return false;
         };
-        let Some(channel) = dialog.service.channels.get(index).cloned() else {
+        let Some(channel) = self.service_channel_catalog.get(index).cloned() else {
             return false;
         };
+        if channel.attached_to.as_deref() != Some(dialog.service.name.as_str()) {
+            return false;
+        }
         dialog.selected_field = 6;
         dialog.selected_channel = index;
         dialog.channel_editor = Some(ServiceChannelDialog {
@@ -324,6 +357,68 @@ impl App {
             confirm_delete: false,
         });
         true
+    }
+
+    async fn toggle_service_channel(&mut self, index: usize) {
+        let Some(dialog) = self.service_dialog.as_ref() else {
+            return;
+        };
+        let service_name = dialog.service.name.clone();
+        let Some(channel) = self.service_channel_catalog.get(index).cloned() else {
+            return;
+        };
+        let operation = match channel.attached_to.as_deref() {
+            None => Some((true, channel.id.clone())),
+            Some(owner) if owner == service_name => Some((false, channel.id.clone())),
+            Some(owner) => {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    dialog.note = Some(format!(
+                        "Channel `{}` is already attached to service `{owner}`.",
+                        channel.id
+                    ));
+                }
+                None
+            }
+        };
+        let Some((attach, channel_id)) = operation else {
+            return;
+        };
+        let result = if attach {
+            self.client
+                .attach_service_channel(&service_name, &channel_id)
+                .await
+        } else {
+            self.client
+                .detach_service_channel(&service_name, &channel_id)
+                .await
+        };
+        match result {
+            Ok(_) => {
+                self.refresh_services().await;
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(service) = self
+                        .services
+                        .iter()
+                        .find(|service| service.name == service_name)
+                        .cloned()
+                    {
+                        dialog.service = service;
+                    }
+                    dialog.note = Some(format!(
+                        "Channel `{channel_id}` {}. Restart the daemon to apply.",
+                        if attach { "attached" } else { "detached" }
+                    ));
+                }
+            }
+            Err(error) => {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    dialog.note = Some(format!(
+                        "Channel `{channel_id}` {} failed: {error}",
+                        if attach { "attach" } else { "detach" }
+                    ));
+                }
+            }
+        }
     }
 
     fn edit_service_channel_text(&mut self, mut edit: impl FnMut(&mut String)) {
@@ -781,11 +876,11 @@ impl App {
                 }
                 KeyCode::Char('p') => {
                     if let Some(dialog) = self.service_dialog.as_mut() {
-                        if dialog.selected_field == 6 && !dialog.service.channels.is_empty() {
+                        if dialog.selected_field == 6 && !self.service_channel_catalog.is_empty() {
                             dialog.selected_channel = dialog
                                 .selected_channel
                                 .checked_sub(1)
-                                .unwrap_or(dialog.service.channels.len() - 1);
+                                .unwrap_or(self.service_channel_catalog.len() - 1);
                         } else {
                             dialog.selected_field = dialog
                                 .selected_field
@@ -797,9 +892,9 @@ impl App {
                 }
                 KeyCode::Char('n') => {
                     if let Some(dialog) = self.service_dialog.as_mut() {
-                        if dialog.selected_field == 6 && !dialog.service.channels.is_empty() {
+                        if dialog.selected_field == 6 && !self.service_channel_catalog.is_empty() {
                             dialog.selected_channel =
-                                (dialog.selected_channel + 1) % dialog.service.channels.len();
+                                (dialog.selected_channel + 1) % self.service_channel_catalog.len();
                         } else {
                             dialog.selected_field = (dialog.selected_field + 1) % FIELD_COUNT;
                         }
@@ -815,34 +910,47 @@ impl App {
                 2 => self.open_service_picker(ServiceDialogPickerKind::Harness),
                 3 => self.open_service_picker(ServiceDialogPickerKind::Model),
                 6 => {
-                    if snapshot.service.channels.is_empty() {
+                    if self.service_channel_catalog.is_empty() {
                         self.open_new_service_channel();
-                    } else {
-                        self.open_edit_service_channel(
-                            snapshot
-                                .selected_channel
-                                .min(snapshot.service.channels.len().saturating_sub(1)),
-                        );
+                    } else if self
+                        .service_channel_catalog
+                        .get(snapshot.selected_channel)
+                        .is_some_and(|channel| {
+                            channel.attached_to.as_deref() == Some(snapshot.service.name.as_str())
+                        })
+                    {
+                        self.open_edit_service_channel(snapshot.selected_channel);
+                    } else if let Some(channel) =
+                        self.service_channel_catalog.get(snapshot.selected_channel)
+                    {
+                        let message = match channel.attached_to.as_deref() {
+                            Some(owner) => format!(
+                                "Channel `{}` is attached to `{owner}`; press Space on an available channel.",
+                                channel.id
+                            ),
+                            None => format!(
+                                "Channel `{}` is available; press Space to attach it.",
+                                channel.id
+                            ),
+                        };
+                        if let Some(dialog) = self.service_dialog.as_mut() {
+                            dialog.note = Some(message);
+                        }
                     }
                 }
                 _ => self.save_service_dialog().await,
             },
+            KeyCode::Char(' ') if snapshot.selected_field == 6 => {
+                self.toggle_service_channel(snapshot.selected_channel).await;
+            }
             KeyCode::Char('a') if snapshot.selected_field == 6 => {
                 self.open_new_service_channel();
             }
-            KeyCode::Char('e') if snapshot.selected_field == 6 && !snapshot.service.channels.is_empty() => {
-                self.open_edit_service_channel(
-                    snapshot
-                        .selected_channel
-                        .min(snapshot.service.channels.len().saturating_sub(1)),
-                );
+            KeyCode::Char('e') if snapshot.selected_field == 6 => {
+                self.open_edit_service_channel(snapshot.selected_channel);
             }
-            KeyCode::Char('d') if snapshot.selected_field == 6 && !snapshot.service.channels.is_empty() => {
-                if self.open_edit_service_channel(
-                    snapshot
-                        .selected_channel
-                        .min(snapshot.service.channels.len().saturating_sub(1)),
-                ) {
+            KeyCode::Char('d') if snapshot.selected_field == 6 => {
+                if self.open_edit_service_channel(snapshot.selected_channel) {
                     if let Some(dialog) = self.service_dialog.as_mut() {
                         if let Some(editor) = dialog.channel_editor.as_mut() {
                             editor.confirm_delete = true;
@@ -851,12 +959,8 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('r') if snapshot.selected_field == 6 && !snapshot.service.channels.is_empty() => {
-                if self.open_edit_service_channel(
-                    snapshot
-                        .selected_channel
-                        .min(snapshot.service.channels.len().saturating_sub(1)),
-                ) {
+            KeyCode::Char('r') if snapshot.selected_field == 6 => {
+                if self.open_edit_service_channel(snapshot.selected_channel) {
                     self.rotate_service_channel_secret().await;
                 }
             }

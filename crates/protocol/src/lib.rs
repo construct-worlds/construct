@@ -1228,8 +1228,11 @@ pub mod ipc_method {
     pub const SERVICE_PUT: &str = "service.put";
     pub const SERVICE_DELETE: &str = "service.delete";
     pub const SERVICE_CHANNEL_LIST: &str = "service.channel.list";
+    pub const SERVICE_CHANNEL_CATALOG_LIST: &str = "service.channel.catalog.list";
     pub const SERVICE_CHANNEL_PUT: &str = "service.channel.put";
     pub const SERVICE_CHANNEL_DELETE: &str = "service.channel.delete";
+    pub const SERVICE_CHANNEL_ATTACH: &str = "service.channel.attach";
+    pub const SERVICE_CHANNEL_DETACH: &str = "service.channel.detach";
     pub const SERVICE_CHANNEL_ROTATE_SECRET: &str = "service.channel.rotate_secret";
     pub const SESSION_CREATE: &str = "session.create";
     pub const SESSION_GET: &str = "session.get";
@@ -3238,6 +3241,8 @@ pub struct ServiceChannelSummary {
     pub port: Option<u16>,
     #[serde(default)]
     pub has_credential: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_to: Option<String>,
 }
 
 fn default_service_channel_true() -> bool {
@@ -3289,6 +3294,12 @@ pub struct ServiceChannelPutResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceChannelNameParams {
+    pub service_name: String,
+    pub channel_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceChannelAttachParams {
     pub service_name: String,
     pub channel_id: String,
 }

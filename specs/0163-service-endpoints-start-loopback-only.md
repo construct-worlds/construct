@@ -16,8 +16,15 @@ zero or more named channel instances. Channel ids are stable keys inside the
 service definition, and each HTTP channel owns its own loopback port,
 credential, and enabled state. The HTTP port is therefore channel
 configuration, not service configuration; two HTTP channels on one service
-must use different ports. V1 supports HTTP channel instances only, while the
-resource model leaves room for future channel kinds.
+must use different ports. Channel definitions live in the daemon-wide
+`channels.toml` catalog beside the `services/` directory. A service TOML's
+`channels` map is its attachment state: attaching copies a catalog definition
+into the service, while detaching removes only that attachment and preserves
+the catalog definition for later reuse. Channel ids are globally exclusive;
+the catalog reports the owning service so clients can disable an already-used
+channel. Existing nested channel definitions migrate into the catalog. V1
+supports HTTP channel instances only, while the resource model leaves room for
+future channel kinds.
 
 The TUI renders services as top-level rows in the ordinary session list rather
 than in a separate sidebar section. A service row uses the distinct `◈` type
@@ -32,8 +39,12 @@ view's normal focus lifecycle.
 The service view uses the same top-right title-actions affordance as a session
 view. Its menu is service-specific: edit the selected HTTP channel credential,
 pause or resume ingress, split or close the pane, and delete the service. The
-editor lists attached channels and supports adding, editing, enabling or
-disabling, credential rotation, and deletion. Global `C-x` chords remain available while the service view is
+editor lists every catalog channel under `Channels`: an attached channel uses
+the filled-square `▣` glyph, an available channel uses the empty-square `▢`
+glyph, and a channel owned by another service is dimmed with its owner shown.
+Space attaches or detaches the selected available/owned channel; Enter edits
+an attached channel. The routed-session list is a separate `Sessions` section
+below the channel catalog. Global `C-x` chords remain available while the service view is
 focused; session-only commands such as `C-x .` explain their scope instead of
 being silently swallowed.
 
@@ -81,7 +92,11 @@ visible and recoverable in the fleet.
 - Service definitions can be created, edited, and removed atomically without
   rewriting the global Construct configuration.
 - Channel mutations preserve other channels and the service behavior fields;
-  deleting the final channel leaves a valid but inert service definition.
+  detaching the final channel leaves a valid but inert service definition and
+  keeps the channel available in the catalog.
+- Channel catalog ownership is exclusive across services. Detach is reversible
+  and never destroys channel credentials; permanent catalog deletion is outside
+  the v1 service-view flow.
 - Channel summaries never return bearer credentials. Creation and explicit
   rotation return a generated credential once, and ordinary service edits do
   not replace it.

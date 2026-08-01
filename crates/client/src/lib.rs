@@ -483,6 +483,15 @@ impl Client {
         )
         .await
     }
+    pub async fn list_service_channel_catalog(
+        &self,
+    ) -> Result<Vec<construct_protocol::ServiceChannelSummary>> {
+        self.request(
+            ipc_method::SERVICE_CHANNEL_CATALOG_LIST,
+            &serde_json::Value::Null,
+        )
+        .await
+    }
     pub async fn put_service_channel(
         &self,
         params: construct_protocol::ServiceChannelPutParams,
@@ -497,6 +506,34 @@ impl Client {
         self.request(
             ipc_method::SERVICE_CHANNEL_DELETE,
             &construct_protocol::ServiceChannelNameParams {
+                service_name: service_name.to_string(),
+                channel_id: channel_id.to_string(),
+            },
+        )
+        .await
+    }
+    pub async fn attach_service_channel(
+        &self,
+        service_name: &str,
+        channel_id: &str,
+    ) -> Result<construct_protocol::ServiceChannelPutResult> {
+        self.request(
+            ipc_method::SERVICE_CHANNEL_ATTACH,
+            &construct_protocol::ServiceChannelAttachParams {
+                service_name: service_name.to_string(),
+                channel_id: channel_id.to_string(),
+            },
+        )
+        .await
+    }
+    pub async fn detach_service_channel(
+        &self,
+        service_name: &str,
+        channel_id: &str,
+    ) -> Result<construct_protocol::ServiceChannelPutResult> {
+        self.request(
+            ipc_method::SERVICE_CHANNEL_DETACH,
+            &construct_protocol::ServiceChannelAttachParams {
                 service_name: service_name.to_string(),
                 channel_id: channel_id.to_string(),
             },

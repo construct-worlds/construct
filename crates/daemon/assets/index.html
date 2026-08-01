@@ -847,6 +847,9 @@
   .service-session-link:hover { color: var(--fg); }
   .service-session-link .service-session-state { color: var(--ok); }
   .service-channel-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border-faint); color: var(--fg-dim); }
+  .service-channel-row.unavailable { opacity: .48; }
+  .service-channel-row .channel-toggle { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+  .service-channel-owner { color: var(--fg-faint); font: 11px var(--mono); }
   .service-channel-row:last-of-type { border-bottom: 0; }
   .service-channel-row .channel-id { min-width: 130px; color: var(--fg); font-family: var(--mono); }
   .service-channel-row .channel-endpoint { flex: 1; min-width: 0; font-family: var(--mono); color: var(--fg-faint); }
@@ -3962,6 +3965,7 @@ const state = {
   reconnectDelay: 1000,
   sessions: [], // [{id, title, harness, state, group_id, position, ...}]
   services: [],
+  serviceChannelCatalog: [],
   harnesses: [],
   groups: [],   // [{id, name, position, collapsed}], TUI-style ordering
   subagentCollapsed: new Set(),
@@ -4667,13 +4671,17 @@ async function refreshSessions(startingLayoutTree = null) {
     // `project/state`, `project/deleted` — the
     // existing `handleNotification` path updates the caches and
     // re-renders.
-    const [list, groups, services] = await Promise.all([
+    const [list, groups, services, channelCatalog] = await Promise.all([
       rpc("session.list", null),
       rpc("project.list", null).catch(() => []),
       rpc("service.list", null).catch(() => []),
+      rpc("service.channel.catalog.list", null).catch(() => []),
     ]);
     state.sessions = Array.isArray(list) ? list : [];
     state.services = Array.isArray(services) ? services : [];
+    state.serviceChannelCatalog = Array.isArray(channelCatalog)
+      ? channelCatalog.slice().sort((a, b) => String(a.id || "").localeCompare(String(b.id || "")))
+      : [];
     // The orchestrator session ("operator") used to be filtered out
     // to mirror the TUI, which surfaces it via a special
     // minibuffer panel instead of the list. The web client
@@ -4871,16 +4879,40 @@ async function saveServiceChannelDraft() {
 
 async function deleteServiceChannel(id) {
   const name = state.currentServiceName;
-  if (!name || !window.confirm(`Delete channel '${id}'?`)) return;
+  if (!name || !window.confirm(`Detach channel '${id}'?`)) return;
   try {
-    await rpc("service.channel.delete", { service_name: name, channel_id: id });
-    state.services = state.services.map((item) => item.name === name ? { ...item, channels: (item.channels || []).filter((channel) => channel.id !== id) } : item);
-    syncServiceDraftChannels(name);
+    await rpc("service.channel.detach", { service_name: name, channel_id: id });
+    await refreshSessions();
     state.serviceChannelDraft = null;
-    renderSessions();
     renderServiceView();
   } catch (e) {
-    serviceViewFooterEl.textContent = `Channel delete failed: ${e.message}`;
+    serviceViewFooterEl.textContent = `Channel detach failed: ${e.message}`;
+  }
+}
+
+async function toggleServiceChannel(id) {
+  const name = state.currentServiceName;
+  const service = name && state.services.find((item) => item.name === name);
+  const channel = state.serviceChannelCatalog.find((item) => item.id === id);
+  if (!name || !service || !channel) return;
+  if (channel.attached_to && channel.attached_to !== name) {
+    serviceViewFooterEl.textContent = `Channel '${id}' is attached to '${channel.attached_to}'.`;
+    renderServiceView();
+    return;
+  }
+  const attach = !channel.attached_to;
+  try {
+    await rpc(attach ? "service.channel.attach" : "service.channel.detach", {
+      service_name: name,
+      channel_id: id,
+    });
+    await refreshSessions();
+    state.serviceChannelDraft = null;
+    renderServiceView();
+    serviceViewFooterEl.textContent = `Channel '${id}' ${attach ? "attached" : "detached"}; restart the daemon to apply.`;
+  } catch (e) {
+    serviceViewFooterEl.textContent = `Channel ${attach ? "attach" : "detach"} failed: ${e.message}`;
+    renderServiceView();
   }
 }
 
@@ -4935,7 +4967,7 @@ function renderServiceView() {
     field("model", "Model", draft.model) +
     field("cwd", "Working dir", draft.cwd) +
     `<div class="service-field"><label class="service-field-label">Routing</label><div class="service-field-value">${route}</div></div>` +
-    `<div class="service-field"><label class="service-field-label">Channels</label><div class="service-field-value">${draft.channels.length} attached</div></div>` +
+    `<div class="service-field"><label class="service-field-label">Channels</label><div class="service-field-value">${(state.serviceChannelCatalog || []).filter((channel) => channel.attached_to === name).length} attached</div></div>` +
     `<div class="service-field"><label class="service-field-label">State</label><div class="service-field-value">${paused}</div></div>`;
   const selected = state.serviceField || "instruction";
   const help = serviceFieldHelp(selected, draft);
@@ -4944,17 +4976,24 @@ function renderServiceView() {
     const title = session.title || "";
     return title === `service:${name}` || title.startsWith(`service:${name}:`);
   });
-  const channels = draft.channels || [];
+  const channels = state.serviceChannelCatalog || [];
   const channelDraft = state.serviceChannelDraft && state.serviceChannelDraft.serviceName === name ? state.serviceChannelDraft : null;
   const channelRows = channels.length
     ? channels.map((channel) => {
       const endpoint = channel.port ? `127.0.0.1:${channel.port}` : "no port";
       const channelState = channel.enabled ? "enabled" : "disabled";
-      return `<div class="service-channel-row"><span class="channel-id">${escape(channel.id)}</span><span>${escape(channel.kind || "http")}</span><span class="channel-endpoint">${escape(endpoint)}</span><span class="channel-state ${channel.enabled ? "" : "disabled"}">${channelState}</span><span class="service-channel-actions"><button type="button" data-channel-edit="${attr(channel.id)}">edit</button><button type="button" data-channel-rotate="${attr(channel.id)}">rotate</button><button type="button" class="danger" data-channel-delete="${attr(channel.id)}">delete</button></span></div>`;
+      const attached = channel.attached_to === name;
+      const ownedByOther = !!channel.attached_to && !attached;
+      const owner = ownedByOther ? `<span class="service-channel-owner">attached to ${escape(channel.attached_to)}</span>` : "";
+      const controls = attached
+        ? `<span class="service-channel-actions"><button type="button" data-channel-edit="${attr(channel.id)}">edit</button><button type="button" data-channel-rotate="${attr(channel.id)}">rotate</button><button type="button" class="danger" data-channel-delete="${attr(channel.id)}">detach</button></span>`
+        : "";
+      return `<div class="service-channel-row${ownedByOther ? " unavailable" : ""}"><input class="channel-toggle" type="checkbox" data-channel-toggle="${attr(channel.id)}" ${attached ? "checked" : ""} ${ownedByOther || !service ? "disabled" : ""} aria-label="${attr(attached ? `Detach ${channel.id}` : `Attach ${channel.id}`)}"><span class="channel-id">${escape(channel.id)}</span><span>${escape(channel.kind || "http")}</span><span class="channel-endpoint">${escape(endpoint)}</span><span class="channel-state ${channel.enabled ? "" : "disabled"}">${channelState}</span>${owner}${controls}</div>`;
     }).join("")
-    : `<div class="service-view-footer">No channels attached.</div>`;
+    : `<div class="service-view-footer">No channels in the catalog.</div>`;
   const channelEditor = channelDraft ? `<div class="service-channel-editor"><div class="service-channel-editor-grid"><label>Channel ID<input data-channel-field="id" value="${attr(channelDraft.id || "")}" ${channelDraft.mode === "edit" ? "readonly" : ""}></label><label>Kind<select data-channel-field="kind" disabled><option selected>http</option></select></label><label>HTTP port<input data-channel-field="port" type="number" min="1" max="65535" value="${attr(channelDraft.port ?? "")}"></label><label>State<select data-channel-field="enabled"><option value="true" ${channelDraft.enabled ? "selected" : ""}>enabled</option><option value="false" ${channelDraft.enabled ? "" : "selected"}>disabled</option></select></label></div><div class="channel-editor-actions"><button type="button" data-channel-save>Save channel</button><button type="button" data-channel-cancel>Cancel</button></div></div>` : "";
-  serviceActivityEl.innerHTML = `<h3>Channels · ${channels.length} attached</h3>${channelRows}<div class="channel-editor-actions"><button type="button" data-channel-add ${service ? "" : "disabled"}>Add HTTP channel</button></div>${channelEditor}<h3 style="margin-top:18px">Activity · ${routed.length} routed session${routed.length === 1 ? "" : "s"}</h3>` +
+  const attachedCount = channels.filter((channel) => channel.attached_to === name).length;
+  serviceActivityEl.innerHTML = `<h3>Channels · ${attachedCount} attached · ${channels.length} in catalog</h3>${channelRows}<div class="channel-editor-actions"><button type="button" data-channel-add ${service ? "" : "disabled"}>Add HTTP channel</button></div>${channelEditor}<h3 style="margin-top:18px">Sessions · ${routed.length} routed session${routed.length === 1 ? "" : "s"}</h3>` +
     (routed.length ? routed.map((session) => `<div class="service-session-link" data-session-id="${attr(session.id)}"><span class="service-session-state">${escape(session.state || "idle")}</span><span>${escape(session.title || session.id)}</span></div>`).join("") : `<div class="service-view-footer">No requests have created a session yet.</div>`);
   const tokenNote = state.serviceNewToken ? `Token (shown once): ${state.serviceNewToken}` : "";
   serviceViewFooterEl.textContent = editing
@@ -4992,6 +5031,7 @@ function renderServiceView() {
     control.addEventListener("change", () => control.dispatchEvent(new Event("input")));
   });
   serviceActivityEl.querySelector("[data-channel-add]")?.addEventListener("click", beginNewServiceChannel);
+  serviceActivityEl.querySelectorAll("[data-channel-toggle]").forEach((control) => control.addEventListener("change", () => toggleServiceChannel(control.dataset.channelToggle)));
   serviceActivityEl.querySelectorAll("[data-channel-edit]").forEach((button) => button.addEventListener("click", () => beginEditServiceChannel(button.dataset.channelEdit)));
   serviceActivityEl.querySelectorAll("[data-channel-delete]").forEach((button) => button.addEventListener("click", () => deleteServiceChannel(button.dataset.channelDelete)));
   serviceActivityEl.querySelectorAll("[data-channel-rotate]").forEach((button) => button.addEventListener("click", () => rotateServiceChannel(button.dataset.channelRotate)));
