@@ -112,7 +112,10 @@ from burning tokens.
   directly on Generate with that draft prefilled as keyword guidance.
   This is only a copy: opening, cancelling, or regenerating never
   consumes or changes the harness prompt, and clicking the pane
-  affordance retains the ordinary unprefilled deck.
+  affordance retains the ordinary unprefilled deck. Once that turn
+  completes, clients clear the captured draft used for this prefill before
+  the next Generate surface can open, so stale prompt text is never carried
+  across a turn boundary.
 - Hidden generation sessions must be torn down after use and must never
   appear in user-facing session lists.
 - A generation result must be discarded if a newer turn started while
