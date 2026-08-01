@@ -18,6 +18,7 @@ use std::sync::OnceLock;
 mod adapter;
 mod availability;
 mod config;
+mod cost_history;
 mod loops;
 pub mod plugins;
 mod program_verbs;

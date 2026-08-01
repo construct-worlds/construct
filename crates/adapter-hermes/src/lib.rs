@@ -566,7 +566,11 @@ fn message_events(message: &HermesMessage) -> Vec<SessionEvent> {
     events
 }
 
-fn usage_delta(current: &UsageTotals, prior: &UsageTotals) -> Option<SessionEvent> {
+fn usage_delta(
+    current: &UsageTotals,
+    prior: &UsageTotals,
+    model: Option<&str>,
+) -> Option<SessionEvent> {
     let input = current.input.saturating_sub(prior.input);
     let cache_read = current.cache_read.saturating_sub(prior.cache_read);
     let cache_write = current.cache_write.saturating_sub(prior.cache_write);
@@ -581,6 +585,9 @@ fn usage_delta(current: &UsageTotals, prior: &UsageTotals) -> Option<SessionEven
             tokens_in: input.saturating_add(cache_read).saturating_add(cache_write),
             tokens_out: output,
             tokens_cached: cache_read,
+            // Same `session.model` the `ModelChanged` above is emitted from
+            // (spec 0167).
+            model: model.map(str::to_string),
         }
     })
 }
@@ -693,7 +700,7 @@ fn spawn_db_watcher(setup: WatcherSetup, emit: EventEmitter) {
                     emit.emit(event);
                 }
             }
-            if let Some(event) = usage_delta(&session.usage, &usage) {
+            if let Some(event) = usage_delta(&session.usage, &usage, session.model.as_deref()) {
                 emit.emit(event);
             }
             usage = session.usage;
@@ -846,17 +853,19 @@ mod tests {
             reasoning: 5,
             usd: 0.3,
         };
-        match usage_delta(&current, &prior).unwrap() {
+        match usage_delta(&current, &prior, Some("Hermes-4-405B")).unwrap() {
             SessionEvent::Cost {
                 usd,
                 tokens_in,
                 tokens_out,
                 tokens_cached,
+                model,
             } => {
                 assert!((usd - 0.1).abs() < 0.00001);
                 assert_eq!(tokens_in, 52);
                 assert_eq!(tokens_out, 8);
                 assert_eq!(tokens_cached, 30);
+                assert_eq!(model.as_deref(), Some("Hermes-4-405B"));
             }
             other => panic!("expected cost, got {other:?}"),
         }

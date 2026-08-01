@@ -620,7 +620,7 @@ fn emit_codex_rollout_event(
         *last_effort = Some(effort.clone());
         emit.emit(SessionEvent::EffortChanged { effort });
     }
-    let usage_events = codex_usage_events(v, reported_usage);
+    let usage_events = codex_usage_events(v, reported_usage, last_model.as_deref());
     let usage_refreshed = usage_events
         .iter()
         .any(|event| matches!(event, SessionEvent::ContextUsage { .. }));
@@ -655,7 +655,11 @@ struct UsageTotals {
 /// recent call — exactly what filled the window — and codex states the
 /// window itself in `model_context_window`. Gated on the delta so repeated
 /// identical snapshots don't respam an unchanged gauge.
-fn codex_usage_events(v: &Value, reported: &mut UsageTotals) -> Vec<SessionEvent> {
+fn codex_usage_events(
+    v: &Value,
+    reported: &mut UsageTotals,
+    model: Option<&str>,
+) -> Vec<SessionEvent> {
     if v.get("type").and_then(Value::as_str) != Some("event_msg") {
         return Vec::new();
     }
@@ -682,6 +686,10 @@ fn codex_usage_events(v: &Value, reported: &mut UsageTotals) -> Vec<SessionEvent
         tokens_in: d_in,
         tokens_out: d_out,
         tokens_cached: d_cached,
+        // A `token_count` record states no model; the rollout's own model
+        // records do, and the caller tracks the latest — the same string
+        // this session's `ModelChanged` carries (spec 0167).
+        model: model.map(str::to_string),
     }];
     let last_input = payload
         .pointer("/info/last_token_usage/input_tokens")
@@ -706,7 +714,10 @@ fn codex_usage_events(v: &Value, reported: &mut UsageTotals) -> Vec<SessionEvent
 /// baseline; without this projection a subagent's tally never leaves zero
 /// and its lineage lane is stuck on the message-count fallback (spec 0103).
 fn codex_child_events(v: &Value, reported: &mut UsageTotals) -> Vec<SessionEvent> {
-    let mut out = codex_usage_events(v, reported);
+    // A child mirror tracks no model of its own here; the daemon knows the
+    // subagent session's model, so leave attribution to the client rather
+    // than stamping the parent's (spec 0167).
+    let mut out = codex_usage_events(v, reported, None);
     out.extend(codex_rollout_events(v));
     out
 }
@@ -1290,6 +1301,10 @@ where
                         tokens_in: n,
                         tokens_out: 0,
                         tokens_cached: 0,
+                        // The PTY footer states no model, and this path
+                        // tracks none — the client attributes it to the
+                        // session's model (spec 0167).
+                        model: None,
                     });
                     continue;
                 }
@@ -1466,7 +1481,13 @@ mod tests {
             })
         };
         let mut reported = UsageTotals::default();
-        match codex_usage_events(&snapshot(19_094, 9_984, 184, 19_094), &mut reported).as_slice() {
+        match codex_usage_events(
+            &snapshot(19_094, 9_984, 184, 19_094),
+            &mut reported,
+            Some("gpt-5.5-codex"),
+        )
+        .as_slice()
+        {
             [SessionEvent::Cost {
                 tokens_in,
                 tokens_out,
@@ -1484,7 +1505,9 @@ mod tests {
             }
             other => panic!("expected Cost + ContextUsage: {other:?}"),
         }
-        match codex_usage_events(&snapshot(48_890, 19_968, 257, 29_796), &mut reported).as_slice() {
+        match codex_usage_events(&snapshot(48_890, 19_968, 257, 29_796), &mut reported, None)
+            .as_slice()
+        {
             [SessionEvent::Cost {
                 tokens_in,
                 tokens_out,
@@ -1499,7 +1522,8 @@ mod tests {
             other => panic!("expected delta Cost + ContextUsage: {other:?}"),
         }
         assert!(
-            codex_usage_events(&snapshot(48_890, 19_968, 257, 29_796), &mut reported).is_empty(),
+            codex_usage_events(&snapshot(48_890, 19_968, 257, 29_796), &mut reported, None)
+                .is_empty(),
             "an unchanged snapshot must not re-report usage or respam the gauge"
         );
     }

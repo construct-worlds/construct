@@ -18,7 +18,8 @@ use construct_protocol::{
     SessionSetProjectParams, SessionSetTitleParams, SessionSetViewParams, SessionSummary,
     SessionToolDecisionParams, SetTerminalBackgroundParams, SmithAuthStatusResult,
     SmithSetAuthMethodParams, SmithSetAuthMethodResult, SubscribeParams, TranscriptParams,
-    TranscriptResult, UsageQueryParams, UsageQueryResult,
+    TokenHistoryParams, TokenHistoryResult, TranscriptResult, UsageQueryParams,
+    UsageQueryResult,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -276,6 +277,22 @@ impl Client {
             &UsageQueryParams {
                 harness: harness.to_string(),
                 allow_refresh,
+            },
+        )
+        .await
+    }
+    /// The fleet's recent token-usage samples (spec 0167), for seeding a
+    /// token meter with history that accrued while this client was closed.
+    pub async fn token_history(
+        &self,
+        window_secs: i64,
+        max_samples: usize,
+    ) -> Result<TokenHistoryResult> {
+        self.request(
+            ipc_method::TOKEN_HISTORY,
+            &TokenHistoryParams {
+                window_secs,
+                max_samples,
             },
         )
         .await

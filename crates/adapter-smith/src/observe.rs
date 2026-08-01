@@ -226,6 +226,7 @@ mod tests {
                 tokens_in: 0,
                 tokens_out: 0,
                 tokens_cached: 0,
+                model: None,
             },
             SessionEvent::Pty { data: "".into() },
             SessionEvent::ToolApprovalRequest {

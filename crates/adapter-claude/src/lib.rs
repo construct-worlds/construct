@@ -1297,6 +1297,10 @@ fn claude_events_from_json(v: &Value, last_usage_msg_id: &mut Option<String>) ->
                     tokens_in: 0,
                     tokens_out: 0,
                     tokens_cached: 0,
+                    // Run-level aggregate across every call the run made —
+                    // no single model owns it, and it carries no tokens to
+                    // attribute anyway.
+                    model: None,
                 }]
             } else {
                 Vec::new()
@@ -1354,6 +1358,9 @@ fn claude_usage_from_assistant(
             tokens_in: prompt_side,
             tokens_out: output,
             tokens_cached: cache_read,
+            // Same field `claude_model_change` reads, so the label matches
+            // this session's `ModelChanged` exactly (spec 0167).
+            model: msg.get("model").and_then(Value::as_str).map(str::to_string),
         },
         SessionEvent::ContextUsage {
             used_tokens: prompt_side,
@@ -2127,8 +2134,11 @@ mod tests {
                 tokens_in,
                 tokens_out,
                 tokens_cached,
+                model,
             }] => {
                 assert_eq!(*usd, 0.25);
+                // A run-level aggregate names no single model (spec 0167).
+                assert_eq!(*model, None);
                 assert_eq!(*tokens_in, 0);
                 assert_eq!(*tokens_out, 0);
                 assert_eq!(*tokens_cached, 0);
@@ -2171,8 +2181,12 @@ mod tests {
                 tokens_in,
                 tokens_out,
                 tokens_cached,
+                model,
             }) => {
                 assert_eq!(*usd, 0.0);
+                // Stamped from the same `message.model` that drives
+                // `ModelChanged`, so the two labels agree (spec 0167).
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-5"));
                 assert_eq!(*tokens_in, 137); // 7 fresh + 100 cache read + 30 cache creation
                 assert_eq!(*tokens_out, 20);
                 assert_eq!(*tokens_cached, 100);

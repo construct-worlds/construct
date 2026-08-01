@@ -1454,6 +1454,10 @@ pub struct SessionManager {
     /// probe itself — session create/submit-command/sleep/delete — all runs
     /// outside the lock, in `session::usage_probe`).
     usage_cache: std::sync::Mutex<crate::usage::UsageCache>,
+    /// Fleet-wide rolling window of token-usage samples (spec 0167), so a
+    /// reconnecting client can seed its meter with the history that accrued
+    /// while it was gone.
+    cost_history: std::sync::Mutex<crate::cost_history::CostHistory>,
     /// Weak handle back to the `Arc<Self>` the daemon runs behind, bound
     /// once by [`Self::bind_self_ref`] right after construction. Lets
     /// `&self` event-path methods (which sit under many callers that don't
@@ -1665,6 +1669,13 @@ impl SessionManager {
         );
         let summaries = storage.list_summaries()?;
         let mut sessions = HashMap::new();
+        // Fleet token history (spec 0167), recovered from the same
+        // transcript walk that self-heals each session's tally below — no
+        // extra I/O, and no separate persistence to keep in sync.
+        let history_now_ms = Utc::now().timestamp_millis();
+        let history_cutoff = Utc::now()
+            - chrono::Duration::seconds(crate::cost_history::WINDOW_SECS);
+        let mut cost_samples: Vec<construct_protocol::TokenSample> = Vec::new();
         for s in summaries {
             // Preserve the prior state in the entry. `resume_running_sessions`
             // (called from main after construction) tries to respawn each
@@ -1687,6 +1698,10 @@ impl SessionManager {
                     let mut tally = construct_protocol::TokenTally::default();
                     let mut context: (Option<u64>, Option<u64>) = (None, None);
                     let mut segments: Vec<construct_protocol::ContextSegment> = Vec::new();
+                    // The model in effect as the scan advances. Attributing a
+                    // historical sample to the session's model *now* would
+                    // credit the current model for work an earlier one did.
+                    let mut scan_model: Option<String> = None;
                     for line in reader.lines() {
                         let line = line?;
                         if line.trim().is_empty() {
@@ -1701,12 +1716,28 @@ impl SessionManager {
                                     msgs += 1;
                                     last_msg_at = Some(ts.at);
                                 }
+                                SessionEvent::ModelChanged { ref model } => {
+                                    scan_model = Some(model.clone());
+                                }
                                 SessionEvent::Cost {
                                     tokens_in,
                                     tokens_out,
                                     tokens_cached,
+                                    ref model,
                                     ..
-                                } => tally.add(tokens_in, tokens_out, tokens_cached),
+                                } => {
+                                    if ts.at >= history_cutoff {
+                                        cost_samples.push(construct_protocol::TokenSample {
+                                            at_ms: ts.at.timestamp_millis(),
+                                            model: model.clone().or_else(|| scan_model.clone()),
+                                            // Cached input is a subset of the
+                                            // prompt side; adding it would
+                                            // double-count.
+                                            tokens: tokens_in.saturating_add(tokens_out),
+                                        });
+                                    }
+                                    tally.add(tokens_in, tokens_out, tokens_cached);
+                                }
                                 SessionEvent::ContextUsage {
                                     used_tokens,
                                     window_tokens,
@@ -1866,6 +1897,10 @@ impl SessionManager {
                     crate::availability::AvailabilityCache::default(),
                 ),
                 usage_cache: std::sync::Mutex::new(crate::usage::UsageCache::default()),
+                cost_history: std::sync::Mutex::new(crate::cost_history::CostHistory::from_scan(
+                    cost_samples,
+                    history_now_ms,
+                )),
                 self_ref: std::sync::OnceLock::new(),
                 ambient_degraded: AtomicBool::new(false),
             },

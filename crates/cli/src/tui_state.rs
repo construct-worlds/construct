@@ -45,6 +45,11 @@ pub struct TuiState {
     pub list_collapsed: bool,
     #[serde(default = "default_matrix_rain_hidden")]
     pub matrix_rain_hidden: bool,
+    /// Which body the Matrix-rain panel shows (spec 0167). Persisted so a
+    /// user who lives in the token meter doesn't have to re-select it every
+    /// launch.
+    #[serde(default)]
+    pub matrix_panel_mode: crate::app::MatrixPanelMode,
     #[serde(default = "default_hide_pane_side_borders")]
     pub hide_pane_side_borders: bool,
     /// Legacy local copy of the split layout. The layout is shared daemon
@@ -108,6 +113,7 @@ impl Default for TuiState {
             matrix_rain_h: None,
             list_collapsed: false,
             matrix_rain_hidden: true,
+            matrix_panel_mode: crate::app::MatrixPanelMode::default(),
             hide_pane_side_borders: default_hide_pane_side_borders(),
             main_windows: None,
             active_window_id: None,

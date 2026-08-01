@@ -1017,6 +1017,35 @@ pub enum ZoomMode {
     View,
 }
 
+/// What the Matrix-rain panel's body is currently showing (spec 0167).
+/// The panel hosts named built-in modes; the operator-widget viewport
+/// (spec 0019) remains a transient overlay on top of whichever mode is
+/// selected, not a third value here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatrixPanelMode {
+    #[default]
+    Rain,
+    /// Fleet-wide realtime token-usage history, grouped by model.
+    Tokens,
+}
+
+impl MatrixPanelMode {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Rain => Self::Tokens,
+            Self::Tokens => Self::Rain,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rain => "rain",
+            Self::Tokens => "tokens",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum MinibufferIntent {
     SendInput {
@@ -2071,6 +2100,17 @@ pub struct App {
     /// User-hidden Matrix-rain panel. Toggle with `/rain`; close with the
     /// panel's `x` button.
     pub matrix_rain_hidden: bool,
+    /// Which body the panel draws — animation or token meter (spec 0167).
+    pub matrix_panel_mode: MatrixPanelMode,
+    /// Fleet-wide token history behind [`MatrixPanelMode::Tokens`]. Fed from
+    /// every session's `Cost` events whether or not the meter is on screen,
+    /// so switching to it shows real history instead of starting blank.
+    pub token_meter: crate::token_meter::TokenMeter,
+    /// Last `busy_ms_at` reading per session, so each tick can feed the
+    /// meter the compute time that elapsed since the previous one (spec
+    /// 0167). Keyed by session id; entries for vanished sessions are pruned
+    /// as they are noticed.
+    pub token_meter_busy: HashMap<String, u64>,
     /// Whether the ungrouped top-level section's archived sessions are
     /// revealed. Toggled by its "N archived" row. Ephemeral — archived
     /// sessions default to hidden on each launch.
@@ -3875,6 +3915,11 @@ pub struct LayoutSnapshot {
     pub matrix_operator_loop_hit: Option<(u16, u16, u16)>,
     /// Matrix-rain title-bar Operator label bounds: `(x_start, x_end, y)`.
     pub matrix_operator_title_hit: Option<(u16, u16, u16)>,
+    /// Matrix-panel body mode switch (rain ↔ token meter, spec 0167):
+    /// `(start_col, end_col, row)`.
+    pub matrix_panel_mode_hit: Option<(u16, u16, u16)>,
+    /// Plot area of the token meter, for per-column hover detail.
+    pub matrix_token_graph_area: Option<ratatui::layout::Rect>,
     /// Matrix-rain title-bar theme switcher bounds: `(x_start, x_end, y)`.
     ///
     /// Retained for stale-frame safety and older hit-test code; current
@@ -4124,6 +4169,8 @@ impl LayoutSnapshot {
             dynamic_ui_inline_hit,
             matrix_operator_loop_hit,
             matrix_operator_title_hit,
+            matrix_panel_mode_hit,
+            matrix_token_graph_area,
             matrix_theme_hit,
             matrix_widget_hits,
             dynamic_ui_trigger,
@@ -4287,6 +4334,8 @@ impl LayoutSnapshot {
         shift.opt_triple(program_selection_run_hit);
         shift.opt_triple(matrix_operator_loop_hit);
         shift.opt_triple(matrix_operator_title_hit);
+        shift.opt_triple(matrix_panel_mode_hit);
+        shift.opt_rect(matrix_token_graph_area);
         shift.opt_triple(matrix_theme_hit);
         shift.opt_triple(browser_preview_close);
 
@@ -4719,6 +4768,15 @@ async fn connect_retrying(socket: &std::path::Path) -> Result<Arc<Client>> {
     Err(last_err.expect("loop runs at least once"))
 }
 
+/// How far back the TUI seeds its token meter from the daemon's window
+/// (spec 0167). Matches the meter's own retention: asking for more would
+/// only be discarded, asking for less would leave a wide terminal's left
+/// edge blank when the history exists.
+const TOKEN_HISTORY_WINDOW_SECS: i64 = 12 * 60 * 60;
+/// Cap on seeded samples, so a very busy fleet's startup fetch stays small.
+/// The daemon returns the newest when this bites.
+const TOKEN_HISTORY_MAX_SAMPLES: usize = 5_000;
+
 async fn run_with_socket_initial_selection(
     socket: std::path::PathBuf,
     initial_session_id: Option<String>,
@@ -4743,6 +4801,16 @@ async fn run_with_socket_initial_selection(
         .await
         .map(|r| r.verbs)
         .unwrap_or_default();
+    // Fleet token history (spec 0167). The daemon keeps this whether or not
+    // a client is attached, so a restarted TUI shows the minutes it missed
+    // instead of a hole where the fleet kept working.
+    let token_history = client
+        .token_history(
+            TOKEN_HISTORY_WINDOW_SECS,
+            TOKEN_HISTORY_MAX_SAMPLES,
+        )
+        .await
+        .ok();
     // Theme config is parsed now; the final palette (light vs dark) is resolved
     // after raw mode is on, once we can query the terminal background (OSC 11).
     let theme_config = crate::theme::ThemeConfig::load();
@@ -5058,6 +5126,23 @@ async fn run_with_socket_initial_selection(
         matrix_widget_pinned: None,
         matrix_widget_hover: None,
         matrix_rain_hidden: persisted.matrix_rain_hidden,
+        matrix_panel_mode: persisted.matrix_panel_mode,
+        token_meter: {
+            let mut meter = crate::token_meter::TokenMeter::new(now);
+            if let Some(history) = token_history {
+                // Ages are measured against the daemon's own clock reading,
+                // not this process's, so the two never have to agree.
+                meter.reserve_history(TOKEN_HISTORY_WINDOW_SECS as u64);
+                meter.seed(
+                    history
+                        .samples
+                        .into_iter()
+                        .map(|s| (history.now_ms - s.at_ms, s.model, s.tokens)),
+                );
+            }
+            meter
+        },
+        token_meter_busy: HashMap::new(),
         show_archived_ungrouped: false,
         show_archived_groups: HashSet::new(),
         show_archived_children: HashSet::new(),
@@ -5230,6 +5315,7 @@ async fn run_with_socket_initial_selection(
         matrix_rain_h: app.matrix_rain_h,
         list_collapsed: app.list_collapsed,
         matrix_rain_hidden: app.matrix_rain_hidden,
+        matrix_panel_mode: app.matrix_panel_mode,
         hide_pane_side_borders: app.hide_pane_side_borders,
         main_windows: Some(app.main_windows.clone()),
         active_window_id: Some(app.active_window_id),
@@ -5993,6 +6079,7 @@ async fn run_loop(
                 app.update_browser_preview_hover_and_expiry();
                 app.expire_program_runs(Instant::now());
                 app.tutorial_tick(Instant::now());
+                app.sample_compute_time(Instant::now());
             }
             _ = harness_refresh.tick(), if app.connected
                 && (app.selected_id().is_none() || app.configure_popup.is_some()) => {
@@ -8785,6 +8872,78 @@ impl App {
     /// treats pinned / orchestrator as always-visible so the gate never
     /// drops a needed redraw; the cost of an occasional extra paint is
     /// far cheaper than missing one.
+    /// Bin one session's `Cost` report into the fleet token meter (spec
+    /// 0167). Attribution prefers the model the report itself names; when
+    /// the harness stated none, the session's currently-tracked model stands
+    /// in, and only a session that has never reported a model at all falls
+    /// through to `unattributed`. Samples are never dropped for want of a
+    /// label — a graph that silently omits volume it measured is worse than
+    /// one with an honest "unattributed" series.
+    fn observe_cost_for_meter(&mut self, session_id: &str, event: &SessionEvent) {
+        let SessionEvent::Cost {
+            tokens_in,
+            tokens_out,
+            model,
+            ..
+        } = event
+        else {
+            return;
+        };
+        // Cached input is a subset of `tokens_in` (see the Cost contract), so
+        // adding it would double-count the cheapest part of the sample.
+        let tokens = tokens_in.saturating_add(*tokens_out);
+        let label = model.clone().or_else(|| {
+            self.sessions
+                .iter()
+                .find(|s| s.id == session_id)
+                .and_then(|s| s.model.clone())
+        });
+        self.token_meter
+            .observe(label.as_deref(), tokens, Instant::now());
+    }
+
+    /// Feed the token meter the compute time that elapsed since the last
+    /// call (spec 0167), attributed per model.
+    ///
+    /// The daemon maintains each session's total `Running` time, so this
+    /// diffs that counter rather than sampling a state flag — the reading
+    /// stays exact across dropped frames and a busy span that starts and
+    /// ends between two ticks still counts.
+    ///
+    /// Only model-backed sessions contribute. A shell session spends most of
+    /// its life `Running` a command with no model behind it; counting that
+    /// as compute time would divide real token output by unrelated seconds
+    /// and understate every rate on the fleet.
+    fn sample_compute_time(&mut self, now: Instant) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut seen: HashSet<&str> = HashSet::with_capacity(self.sessions.len());
+        let mut deltas: Vec<(Option<String>, u64)> = Vec::new();
+        for session in &self.sessions {
+            let Some(model) = session.model.clone() else {
+                continue;
+            };
+            seen.insert(session.id.as_str());
+            let busy = session.busy_ms_at(now_ms);
+            let previous = self.token_meter_busy.get(&session.id).copied();
+            // A first sighting establishes the baseline: the compute time
+            // before this client attached belongs to whatever history the
+            // daemon already served, not to this instant.
+            if let Some(previous) = previous {
+                let delta = busy.saturating_sub(previous);
+                if delta > 0 {
+                    deltas.push((Some(model), delta));
+                }
+            }
+            self.token_meter_busy.insert(session.id.clone(), busy);
+        }
+        let live: HashSet<String> = seen.into_iter().map(str::to_string).collect();
+        self.token_meter_busy.retain(|id, _| live.contains(id));
+        for (model, delta) in deltas {
+            self.token_meter
+                .observe_busy(model.as_deref(), delta, now);
+        }
+    }
+
     fn session_visible_on_screen(&self, id: &str) -> bool {
         if self
             .main_windows
@@ -8819,6 +8978,11 @@ impl App {
                             self.matrix_rain_intensity,
                             &payload.session_id,
                         );
+                        // Fleet-wide token meter (spec 0167). Fed from every
+                        // session's events regardless of which panel body is
+                        // on screen, so the history is already there when the
+                        // user switches to it.
+                        self.observe_cost_for_meter(&payload.session_id, &payload.event);
                         // Suggestion deck caches (specs 0109/0155): a dealt
                         // hand lands, turn movement invalidates.
                         self.observe_suggestion_event(&payload.session_id, &payload.event);
@@ -12860,7 +13024,21 @@ impl App {
             "fork" => self.run_action(KeyAction::OpenFork).await,
             "program" | "edit-program" => self.run_action(KeyAction::OpenProgram).await,
             "zoom" | "fullscreen" => self.run_action(KeyAction::ToggleZoom).await,
+            "tokens" | "token-meter" | "meter" => {
+                self.matrix_panel_mode = MatrixPanelMode::Tokens;
+                self.matrix_rain_hidden = false;
+                self.set_status("matrix panel: token meter".to_string());
+            }
             "rain" | "matrix" | "matrix-rain" => {
+                // From the token meter, `/rain` means "show me the rain"
+                // rather than "collapse the panel" — otherwise the meter
+                // would be a one-way trip without a mouse.
+                if self.matrix_panel_mode == MatrixPanelMode::Tokens {
+                    self.matrix_panel_mode = MatrixPanelMode::Rain;
+                    self.matrix_rain_hidden = false;
+                    self.set_status("matrix panel: rain".to_string());
+                    return;
+                }
                 self.matrix_rain_hidden = !self.matrix_rain_hidden;
                 self.set_status(format!(
                     "matrix rain {}",
@@ -15249,6 +15427,8 @@ mod tests {
             dynamic_ui_panel_close_hits: Vec::new(),
             dynamic_ui_inline_hit: None,
             matrix_operator_loop_hit: None,
+            matrix_panel_mode_hit: None,
+            matrix_token_graph_area: None,
             matrix_operator_title_hit: None,
             matrix_theme_hit: None,
             matrix_widget_hits: Vec::new(),
@@ -15524,6 +15704,9 @@ mod tests {
             matrix_widget_pinned: None,
             matrix_widget_hover: None,
             matrix_rain_hidden: true,
+            matrix_panel_mode: MatrixPanelMode::default(),
+            token_meter: crate::token_meter::TokenMeter::new(now),
+            token_meter_busy: HashMap::new(),
             show_archived_ungrouped: false,
             show_archived_groups: HashSet::new(),
             show_archived_children: HashSet::new(),
@@ -16702,6 +16885,145 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Build an app whose Matrix panel is expanded and showing the token
+    /// meter, with `samples` already binned. Each sample is `(model on the
+    /// Cost report, session model, tokens)`.
+    async fn token_meter_app(
+        samples: &[(Option<&str>, Option<&str>, u64)],
+    ) -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        let (mut app, dir, server) = app_with_ping_build_response(serde_json::Value::Null).await;
+        let mut summary = summary_with_kind(construct_protocol::SessionKind::User);
+        summary.harness = "claude".into();
+        app.sessions = vec![summary];
+        app.matrix_rain_hidden = false;
+        app.matrix_panel_mode = MatrixPanelMode::Tokens;
+        for (report_model, session_model, tokens) in samples {
+            app.sessions[0].model = session_model.map(str::to_string);
+            app.observe_cost_for_meter(
+                "s1",
+                &SessionEvent::Cost {
+                    usd: 0.0,
+                    tokens_in: *tokens,
+                    tokens_out: 0,
+                    tokens_cached: 0,
+                    model: report_model.map(str::to_string),
+                },
+            );
+        }
+        (app, dir, server)
+    }
+
+    /// The meter draws bars, and every bar's series is named in the legend
+    /// with the throughput it achieved — tokens over the time the model was
+    /// actually computing (spec 0167).
+    #[tokio::test]
+    async fn token_meter_draws_bars_and_names_each_series() {
+        let (mut app, _dir, _server) =
+            token_meter_app(&[(Some("claude-opus-5"), None, 240_000)]).await;
+        // 240k tokens produced over 60s of compute → 4k/s.
+        app.token_meter
+            .observe_busy(Some("claude-opus-5"), 60_000, Instant::now());
+        let out = rendered(&mut app, 120, 30);
+        assert!(
+            out.contains("claude-opus-5"),
+            "legend missing the model:\n{out}"
+        );
+        assert!(out.contains("4.0k/s"), "{out}");
+        assert!(
+            out.contains('█') || out.chars().any(|c| "▁▂▃▄▅▆▇".contains(c)),
+            "no bar drawn:\n{out}"
+        );
+    }
+
+    /// Tokens with no measured compute time read as `idle`, not as `0/s`:
+    /// the client can't have watched the work, so it states nothing about
+    /// how fast it was rather than claiming it was slow.
+    #[tokio::test]
+    async fn tokens_without_measured_compute_read_as_idle() {
+        let (mut app, _dir, _server) =
+            token_meter_app(&[(Some("claude-opus-5"), None, 240_000)]).await;
+        let out = rendered(&mut app, 120, 30);
+        assert!(out.contains("claude-opus-5"), "{out}");
+        assert!(out.contains("idle"), "{out}");
+        assert!(!out.contains("/s"), "no rate may be claimed:\n{out}");
+    }
+
+    /// A harness that states no model on the report still gets attributed —
+    /// to the session's tracked model, not to a discard bucket.
+    #[tokio::test]
+    async fn unstated_model_falls_back_to_the_session_model() {
+        let (mut app, _dir, _server) =
+            token_meter_app(&[(None, Some("gpt-5.5-codex"), 12_000)]).await;
+        let out = rendered(&mut app, 120, 30);
+        assert!(out.contains("gpt-5.5-codex"), "{out}");
+        assert!(!out.contains(crate::token_meter::UNATTRIBUTED), "{out}");
+    }
+
+    /// Only when neither source knows does a sample land in `unattributed` —
+    /// and it still lands, rather than vanishing from the totals.
+    #[tokio::test]
+    async fn unknown_model_is_labeled_not_dropped() {
+        let (mut app, _dir, _server) = token_meter_app(&[(None, None, 5_000)]).await;
+        let out = rendered(&mut app, 120, 30);
+        assert!(out.contains(crate::token_meter::UNATTRIBUTED), "{out}");
+    }
+
+    /// The switch names the mode currently showing and carries the same swap
+    /// glyph as the session list's `full ⇄ / compact ⇄` toggle, so the two
+    /// controls read as one convention rather than two.
+    #[tokio::test]
+    async fn mode_switch_names_the_current_mode_like_the_list_toggle() {
+        let (mut app, _dir, _server) = token_meter_app(&[]).await;
+        app.matrix_panel_mode = MatrixPanelMode::Rain;
+        let out = rendered(&mut app, 120, 30);
+        assert!(out.contains("rain ⇄"), "{out}");
+        assert!(!out.contains("tokens ⇄"), "names the current mode:\n{out}");
+        app.matrix_panel_mode = MatrixPanelMode::Tokens;
+        let out = rendered(&mut app, 120, 30);
+        assert!(out.contains("tokens ⇄"), "{out}");
+    }
+
+    /// The header switch flips the panel body and nothing else — the rain's
+    /// own collapse state is untouched.
+    #[tokio::test]
+    async fn header_switch_toggles_the_panel_body() {
+        let (mut app, _dir, _server) = token_meter_app(&[]).await;
+        app.matrix_panel_mode = MatrixPanelMode::Rain;
+        let _ = rendered(&mut app, 120, 30);
+        let (xs, _xe, y) = app
+            .layout
+            .matrix_panel_mode_hit
+            .expect("mode switch must be clickable");
+        app.handle_left_click(xs, y).await;
+        assert_eq!(app.matrix_panel_mode, MatrixPanelMode::Tokens);
+        assert!(!app.matrix_rain_hidden, "switching mode must not collapse");
+        let _ = rendered(&mut app, 120, 30);
+        let (xs, _xe, y) = app.layout.matrix_panel_mode_hit.expect("still clickable");
+        app.handle_left_click(xs, y).await;
+        assert_eq!(app.matrix_panel_mode, MatrixPanelMode::Rain);
+    }
+
+    /// Cost events from every session reach the meter, not just the selected
+    /// one — the panel is a fleet view.
+    #[tokio::test]
+    async fn meter_accumulates_across_sessions() {
+        let (mut app, _dir, _server) = token_meter_app(&[]).await;
+        app.observe_cost_for_meter(
+            "other-session",
+            &SessionEvent::Cost {
+                usd: 0.0,
+                tokens_in: 1_000,
+                tokens_out: 500,
+                tokens_cached: 900,
+                model: Some("kimi-k3".into()),
+            },
+        );
+        // Cached input is a subset of tokens_in and must not be re-added.
+        assert_eq!(app.token_meter.window_total(64), 1_500);
+        let out = rendered(&mut app, 120, 30);
+        assert!(out.contains("kimi-k3"), "{out}");
     }
 
     /// The picker opens on the model indicator and lists Default plus

@@ -16,7 +16,7 @@ use construct_protocol::{
     SessionSetPinnedParams, SessionSetProjectParams, SessionSetRouteParams, SessionSetTitleParams,
     SessionSetViewParams, SessionSuggestParams, SessionToolActionParams, SessionToolDecisionParams,
     SetTerminalBackgroundParams, SmithSetAuthMethodParams, SubscribeParams, TranscriptParams,
-    UsageQueryParams, IPC_VERSION,
+    TokenHistoryParams, UsageQueryParams, IPC_VERSION,
 };
 use anyhow::{Context, Result};
 use futures::{SinkExt as _, StreamExt as _};
@@ -1155,6 +1155,10 @@ async fn dispatch(
     dispatch_entry!(ipc_method::USAGE_QUERY, {
         let p = params!(req, UsageQueryParams);
         ok!(req, &manager.usage_query(&p.harness, p.allow_refresh).await)
+    });
+    dispatch_entry!(ipc_method::TOKEN_HISTORY, {
+        let p = params!(req, TokenHistoryParams);
+        ok!(req, &manager.token_history(p.window_secs, p.max_samples))
     });
     dispatch_entry!(ipc_method::PROGRAM_GET, {
         let p = params!(req, ProgramGetParams);

@@ -284,6 +284,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.dynamic_ui_panel_close_hits.clear();
     app.layout.dynamic_ui_inline_hit = None;
     app.layout.matrix_operator_title_hit = None;
+    app.layout.matrix_panel_mode_hit = None;
     app.layout.matrix_theme_hit = None;
     app.layout.matrix_widget_hits.clear();
     app.layout.dynamic_ui_trigger = None;
@@ -461,6 +462,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_list_title_button_tooltips(f, app);
     render_view_uncollapse_tooltip(f, app);
     render_lineage_segment_tooltip(f, app);
+    render_matrix_token_tooltip(f, app);
     render_harness_hover_tooltip(f, app);
     // A session switch affects the pane's final composited surface, not just
     // the terminal/chat layer underneath it. Paint transitions after Program
@@ -3678,6 +3680,15 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
     }
 
     let activity = update_matrix_rain_intensity(app, now);
+    // Token-meter mode replaces the animated body only. Operator widgets
+    // still overlay it (spec 0019), and intensity keeps easing above so the
+    // rain resumes mid-stride rather than snapping when the user switches
+    // back.
+    if app.matrix_panel_mode == crate::app::MatrixPanelMode::Tokens {
+        render_token_meter(f, rain_area, app, now);
+        render_matrix_widget_viewport(f, rain_area, app, now);
+        return;
+    }
     let elapsed = app.start_instant.elapsed().as_millis() as u64;
     let cycle = rain_area.height + MATRIX_RAIN_TAIL_MAX + 1;
     let charset = b"01:|/\\{}[]<>+$#@*=-zrvshcodxgit";
@@ -3855,6 +3866,386 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
     // visible right below). Widgets render after, on top.
     render_operator_monolog(f, rain_area, app, now);
     render_matrix_widget_viewport(f, rain_area, app, now);
+}
+
+/// Eighth-block glyphs for the partial cell that tops a column, indexed by
+/// how many eighths of that cell are filled (1..=7). They fill from the
+/// bottom of the cell, which is what a bottom-anchored bar needs.
+const METER_PARTIALS: [&str; 8] = ["", "▁", "▂", "▃", "▄", "▅", "▆", "▇"];
+
+/// Fleet-wide realtime token meter (spec 0167): one column per second of
+/// history, stacked by model, autoscaled to the tallest visible column.
+///
+/// Deliberately *not* a percentage gauge. Token throughput has no capacity
+/// to divide by, so the ceiling is whatever the window peaked at and the
+/// label states it — a bar that read "80%" here would be inventing a
+/// denominator.
+fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
+    app.layout.matrix_token_graph_area = None;
+    app.token_meter.advance_to(now);
+    let dim = Style::default().fg(app.theme.dim);
+
+    if app.token_meter.is_idle() {
+        // An empty grid is indistinguishable from a broken one. Say why.
+        let msg = "no token usage reported yet";
+        let x = area.x + area.width.saturating_sub(msg.len() as u16) / 2;
+        let y = area.y + area.height / 2;
+        f.buffer_mut().set_string(x, y, msg, dim);
+        return;
+    }
+
+    // The legend names every series, wrapping onto as many rows as that
+    // takes: a colored bar whose model isn't named anywhere is unreadable,
+    // and on a narrow panel a single row only ever fits one name. The graph
+    // keeps the rest of the panel.
+    let entries = app.token_meter.legend(area.width as usize);
+    let rows = wrap_legend(
+        &entries,
+        area.width as usize,
+        legend_max_rows(area.height),
+    );
+    let legend_h = rows.len() as u16;
+    let graph = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height.saturating_sub(legend_h),
+    };
+    if graph.height == 0 || graph.width == 0 {
+        return;
+    }
+    app.layout.matrix_token_graph_area = Some(graph);
+
+    let width = graph.width as usize;
+    let scale = app.token_meter.scale(width);
+    let cells = graph.height as usize;
+    let eighths_total = cells * 8;
+
+    for (col, bucket) in app.token_meter.window(width).enumerate() {
+        // History shorter than the panel draws flush right, so the newest
+        // column is always the rightmost one.
+        let history = app.token_meter.window(width).count();
+        let x = graph.x + (width - history + col) as u16;
+        let total = bucket.total();
+        if total == 0 {
+            continue;
+        }
+        // A column with any traffic at all must paint at least one eighth —
+        // rounding a real sample down to nothing would read as idle.
+        let filled = ((total as f64 / scale as f64) * eighths_total as f64).round() as usize;
+        let filled = filled.clamp(1, eighths_total);
+        let segments = stacked_eighths(&bucket.stacked(), total, filled);
+        // Paint bottom-up: each series owns a contiguous run of eighths.
+        for cell in column_cells(&segments, filled, cells) {
+            let y = graph.y + graph.height.saturating_sub(cell.row + 1);
+            let mut style = Style::default().fg(app.token_meter.color(cell.fg));
+            // A terminal cell holds one glyph, so a boundary landing inside
+            // one is drawn as a partial block whose *filled* part is the
+            // lower series and whose background is the upper one. Painting
+            // both as foreground glyphs would mean the second overwrites the
+            // first, and the lower series would vanish from the stack.
+            if let Some(bg) = cell.bg {
+                style = style.bg(app.token_meter.color(bg));
+            }
+            f.buffer_mut().set_string(x, y, cell.glyph, style);
+        }
+    }
+
+    if legend_h > 0 {
+        render_token_meter_legend(f, area, app, &entries, &rows, legend_h);
+    }
+}
+
+/// One painted cell of a stacked column: which glyph, in whose color, over
+/// whose color.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ColumnCell {
+    /// Rows up from the bottom of the graph.
+    row: u16,
+    glyph: &'static str,
+    /// Series drawn as the glyph's filled part.
+    fg: u16,
+    /// Series filling the rest of the cell, when a boundary lands inside it.
+    bg: Option<u16>,
+}
+
+/// Lay a column's stacked segments onto terminal cells.
+///
+/// Cells are 8 eighths tall. A cell wholly owned by one series is a full
+/// block; the column's topmost cell is a partial block; a cell where one
+/// series ends and the next begins is a partial block of the lower series
+/// drawn *over* the upper series as background, which is the only way to get
+/// two series into one cell.
+fn column_cells(segments: &[(u16, usize)], filled: usize, cells: usize) -> Vec<ColumnCell> {
+    let mut out = Vec::new();
+    if segments.is_empty() || filled == 0 {
+        return out;
+    }
+    // Which series owns each eighth, bottom-up.
+    let mut owner: Vec<u16> = Vec::with_capacity(filled);
+    for (model, eighths) in segments {
+        for _ in 0..*eighths {
+            owner.push(*model);
+        }
+    }
+    for row in 0..cells {
+        let base = row * 8;
+        if base >= filled.min(owner.len()) {
+            break;
+        }
+        let top = ((row + 1) * 8).min(filled).min(owner.len());
+        let fill = top - base;
+        let bottom_series = owner[base];
+        // How far the bottom series reaches within this cell.
+        let bottom_run = owner[base..top]
+            .iter()
+            .take_while(|m| **m == bottom_series)
+            .count();
+        let cell = if bottom_run == fill {
+            // One series owns everything filled here.
+            ColumnCell {
+                row: row as u16,
+                glyph: if fill == 8 { "█" } else { METER_PARTIALS[fill] },
+                fg: bottom_series,
+                bg: None,
+            }
+        } else if fill == 8 {
+            // A boundary inside a full cell: lower series as the glyph's
+            // filled part, whatever tops the cell as its background.
+            ColumnCell {
+                row: row as u16,
+                glyph: METER_PARTIALS[bottom_run],
+                fg: bottom_series,
+                bg: Some(owner[top - 1]),
+            }
+        } else {
+            // Partially-filled top cell with a boundary in it. The empty part
+            // above must stay the panel background, so there is no room to
+            // encode both series — the larger share takes the cell.
+            let upper = owner[top - 1];
+            let upper_run = fill - bottom_run;
+            ColumnCell {
+                row: row as u16,
+                glyph: METER_PARTIALS[fill],
+                fg: if upper_run > bottom_run {
+                    upper
+                } else {
+                    bottom_series
+                },
+                bg: None,
+            }
+        };
+        out.push(cell);
+    }
+    out
+}
+
+/// Split a column's `filled` eighths across its series in proportion to
+/// their tokens, largest-remainder so the parts sum to exactly `filled` and
+/// no visible series rounds away to nothing.
+fn stacked_eighths(stacked: &[(u16, u64)], total: u64, filled: usize) -> Vec<(u16, usize)> {
+    if total == 0 || filled == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<(u16, usize)> = Vec::with_capacity(stacked.len());
+    let mut remainders: Vec<(usize, f64)> = Vec::with_capacity(stacked.len());
+    let mut assigned = 0usize;
+    for (i, (model, tokens)) in stacked.iter().enumerate() {
+        let exact = (*tokens as f64 / total as f64) * filled as f64;
+        let floor = exact.floor() as usize;
+        out.push((*model, floor));
+        remainders.push((i, exact - floor as f64));
+        assigned += floor;
+    }
+    remainders.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut leftover = filled.saturating_sub(assigned);
+    for (i, _) in remainders {
+        if leftover == 0 {
+            break;
+        }
+        out[i].1 += 1;
+        leftover -= 1;
+    }
+    out.retain(|(_, e)| *e > 0);
+    out
+}
+
+/// How many rows the legend may take. The graph is the point of the panel,
+/// so the legend never grows past a third of it — beyond that the remaining
+/// series are dropped rather than squeezing the bars into nothing.
+fn legend_max_rows(panel_h: u16) -> usize {
+    match panel_h {
+        0..=2 => 0,
+        h => usize::from(h / 3).clamp(1, 4),
+    }
+}
+
+/// One legend entry's rendered text: a dot, the model, and how fast it ran.
+fn legend_entry_text(entry: &crate::token_meter::LegendEntry) -> String {
+    format!("● {} {} ", entry.label, legend_rate(entry.rate))
+}
+
+/// Format a throughput figure. `None` — the model did no work in the rate
+/// window — renders as `idle` rather than `0/s`, which would claim it was
+/// working slowly instead of not working.
+fn legend_rate(rate: Option<u64>) -> String {
+    match rate {
+        None => "idle".to_string(),
+        // A real but sub-unit rate must not round to `0/s` and read as idle.
+        Some(0) => "<1/s".to_string(),
+        Some(per_sec) => format!("{}/s", crate::lineage::format_token_count(per_sec)),
+    }
+}
+
+/// Pack legend entries into rows of `width` columns. Returns the entry
+/// indices per row. An entry too wide for an entire empty row is placed
+/// alone and truncated at render time; entries past `max_rows` are dropped,
+/// which the caller signals rather than hiding.
+fn wrap_legend(
+    entries: &[crate::token_meter::LegendEntry],
+    width: usize,
+    max_rows: usize,
+) -> Vec<Vec<usize>> {
+    if entries.is_empty() || max_rows == 0 || width == 0 {
+        return Vec::new();
+    }
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut used = 0usize;
+    for (i, entry) in entries.iter().enumerate() {
+        let w = UnicodeWidthStr::width(legend_entry_text(entry).as_str());
+        // Only wrap when the row already holds something — otherwise an
+        // over-wide entry would bounce to a fresh row and still not fit.
+        if used + w > width && !rows.last().expect("row").is_empty() {
+            if rows.len() == max_rows {
+                break;
+            }
+            rows.push(Vec::new());
+            used = 0;
+        }
+        rows.last_mut().expect("row").push(i);
+        used += w;
+    }
+    rows
+}
+
+fn render_token_meter_legend(
+    f: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    entries: &[crate::token_meter::LegendEntry],
+    rows: &[Vec<usize>],
+    legend_h: u16,
+) {
+    let dim = Style::default().fg(app.theme.dim);
+    let top = area.y + area.height.saturating_sub(legend_h);
+    let limit = area.x + area.width;
+    let shown: usize = rows.iter().map(Vec::len).sum();
+
+    for (row_idx, row) in rows.iter().enumerate() {
+        let y = top + row_idx as u16;
+        let mut x = area.x;
+        for &i in row {
+            let Some(entry) = entries.get(i) else { continue };
+            let rate = legend_rate(entry.rate);
+            let room = limit.saturating_sub(x) as usize;
+            // Names identify the series and the rate only quantifies it, so
+            // a cramped row drops the rate before it drops a name — and
+            // truncates the name before dropping the entry.
+            let with_rate = UnicodeWidthStr::width("●  ") + rate.len() + 1;
+            let (budget, rate_part) = if room > with_rate + 3 {
+                (room - with_rate, format!(" {rate}"))
+            } else {
+                (room.saturating_sub(4), String::new())
+            };
+            if budget < 2 {
+                break;
+            }
+            let label = truncate_label(&entry.label, budget);
+            let text = format!("● {label}{rate_part} ");
+            f.buffer_mut()
+                .set_string(x, y, text.as_str(), Style::default().fg(entry.color));
+            x += UnicodeWidthStr::width(text.as_str()) as u16;
+        }
+        if row_idx + 1 != rows.len() {
+            continue;
+        }
+        // Anything the rows couldn't hold is counted, not silently dropped.
+        if shown < entries.len() {
+            let more = format!("+{}", entries.len() - shown);
+            let w = UnicodeWidthStr::width(more.as_str()) as u16;
+            if x + w <= limit {
+                f.buffer_mut().set_string(x, y, more.as_str(), dim);
+                x += w;
+            }
+        }
+        // Fleet rate, right-aligned, only if it costs no legend space. Same
+        // basis as the entries — tokens over compute time — so concurrent
+        // sessions don't make it exceed the sum of the parts.
+        let sum = format!(" Σ {}", legend_rate(app.token_meter.recent_fleet_rate()));
+        let sum_w = UnicodeWidthStr::width(sum.as_str()) as u16;
+        if x + sum_w < limit {
+            f.buffer_mut()
+                .set_string(limit - sum_w, y, sum.as_str(), dim);
+        }
+    }
+}
+
+/// Clip `label` to `max` display columns, marking the clip so a truncated
+/// model name never reads as a different model.
+fn truncate_label(label: &str, max: usize) -> String {
+    if UnicodeWidthStr::width(label) <= max {
+        return label.to_string();
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let mut out = String::new();
+    for ch in label.chars() {
+        if UnicodeWidthStr::width(out.as_str()) + 1 >= max {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+/// Hover detail for one meter column: what that second consumed, split by
+/// model. Mirrors the context gauge's hover-for-exact-numbers idiom.
+fn render_matrix_token_tooltip(f: &mut Frame, app: &App) {
+    if app.matrix_panel_mode != crate::app::MatrixPanelMode::Tokens {
+        return;
+    }
+    let Some(graph) = app.layout.matrix_token_graph_area else {
+        return;
+    };
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    if !contains_rect(graph, mx, my) {
+        return;
+    }
+    let col = (mx - graph.x) as usize;
+    let Some(bucket) = app.token_meter.bucket_at(col, graph.width as usize) else {
+        return;
+    };
+    if bucket.is_empty() {
+        return;
+    }
+    let mut parts: Vec<String> = vec![format!(
+        "{} · {} tok",
+        crate::token_meter::TokenMeter::bucket_span_label(),
+        crate::lineage::format_token_count(bucket.total())
+    )];
+    for (model, tokens) in bucket.stacked() {
+        parts.push(format!(
+            "{} {}",
+            app.token_meter.model_label(model),
+            crate::lineage::format_token_count(tokens)
+        ));
+    }
+    let label = format!(" {} ", parts.join(" · "));
+    render_button_tooltip(f, &app.theme, &label, mx, my.saturating_sub(2));
 }
 
 /// Reveal speed and post-typing dwell for the operator monolog.
@@ -4289,8 +4680,31 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
         f.buffer_mut()
             .set_string(separator_x, area.y, "─", line_style);
     }
+    // Mode switch, right-aligned just inside the collapse button. Names the
+    // *current* mode plus a swap glyph, exactly like the session list's
+    // ` compact ⇄ ` toggle (`list_mode_button_label`) — same control shape,
+    // same reading, so one convention covers both (spec 0167).
+    let mode_label = format!(" {} \u{21c4} ", app.matrix_panel_mode.label());
+    let mode_w = UnicodeWidthStr::width(mode_label.as_str()) as u16;
+    let mode_x = toggle_x.saturating_sub(mode_w + 1);
+    let mode_hovered = app
+        .mouse_pos
+        .is_some_and(|(mx, my)| my == area.y && mx >= mode_x && mx < mode_x.saturating_add(mode_w));
+    let mode_style = if mode_hovered {
+        Style::default()
+            .fg(app.theme.matrix_flash_good)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.dim)
+    };
+    if mode_x > area.x {
+        f.buffer_mut()
+            .set_string(mode_x, area.y, mode_label.as_str(), mode_style);
+        app.layout.matrix_panel_mode_hit = Some((mode_x, mode_x.saturating_add(mode_w), area.y));
+    }
+
     let mut icon_x = separator_x.saturating_add(2);
-    let icon_limit = toggle_x.saturating_sub(1);
+    let icon_limit = mode_x.saturating_sub(1);
     for panel in panels {
         if icon_x >= icon_limit {
             break;
@@ -12086,10 +12500,18 @@ fn format_chat_event_body(theme: &Theme, ev: &SessionEvent) -> Vec<Span<'static>
             tokens_in,
             tokens_out,
             tokens_cached,
+            model,
         } => vec![Span::styled(
             format!(
-                "   $ ${:.4} (in={} out={} cached={})",
-                usd, tokens_in, tokens_out, tokens_cached
+                "   $ ${:.4} (in={} out={} cached={}){}",
+                usd,
+                tokens_in,
+                tokens_out,
+                tokens_cached,
+                model
+                    .as_deref()
+                    .map(|m| format!(" {m}"))
+                    .unwrap_or_default()
             ),
             Style::default().fg(theme.dim),
         )],
@@ -22193,6 +22615,157 @@ mod tests {
                 y: 2,
             })
         );
+    }
+
+    /// Two series sharing one terminal cell must both survive it: the lower
+    /// one as the partial glyph's filled part, the upper one as its
+    /// background. Painting both as foreground glyphs made the second
+    /// overwrite the first, so a dominant model erased everything under it.
+    #[test]
+    fn column_cells_encode_a_boundary_inside_one_cell() {
+        // Series 0 takes 3 eighths, series 1 the next 5 — one full cell.
+        let cells = column_cells(&[(0, 3), (1, 5)], 8, 4);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(
+            cells[0],
+            ColumnCell {
+                row: 0,
+                glyph: METER_PARTIALS[3],
+                fg: 0,
+                bg: Some(1),
+            }
+        );
+    }
+
+    /// A cell wholly owned by one series is a plain full block with no
+    /// background — a background there would tint the panel behind the bar.
+    #[test]
+    fn column_cells_leave_single_series_cells_unblended() {
+        let cells = column_cells(&[(2, 16)], 16, 4);
+        assert_eq!(cells.len(), 2);
+        assert!(cells.iter().all(|c| c.glyph == "█" && c.bg.is_none()));
+        assert!(cells.iter().all(|c| c.fg == 2));
+    }
+
+    /// The column's topmost cell is partially filled, so the space above the
+    /// glyph has to stay panel background — there is nowhere to encode a
+    /// second series, and the larger share takes the cell.
+    #[test]
+    fn column_cells_give_the_partial_top_cell_to_the_larger_share() {
+        // Cell 0 full (series 0), cell 1 has 1 eighth of series 0 and 4 of
+        // series 1.
+        let cells = column_cells(&[(0, 9), (1, 4)], 13, 4);
+        let top = cells.last().expect("top cell");
+        assert_eq!(top.row, 1);
+        assert_eq!(top.fg, 1, "series 1 owns 4 of the 5 filled eighths");
+        assert_eq!(top.bg, None);
+    }
+
+    #[test]
+    fn legend_rate_formats_throughput() {
+        assert_eq!(legend_rate(Some(100)), "100/s");
+        assert_eq!(legend_rate(Some(6_000)), "6.0k/s");
+    }
+
+    /// "Did no work" and "worked slowly" are different claims, and `0/s`
+    /// would make the first look like the second.
+    #[test]
+    fn legend_rate_separates_idle_from_slow() {
+        assert_eq!(legend_rate(None), "idle");
+        assert_eq!(legend_rate(Some(0)), "<1/s");
+    }
+
+    /// Every series gets named: a legend too wide for one row wraps instead
+    /// of silently showing only the first entry.
+    #[test]
+    fn wrap_legend_spills_onto_further_rows() {
+        let entries: Vec<crate::token_meter::LegendEntry> = ["alpha", "beta", "gamma", "delta"]
+            .iter()
+            .map(|label| crate::token_meter::LegendEntry {
+                label: (*label).to_string(),
+                tokens: 1_000,
+                color: ratatui::style::Color::Reset,
+                rate: Some(100),
+            })
+            .collect();
+        let rows = wrap_legend(&entries, 30, 4);
+        assert!(rows.len() >= 2, "{rows:?}");
+        let placed: usize = rows.iter().map(Vec::len).sum();
+        assert_eq!(placed, 4, "every series named: {rows:?}");
+    }
+
+    /// The legend may not eat the graph: past its row budget the remaining
+    /// entries are dropped, and the caller renders a "+N" marker for them.
+    #[test]
+    fn wrap_legend_respects_its_row_budget() {
+        let entries: Vec<crate::token_meter::LegendEntry> = (0..12)
+            .map(|i| crate::token_meter::LegendEntry {
+                label: format!("model-number-{i}"),
+                tokens: 1_000,
+                color: ratatui::style::Color::Reset,
+                rate: Some(100),
+            })
+            .collect();
+        let rows = wrap_legend(&entries, 30, 2);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().map(Vec::len).sum::<usize>() < entries.len());
+    }
+
+    #[test]
+    fn legend_never_outgrows_a_third_of_the_panel() {
+        assert_eq!(legend_max_rows(2), 0);
+        assert_eq!(legend_max_rows(3), 1);
+        assert_eq!(legend_max_rows(9), 3);
+        assert_eq!(legend_max_rows(60), 4, "capped so the graph keeps the panel");
+    }
+
+    /// A column's segments sum to exactly the column's height — no drift
+    /// from rounding each share independently — and stay ordered by size.
+    #[test]
+    fn stacked_eighths_sums_exactly_to_the_column_height() {
+        let stacked = vec![(0u16, 600u64), (1, 300), (2, 100)];
+        let filled = 24; // three full cells
+        let out = stacked_eighths(&stacked, 1_000, filled);
+        assert_eq!(out.iter().map(|(_, e)| *e).sum::<usize>(), filled);
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert!(out[0].1 > out[1].1 && out[1].1 > out[2].1, "{out:?}");
+    }
+
+    /// A share smaller than one eighth of the column is omitted from the
+    /// stack rather than promoted to a visible slice — inflating 1% into 4%
+    /// would have to take that space from a series that earned it. The
+    /// column's own height still accounts for the tokens, and the legend
+    /// still lists the model, so nothing is lost from the totals.
+    #[test]
+    fn stacked_eighths_drops_sub_quantum_shares_without_losing_height() {
+        let stacked = vec![(0u16, 900u64), (1, 90), (2, 10)];
+        let filled = 24;
+        let out = stacked_eighths(&stacked, 1_000, filled);
+        assert_eq!(out.iter().map(|(_, e)| *e).sum::<usize>(), filled);
+        assert!(!out.iter().any(|(m, _)| *m == 2), "{out:?}");
+    }
+
+    /// A single-eighth column still belongs to whichever series produced it.
+    #[test]
+    fn stacked_eighths_handles_a_one_eighth_column() {
+        let out = stacked_eighths(&[(4u16, 12u64)], 12, 1);
+        assert_eq!(out, vec![(4, 1)]);
+    }
+
+    #[test]
+    fn stacked_eighths_is_empty_without_volume() {
+        assert!(stacked_eighths(&[], 0, 8).is_empty());
+        assert!(stacked_eighths(&[(0, 5)], 5, 0).is_empty());
+    }
+
+    /// Truncation must mark itself — a clipped model name that looks like a
+    /// complete one would attribute usage to the wrong model.
+    #[test]
+    fn truncate_label_marks_the_clip() {
+        assert_eq!(truncate_label("gpt-5.5-codex", 40), "gpt-5.5-codex");
+        let short = truncate_label("gpt-5.5-codex", 6);
+        assert!(short.ends_with('…'), "{short}");
+        assert!(UnicodeWidthStr::width(short.as_str()) <= 6, "{short}");
     }
 
     fn clip_test_session(

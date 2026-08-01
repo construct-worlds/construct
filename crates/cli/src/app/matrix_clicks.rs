@@ -94,6 +94,11 @@ impl App {
                 return false;
             }
         }
+        if let Some((xs, xe, y)) = self.layout.matrix_panel_mode_hit {
+            if row == y && col >= xs && col < xe {
+                return false;
+            }
+        }
         if self
             .layout
             .matrix_widget_hits
@@ -233,6 +238,12 @@ impl App {
                     }
                 }
                 return;
+            }
+            if let Some((xs, xe, y)) = self.layout.matrix_panel_mode_hit {
+                if row == y && col >= xs && col < xe {
+                    self.matrix_panel_mode = self.matrix_panel_mode.toggled();
+                    return;
+                }
             }
             if let Some((xs, xe, y)) = self.layout.matrix_operator_loop_hit {
                 if row == y && col >= xs && col < xe {
