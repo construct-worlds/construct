@@ -3366,11 +3366,40 @@ impl SessionManager {
         };
         let run_context = playbook_run_context(&result.playbook, scope, body);
         self.write_playbook_run_context(&params.session_id, &run_context)?;
-        let (execution_session_id, prompt, queued_behind_current_turn) = if params.fork {
+        // Arm the run *before* the prompt goes out (#1122). Delivery is what
+        // makes the harness start working, so a session can report Running —
+        // and, on a fast turn, idle again — before this call returns. Any
+        // transition that lands while no run exists is dropped on the floor:
+        // the run would then be created with `seen_running: false` for a turn
+        // already underway, report `delivered` for work in progress, and miss
+        // the idle edge that should have stopped it.
+        let queued_behind_current_turn = !params.fork && {
+            let summary = entry.summary.read().await;
+            summary.state == construct_protocol::SessionState::Running
+        };
+        self.start_playbook_run_with_dispatch_state(
+            &params.session_id,
+            &run_body,
+            is_selection,
+            params.shimmer.as_deref(),
+            queued_behind_current_turn,
+            params.selection_block_ids.as_deref(),
+        );
+        let (execution_session_id, prompt) = if params.fork {
             let fork_created_at_ms = Utc::now().timestamp_millis();
-            let fork_id = self
+            let fork_id = match self
                 .create_playbook_execution_fork(&params.session_id, "playbook selection run".into())
-                .await?;
+                .await
+            {
+                Ok(fork_id) => fork_id,
+                Err(e) => {
+                    // No turn will happen; disarm the run we just armed rather
+                    // than leave the playbook shimmering for a dispatch that
+                    // never left the building.
+                    self.clear_playbook_run(&params.session_id);
+                    return Err(e);
+                }
+            };
             // The fork's own context env points at this sidecar. Store the
             // owner's Playbook context there before delivering the first turn.
             self.write_playbook_run_context(&fork_id, &run_context)?;
@@ -3381,25 +3410,18 @@ impl SessionManager {
                 prompt.clone(),
                 false,
             );
-            (fork_id, prompt, false)
+            (fork_id, prompt)
         } else {
             let prompt = playbook_execution_prompt_with_comment(run_comment);
-            let queued = {
-                let summary = entry.summary.read().await;
-                summary.state == construct_protocol::SessionState::Running
-            };
-            self.deliver_text_to_session(&params.session_id, &prompt)
-                .await?;
-            (params.session_id.clone(), prompt, queued)
+            if let Err(e) = self
+                .deliver_text_to_session(&params.session_id, &prompt)
+                .await
+            {
+                self.clear_playbook_run(&params.session_id);
+                return Err(e);
+            }
+            (params.session_id.clone(), prompt)
         };
-        self.start_playbook_run_with_dispatch_state(
-            &params.session_id,
-            &run_body,
-            is_selection,
-            params.shimmer.as_deref(),
-            queued_behind_current_turn,
-            params.selection_block_ids.as_deref(),
-        );
 
         // A selection Run dispatched to a fork annotates the selection with
         // the fork's session clip — parity with verbs (spec 0089) and the
@@ -11925,6 +11947,89 @@ mod tests {
             .expect("a long turn must keep its run");
         assert!(run.seen_running);
         assert_eq!(run.pending_block_count(), 2, "both blocks are still pending");
+    }
+
+    /// Guard for #1122: a dispatch that never leaves the building disarms the
+    /// run it armed.
+    ///
+    /// The run is now created *before* the prompt is delivered, so that the
+    /// transitions the delivery itself causes land on a run that exists. The
+    /// cost of arming early is that a failed delivery would otherwise leave the
+    /// playbook shimmering for a turn that is never going to happen.
+    #[tokio::test]
+    async fn playbook_execute_disarms_the_run_when_delivery_fails() {
+        let body = "# T\n\n- alpha\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        let mgr = Arc::new(mgr);
+
+        // The synthetic session has no adapter, so delivery cannot succeed.
+        let result = mgr
+            .playbook_execute(construct_protocol::PlaybookExecuteParams {
+                session_id: id.clone(),
+                selection: None,
+                base_version: None,
+                comment: None,
+                shimmer: None,
+                selection_block_ids: None,
+                fork: false,
+            })
+            .await;
+        assert!(result.is_err(), "precondition: delivery must fail here");
+
+        assert!(
+            mgr.playbook_run_snapshot(&id).is_none(),
+            "an undelivered dispatch must not leave the playbook shimmering"
+        );
+    }
+
+    /// Regression for #1100: a PTY-only harness's run reports that the turn is
+    /// producing output.
+    ///
+    /// The progress ladder reads structured events, which such a harness never
+    /// emits, so its runs reported `delivered` for the whole turn while the
+    /// session was visibly streaming bytes.
+    #[tokio::test]
+    async fn playbook_run_counts_pty_output_as_the_turn_producing() {
+        let body = "# T\n\n- alpha\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        let entry = mgr
+            .sessions
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .expect("session entry");
+
+        mgr.start_playbook_run(&id, body, false, None)
+            .expect("start_playbook_run");
+        let run = mgr.playbook_run_snapshot(&id).expect("run snapshot");
+        assert!(
+            !run.first_output_seen,
+            "precondition: nothing has been produced yet"
+        );
+
+        mgr.handle_event(
+            &entry,
+            SessionEvent::Pty {
+                // PTY payloads ride the wire base64-encoded.
+                data: {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD.encode("hello from the shell\r\n")
+                },
+            },
+        )
+        .await;
+
+        let run = mgr.playbook_run_snapshot(&id).expect("run snapshot");
+        assert!(
+            run.first_output_seen,
+            "raw bytes are the only output signal a PTY-only harness has"
+        );
+        assert_eq!(
+            run.system_status.as_deref(),
+            Some(construct_protocol::PLAYBOOK_SHIMMER_STATUS_AGENT_WORKING),
+            "the run must stop reporting `delivered` once the turn produces output"
+        );
     }
 
     /// Regression for #1091: a human editing a block the agent is working on

@@ -364,6 +364,17 @@ impl SessionManager {
                 if genuine && !settling && !is_focused {
                     entry.unseen_activity.store(true, Ordering::Relaxed);
                 }
+                // A PTY-only harness never emits the structured events the
+                // run's progress ladder reads, so its runs used to report
+                // `delivered` for the whole turn while the session was
+                // visibly producing output (#1100). Raw bytes are the only
+                // output signal such a harness has; reuse the discrimination
+                // this path already does, so a status-line repaint or a
+                // resume repainting old scrollback still doesn't count as the
+                // turn producing something.
+                if genuine && !settling {
+                    self.mark_playbook_run_output_seen(&entry.id);
+                }
                 if genuine
                     && !settling
                     && harness_uses_quiescence(&s)
