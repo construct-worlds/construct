@@ -120,6 +120,17 @@ const PTY_BLIP_WINDOW: Duration = Duration::from_secs(2);
 const RESUME_SETTLE_MIN: Duration = Duration::from_secs(10);
 const RESUME_SETTLE_MAX: Duration = Duration::from_secs(30);
 const PLAYBOOK_RUN_MAX_MS: i64 = 10 * 60 * 1000;
+/// How long after dispatch an owning session's "I am idle" report is treated as
+/// the previous turn winding down rather than as evidence that this dispatch
+/// never started.
+///
+/// This is a debounce, never a deadline. A turn can run for hours, and a
+/// session in one reports Running — so a run that has been seen running is out
+/// of this rule's reach entirely and keeps shimmering for as long as the work
+/// takes. It only decides what to make of a session that reports **idle**
+/// without ever having reported a turn, which is the shape a dispatch takes
+/// when it goes nowhere (#1090).
+const PLAYBOOK_RUN_IDLE_WITHOUT_TURN_GRACE_MS: i64 = 10 * 1000;
 
 const MAX_CLIPBOARD_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const ENV_GLOBAL_MEMORY_FILE: &str = "CONSTRUCT_GLOBAL_MEMORY_FILE";
@@ -1637,6 +1648,9 @@ impl SessionManager {
         drop(adapter);
 
         if let Some(snapshot) = snapshot {
+            // Same reason as `kill`: this marks the session terminal without
+            // going through the event path, so the run must be told (#1090).
+            self.note_session_state_for_playbook_run(&entry.id, snapshot.state);
             let _ = self.storage.save_summary(&snapshot);
             let _ = self
                 .broadcast
@@ -2975,6 +2989,37 @@ impl SessionManager {
                 shimmer: true,
                 tooltip: None,
             });
+        }
+        // A human editing a block the agent is still working on must not
+        // settle it (#1091). Typing advances the block's content epoch, so its
+        // ref stops matching and the stale-declaration rule would drop the
+        // shimmer — correct for an agent's stale declaration, wrong for the
+        // very ordinary act of annotating a task while it runs. Nothing would
+        // ever re-light it: the agent already declared that block and has no
+        // reason to declare it again.
+        //
+        // Block ids survive semantic edits, so carry the pending state (and
+        // the agent's tooltip) onto the produced block's new ref. Agents stay
+        // explicit — this is human-authored edits only, and an explicit
+        // declaration in `shimmer` still wins.
+        if params.actor == construct_protocol::PlaybookUpdateActor::Human {
+            let pending_by_block_id = self.playbook_run_pending_by_block_id(&params.session_id);
+            for block in post_blocks
+                .iter()
+                .filter(|block| !before_refs.contains(&block.id))
+            {
+                let Some(tooltip) = pending_by_block_id.get(&block.block_id) else {
+                    continue;
+                };
+                if decls.iter().any(|d| d.id == block.id) {
+                    continue;
+                }
+                decls.push(construct_protocol::PlaybookShimmerDecl {
+                    id: block.id.clone(),
+                    shimmer: true,
+                    tooltip: tooltip.clone(),
+                });
+            }
         }
         self.narrow_playbook_run(&params.session_id, &playbook.markdown, &decls);
         let blocks = self.playbook_blocks_projection(&params.session_id, &playbook.markdown);
@@ -6312,6 +6357,13 @@ impl SessionManager {
         }
         let snapshot = s.clone();
         drop(s);
+        // A force-kill writes the terminal state straight onto the summary
+        // instead of going through the event path, so the playbook run has to
+        // be told here too. Without this the run only cleared when the dying
+        // adapter happened to also emit a terminal event first — a race, and
+        // the reason a killed session's playbook kept shimmering most of the
+        // time (#1090).
+        self.note_session_state_for_playbook_run(id, snapshot.state);
         let _ = self.storage.save_summary(&snapshot);
         let _ = self
             .broadcast
@@ -11708,6 +11760,296 @@ mod tests {
 
         // Run should now be cleared
         assert!(mgr.playbook_run_snapshot(id).is_none());
+    }
+
+    /// Regression for #1090: a session that dies before it ever reports a turn
+    /// still clears its run.
+    ///
+    /// Every stop signal used to be gated on `seen_running`, so a harness that
+    /// crashed, rejected the prompt, or was killed left the whole playbook
+    /// shimmering for the full inactivity backstop — with nothing alive that
+    /// could ever settle it.
+    #[tokio::test]
+    async fn playbook_run_clears_when_the_session_dies_before_running() {
+        let body = "# T\n\n- alpha\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        let entry = mgr
+            .sessions
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .expect("session entry");
+
+        let run = mgr
+            .start_playbook_run(&id, body, false, None)
+            .expect("start_playbook_run");
+        assert!(
+            !run.seen_running,
+            "precondition: the run has not seen a turn yet"
+        );
+
+        mgr.handle_event(
+            &entry,
+            SessionEvent::Status {
+                state: SessionState::Errored,
+                detail: None,
+            },
+        )
+        .await;
+
+        assert!(
+            mgr.playbook_run_snapshot(&id).is_none(),
+            "a terminal session can never settle its blocks, so the run must \
+             clear even though it was never seen running"
+        );
+    }
+
+    /// Regression for #1090: a session that reports idle without ever having
+    /// reported a turn had a dispatch that went nowhere, and nothing else can
+    /// ever stop it.
+    ///
+    /// Deliberately *not* a deadline. A turn can run for hours, and a session
+    /// doing that work reports Running — which takes it out of this rule
+    /// entirely. See the sibling test for the case this must not touch.
+    #[tokio::test]
+    async fn playbook_run_clears_when_the_session_idles_without_ever_running() {
+        let body = "# T\n\n- alpha\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        let entry = mgr
+            .sessions
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .expect("session entry");
+
+        mgr.start_playbook_run(&id, body, false, None)
+            .expect("start_playbook_run");
+
+        // Backdate past the dispatch debounce: this idle report is no longer
+        // the previous turn winding down.
+        {
+            let mut runs = mgr.playbook_runs.lock().expect("runs");
+            let run = runs.get_mut(&id).expect("run");
+            run.started_at_ms -= PLAYBOOK_RUN_IDLE_WITHOUT_TURN_GRACE_MS + 1_000;
+        }
+
+        mgr.handle_event(
+            &entry,
+            SessionEvent::Status {
+                state: SessionState::AwaitingInput,
+                detail: None,
+            },
+        )
+        .await;
+
+        assert!(
+            mgr.playbook_run_snapshot(&id).is_none(),
+            "a dispatch that never produced a turn has no other stop signal; \
+             it must not ride the inactivity backstop"
+        );
+    }
+
+    /// The boundary the rule above must respect: an idle report inside the
+    /// dispatch debounce is the previous turn winding down, not evidence that
+    /// this dispatch went nowhere.
+    #[tokio::test]
+    async fn playbook_run_survives_an_idle_report_inside_the_dispatch_debounce() {
+        let body = "# T\n\n- alpha\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        let entry = mgr
+            .sessions
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .expect("session entry");
+
+        mgr.start_playbook_run(&id, body, false, None)
+            .expect("start_playbook_run");
+
+        mgr.handle_event(
+            &entry,
+            SessionEvent::Status {
+                state: SessionState::AwaitingInput,
+                detail: None,
+            },
+        )
+        .await;
+
+        assert!(
+            mgr.playbook_run_snapshot(&id).is_some(),
+            "a trailing idle right after dispatch must not kill the run before \
+             the turn has had a chance to start"
+        );
+    }
+
+    /// A turn can take hours. Once the session has reported one, the run is
+    /// out of the idle-without-a-turn rule's reach and keeps shimmering for as
+    /// long as the work takes.
+    #[tokio::test]
+    async fn playbook_run_survives_a_long_turn() {
+        let body = "# T\n\n- alpha\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        let entry = mgr
+            .sessions
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .expect("session entry");
+
+        mgr.start_playbook_run(&id, body, false, None)
+            .expect("start_playbook_run");
+        mgr.handle_event(
+            &entry,
+            SessionEvent::Status {
+                state: SessionState::Running,
+                detail: None,
+            },
+        )
+        .await;
+
+        // Hours in, still working: far past every debounce and well past the
+        // point where a deadline-based rule would have killed it.
+        {
+            let mut runs = mgr.playbook_runs.lock().expect("runs");
+            let run = runs.get_mut(&id).expect("run");
+            run.started_at_ms -= 4 * 60 * 60 * 1_000;
+            run.expires_at_ms += 4 * 60 * 60 * 1_000;
+        }
+
+        let run = mgr
+            .playbook_run_snapshot(&id)
+            .expect("a long turn must keep its run");
+        assert!(run.seen_running);
+        assert_eq!(run.pending_block_count(), 2, "both blocks are still pending");
+    }
+
+    /// Regression for #1091: a human editing a block the agent is working on
+    /// must not settle it.
+    ///
+    /// Typing advances the block's content epoch, so its ref stops matching and
+    /// the stale-declaration rule dropped the shimmer — and nothing re-lit it,
+    /// because the agent had already declared that block and had no reason to
+    /// declare it again. Annotating a task while it runs is ordinary use.
+    #[tokio::test]
+    async fn human_edit_keeps_a_pending_block_shimmering() {
+        let body = "# T\n\n- alpha\n- beta\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        mgr.start_playbook_run(&id, body, false, None)
+            .expect("start_playbook_run");
+
+        // The agent's planning pass: only `alpha` is pending.
+        let alpha = mgr
+            .playbook_blocks_projection(&id, body)
+            .into_iter()
+            .find(|b| b.text.contains("alpha"))
+            .expect("alpha block");
+        mgr.set_playbook_run_pending(
+            &id,
+            body,
+            [(alpha.id.clone(), Some("Implementing".to_string()))]
+                .into_iter()
+                .collect(),
+        );
+
+        // The human annotates the task the agent is working on.
+        let result = mgr
+            .playbook_edit(construct_protocol::PlaybookEditParams {
+                session_id: id.clone(),
+                edits: vec![construct_protocol::PlaybookEdit {
+                    old_string: "- alpha".to_string(),
+                    new_string: "- alpha (also check the logs)".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: construct_protocol::PlaybookUpdateActor::Human,
+                note: None,
+                shimmer: Vec::new(),
+            })
+            .await
+            .expect("human edit");
+
+        let edited = result
+            .blocks
+            .iter()
+            .find(|b| b.text.contains("alpha"))
+            .expect("edited block");
+        assert!(
+            edited.shimmer,
+            "the work is still in flight; typing in the block must not settle \
+             it: {:?}",
+            result.blocks
+        );
+        assert_eq!(
+            edited.tooltip.as_deref(),
+            Some("Implementing"),
+            "the agent's status should follow the block across the edit"
+        );
+
+        let beta = result
+            .blocks
+            .iter()
+            .find(|b| b.text.contains("beta"))
+            .expect("beta block");
+        assert!(
+            !beta.shimmer,
+            "a settled block stays settled through someone else's edit"
+        );
+    }
+
+    /// The counterpart to `human_edit_keeps_a_pending_block_shimmering`: agents
+    /// stay explicit. An agent that rewrites a pending block without
+    /// `keep_pending` still drops its shimmer, which is what makes a stale
+    /// declaration fail closed (spec 0053).
+    #[tokio::test]
+    async fn agent_edit_still_settles_a_pending_block_without_keep_pending() {
+        let body = "# T\n\n- alpha\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        mgr.start_playbook_run(&id, body, false, None)
+            .expect("start_playbook_run");
+
+        let alpha = mgr
+            .playbook_blocks_projection(&id, body)
+            .into_iter()
+            .find(|b| b.text.contains("alpha"))
+            .expect("alpha block");
+        mgr.set_playbook_run_pending(
+            &id,
+            body,
+            [(alpha.id.clone(), Some("Implementing".to_string()))]
+                .into_iter()
+                .collect(),
+        );
+
+        let result = mgr
+            .playbook_edit(construct_protocol::PlaybookEditParams {
+                session_id: id.clone(),
+                edits: vec![construct_protocol::PlaybookEdit {
+                    old_string: "- alpha".to_string(),
+                    new_string: "- alpha done".to_string(),
+                    replace_all: false,
+                    keep_pending: false,
+                }],
+                actor: construct_protocol::PlaybookUpdateActor::Agent,
+                note: None,
+                shimmer: Vec::new(),
+            })
+            .await
+            .expect("agent edit");
+
+        let edited = result
+            .blocks
+            .iter()
+            .find(|b| b.text.contains("alpha"))
+            .expect("edited block");
+        assert!(
+            !edited.shimmer,
+            "an agent edit without keep_pending settles the block: {:?}",
+            result.blocks
+        );
     }
 
     // Build a SessionManager with one synthetic session that owns `markdown` as
