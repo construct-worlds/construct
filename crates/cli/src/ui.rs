@@ -3944,14 +3944,14 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
         // Paint bottom-up: each band owns a contiguous run of eighths.
         for cell in column_cells(&segments, filled, cells) {
             let y = graph.y + graph.height.saturating_sub(cell.row + 1);
-            let mut style = Style::default().fg(band_color(&app.token_meter, cell.fg));
+            let mut style = Style::default().fg(app.token_meter.color(cell.fg.paint()));
             // A terminal cell holds one glyph, so a boundary landing inside
             // one is drawn as a partial block whose *filled* part is the
             // lower band and whose background is the upper one. Painting
             // both as foreground glyphs would mean the second overwrites the
             // first, and the lower band would vanish from the stack.
             if let Some(bg) = cell.bg {
-                style = style.bg(band_color(&app.token_meter, bg));
+                style = style.bg(app.token_meter.color(bg.paint()));
             }
             f.buffer_mut().set_string(x, y, cell.glyph, style);
         }
@@ -3962,27 +3962,40 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
     }
 }
 
-/// How much of a model's hue survives in its cache-read band. Low enough to
-/// read as recessed at a glance, high enough that the hue still identifies
-/// which model the shaded part belongs to.
-const CACHED_BAND_MIX: f32 = 0.45;
+/// The glyph a cache-read band fills a cell with: the model's own color, at
+/// half density. A model gets exactly one color — the one on its legend dot —
+/// and the split between what the provider processed fresh and what it served
+/// from cache is carried by fill, not by hue.
+const SHADED_BLOCK: &str = "▒";
 
-/// Resolve a band to its color: a model's new work in its own color, and the
-/// part the provider served from cache in the same hue pushed toward black.
-/// Same hue because the two bands are one model's bar; recessed because
-/// cache-read work is the cheap part of it.
-///
-/// This has to be a color rather than [`Modifier::DIM`]: one cell can hold a
-/// model's new/cached boundary, and there the two bands are the glyph's
-/// foreground and its background — an attribute would dim both or neither.
-fn band_color(
-    meter: &crate::token_meter::TokenMeter,
-    (model, part): crate::token_meter::Band,
-) -> Color {
-    let base = meter.color(model);
-    match part {
-        crate::token_meter::Part::New => base,
-        crate::token_meter::Part::Cached => blend_color(Color::Black, base, CACHED_BAND_MIX),
+/// How a band paints. Bands sharing a `paint` are the same color, so a
+/// boundary between them cannot be encoded as foreground-over-background;
+/// `shaded` is what distinguishes them instead.
+trait BandPaint: Copy + PartialEq {
+    /// Which series color fills this band.
+    fn paint(self) -> u16;
+    /// Whether it fills with the shaded block rather than a solid one.
+    fn shaded(self) -> bool;
+}
+
+impl BandPaint for crate::token_meter::Band {
+    fn paint(self) -> u16 {
+        self.0
+    }
+
+    fn shaded(self) -> bool {
+        matches!(self.1, crate::token_meter::Part::Cached)
+    }
+}
+
+/// Plain series indices, for callers that draw one band per model.
+impl BandPaint for u16 {
+    fn paint(self) -> u16 {
+        self
+    }
+
+    fn shaded(self) -> bool {
+        false
     }
 }
 
@@ -4002,11 +4015,20 @@ struct ColumnCell<K> {
 /// Lay a column's stacked segments onto terminal cells.
 ///
 /// Cells are 8 eighths tall. A cell wholly owned by one band is a full
-/// block; the column's topmost cell is a partial block; a cell where one
-/// band ends and the next begins is a partial block of the lower band
-/// drawn *over* the upper band as background, which is the only way to get
-/// two bands into one cell.
-fn column_cells<K: Copy + PartialEq>(
+/// block — solid or shaded, per the band; the column's topmost cell is a
+/// partial block; a cell where one band ends and a differently-colored one
+/// begins is a partial block of the lower band drawn *over* the upper band as
+/// background, which is the only way to get two colors into one cell.
+///
+/// Two cases cannot encode a boundary at all, and both hand the cell to
+/// whichever band owns more of it. A partial cell has to leave its empty part
+/// as panel background, so there is nowhere to put the second band. And where
+/// the two bands are one model's own new/cached split they share a color, so
+/// the fill has to carry the difference — and a block cannot be partially
+/// shaded. The bands are ordered cache-first for this reason: it puts the
+/// unencodable partial cell at the top of a model's run, where new work is,
+/// and solid is the right answer.
+fn column_cells<K: BandPaint>(
     segments: &[(K, usize)],
     filled: usize,
     cells: usize,
@@ -4035,43 +4057,56 @@ fn column_cells<K: Copy + PartialEq>(
             .iter()
             .take_while(|m| **m == bottom_series)
             .count();
+        let upper = owner[top - 1];
         let cell = if bottom_run == fill {
             // One band owns everything filled here.
             ColumnCell {
                 row: row as u16,
-                glyph: if fill == 8 { "█" } else { METER_PARTIALS[fill] },
+                glyph: full_cell_glyph(bottom_series, fill),
                 fg: bottom_series,
                 bg: None,
             }
-        } else if fill == 8 {
-            // A boundary inside a full cell: lower band as the glyph's
-            // filled part, whatever tops the cell as its background.
+        } else if fill == 8 && bottom_series.paint() != upper.paint() {
+            // A boundary between two colors inside a full cell: lower band as
+            // the glyph's filled part, whatever tops the cell as its
+            // background.
             ColumnCell {
                 row: row as u16,
                 glyph: METER_PARTIALS[bottom_run],
                 fg: bottom_series,
-                bg: Some(owner[top - 1]),
+                bg: Some(upper),
             }
         } else {
-            // Partially-filled top cell with a boundary in it. The empty part
-            // above must stay the panel background, so there is no room to
-            // encode both bands — the larger share takes the cell.
-            let upper = owner[top - 1];
+            // Either a partially-filled top cell, or a boundary between two
+            // bands of one color. Neither can hold both, so the larger share
+            // takes the cell.
             let upper_run = fill - bottom_run;
+            let winner = if upper_run > bottom_run {
+                upper
+            } else {
+                bottom_series
+            };
             ColumnCell {
                 row: row as u16,
-                glyph: METER_PARTIALS[fill],
-                fg: if upper_run > bottom_run {
-                    upper
-                } else {
-                    bottom_series
-                },
+                glyph: full_cell_glyph(winner, fill),
+                fg: winner,
                 bg: None,
             }
         };
         out.push(cell);
     }
     out
+}
+
+/// The glyph for a cell one band owns outright. Only a cell filled to the top
+/// can be shaded: the partial blocks have no half-density counterpart, so a
+/// band that would rather be shaded is drawn solid there.
+fn full_cell_glyph<K: BandPaint>(band: K, fill: usize) -> &'static str {
+    match (fill, band.shaded()) {
+        (8, true) => SHADED_BLOCK,
+        (8, false) => "█",
+        _ => METER_PARTIALS[fill],
+    }
 }
 
 /// Split a column's `filled` eighths across its bands in proportion to
@@ -22812,50 +22847,64 @@ mod tests {
         assert_eq!(top.bg, None);
     }
 
-    /// A model's cached band must be the same hue as its new work — that is
-    /// what says the two parts belong to one bar — but visibly recessed, or
-    /// the split says nothing at all.
+    /// A model owns exactly one color — the one on its legend dot. What
+    /// separates the volume its provider served from cache from the work it
+    /// actually did is how densely the cell is filled, so both parts still
+    /// read as one bar.
     #[test]
-    fn cached_bands_are_a_recessed_shade_of_the_model_color() {
-        let mut meter = crate::token_meter::TokenMeter::new(Instant::now());
-        meter.observe(Some("opus"), 100, 40, Instant::now());
-        let new = band_color(&meter, (0, crate::token_meter::Part::New));
-        let cached = band_color(&meter, (0, crate::token_meter::Part::Cached));
-        assert_eq!(new, meter.color(0), "new work keeps the series color");
-        assert_ne!(cached, new, "the cached part has to read as different");
-        let (Color::Rgb(nr, ng, nb), Color::Rgb(cr, cg, cb)) = (new, cached) else {
-            panic!("series palette is rgb");
-        };
-        assert!(
-            cr < nr && cg < ng && cb < nb,
-            "cached must be darker on every channel: {cached:?} vs {new:?}"
+    fn cached_cells_keep_the_model_color_and_change_only_the_fill() {
+        use crate::token_meter::Part;
+        assert_eq!(
+            (0u16, Part::Cached).paint(),
+            (0u16, Part::New).paint(),
+            "both parts paint with the model's own series color"
         );
-        // Same hue, i.e. the channels stay in proportion rather than sliding
-        // toward gray — a blend toward black scales them all by one factor.
-        let ratio = |c: u8, n: u8| c as f32 / n as f32;
-        let base = ratio(cr, nr);
-        for (c, n) in [(cg, ng), (cb, nb)] {
-            assert!(
-                (ratio(c, n) - base).abs() < 0.05,
-                "hue drifted: {cached:?} vs {new:?}"
-            );
-        }
+        assert_eq!(full_cell_glyph((0u16, Part::Cached), 8), SHADED_BLOCK);
+        assert_eq!(full_cell_glyph((0u16, Part::New), 8), "█");
     }
 
-    /// Two bands of the *same* model sharing a cell still have to be encoded
-    /// as fg-over-bg — the split is invisible otherwise, exactly where a
-    /// column is short enough that it matters most.
+    /// The eighth-blocks have no half-density counterpart, so a cache band
+    /// that stops short of the top of its cell is drawn solid rather than
+    /// snapped to a glyph that would misstate its height.
     #[test]
-    fn column_cells_encode_a_new_cached_boundary_like_any_other() {
+    fn a_partial_cached_cell_falls_back_to_a_solid_block() {
         use crate::token_meter::Part;
-        let cells = column_cells(&[((0u16, Part::New), 5), ((0u16, Part::Cached), 3)], 8, 4);
+        assert_eq!(full_cell_glyph((0u16, Part::Cached), 5), METER_PARTIALS[5]);
+    }
+
+    /// Two bands of the *same* model sharing a cell cannot be encoded as
+    /// fg-over-bg — same color, so the boundary would vanish — and no glyph is
+    /// half shaded and half solid. The larger share takes the cell, exactly as
+    /// it does for the partial cell topping a column.
+    #[test]
+    fn a_same_model_boundary_in_one_cell_goes_to_the_larger_share() {
+        use crate::token_meter::Part;
+        let cells = column_cells(&[((0u16, Part::Cached), 3), ((0u16, Part::New), 5)], 8, 4);
         assert_eq!(
             cells,
             vec![ColumnCell {
                 row: 0,
-                glyph: METER_PARTIALS[5],
+                glyph: "█",
                 fg: (0, Part::New),
-                bg: Some((0, Part::Cached)),
+                bg: None,
+            }]
+        );
+    }
+
+    /// Bands of *different* models still differ in color, so their shared cell
+    /// keeps the fg-over-bg encoding — the same-color degradation above must
+    /// not leak into the ordinary case.
+    #[test]
+    fn column_cells_still_blend_a_boundary_between_two_models() {
+        use crate::token_meter::Part;
+        let cells = column_cells(&[((0u16, Part::New), 3), ((1u16, Part::New), 5)], 8, 4);
+        assert_eq!(
+            cells,
+            vec![ColumnCell {
+                row: 0,
+                glyph: METER_PARTIALS[3],
+                fg: (0, Part::New),
+                bg: Some((1, Part::New)),
             }]
         );
     }
