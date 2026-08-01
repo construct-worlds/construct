@@ -6,6 +6,7 @@
 
 mod http;
 mod ingress;
+mod slack;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -119,6 +120,14 @@ pub struct ServiceChannelConfig {
     pub enabled: bool,
     pub port: Option<u16>,
     pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_workspaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_channels: Vec<String>,
 }
 
 fn default_channel_enabled() -> bool {
@@ -220,9 +229,7 @@ struct ChannelCatalog {
 }
 
 fn channel_catalog_path(dir: &std::path::Path) -> PathBuf {
-    dir.parent()
-        .unwrap_or(dir)
-        .join("channels.toml")
+    dir.parent().unwrap_or(dir).join("channels.toml")
 }
 
 fn load_channel_catalog(dir: &std::path::Path) -> Result<ChannelCatalog> {
@@ -248,9 +255,7 @@ fn write_channel_catalog(dir: &std::path::Path, catalog: &ChannelCatalog) -> Res
     Ok(())
 }
 
-fn channel_owners(
-    services: &BTreeMap<String, ServiceConfig>,
-) -> BTreeMap<String, Vec<String>> {
+fn channel_owners(services: &BTreeMap<String, ServiceConfig>) -> BTreeMap<String, Vec<String>> {
     let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (service_name, service) in services {
         for channel_id in service.channels.keys() {
@@ -323,17 +328,22 @@ pub fn put_channel(
 ) -> Result<construct_protocol::ServiceChannelPutResult> {
     validate_service_name(&params.service_name)?;
     validate_channel_id(&params.channel.id)?;
-    if params.channel.kind != "http" {
+    if !matches!(params.channel.kind.as_str(), "http" | "slack") {
         return Err(anyhow!(
-            "unsupported channel kind `{}`; v1 supports `http`",
+            "unsupported channel kind `{}`",
             params.channel.kind
         ));
     }
-    let port = params
-        .channel
-        .port
-        .filter(|port| *port > 0)
-        .ok_or_else(|| anyhow!("HTTP channel port must be between 1 and 65535"))?;
+    let port = match params.channel.kind.as_str() {
+        "http" => Some(
+            params
+                .channel
+                .port
+                .filter(|port| *port > 0)
+                .ok_or_else(|| anyhow!("HTTP channel port must be between 1 and 65535"))?,
+        ),
+        _ => None,
+    };
     let mut services = load_definitions(dir)?;
     let mut catalog = load_channel_catalog(dir)?;
     migrate_legacy_channels(dir, &services, &mut catalog)?;
@@ -346,10 +356,14 @@ pub fn put_channel(
             ));
         }
     }
-    if catalog.channels.iter().any(|(id, channel)| {
-        id != &params.channel.id && channel.port == Some(port)
-    }) {
-        return Err(anyhow!("HTTP port {port} is already used by this service"));
+    if let Some(port) = port {
+        if catalog.channels.iter().any(|(id, channel)| {
+            id != &params.channel.id
+                && channel_kind(id, channel) == "http"
+                && channel.port == Some(port)
+        }) {
+            return Err(anyhow!("HTTP port {port} is already used by this service"));
+        }
     }
     let service = services
         .get_mut(&params.service_name)
@@ -364,30 +378,60 @@ pub fn put_channel(
         if existing_kind != params.channel.kind {
             return Err(anyhow!(
                 "channel `{}` cannot change kind from `{existing_kind}` to `{}`",
-                params.channel.id, params.channel.kind
+                params.channel.id,
+                params.channel.kind
             ));
         }
     }
-    let new_secret = if params.rotate_secret
-        || existing
-            .as_ref()
-            .and_then(|channel| channel.token.as_deref())
-            .is_none()
+    let new_secret = if params.channel.kind == "http"
+        && (params.rotate_secret
+            || existing
+                .as_ref()
+                .and_then(|channel| channel.token.as_deref())
+                .is_none())
     {
         Some(generate_channel_secret())
     } else {
         None
     };
-    let token = new_secret.clone().or_else(|| {
-        existing
-            .as_ref()
-            .and_then(|channel| channel.token.clone())
-    });
+    let token = (params.channel.kind == "http")
+        .then(|| {
+            new_secret
+                .clone()
+                .or_else(|| existing.as_ref().and_then(|channel| channel.token.clone()))
+        })
+        .flatten();
+    let app_token = params
+        .channel
+        .app_token
+        .filter(|token| !token.trim().is_empty())
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|channel| channel.app_token.clone())
+        });
+    let bot_token = params
+        .channel
+        .bot_token
+        .filter(|token| !token.trim().is_empty())
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|channel| channel.bot_token.clone())
+        });
+    if params.channel.kind == "slack" {
+        validate_slack_token("app", app_token.as_deref(), "xapp-")?;
+        validate_slack_token("bot", bot_token.as_deref(), "xoxb-")?;
+    }
     let config = ServiceChannelConfig {
         kind: Some(params.channel.kind),
         enabled: params.channel.enabled,
-        port: Some(port),
+        port,
         token,
+        app_token,
+        bot_token,
+        allowed_workspaces: normalize_allowlist(params.channel.allowed_workspaces),
+        allowed_channels: normalize_allowlist(params.channel.allowed_channels),
     };
     service
         .channels
@@ -449,26 +493,24 @@ pub fn attach_channel(
     let service = services
         .get_mut(&params.service_name)
         .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
-    if service
-        .channels
-        .iter()
-        .any(|(id, channel)| id != &params.channel_id && channel.port == config.port)
-    {
-        return Err(anyhow!(
-            "HTTP port {:?} is already used by this service",
-            config.port
-        ));
+    if channel_kind(&params.channel_id, &config) == "http" {
+        if service.channels.iter().any(|(id, channel)| {
+            id != &params.channel_id
+                && channel_kind(id, channel) == "http"
+                && channel.port == config.port
+        }) {
+            return Err(anyhow!(
+                "HTTP port {:?} is already used by this service",
+                config.port
+            ));
+        }
     }
     service
         .channels
         .insert(params.channel_id.clone(), config.clone());
     write_definition(dir, &params.service_name, service)?;
     Ok(construct_protocol::ServiceChannelPutResult {
-        channel: channel_summary(
-            params.channel_id,
-            &config,
-            Some(params.service_name),
-        ),
+        channel: channel_summary(params.channel_id, &config, Some(params.service_name)),
         new_secret: None,
         applied: Default::default(),
     })
@@ -486,15 +528,13 @@ pub fn detach_channel(
     let service = services
         .get_mut(&params.service_name)
         .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
-    let config = service
-        .channels
-        .remove(&params.channel_id)
-        .ok_or_else(|| {
-            anyhow!(
-                "channel `{}` is not attached to service `{}`",
-                params.channel_id, params.service_name
-            )
-        })?;
+    let config = service.channels.remove(&params.channel_id).ok_or_else(|| {
+        anyhow!(
+            "channel `{}` is not attached to service `{}`",
+            params.channel_id,
+            params.service_name
+        )
+    })?;
     catalog
         .channels
         .entry(params.channel_id.clone())
@@ -526,11 +566,14 @@ pub fn rotate_channel_secret(
         .ok_or_else(|| {
             anyhow!(
                 "channel `{}` not found on service `{}`",
-                params.channel_id, params.service_name
+                params.channel_id,
+                params.service_name
             )
         })?;
     if channel_kind(&params.channel_id, channel) != "http" {
-        return Err(anyhow!("only HTTP channel credentials can be rotated in v1"));
+        return Err(anyhow!(
+            "only HTTP channel credentials can be rotated in v1"
+        ));
     }
     let secret = generate_channel_secret();
     channel.token = Some(secret.clone());
@@ -562,7 +605,7 @@ fn write_definition(dir: &std::path::Path, name: &str, config: &ServiceConfig) -
     Ok(())
 }
 
-fn channel_kind(id: &str, config: &ServiceChannelConfig) -> String {
+pub(crate) fn channel_kind(id: &str, config: &ServiceChannelConfig) -> String {
     config
         .kind
         .clone()
@@ -588,6 +631,24 @@ fn generate_channel_secret() -> String {
     format!("cst_{}", Uuid::new_v4().simple())
 }
 
+fn validate_slack_token(label: &str, token: Option<&str>, prefix: &str) -> Result<()> {
+    match token {
+        Some(token) if token.starts_with(prefix) => Ok(()),
+        _ => Err(anyhow!("Slack {label} token must start with `{prefix}`")),
+    }
+}
+
+fn normalize_allowlist(values: Vec<String>) -> Vec<String> {
+    let mut values: Vec<_> = values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    values.sort();
+    values.dedup();
+    values
+}
+
 fn channel_summary(
     id: String,
     config: &ServiceChannelConfig,
@@ -598,7 +659,31 @@ fn channel_summary(
         kind: channel_kind(&id, config),
         enabled: config.enabled,
         port: config.port,
-        has_credential: config.token.as_ref().is_some_and(|token| !token.is_empty()),
+        has_credential: match channel_kind(&id, config).as_str() {
+            "slack" => {
+                config
+                    .app_token
+                    .as_ref()
+                    .is_some_and(|token| !token.is_empty())
+                    && config
+                        .bot_token
+                        .as_ref()
+                        .is_some_and(|token| !token.is_empty())
+            }
+            _ => config.token.as_ref().is_some_and(|token| !token.is_empty()),
+        },
+        has_app_token: config
+            .app_token
+            .as_ref()
+            .is_some_and(|token| !token.is_empty()),
+        has_bot_token: config
+            .bot_token
+            .as_ref()
+            .is_some_and(|token| !token.is_empty()),
+        allowed_workspace_count: config.allowed_workspaces.len(),
+        allowed_channel_count: config.allowed_channels.len(),
+        allowed_workspaces: config.allowed_workspaces.clone(),
+        allowed_channels: config.allowed_channels.clone(),
         attached_to,
     }
 }
@@ -641,9 +726,8 @@ fn validate_service_name(name: &str) -> Result<()> {
     }
 }
 
-pub(crate) use ingress::{
-    ServiceIngress as ServiceRuntime, ServiceIngressShared as ServiceShared,
-};
+pub(crate) use ingress::{ServiceIngress as ServiceRuntime, ServiceIngressShared as ServiceShared};
+pub(crate) use slack::SlackConfig;
 
 /// Build the transport-neutral ingress runtime for one channel.
 pub(crate) fn channel_runtime(
@@ -663,7 +747,11 @@ pub(crate) fn bindable_port(
     if !channel.enabled {
         return None;
     }
-    if channel_kind(channel_id, channel) != "http" {
+    let kind = channel_kind(channel_id, channel);
+    if kind == "slack" {
+        return None;
+    }
+    if kind != "http" {
         tracing::warn!(service = %service, channel = %channel_id, "unsupported service channel kind; skipping");
         return None;
     }
@@ -685,6 +773,43 @@ pub(crate) async fn serve(
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     http::serve(runtime, listener, cancel).await
+}
+
+/// Validate and snapshot one Slack channel without exposing its credentials.
+pub(crate) fn slack_config(
+    service: &str,
+    channel_id: &str,
+    channel: &ServiceChannelConfig,
+) -> Option<slack::SlackConfig> {
+    if !channel.enabled || channel_kind(channel_id, channel) != "slack" {
+        return None;
+    }
+    let app_token = channel
+        .app_token
+        .clone()
+        .filter(|token| token.starts_with("xapp-"));
+    let bot_token = channel
+        .bot_token
+        .clone()
+        .filter(|token| token.starts_with("xoxb-"));
+    let (Some(app_token), Some(bot_token)) = (app_token, bot_token) else {
+        tracing::warn!(service = %service, channel = %channel_id, "Slack channel credentials are missing or invalid; skipping");
+        return None;
+    };
+    Some(slack::SlackConfig {
+        app_token,
+        bot_token,
+        allowed_workspaces: channel.allowed_workspaces.clone(),
+        allowed_channels: channel.allowed_channels.clone(),
+    })
+}
+
+pub(crate) async fn serve_slack(
+    runtime: Arc<ServiceRuntime>,
+    config: slack::SlackConfig,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    slack::serve(runtime, config, cancel).await
 }
 
 #[cfg(test)]
@@ -734,6 +859,10 @@ mod tests {
                     enabled,
                     port: Some(9000),
                     token: Some(token.to_string()),
+                    app_token: None,
+                    bot_token: None,
+                    allowed_workspaces: Vec::new(),
+                    allowed_channels: Vec::new(),
                 },
             )]),
         }
@@ -768,10 +897,16 @@ mod tests {
         assert!(http::serving(&runtime));
 
         shared.set_config(config_with_channel("t", true, true));
-        assert!(!http::serving(&runtime), "a paused service refuses requests");
+        assert!(
+            !http::serving(&runtime),
+            "a paused service refuses requests"
+        );
 
         shared.set_config(config_with_channel("t", false, false));
-        assert!(!http::serving(&runtime), "a disabled channel refuses requests");
+        assert!(
+            !http::serving(&runtime),
+            "a disabled channel refuses requests"
+        );
 
         shared.set_config(config_with_channel("t", true, false));
         assert!(http::serving(&runtime), "resuming serves again");
@@ -908,7 +1043,10 @@ mod tests {
             env.get("CONSTRUCT_SMITH_FLEET_TOOLS").map(String::as_str),
             Some("off")
         );
-        assert_eq!(env.get("CONSTRUCT_INJECT_MCP").map(String::as_str), Some("0"));
+        assert_eq!(
+            env.get("CONSTRUCT_INJECT_MCP").map(String::as_str),
+            Some("0")
+        );
         assert!(!env.contains_key("CONSTRUCT_SMITH_SKILLS"));
 
         let opened = ServiceSandboxConfig {
@@ -1150,6 +1288,10 @@ mod tests {
                     kind: "http".into(),
                     enabled: true,
                     port: Some(8787),
+                    app_token: None,
+                    bot_token: None,
+                    allowed_workspaces: Vec::new(),
+                    allowed_channels: Vec::new(),
                 },
                 rotate_secret: false,
             },
@@ -1224,6 +1366,10 @@ mod tests {
                     kind: "http".into(),
                     enabled: true,
                     port: Some(8787),
+                    app_token: None,
+                    bot_token: None,
+                    allowed_workspaces: Vec::new(),
+                    allowed_channels: Vec::new(),
                 },
                 rotate_secret: false,
             },
@@ -1238,6 +1384,10 @@ mod tests {
                     kind: "http".into(),
                     enabled: true,
                     port: Some(8787),
+                    app_token: None,
+                    bot_token: None,
+                    allowed_workspaces: Vec::new(),
+                    allowed_channels: Vec::new(),
                 },
                 rotate_secret: false,
             },
@@ -1346,6 +1496,10 @@ mod tests {
                     kind: "http".into(),
                     enabled: true,
                     port: Some(8787),
+                    app_token: None,
+                    bot_token: None,
+                    allowed_workspaces: Vec::new(),
+                    allowed_channels: Vec::new(),
                 },
                 rotate_secret: false,
             },
@@ -1362,5 +1516,64 @@ mod tests {
         .unwrap();
         assert_ne!(rotated.new_secret.as_deref(), Some(original.as_str()));
         assert!(list_channel_catalog(&services).unwrap()[0].has_credential);
+    }
+
+    #[test]
+    fn slack_credentials_are_persisted_but_never_returned_in_summaries() {
+        let config = tempfile::tempdir().unwrap();
+        let services = config.path().join("services");
+        std::fs::create_dir_all(&services).unwrap();
+        put_definition(
+            &services,
+            construct_protocol::ServicePutParams {
+                service: construct_protocol::ServiceSummary {
+                    name: "chat".into(),
+                    instruction: String::new(),
+                    harness: "smith".into(),
+                    model: None,
+                    cwd: ".".into(),
+                    routing: "session-key".into(),
+                    paused: false,
+                    channels: Vec::new(),
+                },
+            },
+        )
+        .unwrap();
+        let result = put_channel(
+            &services,
+            construct_protocol::ServiceChannelPutParams {
+                service_name: "chat".into(),
+                channel: construct_protocol::ServiceChannelPut {
+                    id: "slack".into(),
+                    kind: "slack".into(),
+                    enabled: true,
+                    port: None,
+                    app_token: Some("xapp-secret".into()),
+                    bot_token: Some("xoxb-secret".into()),
+                    allowed_workspaces: vec![" T2 ".into(), "T1".into(), "T1".into()],
+                    allowed_channels: vec!["C1".into()],
+                },
+                rotate_secret: false,
+            },
+        )
+        .unwrap();
+        assert!(result.new_secret.is_none());
+        assert!(result.channel.has_credential);
+        assert!(result.channel.has_app_token);
+        assert!(result.channel.has_bot_token);
+        assert_eq!(result.channel.allowed_workspaces, vec!["T1", "T2"]);
+        let encoded = std::fs::read_to_string(services.join("chat.toml")).unwrap();
+        assert!(encoded.contains("xapp-secret"));
+        assert!(encoded.contains("xoxb-secret"));
+        let summary = serde_json::to_string(&result.channel).unwrap();
+        assert!(!summary.contains("xapp-secret"));
+        assert!(!summary.contains("xoxb-secret"));
+    }
+
+    #[test]
+    fn slack_token_prefixes_are_validated() {
+        assert!(validate_slack_token("app", Some("xapp-good"), "xapp-").is_ok());
+        assert!(validate_slack_token("bot", Some("xoxp-user"), "xoxb-").is_err());
+        assert!(validate_slack_token("bot", None, "xoxb-").is_err());
     }
 }

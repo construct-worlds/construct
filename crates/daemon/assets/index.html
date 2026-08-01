@@ -4767,7 +4767,7 @@ function serviceFieldHelp(field, service) {
     model: ["Model", "Optional model override passed to the harness. Blank uses the harness default.", "Applies to new sessions."],
     cwd: ["Working directory", "Directory where service sessions start and relative paths resolve.", "Applies to new sessions."],
     routing: ["Routing", route === "per-event" ? "Creates a fresh session for every accepted request." : route === "single" ? "Routes every request into one shared session." : "Reuses one session for each caller-supplied session_key.", "Applies to the next request."],
-    channels: ["Channels", "Transport endpoints attached to this service. Each HTTP channel has its own loopback port, enabled state, and credential.", "Add, edit, disable, rotate, or delete channels below."],
+    channels: ["Channels", "Transport endpoints attached to this service. HTTP listens on loopback; Slack connects outbound with Socket Mode.", "Add, edit, disable, or detach channels below."],
     paused: ["State", "Paused services stop their listeners and refuse requests, keeping the definition and history.", "Applies immediately."],
   };
   return descriptions[field] || descriptions.instruction;
@@ -4814,6 +4814,10 @@ function beginNewServiceChannel() {
     kind: "http",
     enabled: true,
     port: nextServiceChannelPort(service),
+    app_token: "",
+    bot_token: "",
+    allowed_workspaces: [],
+    allowed_channels: [],
   };
   renderServiceView();
   const input = serviceActivityEl.querySelector('[data-channel-field="id"]');
@@ -4845,19 +4849,38 @@ function syncServiceDraftChannels(name) {
 async function saveServiceChannelDraft() {
   const draft = state.serviceChannelDraft;
   if (!draft) return;
+  const kind = draft.kind === "slack" ? "slack" : "http";
   const port = Number(draft.port) || 0;
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(draft.id || "") || draft.id.length > 32) {
     serviceViewFooterEl.textContent = "Channel ID must use lowercase letters, digits, and interior hyphens.";
     return;
   }
-  if (port < 1 || port > 65535) {
+  if (kind === "http" && (port < 1 || port > 65535)) {
     serviceViewFooterEl.textContent = "HTTP port must be between 1 and 65535.";
     return;
   }
+  if (kind === "slack" && draft.mode === "create" && !String(draft.app_token || "").startsWith("xapp-")) {
+    serviceViewFooterEl.textContent = "Slack app token must start with xapp-.";
+    return;
+  }
+  if (kind === "slack" && draft.mode === "create" && !String(draft.bot_token || "").startsWith("xoxb-")) {
+    serviceViewFooterEl.textContent = "Slack bot token must start with xoxb-.";
+    return;
+  }
   try {
+    const channel = {
+      id: draft.id,
+      kind,
+      enabled: !!draft.enabled,
+      port: kind === "http" ? port : null,
+      allowed_workspaces: kind === "slack" ? (draft.allowed_workspaces || []) : [],
+      allowed_channels: kind === "slack" ? (draft.allowed_channels || []) : [],
+    };
+    if (kind === "slack" && draft.app_token) channel.app_token = draft.app_token;
+    if (kind === "slack" && draft.bot_token) channel.bot_token = draft.bot_token;
     const result = await rpc("service.channel.put", {
       service_name: draft.serviceName,
-      channel: { id: draft.id, kind: "http", enabled: !!draft.enabled, port },
+      channel,
       rotate_secret: false,
     });
     state.services = state.services.map((item) => {
@@ -5007,20 +5030,26 @@ function renderServiceView() {
   const channelDraft = state.serviceChannelDraft && state.serviceChannelDraft.serviceName === name ? state.serviceChannelDraft : null;
   const channelRows = channels.length
     ? channels.map((channel) => {
-      const endpoint = channel.port ? `127.0.0.1:${channel.port}` : "no port";
+      const endpoint = channel.kind === "slack"
+        ? `Socket Mode · ${channel.allowed_workspace_count || 0} workspace / ${channel.allowed_channel_count || 0} channel filters`
+        : (channel.port ? `127.0.0.1:${channel.port}` : "no port");
       const channelState = channel.enabled ? "enabled" : "disabled";
       const attached = channel.attached_to === name;
       const ownedByOther = !!channel.attached_to && !attached;
       const owner = ownedByOther ? `<span class="service-channel-owner">attached to ${escape(channel.attached_to)}</span>` : "";
+      const rotate = channel.kind === "http" ? `<button type="button" data-channel-rotate="${attr(channel.id)}">rotate</button>` : "";
       const controls = attached
-        ? `<span class="service-channel-actions"><button type="button" data-channel-edit="${attr(channel.id)}">edit</button><button type="button" data-channel-rotate="${attr(channel.id)}">rotate</button><button type="button" class="danger" data-channel-delete="${attr(channel.id)}">detach</button></span>`
+        ? `<span class="service-channel-actions"><button type="button" data-channel-edit="${attr(channel.id)}">edit</button>${rotate}<button type="button" class="danger" data-channel-delete="${attr(channel.id)}">detach</button></span>`
         : "";
       return `<div class="service-channel-row${ownedByOther ? " unavailable" : ""}"><input class="channel-toggle" type="checkbox" data-channel-toggle="${attr(channel.id)}" ${attached ? "checked" : ""} ${ownedByOther || !service ? "disabled" : ""} aria-label="${attr(attached ? `Detach ${channel.id}` : `Attach ${channel.id}`)}"><span class="channel-id">${escape(channel.id)}</span><span>${escape(channel.kind || "http")}</span><span class="channel-endpoint">${escape(endpoint)}</span><span class="channel-state ${channel.enabled ? "" : "disabled"}">${channelState}</span>${owner}${controls}</div>`;
     }).join("")
     : `<div class="service-view-footer">No channels in the catalog.</div>`;
-  const channelEditor = channelDraft ? `<div class="service-channel-editor"><div class="service-channel-editor-grid"><label>Channel ID<input data-channel-field="id" value="${attr(channelDraft.id || "")}" ${channelDraft.mode === "edit" ? "readonly" : ""}></label><label>Kind<select data-channel-field="kind" disabled><option selected>http</option></select></label><label>HTTP port<input data-channel-field="port" type="number" min="1" max="65535" value="${attr(channelDraft.port ?? "")}"></label><label>State<select data-channel-field="enabled"><option value="true" ${channelDraft.enabled ? "selected" : ""}>enabled</option><option value="false" ${channelDraft.enabled ? "" : "selected"}>disabled</option></select></label></div><div class="channel-editor-actions"><button type="button" data-channel-save>Save channel</button><button type="button" data-channel-cancel>Cancel</button></div></div>` : "";
+  const channelSpecificFields = channelDraft?.kind === "slack"
+    ? `<label>App token<input data-channel-field="app_token" type="password" value="" placeholder="${channelDraft.has_app_token ? "xapp-… (set)" : "xapp-…"}" autocomplete="off"></label><label>Bot token<input data-channel-field="bot_token" type="password" value="" placeholder="${channelDraft.has_bot_token ? "xoxb-… (set)" : "xoxb-…"}" autocomplete="off"></label><label>Workspace allowlist<input data-channel-field="allowed_workspaces" value="${attr((channelDraft.allowed_workspaces || []).join(","))}" placeholder="T123,T456"></label><label>Channel allowlist<input data-channel-field="allowed_channels" value="${attr((channelDraft.allowed_channels || []).join(","))}" placeholder="C123,D456"></label>`
+    : `<label>HTTP port<input data-channel-field="port" type="number" min="1" max="65535" value="${attr(channelDraft?.port ?? "")}"></label>`;
+  const channelEditor = channelDraft ? `<div class="service-channel-editor"><div class="service-channel-editor-grid"><label>Channel ID<input data-channel-field="id" value="${attr(channelDraft.id || "")}" ${channelDraft.mode === "edit" ? "readonly" : ""}></label><label>Kind<select data-channel-field="kind" ${channelDraft.mode === "edit" ? "disabled" : ""}><option value="http" ${channelDraft.kind === "http" ? "selected" : ""}>http</option><option value="slack" ${channelDraft.kind === "slack" ? "selected" : ""}>slack</option></select></label>${channelSpecificFields}<label>State<select data-channel-field="enabled"><option value="true" ${channelDraft.enabled ? "selected" : ""}>enabled</option><option value="false" ${channelDraft.enabled ? "" : "selected"}>disabled</option></select></label></div><div class="channel-editor-actions"><button type="button" data-channel-save>Save channel</button><button type="button" data-channel-cancel>Cancel</button></div></div>` : "";
   const attachedCount = channels.filter((channel) => channel.attached_to === name).length;
-  serviceActivityEl.innerHTML = `<h3>Channels · ${attachedCount} attached · ${channels.length} in catalog</h3>${channelRows}<div class="channel-editor-actions"><button type="button" data-channel-add ${service ? "" : "disabled"}>Add HTTP channel</button></div>${channelEditor}<h3 style="margin-top:18px">Sessions · ${routed.length} routed session${routed.length === 1 ? "" : "s"}</h3>` +
+  serviceActivityEl.innerHTML = `<h3>Channels · ${attachedCount} attached · ${channels.length} in catalog</h3>${channelRows}<div class="channel-editor-actions"><button type="button" data-channel-add ${service ? "" : "disabled"}>Add channel</button></div>${channelEditor}<h3 style="margin-top:18px">Sessions · ${routed.length} routed session${routed.length === 1 ? "" : "s"}</h3>` +
     (routed.length ? routed.map((session) => {
       const route = serviceSessionRouteLabel(session, name, channels, service?.channels || []);
       return `<div class="service-session-link" data-session-id="${attr(session.id)}"><span class="service-session-state">${escape(session.state || "idle")}</span><span class="service-session-channel">channel: ${escape(route.channel)}</span><span>${escape(route.label)}</span></div>`;
@@ -5028,7 +5057,7 @@ function renderServiceView() {
   const tokenNote = state.serviceNewToken ? `Token (shown once): ${state.serviceNewToken}` : "";
   serviceViewFooterEl.textContent = editing
     ? `Enter saves · Esc cancels${tokenNote ? `\n${tokenNote}` : ""}`
-    : `Channels are loopback-only · credentials are shown once${tokenNote ? `\n${tokenNote}` : ""}`;
+    : `HTTP is loopback-only · Slack uses outbound Socket Mode · credentials are never returned${tokenNote ? `\n${tokenNote}` : ""}`;
   serviceEditBtn.textContent = editing ? "Save" : "Edit";
   serviceRotateBtn.hidden = !service;
   serviceDeleteBtn.hidden = !service;
@@ -5056,7 +5085,9 @@ function renderServiceView() {
       const key = control.dataset.channelField;
       if (key === "port") state.serviceChannelDraft.port = Number(control.value) || 0;
       else if (key === "enabled") state.serviceChannelDraft.enabled = control.value === "true";
+      else if (key === "allowed_workspaces" || key === "allowed_channels") state.serviceChannelDraft[key] = control.value.split(",").map((value) => value.trim()).filter(Boolean);
       else state.serviceChannelDraft[key] = control.value;
+      if (key === "kind") renderServiceView();
     });
     control.addEventListener("change", () => control.dispatchEvent(new Event("input")));
   });

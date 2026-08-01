@@ -40167,6 +40167,12 @@ mod tests {
                 enabled: true,
                 port: Some(8787),
                 has_credential: true,
+                has_app_token: false,
+                has_bot_token: false,
+                allowed_workspace_count: 0,
+                allowed_channel_count: 0,
+                allowed_workspaces: Vec::new(),
+                allowed_channels: Vec::new(),
                 attached_to: Some(name.to_string()),
             }],
         }
@@ -40674,6 +40680,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_channel_editor_configures_slack_without_rendering_tokens() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.service_channel_catalog = app.services[0].channels.clone();
+        app.open_edit_service_view("assistant");
+        app.open_new_service_channel();
+        app.service_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .selected_field = 1;
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        let editor = app
+            .service_dialog
+            .as_ref()
+            .unwrap()
+            .channel_editor
+            .as_ref()
+            .unwrap();
+        assert_eq!(editor.channel.kind, "slack");
+        assert_eq!(editor.channel.port, None);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        assert!(app.insert_service_dialog_text("xapp-super-secret"));
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .channel_editor
+                .as_ref()
+                .unwrap()
+                .app_token,
+            "xapp-super-secret"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn service_view_lists_available_and_owned_catalog_channels() {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
@@ -40685,6 +40733,12 @@ mod tests {
                 enabled: true,
                 port: Some(8788),
                 has_credential: true,
+                has_app_token: false,
+                has_bot_token: false,
+                allowed_workspace_count: 0,
+                allowed_channel_count: 0,
+                allowed_workspaces: Vec::new(),
+                allowed_channels: Vec::new(),
                 attached_to: None,
             },
             construct_protocol::ServiceChannelSummary {
@@ -40693,6 +40747,12 @@ mod tests {
                 enabled: true,
                 port: Some(8789),
                 has_credential: true,
+                has_app_token: false,
+                has_bot_token: false,
+                allowed_workspace_count: 0,
+                allowed_channel_count: 0,
+                allowed_workspaces: Vec::new(),
+                allowed_channels: Vec::new(),
                 attached_to: Some("other-service".to_string()),
             },
         ];

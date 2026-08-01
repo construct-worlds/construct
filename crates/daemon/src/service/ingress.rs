@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 const REQUEST_DEDUP_CAP: usize = 4096;
 
@@ -88,7 +89,6 @@ impl ServiceIngressShared {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *slot = Arc::new(config);
     }
-
 }
 
 /// One service channel's transport-neutral route into Construct sessions.
@@ -115,6 +115,13 @@ impl ServiceIngress {
     }
 
     pub(super) async fn submit(&self, request: IngressRequest) -> Result<String> {
+        Ok(self.submit_tracked(request).await?.session)
+    }
+
+    /// Submit a native channel delivery and retain the transcript position at
+    /// which its turn began. Long-lived adapters use this cursor to avoid
+    /// mistaking the previous turn's final answer for the new one.
+    pub(super) async fn submit_tracked(&self, request: IngressRequest) -> Result<IngressReceipt> {
         if request.message.trim().is_empty() {
             return Err(anyhow!("message must not be empty"));
         }
@@ -159,8 +166,18 @@ impl ServiceIngress {
             });
             if let Some(id) = existing {
                 drop(state);
+                let event_cursor = self
+                    .shared
+                    .manager
+                    .detail(&id)
+                    .await
+                    .map(|detail| detail.events.len())
+                    .unwrap_or(0);
                 self.shared.manager.send_input(&id, request.message).await?;
-                return Ok(id);
+                return Ok(IngressReceipt {
+                    session: id,
+                    event_cursor,
+                });
             }
             let id = self
                 .create(
@@ -174,7 +191,10 @@ impl ServiceIngress {
             state.sessions.insert(lookup_key, id.clone());
             state.owned_sessions.insert(id.clone());
             self.persist_state(&state).await?;
-            Ok(id)
+            Ok(IngressReceipt {
+                session: id,
+                event_cursor: 0,
+            })
         } else {
             let id = self
                 .create(
@@ -185,7 +205,55 @@ impl ServiceIngress {
             let mut state = self.shared.state.lock().await;
             state.owned_sessions.insert(id.clone());
             self.persist_state(&state).await?;
-            Ok(id)
+            Ok(IngressReceipt {
+                session: id,
+                event_cursor: 0,
+            })
+        }
+    }
+
+    /// Wait for the final assistant answer belonging to one submitted turn.
+    /// The transport is cancelled on configuration reload or daemon shutdown.
+    pub(super) async fn wait_for_final(
+        &self,
+        receipt: &IngressReceipt,
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(anyhow!("channel stopped")),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!("service turn timed out"));
+            }
+            let Ok(detail) = self.shared.manager.detail(&receipt.session).await else {
+                continue;
+            };
+            let events = detail.events.get(receipt.event_cursor..).unwrap_or(&[]);
+            let saw_user = events.iter().any(|event| {
+                matches!(
+                    event.event,
+                    SessionEvent::Message {
+                        role: MessageRole::User,
+                        ..
+                    }
+                )
+            });
+            let ready = matches!(
+                detail.summary.state,
+                SessionState::AwaitingInput | SessionState::Done | SessionState::Errored
+            );
+            if saw_user && ready {
+                if let Some(reply) = latest_assistant_reply(events.iter().map(|event| &event.event))
+                {
+                    return Ok(reply);
+                }
+                if detail.summary.state == SessionState::Errored {
+                    return Err(anyhow!("service session errored without a final reply"));
+                }
+            }
         }
     }
 
@@ -302,6 +370,11 @@ impl ServiceIngress {
             })
             .await
     }
+}
+
+pub(super) struct IngressReceipt {
+    pub(super) session: String,
+    event_cursor: usize,
 }
 
 #[derive(Deserialize)]
