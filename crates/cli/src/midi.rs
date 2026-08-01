@@ -2829,13 +2829,16 @@ mod tests {
         });
         config.save(&midi_path).unwrap();
 
-        let _listener_with_config = start_listener();
+        let listener_with_config = start_listener();
         #[cfg(not(target_os = "macos"))]
         {
-            let err = _listener_with_config.unwrap_err().to_string();
+            let Err(err) = listener_with_config else {
+                panic!("expected error when MIDI is configured on non-macOS");
+            };
+            let err_str = err.to_string();
             assert!(
-                err.contains("native MIDI control is currently supported on macOS"),
-                "expected unsupported platform error, got: {err}"
+                err_str.contains("native MIDI control is currently supported on macOS"),
+                "expected unsupported platform error, got: {err_str}"
             );
         }
 
