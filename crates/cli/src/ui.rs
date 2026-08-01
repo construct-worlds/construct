@@ -4070,14 +4070,21 @@ fn stacked_eighths(stacked: &[(u16, u64)], total: u64, filled: usize) -> Vec<(u1
     out
 }
 
-/// How many rows the legend may take. The graph is the point of the panel,
-/// so the legend never grows past a third of it — beyond that the remaining
-/// series are dropped rather than squeezing the bars into nothing.
+/// Rows the bars keep no matter how many series need naming. Three is the
+/// least that still reads as a graph rather than a stripe: a floor and two
+/// rows of relief above it.
+const GRAPH_MIN_ROWS: u16 = 3;
+
+/// How many rows the legend may take: everything above the graph's floor.
+///
+/// The earlier rule capped the legend at a third of the panel, which on a
+/// short panel meant one row — so most series collapsed into a `+N` and
+/// their colors named nothing. Naming a series costs one row; not naming it
+/// makes its band unreadable, which is worse than a shorter graph. The
+/// legend can never want more rows than there are palette slots plus the
+/// collapsed row, so this cannot run away.
 fn legend_max_rows(panel_h: u16) -> usize {
-    match panel_h {
-        0..=2 => 0,
-        h => usize::from(h / 3).clamp(1, 4),
-    }
+    usize::from(panel_h.saturating_sub(GRAPH_MIN_ROWS))
 }
 
 /// One legend entry's rendered text: a dot, the model, and how fast it ran.
@@ -4085,16 +4092,21 @@ fn legend_entry_text(entry: &crate::token_meter::LegendEntry) -> String {
     format!("● {} {} ", entry.label, legend_rate(entry.rate))
 }
 
-/// Format a throughput figure. `None` — the model did no work in the rate
-/// window — renders as `idle` rather than `0/s`, which would claim it was
-/// working slowly instead of not working.
-fn legend_rate(rate: Option<u64>) -> String {
-    match rate {
-        None => "idle".to_string(),
-        // A real but sub-unit rate must not round to `0/s` and read as idle.
-        Some(0) => "<1/s".to_string(),
-        Some(per_sec) => format!("{}/s", crate::lineage::format_token_count(per_sec)),
+/// Format a throughput figure. Three distinct states, because collapsing any
+/// two of them misreports what happened: `idle` (nothing computed — `None`),
+/// `0/s` (computed but produced nothing), and `<1/s` (produced something,
+/// just less than a token per second).
+fn legend_rate(rate: Option<f64>) -> String {
+    let Some(per_sec) = rate else {
+        return "idle".to_string();
+    };
+    if per_sec <= 0.0 {
+        return "0/s".to_string();
     }
+    if per_sec < 1.0 {
+        return "<1/s".to_string();
+    }
+    format!("{}/s", crate::lineage::format_token_count(per_sec as u64))
 }
 
 /// Pack legend entries into rows of `width` columns. Returns the entry
@@ -22663,16 +22675,17 @@ mod tests {
 
     #[test]
     fn legend_rate_formats_throughput() {
-        assert_eq!(legend_rate(Some(100)), "100/s");
-        assert_eq!(legend_rate(Some(6_000)), "6.0k/s");
+        assert_eq!(legend_rate(Some(100.0)), "100/s");
+        assert_eq!(legend_rate(Some(6_000.0)), "6.0k/s");
     }
 
-    /// "Did no work" and "worked slowly" are different claims, and `0/s`
-    /// would make the first look like the second.
+    /// Three states that must not collapse into each other: never worked,
+    /// worked and produced nothing, worked and produced very little.
     #[test]
-    fn legend_rate_separates_idle_from_slow() {
+    fn legend_rate_separates_idle_zero_and_sub_unit() {
         assert_eq!(legend_rate(None), "idle");
-        assert_eq!(legend_rate(Some(0)), "<1/s");
+        assert_eq!(legend_rate(Some(0.0)), "0/s");
+        assert_eq!(legend_rate(Some(0.4)), "<1/s");
     }
 
     /// Every series gets named: a legend too wide for one row wraps instead
@@ -22685,7 +22698,7 @@ mod tests {
                 label: (*label).to_string(),
                 tokens: 1_000,
                 color: ratatui::style::Color::Reset,
-                rate: Some(100),
+                rate: Some(100.0),
             })
             .collect();
         let rows = wrap_legend(&entries, 30, 4);
@@ -22703,7 +22716,7 @@ mod tests {
                 label: format!("model-number-{i}"),
                 tokens: 1_000,
                 color: ratatui::style::Color::Reset,
-                rate: Some(100),
+                rate: Some(100.0),
             })
             .collect();
         let rows = wrap_legend(&entries, 30, 2);
@@ -22711,12 +22724,37 @@ mod tests {
         assert!(rows.iter().map(Vec::len).sum::<usize>() < entries.len());
     }
 
+    /// The legend may take everything above the graph's three-row floor —
+    /// naming a series matters more than a taller graph, and an unnamed
+    /// color is unreadable.
     #[test]
-    fn legend_never_outgrows_a_third_of_the_panel() {
-        assert_eq!(legend_max_rows(2), 0);
-        assert_eq!(legend_max_rows(3), 1);
-        assert_eq!(legend_max_rows(9), 3);
-        assert_eq!(legend_max_rows(60), 4, "capped so the graph keeps the panel");
+    fn legend_takes_every_row_above_the_graph_floor() {
+        assert_eq!(legend_max_rows(3), 0, "graph floor leaves nothing over");
+        assert_eq!(legend_max_rows(2), 0, "…and is never borrowed against");
+        assert_eq!(legend_max_rows(7), 4, "four series named on a short panel");
+        assert_eq!(legend_max_rows(14), 11);
+    }
+
+    /// The graph keeps its floor even when more series want naming than the
+    /// panel can hold — past that point the legend truncates instead.
+    #[test]
+    fn the_graph_floor_wins_over_naming_every_series() {
+        let entries: Vec<crate::token_meter::LegendEntry> = (0..7)
+            .map(|i| crate::token_meter::LegendEntry {
+                label: format!("model-{i}"),
+                tokens: 1_000,
+                color: ratatui::style::Color::Reset,
+                rate: Some(100.0),
+            })
+            .collect();
+        // A 6-row panel leaves 3 rows for the legend; each entry needs its
+        // own row at this width.
+        let rows = wrap_legend(&entries, 14, legend_max_rows(6));
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter().map(Vec::len).sum::<usize>() < entries.len(),
+            "the rest truncate rather than eating the graph: {rows:?}"
+        );
     }
 
     /// A column's segments sum to exactly the column's height — no drift

@@ -54,17 +54,24 @@ const MIN_SCALE: u64 = MIN_SCALE_PER_SEC * BUCKET_SECS;
 /// as the context-breakdown palette so a model's color reads as "a series
 /// color" in the same visual language; kept as its own const because the two
 /// lists are free to diverge.
-const SERIES_PALETTE: [Color; 6] = [
+const SERIES_PALETTE: [Color; 10] = [
     Color::Rgb(250, 179, 135), // orange
     Color::Rgb(137, 180, 250), // blue
     Color::Rgb(249, 226, 175), // yellow
     Color::Rgb(203, 166, 247), // mauve
     Color::Rgb(148, 226, 213), // teal
     Color::Rgb(245, 194, 231), // pink
+    Color::Rgb(166, 227, 161), // green
+    Color::Rgb(243, 139, 168), // red
+    Color::Rgb(137, 220, 235), // sky
+    Color::Rgb(180, 190, 254), // lavender
 ];
 
 /// Every model past the palette's size shares this gray and is reported as
-/// "other" in the legend, rather than reusing a color already spoken for.
+/// one collapsed "other" row, rather than reusing a color already spoken
+/// for. The palette is the real limit on how many series a legend can name:
+/// listing more names than there are distinguishable colors would produce
+/// rows nobody could match to a band.
 const OTHER_COLOR: Color = Color::Rgb(127, 132, 156);
 
 /// Resolution of the sliding window the legend's rates are measured over.
@@ -134,14 +141,16 @@ impl Bucket {
 
 /// One legend row: a model, its color, and what it consumed over the
 /// currently visible history.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LegendEntry {
     pub label: String,
     pub tokens: u64,
     pub color: Color,
     /// Tokens per second of compute over the last minute, or `None` when
-    /// this model did no work in that window.
-    pub rate: Option<u64>,
+    /// this model did no work in that window. Fractional so a formatter can
+    /// tell "computed and produced nothing" from "produced less than a token
+    /// a second" — integer division collapses those into the same 0.
+    pub rate: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -301,13 +310,11 @@ impl TokenMeter {
     ///
     /// `None` when nothing on that model computed in the window — a model
     /// that did no work has no throughput, and reporting `0/s` for it would
-    /// claim it was working slowly rather than not at all.
-    pub fn recent_rate(&self, model: u16) -> Option<u64> {
+    /// claim it was working slowly rather than not at all. A model that
+    /// computed and produced nothing does report `0`.
+    pub fn recent_rate(&self, model: u16) -> Option<f64> {
         let (tokens, busy_ms) = self.recent_totals(model);
-        if busy_ms == 0 {
-            return None;
-        }
-        Some(tokens.saturating_mul(1_000) / busy_ms)
+        (busy_ms > 0).then(|| tokens as f64 * 1_000.0 / busy_ms as f64)
     }
 
     /// Fleet throughput over the rate window: the sum of the per-model
@@ -323,12 +330,12 @@ impl TokenMeter {
     /// The sum reads as "what the fleet produces per second with everything
     /// running at once". Models that did no work contribute nothing, and a
     /// fleet where none did has no rate at all rather than zero.
-    pub fn recent_fleet_rate(&self) -> Option<u64> {
-        let mut total = 0u64;
+    pub fn recent_fleet_rate(&self) -> Option<f64> {
+        let mut total = 0.0f64;
         let mut any = false;
         for idx in 0..self.models.len() {
             if let Some(rate) = self.recent_rate(idx as u16) {
-                total = total.saturating_add(rate);
+                total += rate;
                 any = true;
             }
         }
@@ -474,11 +481,11 @@ impl TokenMeter {
             // Summed, not pooled, for the same reason as the fleet figure:
             // this row stands in for several models, and the column has to
             // add up.
-            let mut other_rate = 0u64;
+            let mut other_rate = 0.0f64;
             let mut other_any = false;
             for idx in SERIES_PALETTE.len()..totals.len() {
                 if let Some(rate) = self.recent_rate(idx as u16) {
-                    other_rate = other_rate.saturating_add(rate);
+                    other_rate += rate;
                     other_any = true;
                 }
             }
@@ -631,7 +638,7 @@ mod tests {
         let mut m = TokenMeter::new(t0);
         m.observe(Some("opus"), 60_000, t0);
         m.observe_busy(Some("opus"), 20_000, t0);
-        assert_eq!(m.recent_rate(0), Some(3_000));
+        assert_eq!(m.recent_rate(0), Some(3_000.0));
     }
 
     /// A model that did no work has no throughput. Reporting `0/s` would
@@ -662,7 +669,7 @@ mod tests {
         m.observe(Some("opus"), 30_000, t0);
         m.observe_busy(Some("opus"), 10_000, t0);
         m.advance_to(t0 + Duration::from_secs(30));
-        assert_eq!(m.recent_rate(0), Some(3_000), "still inside the window");
+        assert_eq!(m.recent_rate(0), Some(3_000.0), "still inside the window");
     }
 
     /// The fleet figure is the sum of the rates shown above it, so the
@@ -677,9 +684,9 @@ mod tests {
         m.observe_busy(Some("a"), 10_000, t0);
         m.observe(Some("b"), 10_000, t0);
         m.observe_busy(Some("b"), 10_000, t0);
-        assert_eq!(m.recent_rate(0), Some(2_000));
-        assert_eq!(m.recent_rate(1), Some(1_000));
-        assert_eq!(m.recent_fleet_rate(), Some(3_000));
+        assert_eq!(m.recent_rate(0), Some(2_000.0));
+        assert_eq!(m.recent_rate(1), Some(1_000.0));
+        assert_eq!(m.recent_fleet_rate(), Some(3_000.0));
     }
 
     /// A fleet where nothing computed has no throughput to state, the same

@@ -1,7 +1,7 @@
 # 0019-operator-widgets-use-matrix-rain-viewport
 
 Status: accepted
-Date: 2026-06-05 (amended 2026-07-31)
+Date: 2026-06-05 (amended 2026-08-01)
 Area: tui
 Scope: Defines the ambient panel's selectable body modes and how the collapsed Operator communicates through it.
 
@@ -9,7 +9,11 @@ Scope: Defines the ambient panel's selectable body modes and how the collapsed O
 
 The ambient panel's body is one of a small set of **named built-in modes** —
 the Matrix rain animation and the fleet token meter (spec 0167) — selected by
-the user and remembered across launches. Everything below applies to whichever
+the user and remembered across launches. A client with no recorded choice
+opens on the token meter: it answers a question the user has, where the
+animation is ambience. An absent setting means "never asked", which covers a
+fresh install and an upgrade from before the panel had modes alike; anyone
+who has actually picked a mode keeps it. Everything below applies to whichever
 mode is selected: the Operator widget viewport is a transient overlay on top
 of the body, not a mode of its own.
 
