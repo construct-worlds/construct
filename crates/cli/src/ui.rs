@@ -2719,6 +2719,12 @@ impl FleetStatusBuckets {
 /// Idle sessions are deliberately untallied. `AwaitingInput` is the fleet's
 /// resting state, so counting it would put the largest and least actionable
 /// number in the title (spec 0169).
+///
+/// Harness-native subagent mirrors (`native_subagent` set) are also
+/// excluded: they are read-only projections of work the parent harness
+/// owns (spec 0079), and counting them inflates the title with rows the
+/// operator cannot act on as first-class sessions. Construct-owned
+/// subagents and forked sessions remain tallied.
 pub(crate) fn fleet_status_buckets(items: &[AppListItem]) -> FleetStatusBuckets {
     let mut buckets = FleetStatusBuckets::default();
     for item in items {
@@ -2732,6 +2738,14 @@ pub(crate) fn fleet_status_buckets(items: &[AppListItem]) -> FleetStatusBuckets 
                 // expanded archive drawer renders them, but counting them
                 // would make the tally jump on a disclosure toggle.
                 if summary.archived {
+                    continue;
+                }
+                // Harness-native mirrors are list rows the operator can
+                // inspect, but not sessions Construct owns — keep them
+                // out of the title scan so a busy Claude/Codex child tree
+                // does not drown out the fleet's own working/wants-you
+                // signal. Construct subagents and forks keep counting.
+                if summary.native_subagent.is_some() {
                     continue;
                 }
                 let row = FleetPanelRow {
@@ -24168,7 +24182,8 @@ mod tests {
     /// numbers disagree with the list directly beneath them. The orchestrator
     /// and daemon-internal probes never reach this function at all: they are
     /// already gone from `list_items()`. Archived rows can reach it, via an
-    /// expanded archive drawer, and are the one deliberate exclusion.
+    /// expanded archive drawer, and are a deliberate exclusion; harness-
+    /// native mirrors are the other.
     #[test]
     fn fleet_counts_skip_archived() {
         let mut archived = clip_test_session("archived", None, "claude", SessionState::Running);
@@ -24187,6 +24202,82 @@ mod tests {
         assert_eq!(buckets.bucket(FleetTally::Working).len(), 1);
         assert_eq!(buckets.bucket(FleetTally::NeedsYou).len(), 0);
         assert_eq!(buckets.bucket(FleetTally::Errored).len(), 0);
+    }
+
+    /// Harness-native mirrors paint as list rows but are read-only
+    /// projections the operator cannot drive (spec 0079). Counting them
+    /// would let a busy Claude/Codex child tree drown the fleet signal.
+    /// Construct-owned subagents and forks remain tallied.
+    #[test]
+    fn fleet_counts_skip_native_subagents_but_keep_construct_children() {
+        let mut native = clip_test_session("native", Some("task"), "claude", SessionState::Running);
+        native.kind = construct_protocol::SessionKind::Subagent;
+        native.parent_session_id = Some("parent".into());
+        native.native_subagent = Some(construct_protocol::NativeSubagentRef {
+            owner_session_id: "parent".into(),
+            native_id: "child-1".into(),
+            projected_seq: 0,
+        });
+
+        let mut construct_sub =
+            clip_test_session("sub", Some("smith-sub"), "smith", SessionState::Running);
+        construct_sub.kind = construct_protocol::SessionKind::Subagent;
+        construct_sub.parent_session_id = Some("parent".into());
+
+        let mut fork = clip_test_session("fork", Some("branch"), "claude", SessionState::Running);
+        fork.forked_from = Some(construct_protocol::ForkedFrom {
+            session_id: "parent".into(),
+            transcript_seq: 1,
+            at_ms: 1_000,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+            parent_tokens: Default::default(),
+            is_reset_snapshot: false,
+        });
+
+        let mut flagged_native =
+            clip_test_session("native-ask", Some("ask"), "claude", SessionState::AwaitingInput);
+        flagged_native.kind = construct_protocol::SessionKind::Subagent;
+        flagged_native.parent_session_id = Some("parent".into());
+        flagged_native.needs_attention = true;
+        flagged_native.native_subagent = Some(construct_protocol::NativeSubagentRef {
+            owner_session_id: "parent".into(),
+            native_id: "child-2".into(),
+            projected_seq: 0,
+        });
+
+        let items = vec![
+            tally_row(clip_test_session(
+                "parent",
+                Some("Parent"),
+                "claude",
+                SessionState::Running,
+            )),
+            tally_row(native),
+            tally_row(construct_sub),
+            tally_row(fork),
+            tally_row(flagged_native),
+        ];
+
+        let buckets = fleet_status_buckets(&items);
+        let working: Vec<_> = buckets
+            .bucket(FleetTally::Working)
+            .iter()
+            .map(|r| match &r.target {
+                FleetPanelTarget::Session(id) => id.as_str(),
+                FleetPanelTarget::Group(_) => panic!("expected session targets"),
+            })
+            .collect();
+        assert_eq!(
+            working,
+            vec!["parent", "sub", "fork"],
+            "native mirrors must drop out; parent, Construct subagent, and fork stay"
+        );
+        assert!(
+            buckets.bucket(FleetTally::NeedsYou).is_empty(),
+            "a native-only attention mark must not enter the wants-you tally on its own row"
+        );
+        assert!(buckets.bucket(FleetTally::Errored).is_empty());
     }
 
     /// "Wants you" is the sticky attention marker, not `AwaitingInput`. An

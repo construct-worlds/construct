@@ -66,9 +66,11 @@ The tally obeys four rules:
   for hidden descendants — a collapsed subtree or group surfacing one
   rolled-up marker — counts exactly once, as itself. The tally can then
   never disagree with the marks beneath it, and every entry it counts is a
-  row the operator can be taken to. Archived rows are the one deliberate
-  exclusion: they are counted out even while the archive drawer is open, so
-  the tally does not flicker on a disclosure toggle.
+  row the operator can be taken to. Two deliberate exclusions apply even
+  when the row is painted: archived rows (so the tally does not flicker on
+  a disclosure toggle), and harness-native subagent mirrors (sessions with
+  native provenance — read-only projections of work the parent harness
+  owns). Construct-owned subagents and forked sessions stay in the tally.
 - **Buckets are disjoint and ranked.** Every counted session lands in
   exactly one bucket, most specific reading first: errored, then wants-you,
   then working. A crash the operator hasn't seen is counted once, as a
@@ -186,6 +188,12 @@ failure, which keeps its own glyph.
   The two counts render with the same mark, told apart by hue and by the
   words their panels carry; three of the rows below carry that same mark
   individually, and the title's count of them is the total.
+- Under one of those four running agents, Claude has spun up two native
+  child tasks that also look busy, and a Construct-owned subagent is mid-
+  turn as well. The title still reports four working from the top-level
+  agents plus one for the Construct subagent — five — and does not add the
+  two native mirrors. Expand the parent and the native rows still paint
+  beneath it; they just do not join the title scan.
 - Only one of those three flagged rows is on screen; the pane is too short
   for the rest. The operator opens the wants-you entry, reads the three
   names, and picks the second. The list scrolls until that row is visible
