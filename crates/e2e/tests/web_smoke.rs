@@ -2671,6 +2671,8 @@ async fn web_client_loads_and_websocket_connects() {
         .expect("json object");
     assert_eq!(status_icons["sp"]["icon"], "○");
     assert_eq!(status_icons["sr"]["icon"], "●");
+    // Same dot as running, matching the TUI: at-a-prompt is idle, not
+    // blocked on the operator (spec 0169).
     assert_eq!(status_icons["sa"]["icon"], "●");
     assert_eq!(status_icons["sz"]["icon"], "⏸");
     assert_eq!(status_icons["sd"]["icon"], "✓");

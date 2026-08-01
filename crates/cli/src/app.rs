@@ -3932,6 +3932,10 @@ pub struct LayoutSnapshot {
     /// frames leave it unset because the theme switcher lives in the
     /// minibuffer shortcut hints.
     pub matrix_theme_hit: Option<(u16, u16, u16)>,
+    /// Session-list title fleet-tally bounds: `(x_start, x_end, y, tooltip)`.
+    /// One entry per rendered tally, so hovering a count can spell it out in
+    /// words (spec 0169). Empty when the tallies don't fit or all read zero.
+    pub list_title_tally_hits: Vec<(u16, u16, u16, String)>,
     /// Matrix-rain title-bar widget viewport affordances for the operator session.
     pub matrix_widget_hits: Vec<MatrixWidgetHit>,
     /// Dynamic UI title-bar affordance bounds: `(x_start, x_end, y, session_id)`.
@@ -4178,6 +4182,7 @@ impl LayoutSnapshot {
             matrix_panel_mode_hit,
             matrix_token_graph_area,
             matrix_theme_hit,
+            list_title_tally_hits,
             matrix_widget_hits,
             dynamic_ui_trigger,
             dynamic_ui_triggers,
@@ -4285,6 +4290,7 @@ impl LayoutSnapshot {
         shift.retain_rows(dynamic_ui_widget_hits, |hit| &mut hit.row);
         shift.retain_rows(dynamic_ui_panel_close_hits, |hit| &mut hit.row);
         shift.retain_rows(matrix_widget_hits, |hit| &mut hit.row);
+        shift.retain_rows(list_title_tally_hits, |hit| &mut hit.2);
         shift.retain_rows(program_clip_hits, |hit| &mut hit.row);
         shift.retain_rows(program_attachment_hits, |hit| &mut hit.row);
         shift.retain_rows(program_action_link_hits, |hit| &mut hit.row);
@@ -15439,6 +15445,7 @@ mod tests {
             matrix_token_graph_area: None,
             matrix_operator_title_hit: None,
             matrix_theme_hit: None,
+            list_title_tally_hits: Vec::new(),
             matrix_widget_hits: Vec::new(),
             dynamic_ui_trigger: None,
             dynamic_ui_triggers: Vec::new(),
@@ -23342,6 +23349,69 @@ mod tests {
                 .add_modifier
                 .contains(ratatui::style::Modifier::CROSSED_OUT),
             "a known-but-errored session is not struck through, only recolored"
+        );
+        server.abort();
+    }
+
+    /// The tally's hover geometry is computed by hand from the title's span
+    /// widths, so it can silently drift off the glyphs it labels. Render for
+    /// real, take the registered hit zone, and hover it: the tooltip is the
+    /// only place the tally's vocabulary is written out, and a hit zone that
+    /// misses means the glyphs are never explained.
+    #[tokio::test]
+    async fn fleet_tally_hover_names_the_bucket_it_sits_on() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut working = summary_with_kind(construct_protocol::SessionKind::User);
+        working.id = "run".into();
+        working.state = construct_protocol::SessionState::Running;
+        let mut flagged = summary_with_kind(construct_protocol::SessionKind::User);
+        flagged.id = "ask".into();
+        flagged.state = construct_protocol::SessionState::AwaitingInput;
+        flagged.needs_attention = true;
+        let mut broken = summary_with_kind(construct_protocol::SessionKind::User);
+        broken.id = "bad".into();
+        broken.state = construct_protocol::SessionState::Errored;
+        app.sessions = vec![working, flagged, broken];
+        app.selection = Selection::Session("run".into());
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("list should render");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            text.contains("1● 1! 1✗"),
+            "one session per bucket should tally as `1● 1! 1✗`: {text}"
+        );
+
+        let hits = app.layout.list_title_tally_hits.clone();
+        assert_eq!(hits.len(), 3, "one hit zone per rendered tally: {hits:?}");
+        // The middle tally is "wants you" — the one whose meaning is least
+        // guessable from its glyph, so it is the one worth pinning down.
+        let (xs, xe, y, ref label) = hits[1];
+        assert_eq!(label, " 1 session needs you ");
+        for x in xs..xe {
+            let cell = term
+                .backend()
+                .buffer()
+                .cell((x, y))
+                .expect("cell inside the hit zone")
+                .symbol()
+                .to_string();
+            assert!(
+                cell == "1" || cell == "!",
+                "the wants-you hit zone must cover its own count and glyph, \
+                 found {cell:?} at x={x}"
+            );
+        }
+
+        app.mouse_pos = Some((xs, y));
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover tooltip should render");
+        let hovered = rendered_text(term.backend().buffer());
+        assert!(
+            hovered.contains("1 session needs you"),
+            "hovering the wants-you tally should name it in words: {hovered}"
         );
         server.abort();
     }

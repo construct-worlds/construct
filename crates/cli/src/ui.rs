@@ -1052,6 +1052,14 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
             return;
         }
     }
+    // Fleet tallies on the list title. The glyphs are compact by design, so
+    // hovering is what names them (spec 0169).
+    for (xs, xe, y, label) in &app.layout.list_title_tally_hits {
+        if my == *y && mx >= *xs && mx < *xe {
+            render_button_tooltip(f, &app.theme, label, *xs, y.saturating_add(2));
+            return;
+        }
+    }
     // Note: widget title squares no longer show a tooltip — hovering a square
     // reveals the widget itself (see `render_session_widget_title` /
     // `render_matrix_rain_header`).
@@ -2649,6 +2657,106 @@ fn format_age_ms(ms: u64) -> String {
     }
 }
 
+/// One bucket of the session list's fleet tally.
+///
+/// Deliberately not a run state. "Wants the operator" is the sticky
+/// attention marker (spec 0054), not `AwaitingInput` — a session sitting at
+/// a prompt is usually just idle, and tallying idle sessions as if they
+/// were blocked would cry wolf on the whole fleet (spec 0169).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FleetTally {
+    Working,
+    NeedsYou,
+    Errored,
+}
+
+impl FleetTally {
+    /// Distinct glyphs, so the tally survives a monochrome terminal: two
+    /// counts separated only by hue would be unreadable side by side.
+    fn glyph(self) -> &'static str {
+        match self {
+            FleetTally::Working => SessionState::Running.glyph(),
+            FleetTally::NeedsYou => "!",
+            FleetTally::Errored => SessionState::Errored.glyph(),
+        }
+    }
+
+    fn color(self, theme: &Theme) -> Color {
+        match self {
+            FleetTally::Working => theme.success,
+            // The same blue as the per-row attention marker, so the count
+            // and the dots it counts read as one signal.
+            FleetTally::NeedsYou => theme.info,
+            FleetTally::Errored => theme.danger,
+        }
+    }
+
+    /// Hover text. The glyphs are compact by design, so the tooltip is
+    /// where the vocabulary is actually spelled out.
+    fn tooltip(self, n: usize) -> String {
+        let plural = if n == 1 { "session" } else { "sessions" };
+        match self {
+            FleetTally::Working => format!(" {n} {plural} working "),
+            FleetTally::NeedsYou if n == 1 => " 1 session needs you ".to_string(),
+            FleetTally::NeedsYou => format!(" {n} sessions need you "),
+            FleetTally::Errored => format!(" {n} {plural} errored "),
+        }
+    }
+}
+
+/// Fleet tallies summarizing the session rows, in the order they render
+/// beside the list title.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct FleetStatusCounts {
+    working: usize,
+    needs_you: usize,
+    errored: usize,
+}
+
+impl FleetStatusCounts {
+    fn entries(self) -> [(FleetTally, usize); 3] {
+        [
+            (FleetTally::Working, self.working),
+            (FleetTally::NeedsYou, self.needs_you),
+            (FleetTally::Errored, self.errored),
+        ]
+    }
+}
+
+/// Tally the fleet for the session list's title.
+///
+/// Counts exactly what the list shows: archived sessions are folded away
+/// behind their own row, and the orchestrator is not a fleet member at all
+/// (it's the minibuffer), so neither belongs in a summary of the rows.
+///
+/// Buckets are disjoint and ranked — errored, then wants-you, then working
+/// — so the numbers read as parts of one whole rather than as overlapping
+/// filters. A crashed session the operator hasn't seen is counted once, as
+/// errored: it is the more specific and more urgent reading.
+///
+/// Idle sessions are deliberately untallied. `AwaitingInput` is the fleet's
+/// resting state, so counting it would put the largest and least actionable
+/// number in the title (spec 0169).
+fn fleet_status_counts<'a>(
+    sessions: impl IntoIterator<Item = &'a SessionSummary>,
+    orchestrator_id: Option<&str>,
+) -> FleetStatusCounts {
+    let mut counts = FleetStatusCounts::default();
+    for s in sessions {
+        if s.archived || Some(s.id.as_str()) == orchestrator_id {
+            continue;
+        }
+        if s.state == SessionState::Errored {
+            counts.errored += 1;
+        } else if s.needs_attention {
+            counts.needs_you += 1;
+        } else if s.state == SessionState::Running {
+            counts.working += 1;
+        }
+    }
+    counts
+}
+
 fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     // Tutorial pane highlight (spec 0077, step 4 "get around"): reuses
     // `pane_border_style`'s focused styling as the highlight rather than
@@ -2685,12 +2793,68 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     let plus_style = Style::default()
         .fg(app.theme.accent)
         .add_modifier(Modifier::BOLD);
-    let title_line = Line::from(vec![
+    let mode_range = list_mode_button_range(area, app.list_mode);
+    // Fleet tallies trail the title: how many sessions are working, how many
+    // want the operator, how many broke — answerable without reading the
+    // rows, and still true when the list is scrolled or the fleet is longer
+    // than the pane. Empty buckets render nothing so a calm fleet stays
+    // quiet, and hovering a tally spells it out in words (spec 0169).
+    const LIST_TITLE_BASE_W: u16 = 12; // " + sessions "
+    let mut title_spans = vec![
         Span::raw(" "),
         Span::styled("+", plus_style),
         Span::raw(" sessions "),
-    ]);
-    let mode_range = list_mode_button_range(area, app.list_mode);
+    ];
+    app.layout.list_title_tally_hits.clear();
+    let tallies: Vec<(FleetTally, usize)> =
+        fleet_status_counts(&app.sessions, app.orchestrator_id.as_deref())
+            .entries()
+            .into_iter()
+            .filter(|(_, n)| *n > 0)
+            .collect();
+    let tally_texts: Vec<String> = tallies
+        .iter()
+        .map(|(kind, n)| format!("{n}{} ", kind.glyph()))
+        .collect();
+    let tally_w: u16 = tally_texts
+        .iter()
+        .map(|t| UnicodeWidthStr::width(t.as_str()) as u16)
+        .sum();
+    // The mode toggle and `«` are right-aligned from a separate title, so an
+    // overlong left title would silently render underneath them. Drop the
+    // tallies rather than collide with a control.
+    let title_right_limit = mode_range
+        .map(|(xs, _, _)| xs)
+        .or_else(|| list_collapse_button_range(area).map(|(xs, _, _)| xs))
+        .unwrap_or_else(|| area.x.saturating_add(area.width));
+    if area
+        .x
+        .saturating_add(LIST_TITLE_BASE_W)
+        .saturating_add(tally_w)
+        < title_right_limit
+    {
+        // The title paints from the first cell inside the left border, so
+        // that's where the hover geometry has to start counting from.
+        let mut cursor = area.x.saturating_add(1).saturating_add(LIST_TITLE_BASE_W);
+        for ((kind, n), text) in tallies.iter().zip(tally_texts) {
+            let w = UnicodeWidthStr::width(text.as_str()) as u16;
+            // The hit zone covers the count and glyph but not the trailing
+            // separator space, so the tooltip doesn't flicker on between
+            // two adjacent tallies.
+            app.layout.list_title_tally_hits.push((
+                cursor,
+                cursor.saturating_add(w.saturating_sub(1)),
+                area.y,
+                kind.tooltip(*n),
+            ));
+            title_spans.push(Span::styled(
+                text,
+                Style::default().fg(kind.color(&app.theme)),
+            ));
+            cursor = cursor.saturating_add(w);
+        }
+    }
+    let title_line = Line::from(title_spans);
     let mode_hovered = match (app.mouse_pos, mode_range) {
         (Some((mx, my)), Some((xs, xe, y))) => my == y && mx >= xs && mx < xe,
         _ => false,
@@ -13503,6 +13667,9 @@ fn state_style(theme: &Theme, state: SessionState) -> Style {
     match state {
         SessionState::Pending => Style::default().fg(theme.muted),
         SessionState::Running => Style::default().fg(theme.success),
+        // Same green as `Running` on purpose — see `SessionState::glyph`.
+        // A session at a prompt is idle, not blocked; the trailing
+        // attention marker says when one actually wants the operator.
         SessionState::AwaitingInput => Style::default().fg(theme.success),
         SessionState::Paused => Style::default().fg(theme.warning),
         SessionState::Done => Style::default().fg(theme.info),
@@ -23139,6 +23306,96 @@ mod tests {
             forked_from: None,
             merge: None,
         }
+    }
+
+    /// The title tallies summarize the rows the operator can actually see,
+    /// so anything the list hides must not be counted — otherwise the
+    /// numbers disagree with the list directly beneath them.
+    #[test]
+    fn fleet_counts_skip_archived_and_the_orchestrator() {
+        let mut archived = clip_test_session("archived", None, "claude", SessionState::Running);
+        archived.archived = true;
+        let sessions = vec![
+            clip_test_session("a", None, "claude", SessionState::Running),
+            archived,
+            clip_test_session("orch", None, "smith", SessionState::Running),
+        ];
+
+        let counts = fleet_status_counts(&sessions, Some("orch"));
+        assert_eq!(counts.working, 1);
+        assert_eq!(counts.needs_you, 0);
+        assert_eq!(counts.errored, 0);
+    }
+
+    /// "Wants you" is the sticky attention marker, not `AwaitingInput`. An
+    /// idle session the operator has already seen is not waiting on anyone,
+    /// and counting the fleet's resting state would make the tally useless.
+    #[test]
+    fn fleet_counts_read_attention_not_awaiting_input() {
+        let mut flagged = clip_test_session("flagged", None, "claude", SessionState::AwaitingInput);
+        flagged.needs_attention = true;
+        let sessions = vec![
+            flagged,
+            // Same state, already seen — idle, not waiting.
+            clip_test_session("seen", None, "claude", SessionState::AwaitingInput),
+            clip_test_session("seen2", None, "codex", SessionState::AwaitingInput),
+        ];
+
+        let counts = fleet_status_counts(&sessions, None);
+        assert_eq!(counts.needs_you, 1);
+        assert_eq!(counts.working, 0);
+    }
+
+    /// Buckets are disjoint so the tallies read as parts of one whole. A
+    /// crash the operator hasn't seen is counted once, as errored — the more
+    /// specific and more urgent of the two readings.
+    #[test]
+    fn fleet_counts_bucket_each_session_once() {
+        let mut errored = clip_test_session("bad", None, "codex", SessionState::Errored);
+        errored.needs_attention = true;
+        let mut flagged = clip_test_session("ask", None, "claude", SessionState::AwaitingInput);
+        flagged.needs_attention = true;
+        let sessions = vec![
+            clip_test_session("run", None, "claude", SessionState::Running),
+            flagged,
+            errored,
+            clip_test_session("done", None, "codex", SessionState::Done),
+            clip_test_session("idle", None, "smith", SessionState::Paused),
+        ];
+
+        let counts = fleet_status_counts(&sessions, None);
+        assert_eq!(counts.working, 1);
+        assert_eq!(counts.needs_you, 1);
+        assert_eq!(counts.errored, 1);
+        // Five sessions in, three tallied: idle and finished sessions are
+        // deliberately untallied, so the tally is a scan list, not a census.
+        let shown: usize = counts.entries().iter().map(|(_, n)| n).sum();
+        assert_eq!(shown, 3);
+    }
+
+    /// The tally is glyph-first: two counts distinguished only by color
+    /// would be unreadable side by side on a monochrome terminal.
+    #[test]
+    fn fleet_tally_glyphs_are_distinct() {
+        let glyphs: Vec<&str> = FleetStatusCounts::default()
+            .entries()
+            .iter()
+            .map(|(kind, _)| kind.glyph())
+            .collect();
+        let mut sorted = glyphs.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), glyphs.len(), "tally glyphs collide: {glyphs:?}");
+    }
+
+    /// Singular attention reads as a sentence, not as a template with a
+    /// stray plural — this string is the only place the tally is spelled out.
+    #[test]
+    fn fleet_tally_tooltips_read_naturally() {
+        assert_eq!(FleetTally::NeedsYou.tooltip(1), " 1 session needs you ");
+        assert_eq!(FleetTally::NeedsYou.tooltip(3), " 3 sessions need you ");
+        assert_eq!(FleetTally::Working.tooltip(1), " 1 session working ");
+        assert_eq!(FleetTally::Errored.tooltip(2), " 2 sessions errored ");
     }
 
     #[test]

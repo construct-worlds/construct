@@ -4727,6 +4727,9 @@ function sessionStatusGlyph(s, now = Date.now()) {
   switch (status) {
     case "pending": return "○";
     case "running": return "●";
+    // Same dot as running on purpose: "at a prompt" is usually just idle,
+    // not blocked on the operator. The attention marker carries "wants
+    // you" (spec 0169).
     case "awaiting_input": return "●";
     case "paused": return "⏸";
     case "done": return "✓";
