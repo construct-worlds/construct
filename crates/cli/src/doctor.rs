@@ -11,15 +11,22 @@ use std::path::Path;
 
 use anyhow::Result;
 use construct_client::Client;
+#[cfg(test)]
+use construct_daemon::doctor::Section;
 use construct_daemon::doctor::{
     DaemonFeature, DaemonFeatures, DaemonHarness, DaemonProbe, DoctorInput, Finding, Report,
+    Severity,
 };
-#[cfg(test)]
-use construct_daemon::doctor::{Section, Severity};
 
+use crate::ansi::{ColorChoice, Palette};
 use crate::BUILD_ID;
 
-pub async fn run(socket: &Path, socket_overridden: bool, json: bool) -> Result<()> {
+pub async fn run(
+    socket: &Path,
+    socket_overridden: bool,
+    json: bool,
+    color: ColorChoice,
+) -> Result<()> {
     let daemon = probe_daemon(socket).await;
 
     let report = construct_daemon::doctor::run(DoctorInput {
@@ -33,9 +40,11 @@ pub async fn run(socket: &Path, socket_overridden: bool, json: bool) -> Result<(
     .await;
 
     if json {
+        // Machine output is never styled: escape codes would land inside
+        // whatever parses this.
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        print!("{}", render(&report));
+        print!("{}", render(&report, color.resolve()));
     }
 
     if report.has_errors() {
@@ -121,10 +130,28 @@ const STATUS_WIDTH: usize = 9;
 const LABEL_MIN: usize = 14;
 const LABEL_MAX: usize = 28;
 
-/// Pure: the whole report as text. No terminal, no I/O — the TUI's colour
-/// helpers are ratatui-only and unusable from a plain subcommand, so this
-/// is deliberately ASCII and pipe-friendly.
-pub fn render(report: &Report) -> String {
+/// Paint a severity's status token. Colors are the basic ANSI 16 so the
+/// user's terminal profile owns the hues — see [`crate::ansi`].
+fn paint_severity(p: Palette, sev: Severity, text: &str) -> String {
+    match sev {
+        Severity::Ok => p.green(text),
+        // Info is context, not a call to action: it must not compete with
+        // the warn and error rows for attention.
+        Severity::Info => p.dim(text),
+        Severity::Warn => p.yellow(text),
+        Severity::Error => p.red(text),
+    }
+}
+
+/// Pure: the whole report as text. No terminal, no I/O — the palette is
+/// resolved by the caller and passed in, so tests render both styled and
+/// plain without touching the environment.
+///
+/// Styling is strictly additive: [`Palette::PLAIN`] reproduces the original
+/// ASCII output byte for byte, and stripping SGR codes from a styled render
+/// yields exactly that. Column math therefore always runs on the unstyled
+/// text, and escape codes are wrapped around already-padded tokens.
+pub fn render(report: &Report, palette: Palette) -> String {
     let label_width = report
         .sections
         .iter()
@@ -134,56 +161,83 @@ pub fn render(report: &Report) -> String {
         .unwrap_or(LABEL_MIN)
         .clamp(LABEL_MIN, LABEL_MAX);
 
-    let mut out = String::from("construct doctor\n");
+    let mut out = palette.bold("construct doctor");
+    out.push('\n');
 
     for section in &report.sections {
         out.push('\n');
-        out.push_str(&section.title);
+        out.push_str(&palette.bold(&section.title));
         out.push('\n');
         if section.findings.is_empty() {
-            out.push_str("  (no checks)\n");
+            out.push_str(&format!("  {}\n", palette.dim("(no checks)")));
             continue;
         }
         for finding in &section.findings {
-            out.push_str(&render_finding(finding, label_width));
+            out.push_str(&render_finding(finding, label_width, palette));
         }
     }
 
     out.push('\n');
-    out.push_str(&summary_line(report));
+    out.push_str(&summary_line(report, palette));
     out.push('\n');
     out
 }
 
-fn render_finding(finding: &Finding, label_width: usize) -> String {
+fn render_finding(finding: &Finding, label_width: usize, palette: Palette) -> String {
+    // Pad first, colorize second. Escape bytes are invisible but they are
+    // still bytes: `{status:<WIDTH$}` on a styled token would count them
+    // toward the width and shear the column.
     let status = format!("[{}]", finding.severity.as_str());
+    let status_pad = " ".repeat(STATUS_WIDTH.saturating_sub(status.chars().count()));
+    let label_pad = " ".repeat(label_width.saturating_sub(finding.label.chars().count()));
+
     let mut out = format!(
-        "  {status:<STATUS_WIDTH$}{:<label_width$}  {}\n",
-        finding.label, finding.detail
+        "  {}{status_pad}{}{label_pad}  {}\n",
+        paint_severity(palette, finding.severity, &status),
+        finding.label,
+        finding.detail
     );
 
     // Continuation lines align under the detail column.
     let indent = " ".repeat(2 + STATUS_WIDTH + label_width + 2);
     for note in &finding.notes {
-        out.push_str(&format!("{indent}{note}\n"));
+        out.push_str(&format!("{indent}{}\n", palette.dim(note)));
     }
     if let Some(fix) = &finding.fix {
-        out.push_str(&format!("{indent}fix: {fix}\n"));
+        // Only the marker is colored — the command stays in the default
+        // foreground so a copy-paste selection reads as ordinary text.
+        out.push_str(&format!("{indent}{} {fix}\n", palette.cyan("fix:")));
     }
     out
 }
 
-fn summary_line(report: &Report) -> String {
+fn summary_line(report: &Report, p: Palette) -> String {
     let s = &report.summary;
+    // A zero count is not news; dim it so the eye lands on what is nonzero.
+    let count = |n: usize, word: &str, sev: Severity| {
+        let text = format!("{n} {word}");
+        if n == 0 {
+            p.dim(&text)
+        } else {
+            paint_severity(p, sev, &text)
+        }
+    };
     let counts = format!(
-        "{} ok, {} info, {} warn, {} error",
-        s.ok, s.info, s.warn, s.error
+        "{}, {}, {}, {}",
+        count(s.ok, "ok", Severity::Ok),
+        count(s.info, "info", Severity::Info),
+        count(s.warn, "warn", Severity::Warn),
+        count(s.error, "error", Severity::Error),
     );
     if s.error == 0 {
-        format!("{counts} — construct looks healthy.")
+        format!("{counts} — {}", p.green("construct looks healthy."))
     } else {
         let noun = if s.error == 1 { "problem" } else { "problems" };
-        format!("{counts} — {} {noun} will prevent construct from working. Fix the [error] lines above.", s.error)
+        let verdict = format!(
+            "{} {noun} will prevent construct from working. Fix the [error] lines above.",
+            s.error
+        );
+        format!("{counts} — {}", p.red(&verdict))
     }
 }
 
@@ -243,7 +297,7 @@ mod tests {
                 finding("short", Severity::Ok, "detail"),
             ],
         )]);
-        let out = render(&r);
+        let out = render(&r, Palette::PLAIN);
 
         // The long label is not truncated, but the column stops growing —
         // the short row's detail sits at LABEL_MAX, not at 60.
@@ -261,7 +315,7 @@ mod tests {
         f.notes = vec!["1. /usr/local/bin/construct".into()];
         f.fix = Some("rm '/opt/homebrew/bin/construct'".into());
         let r = report(vec![section("environment", vec![f])]);
-        let out = render(&r);
+        let out = render(&r, Palette::PLAIN);
 
         let note = out
             .lines()
@@ -286,7 +340,7 @@ mod tests {
     #[test]
     fn an_empty_section_says_so_rather_than_vanishing() {
         let r = report(vec![section("logins", vec![])]);
-        assert!(render(&r).contains("(no checks)"));
+        assert!(render(&r, Palette::PLAIN).contains("(no checks)"));
     }
 
     #[test]
@@ -295,7 +349,7 @@ mod tests {
             "s",
             vec![finding("version", Severity::Ok, "0.16.7")],
         )]);
-        let out = render(&r);
+        let out = render(&r, Palette::PLAIN);
         assert!(
             out.trim_end().ends_with("construct looks healthy."),
             "{out}"
@@ -313,16 +367,78 @@ mod tests {
             ],
         )]);
         assert!(
-            render(&r).contains("2 problems will prevent construct from working"),
+            render(&r, Palette::PLAIN).contains("2 problems will prevent construct from working"),
             "{}",
-            render(&r)
+            render(&r, Palette::PLAIN)
         );
 
         let one = report(vec![section(
             "s",
             vec![finding("data", Severity::Error, "not writable")],
         )]);
-        assert!(render(&one).contains("1 problem will prevent"));
+        assert!(render(&one, Palette::PLAIN).contains("1 problem will prevent"));
+    }
+
+    /// One report exercising every styled element: all four severities, a
+    /// clamped label, notes, a fix line, and an empty section.
+    fn kitchen_sink() -> Report {
+        let mut warn = finding("PATH", Severity::Warn, "2 binaries on PATH");
+        warn.notes = vec!["1. /usr/local/bin/construct".into()];
+        warn.fix = Some("rm '/opt/homebrew/bin/construct'".into());
+        report(vec![
+            section(
+                "environment",
+                vec![
+                    finding("version", Severity::Ok, "0.16.7"),
+                    finding(&"b".repeat(40), Severity::Info, "skipped"),
+                    warn,
+                    finding("config", Severity::Error, "parse failed"),
+                ],
+            ),
+            section("logins", vec![]),
+        ])
+    }
+
+    #[test]
+    fn color_adds_escape_codes_and_changes_nothing_else() {
+        let r = kitchen_sink();
+        let plain = render(&r, Palette::PLAIN);
+        let styled = render(&r, ColorChoice::Always.resolve());
+
+        assert!(styled.contains('\x1b'), "nothing was styled at all");
+        // The load-bearing invariant. Every column offset asserted by the
+        // other tests holds under color for free, and piping through a
+        // stripper (or `NO_COLOR`) recovers the exact original output.
+        assert_eq!(crate::ansi::strip(&styled), plain);
+    }
+
+    #[test]
+    fn each_severity_gets_its_own_color() {
+        let styled = render(&kitchen_sink(), ColorChoice::Always.resolve());
+        for (token, code) in [
+            ("[ok]", "32"),
+            ("[info]", "2"),
+            ("[warn]", "33"),
+            ("[error]", "1;31"),
+        ] {
+            assert!(
+                styled.contains(&format!("\x1b[{code}m{token}\x1b[0m")),
+                "{token} should be painted with SGR {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn padding_stays_outside_the_escape_codes() {
+        // Regression guard for the tempting one-liner
+        // `format!("{styled:<STATUS_WIDTH$}")`, which pads to the *byte*
+        // width and so eats the column whenever styling is on.
+        let styled = render(&kitchen_sink(), ColorChoice::Always.resolve());
+        let ok_line = styled.lines().find(|l| l.contains("[ok]")).unwrap();
+        assert!(
+            ok_line.contains("\x1b[0m     version"),
+            "reset must come before the pad: {ok_line:?}"
+        );
     }
 
     #[test]
@@ -332,7 +448,7 @@ mod tests {
             vec![finding("socket", Severity::Warn, "no daemon running")],
         )]);
         assert!(
-            render(&r).contains("construct looks healthy."),
+            render(&r, Palette::PLAIN).contains("construct looks healthy."),
             "a machine with no daemon running is not a broken machine"
         );
     }

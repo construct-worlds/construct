@@ -5,6 +5,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 mod acp;
+mod ansi;
 mod app;
 mod clipboard_bridge;
 mod doctor;
@@ -63,9 +64,12 @@ enum Command {
     /// config. Works with the daemon down. Exits non-zero only when
     /// construct genuinely cannot run here (spec 0168).
     Doctor {
-        /// Emit the full report as JSON instead of text.
+        /// Emit the full report as JSON instead of text. Never colored.
         #[arg(long)]
         json: bool,
+        /// When to color the text report.
+        #[arg(long, value_name = "WHEN", default_value = "auto")]
+        color: ansi::ColorChoice,
     },
     /// Ping the daemon.
     Ping,
@@ -453,7 +457,9 @@ async fn main() -> Result<()> {
             construct_daemon::print_paths();
             Ok(())
         }
-        Command::Doctor { json } => doctor::run(&socket, socket_overridden, json).await,
+        Command::Doctor { json, color } => {
+            doctor::run(&socket, socket_overridden, json, color).await
+        }
         Command::Ping => {
             let c = connect(&socket).await?;
             let r = c.ping().await?;

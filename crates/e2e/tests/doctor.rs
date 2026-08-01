@@ -45,8 +45,9 @@ impl Fixture {
         self.root.join("config/config.toml")
     }
 
-    /// Run `construct doctor --json` against this isolated home.
-    fn doctor(&self) -> Result<(i32, Value)> {
+    /// Run `construct doctor <args>` against this isolated home and return
+    /// its exit code and raw stdout.
+    fn doctor_raw(&self, args: &[&str]) -> Result<(i32, Vec<u8>)> {
         let mut cmd = Command::new(&self.bin);
         // The test may itself be running inside a construct session; an
         // inherited CONSTRUCT_* would point doctor at the developer's real
@@ -63,15 +64,19 @@ impl Fixture {
             .env("CONSTRUCT_RUNTIME_DIR", self.root.join("run"))
             .env("CONSTRUCT_NO_AUTOSTART", "1")
             .env("CONSTRUCT_NO_UPDATE_CHECK", "1")
-            .args(["doctor", "--json"])
+            .arg("doctor")
+            .args(args)
             .output()?;
+        Ok((out.status.code().unwrap_or(-1), out.stdout))
+    }
 
-        let code = out.status.code().unwrap_or(-1);
-        let report = serde_json::from_slice(&out.stdout).map_err(|e| {
+    /// Run `construct doctor --json` against this isolated home.
+    fn doctor(&self) -> Result<(i32, Value)> {
+        let (code, stdout) = self.doctor_raw(&["--json"])?;
+        let report = serde_json::from_slice(&stdout).map_err(|e| {
             anyhow::anyhow!(
-                "doctor did not emit JSON ({e}); stdout={:?} stderr={:?}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
+                "doctor did not emit JSON ({e}); stdout={:?}",
+                String::from_utf8_lossy(&stdout)
             )
         })?;
         Ok((code, report))
@@ -263,4 +268,55 @@ fn an_explicit_socket_flag_is_the_one_reported() -> Result<()> {
         "doctor reported a socket other than the one passed with --socket: {detail}"
     );
     Ok(())
+}
+
+/// Redirected output is what people paste into issues and grep with
+/// `--json`; escape codes must not leak into either (spec 0168).
+#[test]
+fn a_redirected_report_carries_no_escape_codes_unless_asked() -> Result<()> {
+    let fx = Fixture::new()?;
+
+    // stdout is a pipe here, which is precisely the case `auto` must
+    // detect — this is why the check lives in an e2e test rather than a
+    // unit test, where stdout is whatever the test harness supplies.
+    for args in [&["--json"][..], &[][..], &["--color", "never"][..]] {
+        let (_, stdout) = fx.doctor_raw(args)?;
+        assert!(
+            !stdout.contains(&0x1b),
+            "`doctor {args:?}` emitted an escape code into a pipe"
+        );
+    }
+
+    let (_, forced) = fx.doctor_raw(&["--color", "always"])?;
+    assert!(
+        forced.contains(&0x1b),
+        "--color=always must style even a pipe, for `| less -R`"
+    );
+
+    // Stripping the forced-color render must reproduce the plain one
+    // exactly: color carries no information of its own.
+    let (_, plain) = fx.doctor_raw(&["--color", "never"])?;
+    assert_eq!(
+        strip_ansi(&String::from_utf8_lossy(&forced)),
+        String::from_utf8_lossy(&plain),
+        "color changed more than the escape codes"
+    );
+    Ok(())
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+        } else if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
