@@ -766,6 +766,10 @@ fn spawn_interactive_transcript_watcher(
                                         tokens_in: u.prompt_side(),
                                         tokens_out: u.output,
                                         tokens_cached: u.cached_input,
+                                        // The model just announced above, so
+                                        // the label matches `ModelChanged`
+                                        // exactly (spec 0167).
+                                        model: last_model.clone(),
                                     });
                                 }
                                 if let Some(last) = usage.last() {

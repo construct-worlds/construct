@@ -249,7 +249,7 @@ fn model_label(provider: Option<&str>, model: Option<&str>) -> Option<String> {
 /// so it is not added separately. pi prices every call itself
 /// (`usage.cost.total`), and states no context window, so the gauge has no
 /// denominator.
-fn usage_events(usage: &Value) -> Vec<SessionEvent> {
+fn usage_events(usage: &Value, model: Option<&str>) -> Vec<SessionEvent> {
     let field = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
     let input = field("input");
     let output = field("output");
@@ -269,6 +269,9 @@ fn usage_events(usage: &Value) -> Vec<SessionEvent> {
             tokens_in: prompt_side,
             tokens_out: output,
             tokens_cached: cache_read,
+            // The provider-qualified label built from this same message, so
+            // it matches `ModelChanged` exactly (spec 0167).
+            model: model.map(str::to_string),
         },
         SessionEvent::ContextUsage {
             used_tokens: prompt_side,
@@ -470,7 +473,10 @@ fn message_events(message: &Value, meta: &mut MetaState) -> Vec<SessionEvent> {
                 }
             }
             if let Some(usage) = message.get("usage") {
-                events.extend(usage_events(usage));
+                // `last_model` was just refreshed from this same message's
+                // `model`/`provider` fields above, so it is this call's model
+                // spelled exactly as `ModelChanged` spells it (spec 0167).
+                events.extend(usage_events(usage, meta.last_model.as_deref()));
             }
         }
         Some("toolResult") => {
@@ -1132,6 +1138,7 @@ mod tests {
                 tokens_in,
                 tokens_out,
                 tokens_cached,
+                model: cost_model,
             }, SessionEvent::ContextUsage {
                 used_tokens,
                 window_tokens,
@@ -1219,7 +1226,7 @@ mod tests {
             "input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,
             "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}
         });
-        assert!(usage_events(&usage).is_empty());
+        assert!(usage_events(&usage, None).is_empty());
     }
 
     #[test]

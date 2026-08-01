@@ -17,6 +17,7 @@ mod plugin_cmd;
 mod pty_render;
 mod text_util;
 mod theme;
+mod token_meter;
 mod tui_state;
 mod ui;
 mod upgrade;

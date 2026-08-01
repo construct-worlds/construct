@@ -172,8 +172,8 @@ async fn run_interactive(params: SessionStartParams, ctx: AdapterContext) {
                     usage_file.to_string_lossy().into_owned(),
                 ));
                 spawn_native_id_watcher(session_file.to_path_buf(), native_id, ctx.emit.clone());
-                spawn_model_watcher(model_file, params.model.clone(), ctx.emit.clone());
-                spawn_usage_watcher(usage_file, ctx.emit.clone());
+                spawn_model_watcher(model_file.clone(), params.model.clone(), ctx.emit.clone());
+                spawn_usage_watcher(usage_file, model_file, ctx.emit.clone());
             }
             Err(error) => ctx.emit.log(format!(
                 "opencode native-session capture disabled: {error:#}"
@@ -380,7 +380,7 @@ struct UsageTotals {
 /// (a stale file from before the restart). A shrinking total means the
 /// plugin restarted and began a fresh count — rebase silently, then report
 /// growth from there.
-fn spawn_usage_watcher(path: PathBuf, emit: EventEmitter) {
+fn spawn_usage_watcher(path: PathBuf, model_path: PathBuf, emit: EventEmitter) {
     tokio::spawn(async move {
         let mut reported = read_usage(&path).unwrap_or_default();
         let mut timer = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -390,7 +390,12 @@ fn spawn_usage_watcher(path: PathBuf, emit: EventEmitter) {
             let Some(observed) = read_usage(&path) else {
                 continue;
             };
-            for event in usage_delta_events(&mut reported, observed) {
+            // Read the model the same way the model watcher does, from the
+            // same file, so a sample's label is spelled exactly as this
+            // session's `ModelChanged` spells it — including after a
+            // mid-session switch through OpenCode's own picker (spec 0167).
+            let model = read_model(&model_path);
+            for event in usage_delta_events(&mut reported, observed, model.as_deref()) {
                 emit.emit(event);
             }
         }
@@ -409,7 +414,11 @@ fn read_usage(path: &Path) -> Option<UsageTotals> {
     })
 }
 
-fn usage_delta_events(reported: &mut UsageTotals, observed: UsageTotals) -> Vec<SessionEvent> {
+fn usage_delta_events(
+    reported: &mut UsageTotals,
+    observed: UsageTotals,
+    model: Option<&str>,
+) -> Vec<SessionEvent> {
     if observed.input < reported.input
         || observed.output < reported.output
         || observed.cached < reported.cached
@@ -434,6 +443,7 @@ fn usage_delta_events(reported: &mut UsageTotals, observed: UsageTotals) -> Vec<
             tokens_in: d_in,
             tokens_out: d_out,
             tokens_cached: d_cached,
+            model: model.map(str::to_string),
         });
     }
     if context_changed {
@@ -491,7 +501,7 @@ mod tests {
             cached: 2_000,
             context: 11_000,
         };
-        match usage_delta_events(&mut reported, first).as_slice() {
+        match usage_delta_events(&mut reported, first, Some("anthropic/claude-opus-5")).as_slice() {
             [SessionEvent::Cost {
                 tokens_in,
                 tokens_out,
@@ -510,14 +520,14 @@ mod tests {
             other => panic!("expected Cost + ContextUsage: {other:?}"),
         }
         // Unchanged totals stay quiet; growth reports only the delta.
-        assert!(usage_delta_events(&mut reported, first).is_empty());
+        assert!(usage_delta_events(&mut reported, first, None).is_empty());
         let second = UsageTotals {
             input: 15_000,
             output: 200,
             cached: 5_000,
             context: 14_800,
         };
-        match usage_delta_events(&mut reported, second).as_slice() {
+        match usage_delta_events(&mut reported, second, None).as_slice() {
             [SessionEvent::Cost {
                 tokens_in,
                 tokens_out,
@@ -539,14 +549,14 @@ mod tests {
             cached: 0,
             context: 500,
         };
-        assert!(usage_delta_events(&mut reported, rebased).is_empty());
+        assert!(usage_delta_events(&mut reported, rebased, None).is_empty());
         let grown = UsageTotals {
             input: 900,
             output: 25,
             cached: 100,
             context: 900,
         };
-        match usage_delta_events(&mut reported, grown).as_slice() {
+        match usage_delta_events(&mut reported, grown, None).as_slice() {
             [SessionEvent::Cost {
                 tokens_in,
                 tokens_out,

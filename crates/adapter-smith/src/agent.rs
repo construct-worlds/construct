@@ -601,6 +601,10 @@ pub async fn run(
     // Captured before `spec.provider` is moved out below (`spec_string`
     // borrows the whole struct).
     let startup_model_spec = spec.spec_string();
+    // The spec string every `Cost` this run emits is attributed to — the
+    // same spelling `ModelChanged` carries (spec 0167). A headless run
+    // resolves its model once, so this never moves.
+    let current_model_spec = startup_model_spec.clone();
     let provider = spec.provider;
     // Per-model learned token limits — adapts on overflow errors
     // and bumps upward on successful probe calls. Shared across
@@ -966,6 +970,7 @@ pub async fn run(
                 tokens_in: turn.usage.input_tokens,
                 tokens_out: turn.usage.output_tokens,
                 tokens_cached: turn.usage.cached_tokens,
+                model: Some(current_model_spec.clone()),
             });
             // Context gauge (spec 0104): this call's prompt side against the
             // limit smith itself budgets requests with (learned, else the

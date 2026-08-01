@@ -449,6 +449,9 @@ impl SessionManager {
                     tokens_in,
                     tokens_out,
                     tokens_cached,
+                    // Attribution is a client-side concern (spec 0167); the
+                    // session's own lifetime tally is model-agnostic.
+                    model: _,
                 } => {
                     s.cost_usd = Some(s.cost_usd.unwrap_or(0.0) + *usd);
                     s.tokens.add(*tokens_in, *tokens_out, *tokens_cached);

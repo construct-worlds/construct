@@ -1934,11 +1934,17 @@ pub async fn run(
     // Captured here (spec is moved into `resolved` below) and emitted once
     // startup settles and `resuming` is known, further down.
     let mut startup_model_spec: Option<String> = None;
+    // Live mirror of the spec string this session's `ModelChanged` reports,
+    // kept current across `/model` switches and a lazy re-resolve so every
+    // `Cost` is attributed to the model that actually served it, spelled the
+    // same way (spec 0167).
+    let mut current_model_spec: Option<String> = None;
     if let Ok(resolved) = spec {
         provider_name = resolved.provider_name();
         display_name = resolved.display_name();
         model = resolved.model.clone();
         startup_model_spec = Some(resolved.spec_string());
+        current_model_spec = startup_model_spec.clone();
         provider = resolved.provider;
     }
     let cwd = PathBuf::from(&params.cwd);
@@ -2361,6 +2367,7 @@ pub async fn run(
                                         emit.emit(SessionEvent::ModelChanged {
                                             model: new.spec_string(),
                                         });
+                                        current_model_spec = Some(new.spec_string());
                                         provider = new.provider;
                                         provider_name = new_name;
                                         display_name = new_display;
@@ -2556,6 +2563,7 @@ pub async fn run(
                     provider_name = resolved.provider_name();
                     display_name = resolved.display_name();
                     model = resolved.model.clone();
+                    current_model_spec = Some(resolved.spec_string());
                     provider = resolved.provider;
                     model_ready = true;
                     term.note(&format!("(model configured: {display_name}:{model})"));
@@ -2836,6 +2844,7 @@ pub async fn run(
                 tokens_in: turn.usage.input_tokens,
                 tokens_out: turn.usage.output_tokens,
                 tokens_cached: turn.usage.cached_tokens,
+                model: current_model_spec.clone(),
             });
             // Context gauge (spec 0104): this call's prompt side against the
             // limit smith itself budgets requests with (learned, else the

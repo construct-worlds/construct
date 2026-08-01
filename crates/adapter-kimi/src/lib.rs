@@ -227,7 +227,7 @@ fn wire_effort_change(v: &Value, last_effort: &Option<String>) -> Option<String>
 /// contract. Kimi states no window size, so the gauge has no denominator.
 /// No dedupe needed — each step lands exactly once and the watcher's line
 /// cursor already skips history on resume.
-fn wire_usage_events(v: &Value) -> Vec<SessionEvent> {
+fn wire_usage_events(v: &Value, model: Option<&str>) -> Vec<SessionEvent> {
     if v.get("type").and_then(|t| t.as_str()) != Some("context.append_loop_event") {
         return Vec::new();
     }
@@ -257,6 +257,10 @@ fn wire_usage_events(v: &Value) -> Vec<SessionEvent> {
             tokens_in: prompt_side,
             tokens_out: output,
             tokens_cached: cache_read,
+            // The step record states no model of its own; the wire's own
+            // model records do, and the caller tracks the latest one — the
+            // same string this session's `ModelChanged` carries (spec 0167).
+            model: model.map(str::to_string),
         },
         SessionEvent::ContextUsage {
             used_tokens: prompt_side,
@@ -569,7 +573,7 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
                     last_effort = Some(effort.clone());
                     emit.emit(SessionEvent::EffortChanged { effort });
                 }
-                let usage_events = wire_usage_events(&v);
+                let usage_events = wire_usage_events(&v, last_model.as_deref());
                 saw_step_usage |= !usage_events.is_empty();
                 for event in usage_events {
                     emit.emit(event);
@@ -771,7 +775,7 @@ mod tests {
                 }
             }
         });
-        match wire_usage_events(&v).as_slice() {
+        match wire_usage_events(&v, Some("kimi-k3")).as_slice() {
             [SessionEvent::Cost {
                 tokens_in,
                 tokens_out,
@@ -796,7 +800,7 @@ mod tests {
             "type": "context.append_loop_event",
             "event": { "type": "step.begin" }
         });
-        assert!(wire_usage_events(&other).is_empty());
+        assert!(wire_usage_events(&other, None).is_empty());
     }
 
     #[test]

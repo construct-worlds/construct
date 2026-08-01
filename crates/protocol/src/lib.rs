@@ -532,6 +532,17 @@ pub enum SessionEvent {
         /// prompt cache). 0 when unknown or unsupported by the provider.
         #[serde(default)]
         tokens_cached: u64,
+        /// Model that consumed these tokens, spelled exactly as this adapter
+        /// spells it in [`ModelChanged`](Self::ModelChanged) — read from the
+        /// same report when the harness states one there, else the adapter's
+        /// currently-tracked model from the harness's own model records (spec
+        /// 0167). `None` when the harness never stated a model; clients then
+        /// attribute the sample to the session's current model rather than
+        /// dropping it. The two spellings must not diverge — a label that
+        /// disagrees with `ModelChanged` splits one model into two series
+        /// wherever usage is grouped by model.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Live context-window fill (spec 0104): the prompt-side token count of
     /// the session's most recent model call, and the model's context-window
@@ -4377,5 +4388,68 @@ mod auto_title_tests {
         let huge = "Word ".repeat(50);
         let out = sanitize_auto_title(&huge);
         assert!(out.len() <= 48);
+    }
+}
+
+#[cfg(test)]
+mod cost_model_tests {
+    use super::*;
+
+    /// A transcript written before `Cost` carried a model must still load —
+    /// the field is additive and absence means "harness never said" (spec
+    /// 0167), never a parse failure.
+    #[test]
+    fn legacy_cost_without_model_deserializes() {
+        let legacy =
+            r#"{"type":"cost","usd":0.5,"tokens_in":100,"tokens_out":20,"tokens_cached":80}"#;
+        match serde_json::from_str::<SessionEvent>(legacy).expect("legacy cost parses") {
+            SessionEvent::Cost {
+                usd,
+                tokens_in,
+                tokens_out,
+                tokens_cached,
+                model,
+            } => {
+                assert!((usd - 0.5).abs() < f64::EPSILON);
+                assert_eq!(tokens_in, 100);
+                assert_eq!(tokens_out, 20);
+                assert_eq!(tokens_cached, 80);
+                assert_eq!(model, None);
+            }
+            other => panic!("expected Cost, got {other:?}"),
+        }
+    }
+
+    /// An absent model stays absent on the wire, so records written by this
+    /// version keep the same shape older readers already accept.
+    #[test]
+    fn absent_model_is_omitted_when_serialized() {
+        let event = SessionEvent::Cost {
+            usd: 0.0,
+            tokens_in: 1,
+            tokens_out: 2,
+            tokens_cached: 0,
+            model: None,
+        };
+        let json = serde_json::to_string(&event).expect("serializes");
+        assert!(!json.contains("model"), "{json}");
+    }
+
+    #[test]
+    fn model_roundtrips_when_stated() {
+        let event = SessionEvent::Cost {
+            usd: 0.0,
+            tokens_in: 1,
+            tokens_out: 2,
+            tokens_cached: 0,
+            model: Some("claude-opus-5".into()),
+        };
+        let json = serde_json::to_string(&event).expect("serializes");
+        match serde_json::from_str::<SessionEvent>(&json).expect("parses") {
+            SessionEvent::Cost { model, .. } => {
+                assert_eq!(model.as_deref(), Some("claude-opus-5"))
+            }
+            other => panic!("expected Cost, got {other:?}"),
+        }
     }
 }
