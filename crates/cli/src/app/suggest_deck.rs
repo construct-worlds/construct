@@ -916,7 +916,9 @@ impl App {
     /// Fold a broadcast session event into the suggestion caches: a
     /// dealt hand lands; any turn movement (new turn, user message,
     /// terminal state, reset) invalidates the hand and closes the deck
-    /// if it was open for that session (spec 0109).
+    /// if it was open for that session (spec 0109). Turn boundaries also
+    /// reset the draft sentinel used when opening Generate, so a stale
+    /// editor snapshot cannot repopulate the keyword field.
     pub(crate) fn observe_suggestion_event(&mut self, session_id: &str, event: &SessionEvent) {
         match event {
             SessionEvent::Suggestions(hand) => {
@@ -952,6 +954,7 @@ impl App {
             | SessionEvent::Done { .. }
             | SessionEvent::Error { .. }
             | SessionEvent::Reset => {
+                self.clear_suggestion_draft(session_id);
                 self.suggestion_hands.remove(session_id);
                 self.suggest_pending.remove(session_id);
                 if self
@@ -962,8 +965,25 @@ impl App {
                     self.suggest_deck = None;
                 }
             }
+            SessionEvent::AgentStatus(status) if !status.active => {
+                self.clear_suggestion_draft(session_id);
+            }
+            SessionEvent::Status {
+                state: SessionState::AwaitingInput,
+                ..
+            } => {
+                self.clear_suggestion_draft(session_id);
+            }
             _ => {}
         }
+    }
+
+    /// Keep an explicit empty draft after a turn boundary. Removing the
+    /// optimistic draft would make `suggestion_draft_keywords` fall back to
+    /// an older adapter editor snapshot until the next `EditorState` arrives.
+    fn clear_suggestion_draft(&mut self, session_id: &str) {
+        self.prompt_drafts
+            .insert(session_id.to_string(), super::PromptDraft::default());
     }
 }
 

@@ -33667,6 +33667,46 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn suggestion_draft_clears_at_turn_completion() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.editor_states.insert(
+            "s1".into(),
+            EditorState {
+                buf: "generation keywords".into(),
+                cursor: "generation keywords".chars().count(),
+                ..EditorState::default()
+            },
+        );
+        app.prompt_drafts.insert(
+            "s1".into(),
+            PromptDraft {
+                buf: "generation keywords".into(),
+                cursor: "generation keywords".chars().count(),
+            },
+        );
+        assert_eq!(
+            app.suggestion_draft_keywords("s1").as_deref(),
+            Some("generation keywords")
+        );
+
+        app.observe_suggestion_event(
+            "s1",
+            &SessionEvent::AgentStatus(construct_protocol::AgentStatus {
+                active: false,
+                started_at_ms: 0,
+                status: "Worked".into(),
+            }),
+        );
+
+        assert_eq!(app.suggestion_draft_keywords("s1"), None);
+        assert_eq!(
+            app.prompt_drafts.get("s1").map(|draft| draft.buf.as_str()),
+            Some("")
+        );
+        server.abort();
+    }
+
     /// Affordance state (idle / hand) is keyed by session_id: a dealt hand
     /// on s1 must not paint as a dealt hand on s2, and selecting s2 closes
     /// s1's open deck so chrome never leaks across sessions.
