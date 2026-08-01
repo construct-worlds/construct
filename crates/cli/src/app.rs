@@ -2106,6 +2106,11 @@ pub struct App {
     /// every session's `Cost` events whether or not the meter is on screen,
     /// so switching to it shows real history instead of starting blank.
     pub token_meter: crate::token_meter::TokenMeter,
+    /// Last `busy_ms_at` reading per session, so each tick can feed the
+    /// meter the compute time that elapsed since the previous one (spec
+    /// 0167). Keyed by session id; entries for vanished sessions are pruned
+    /// as they are noticed.
+    pub token_meter_busy: HashMap<String, u64>,
     /// Whether the ungrouped top-level section's archived sessions are
     /// revealed. Toggled by its "N archived" row. Ephemeral — archived
     /// sessions default to hidden on each launch.
@@ -5137,6 +5142,7 @@ async fn run_with_socket_initial_selection(
             }
             meter
         },
+        token_meter_busy: HashMap::new(),
         show_archived_ungrouped: false,
         show_archived_groups: HashSet::new(),
         show_archived_children: HashSet::new(),
@@ -6073,6 +6079,7 @@ async fn run_loop(
                 app.update_browser_preview_hover_and_expiry();
                 app.expire_program_runs(Instant::now());
                 app.tutorial_tick(Instant::now());
+                app.sample_compute_time(Instant::now());
             }
             _ = harness_refresh.tick(), if app.connected
                 && (app.selected_id().is_none() || app.configure_popup.is_some()) => {
@@ -8893,6 +8900,48 @@ impl App {
         });
         self.token_meter
             .observe(label.as_deref(), tokens, Instant::now());
+    }
+
+    /// Feed the token meter the compute time that elapsed since the last
+    /// call (spec 0167), attributed per model.
+    ///
+    /// The daemon maintains each session's total `Running` time, so this
+    /// diffs that counter rather than sampling a state flag — the reading
+    /// stays exact across dropped frames and a busy span that starts and
+    /// ends between two ticks still counts.
+    ///
+    /// Only model-backed sessions contribute. A shell session spends most of
+    /// its life `Running` a command with no model behind it; counting that
+    /// as compute time would divide real token output by unrelated seconds
+    /// and understate every rate on the fleet.
+    fn sample_compute_time(&mut self, now: Instant) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut seen: HashSet<&str> = HashSet::with_capacity(self.sessions.len());
+        let mut deltas: Vec<(Option<String>, u64)> = Vec::new();
+        for session in &self.sessions {
+            let Some(model) = session.model.clone() else {
+                continue;
+            };
+            seen.insert(session.id.as_str());
+            let busy = session.busy_ms_at(now_ms);
+            let previous = self.token_meter_busy.get(&session.id).copied();
+            // A first sighting establishes the baseline: the compute time
+            // before this client attached belongs to whatever history the
+            // daemon already served, not to this instant.
+            if let Some(previous) = previous {
+                let delta = busy.saturating_sub(previous);
+                if delta > 0 {
+                    deltas.push((Some(model), delta));
+                }
+            }
+            self.token_meter_busy.insert(session.id.clone(), busy);
+        }
+        let live: HashSet<String> = seen.into_iter().map(str::to_string).collect();
+        self.token_meter_busy.retain(|id, _| live.contains(id));
+        for (model, delta) in deltas {
+            self.token_meter
+                .observe_busy(model.as_deref(), delta, now);
+        }
     }
 
     fn session_visible_on_screen(&self, id: &str) -> bool {
@@ -15657,6 +15706,7 @@ mod tests {
             matrix_rain_hidden: true,
             matrix_panel_mode: MatrixPanelMode::default(),
             token_meter: crate::token_meter::TokenMeter::new(now),
+            token_meter_busy: HashMap::new(),
             show_archived_ungrouped: false,
             show_archived_groups: HashSet::new(),
             show_archived_children: HashSet::new(),
@@ -16866,22 +16916,38 @@ mod tests {
     }
 
     /// The meter draws bars, and every bar's series is named in the legend
-    /// with the throughput it represents (spec 0167).
+    /// with the throughput it achieved — tokens over the time the model was
+    /// actually computing (spec 0167).
     #[tokio::test]
     async fn token_meter_draws_bars_and_names_each_series() {
         let (mut app, _dir, _server) =
             token_meter_app(&[(Some("claude-opus-5"), None, 240_000)]).await;
+        // 240k tokens produced over 60s of compute → 4k/s.
+        app.token_meter
+            .observe_busy(Some("claude-opus-5"), 60_000, Instant::now());
         let out = rendered(&mut app, 120, 30);
         assert!(
             out.contains("claude-opus-5"),
             "legend missing the model:\n{out}"
         );
-        // 240k over one minute of window.
-        assert!(out.contains("4.0k/s") || out.contains("4k/s"), "{out}");
+        assert!(out.contains("4.0k/s"), "{out}");
         assert!(
             out.contains('█') || out.chars().any(|c| "▁▂▃▄▅▆▇".contains(c)),
             "no bar drawn:\n{out}"
         );
+    }
+
+    /// Tokens with no measured compute time read as `idle`, not as `0/s`:
+    /// the client can't have watched the work, so it states nothing about
+    /// how fast it was rather than claiming it was slow.
+    #[tokio::test]
+    async fn tokens_without_measured_compute_read_as_idle() {
+        let (mut app, _dir, _server) =
+            token_meter_app(&[(Some("claude-opus-5"), None, 240_000)]).await;
+        let out = rendered(&mut app, 120, 30);
+        assert!(out.contains("claude-opus-5"), "{out}");
+        assert!(out.contains("idle"), "{out}");
+        assert!(!out.contains("/s"), "no rate may be claimed:\n{out}");
     }
 
     /// A harness that states no model on the report still gets attributed —

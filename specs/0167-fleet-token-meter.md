@@ -38,13 +38,38 @@ and two colors, which reads as two models running.
 Token throughput has no capacity to divide by. The meter therefore
 autoscales: the ceiling is the tallest column currently visible.
 
-Magnitude is carried by the legend, which quantifies each series as a rate
-over the visible window rather than as a raw total — a total changes with
-panel width for the same actual throughput, and says nothing about how hard
-anything is working now. Rates are normalized out of whatever span a column
-covers, so retuning that span never silently changes the number users read.
-The bars themselves then carry shape and mix; they are comparable within a
-frame, and the legend is what makes them comparable to anything else.
+Magnitude is carried by the legend, which quantifies each series as a
+**throughput**: tokens produced per second of *compute*, over a short
+sliding window ending now.
+
+Both halves of that are deliberate.
+
+The denominator is the time sessions on that model actually spent working —
+the span between a request going out and its response landing — not elapsed
+wall-clock. Dividing by wall-clock answers "how much of the last minute did
+this model spend generating", which drops as a fleet idles even though
+nothing about the model changed. Dividing by compute answers "how fast is
+this model when it runs", which is a property of the model and stays
+comparable across a busy fleet and a quiet one.
+
+That denominator is turn time, and turn time includes tool execution inside
+the turn. It is not pure generation latency; no harness reports that per
+call, and synthesizing it would be a guess.
+
+The window is short and sliding, not the visible graph. A rate averaged over
+everything on screen changes when the panel is resized and dilutes a burst
+as history grows around it. A sliding window must also be finer-grained than
+the columns: one that reset when a column did would flick every rate to zero
+at each column boundary.
+
+A model with no compute time in the window has no throughput, and must be
+reported as such rather than as zero — "did no work" and "worked slowly" are
+different claims. The same applies to the aggregate figure, which uses the
+same basis (total tokens over total compute) so that concurrent sessions
+cannot push it above what any of them achieved.
+
+The bars themselves carry shape and mix; they are comparable within a frame,
+and the legend is what makes them comparable to anything else.
 
 The ceiling falls back to a floor so a single small sample on an idle fleet
 cannot paint a full-height column and read as saturation. After a burst
@@ -149,6 +174,13 @@ inspecting the rest.
 - Because the bars carry no stated ceiling, a client must not invite
   cross-time comparison of bar heights alone; the legend's rates are the
   figure that survives the scale moving.
+- Compute time must be attributed only to model-backed sessions. A session
+  running a shell command spends most of its life busy with no model behind
+  it; counting that would divide real token output by unrelated seconds and
+  understate every rate on the fleet.
+- Compute time should be derived by differencing an authoritative
+  accumulator rather than by sampling a state flag, so a span that begins
+  and ends between two samples still counts.
 - Attribution is a client concern. A session's own lifetime tally stays
   model-agnostic; per-model accounting is derived at the display, not
   accumulated per session.
@@ -174,7 +206,12 @@ inspecting the rest.
 
 - Three sessions on two models run for a minute: the meter shows a column
   per interval, each stacked in two colors, with a legend naming both models
-  and their totals over the visible window, and a stated peak rate.
+  and the throughput each achieved while computing.
+- A model produced 60k tokens during 20 seconds of work and then sat idle
+  for the rest of the minute: it reads as 3k/s, not 1k/s. The bar shows the
+  60k; the rate shows how fast they arrived.
+- A model has bars on screen but did nothing in the last minute: it is
+  listed as idle, not as 0/s.
 - A session's harness reports usage without naming a model, and the session
   has reported a model change earlier: the sample is attributed to that
   model, not to `unattributed`.

@@ -67,6 +67,15 @@ const SERIES_PALETTE: [Color; 6] = [
 /// "other" in the legend, rather than reusing a color already spoken for.
 const OTHER_COLOR: Color = Color::Rgb(127, 132, 156);
 
+/// Resolution of the sliding window the legend's rates are measured over.
+/// One-second slots keep the rate a true sliding minute instead of resetting
+/// at each column boundary, which would flick every rate to zero at the top
+/// of every minute.
+const RECENT_SLOT_SECS: u64 = 1;
+
+/// Slots retained for the rate window — one minute of them.
+const RECENT_SLOTS: usize = 60;
+
 /// Label for a sample whose model could be established neither from the
 /// report nor from the session's tracked model. Named rather than hidden so
 /// the graph never silently drops volume it did measure.
@@ -77,6 +86,23 @@ pub const UNATTRIBUTED: &str = "unattributed";
 #[derive(Debug, Default, Clone)]
 pub struct Bucket {
     entries: Vec<(u16, u64)>,
+}
+
+/// One slot of the rate window: tokens produced, and how long any session on
+/// that model was actually computing. The ratio of the two is the rate — a
+/// model that produced 60k tokens during 20 seconds of work ran at 3k/s,
+/// regardless of how much of the minute it spent idle.
+#[derive(Debug, Default, Clone)]
+struct RecentSlot {
+    tokens: Vec<(u16, u64)>,
+    busy_ms: Vec<(u16, u64)>,
+}
+
+fn add_sparse(entries: &mut Vec<(u16, u64)>, key: u16, amount: u64) {
+    match entries.iter_mut().find(|(k, _)| *k == key) {
+        Some(slot) => slot.1 = slot.1.saturating_add(amount),
+        None => entries.push((key, amount)),
+    }
 }
 
 impl Bucket {
@@ -102,10 +128,7 @@ impl Bucket {
     }
 
     fn add(&mut self, model: u16, tokens: u64) {
-        match self.entries.iter_mut().find(|(m, _)| *m == model) {
-            Some(slot) => slot.1 = slot.1.saturating_add(tokens),
-            None => self.entries.push((model, tokens)),
-        }
+        add_sparse(&mut self.entries, model, tokens);
     }
 }
 
@@ -116,6 +139,9 @@ pub struct LegendEntry {
     pub label: String,
     pub tokens: u64,
     pub color: Color,
+    /// Tokens per second of compute over the last minute, or `None` when
+    /// this model did no work in that window.
+    pub rate: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -129,6 +155,12 @@ pub struct TokenMeter {
     current_start: Instant,
     /// Decaying autoscale ceiling, in tokens per bucket.
     peak: f64,
+    /// Sliding one-minute window behind the legend's rates, at a finer
+    /// resolution than the columns so the figure doesn't reset when a column
+    /// does.
+    recent: VecDeque<RecentSlot>,
+    /// Start instant of the recent slot currently filling.
+    recent_start: Instant,
 }
 
 impl TokenMeter {
@@ -140,6 +172,8 @@ impl TokenMeter {
             buckets,
             current_start: now,
             peak: 0.0,
+            recent: VecDeque::from([RecentSlot::default()]),
+            recent_start: now,
         }
     }
 
@@ -189,6 +223,7 @@ impl TokenMeter {
     /// time that passed. Called every frame so idle time scrolls as a gap
     /// rather than compressing away.
     pub fn advance_to(&mut self, now: Instant) {
+        self.advance_recent(now);
         let elapsed = now.saturating_duration_since(self.current_start);
         let steps = (elapsed.as_millis() / BUCKET.as_millis()) as usize;
         if steps == 0 {
@@ -205,6 +240,92 @@ impl TokenMeter {
         // *falls* — `scale` re-floors against what is actually on screen, so
         // decay can never shrink the graph below a column it must draw.
         self.peak *= PEAK_DECAY.powi(steps.min(1_000) as i32);
+    }
+
+    fn advance_recent(&mut self, now: Instant) {
+        let slot = Duration::from_secs(RECENT_SLOT_SECS);
+        let elapsed = now.saturating_duration_since(self.recent_start);
+        let steps = (elapsed.as_millis() / slot.as_millis()) as usize;
+        if steps == 0 {
+            return;
+        }
+        for _ in 0..steps.min(RECENT_SLOTS) {
+            self.recent.push_back(RecentSlot::default());
+        }
+        while self.recent.len() > RECENT_SLOTS {
+            self.recent.pop_front();
+        }
+        self.recent_start += slot * steps as u32;
+    }
+
+    /// Record compute time: `delta_ms` of wall-clock during which a session
+    /// on `model` was running a turn.
+    ///
+    /// This is the rate's denominator, and it is turn time — the span
+    /// between a request going out and its response landing, including any
+    /// tool work inside that turn. It is not pure generation latency; no
+    /// harness reports that per call, and inventing it would be a guess.
+    pub fn observe_busy(&mut self, model: Option<&str>, delta_ms: u64, now: Instant) {
+        if delta_ms == 0 {
+            return;
+        }
+        self.advance_recent(now);
+        let idx = self.intern(model.unwrap_or(UNATTRIBUTED));
+        if let Some(slot) = self.recent.back_mut() {
+            add_sparse(&mut slot.busy_ms, idx, delta_ms);
+        }
+    }
+
+    /// Tokens and compute-milliseconds for `model` over the sliding rate
+    /// window.
+    fn recent_totals(&self, model: u16) -> (u64, u64) {
+        let mut tokens = 0u64;
+        let mut busy = 0u64;
+        for slot in &self.recent {
+            for (m, t) in &slot.tokens {
+                if *m == model {
+                    tokens = tokens.saturating_add(*t);
+                }
+            }
+            for (m, ms) in &slot.busy_ms {
+                if *m == model {
+                    busy = busy.saturating_add(*ms);
+                }
+            }
+        }
+        (tokens, busy)
+    }
+
+    /// Throughput for `model` over the last minute: tokens produced per
+    /// second of compute, not per second of wall-clock.
+    ///
+    /// `None` when nothing on that model computed in the window — a model
+    /// that did no work has no throughput, and reporting `0/s` for it would
+    /// claim it was working slowly rather than not at all.
+    pub fn recent_rate(&self, model: u16) -> Option<u64> {
+        let (tokens, busy_ms) = self.recent_totals(model);
+        if busy_ms == 0 {
+            return None;
+        }
+        Some(tokens.saturating_mul(1_000) / busy_ms)
+    }
+
+    /// Fleet throughput over the rate window, on the same basis: total
+    /// tokens over total compute time. Concurrent sessions each contribute
+    /// their own compute time, so this is per second of *work*, not of
+    /// wall-clock, and does not exceed the sum of the per-model rates.
+    pub fn recent_fleet_rate(&self) -> Option<u64> {
+        let mut tokens = 0u64;
+        let mut busy = 0u64;
+        for slot in &self.recent {
+            for (_, t) in &slot.tokens {
+                tokens = tokens.saturating_add(*t);
+            }
+            for (_, ms) in &slot.busy_ms {
+                busy = busy.saturating_add(*ms);
+            }
+        }
+        (busy > 0).then(|| tokens.saturating_mul(1_000) / busy)
     }
 
     /// Record one usage sample. `model` is the label to group under —
@@ -224,6 +345,9 @@ impl TokenMeter {
         let total = bucket.total() as f64;
         if total > self.peak {
             self.peak = total;
+        }
+        if let Some(slot) = self.recent.back_mut() {
+            add_sparse(&mut slot.tokens, idx, tokens);
         }
     }
 
@@ -288,21 +412,6 @@ impl TokenMeter {
         }
     }
 
-    /// Wall-clock seconds the visible window spans — the columns actually on
-    /// screen, not the ring's full retention.
-    ///
-    /// The legend divides by this, so its rates are averages over exactly
-    /// what is being displayed. Two consequences worth keeping in mind
-    /// before "fixing" either: a narrower panel averages a shorter, more
-    /// recent window and therefore reports a different number for unchanged
-    /// throughput; and a burst's contribution shrinks as the window grows
-    /// around it, rather than dropping out at some cutoff. What the divisor
-    /// does guarantee is that the figure is a rate in seconds regardless of
-    /// how [`BUCKET_SECS`] is tuned.
-    pub fn window_seconds(&self, width: usize) -> u64 {
-        (self.window(width).count() as u64).max(1) * BUCKET_SECS
-    }
-
     pub fn model_label(&self, idx: u16) -> &str {
         self.models
             .get(idx as usize)
@@ -340,6 +449,7 @@ impl TokenMeter {
                 label: self.models[idx].clone(),
                 tokens: *tokens,
                 color: SERIES_PALETTE[idx],
+                rate: self.recent_rate(idx as u16),
             })
             .collect();
         named.sort_by(|a, b| b.tokens.cmp(&a.tokens).then(a.label.cmp(&b.label)));
@@ -354,10 +464,20 @@ impl TokenMeter {
                 .skip(SERIES_PALETTE.len())
                 .filter(|t| **t > 0)
                 .count();
+            let (other_tokens, other_busy) = totals
+                .iter()
+                .enumerate()
+                .skip(SERIES_PALETTE.len())
+                .fold((0u64, 0u64), |(t, b), (idx, _)| {
+                    let (rt, rb) = self.recent_totals(idx as u16);
+                    (t.saturating_add(rt), b.saturating_add(rb))
+                });
             named.push(LegendEntry {
                 label: format!("other ({count})"),
                 tokens: other,
                 color: OTHER_COLOR,
+                rate: (other_busy > 0)
+                    .then(|| other_tokens.saturating_mul(1_000) / other_busy),
             });
         }
         named
@@ -493,21 +613,63 @@ mod tests {
         assert_eq!(m.scale(2), MIN_SCALE, "eventually returns to the floor");
     }
 
-    /// The legend states per-series rates, so the window's span in seconds
-    /// has to track the columns actually on screen — a fixed divisor would
-    /// misreport throughput on a resize or a partly-filled meter.
+    /// The rate is tokens per second of *compute*, not of wall-clock: a
+    /// model that produced 60k tokens during 20s of work ran at 3k/s even
+    /// though it sat idle for the rest of the minute.
     #[test]
-    fn window_seconds_follows_the_visible_columns() {
+    fn rate_divides_by_compute_time_not_wall_clock() {
         let t0 = Instant::now();
         let mut m = TokenMeter::new(t0);
-        assert_eq!(m.window_seconds(80), BUCKET_SECS, "one column so far");
-        m.advance_to(buckets_after(t0, 9));
-        assert_eq!(m.window_seconds(80), 10 * BUCKET_SECS);
-        assert_eq!(
-            m.window_seconds(4),
-            4 * BUCKET_SECS,
-            "a narrow panel spans less time"
-        );
+        m.observe(Some("opus"), 60_000, t0);
+        m.observe_busy(Some("opus"), 20_000, t0);
+        assert_eq!(m.recent_rate(0), Some(3_000));
+    }
+
+    /// A model that did no work has no throughput. Reporting `0/s` would
+    /// claim it was working slowly rather than not working.
+    #[test]
+    fn a_model_with_no_compute_time_has_no_rate() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.observe(Some("opus"), 5_000, t0);
+        assert_eq!(m.recent_rate(0), None, "tokens but no measured compute");
+    }
+
+    /// The rate window slides by the second rather than resetting with the
+    /// columns — otherwise every rate would flick to zero at the top of each
+    /// minute, when a new column starts empty.
+    #[test]
+    fn rate_window_slides_across_a_column_boundary() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.observe(Some("opus"), 30_000, t0);
+        m.observe_busy(Some("opus"), 10_000, t0);
+        // Well into the next column, but still inside the rate window.
+        let later = t0 + Duration::from_secs(BUCKET_SECS + 5);
+        m.advance_to(later);
+        assert_eq!(m.recent_rate(0), None, "…and out of it once a minute passes");
+
+        let mut m = TokenMeter::new(t0);
+        m.observe(Some("opus"), 30_000, t0);
+        m.observe_busy(Some("opus"), 10_000, t0);
+        m.advance_to(t0 + Duration::from_secs(30));
+        assert_eq!(m.recent_rate(0), Some(3_000), "still inside the window");
+    }
+
+    /// The fleet figure uses the same basis as the per-model ones — total
+    /// tokens over total compute — so two sessions working concurrently
+    /// can't make it exceed what any of them actually achieved.
+    #[test]
+    fn fleet_rate_is_tokens_over_total_compute() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        m.observe(Some("a"), 20_000, t0);
+        m.observe_busy(Some("a"), 10_000, t0);
+        m.observe(Some("b"), 10_000, t0);
+        m.observe_busy(Some("b"), 10_000, t0);
+        assert_eq!(m.recent_rate(0), Some(2_000));
+        assert_eq!(m.recent_rate(1), Some(1_000));
+        assert_eq!(m.recent_fleet_rate(), Some(1_500), "30k over 20s of work");
     }
 
     #[test]
