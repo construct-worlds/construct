@@ -1,26 +1,18 @@
-//! Loopback-only v1 service ingress.
+//! Daemon-owned service definitions and channel lifecycle.
 //!
-//! Service definitions live in `services/<name>.toml` in the config dir. This
-//! module intentionally owns no public exposure: tunnels and non-HTTP
-//! channels are separate capabilities, so enabling a service cannot make a
-//! machine reachable from the internet by accident.
+//! Service definitions live in `services/<name>.toml` in the config dir.
+//! HTTP remains loopback-only. Transport adapters are separate from the shared
+//! ingress router so adding a channel does not fork session semantics.
 
-use crate::session::SessionManager;
+mod http;
+mod ingress;
+
 use anyhow::{anyhow, Context, Result};
-use construct_protocol::{
-    CreateSessionParams, MessageRole, SessionEvent, SessionKind, SessionState,
-};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
 use uuid::Uuid;
-
-const MAX_HTTP_BYTES: usize = 1024 * 1024;
-const REQUEST_DEDUP_CAP: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
@@ -649,12 +641,16 @@ fn validate_service_name(name: &str) -> Result<()> {
     }
 }
 
-/// Build the runtime for one channel of an already-loaded service.
-///
-/// The supervisor owns the decision of *which* channels should exist; this
-/// only turns one of those decisions into something `serve` can drive.
-pub(crate) fn channel_runtime(shared: Arc<ServiceShared>, channel_id: String) -> Arc<ServiceRuntime> {
-    Arc::new(ServiceRuntime { channel_id, shared })
+pub(crate) use ingress::{
+    ServiceIngress as ServiceRuntime, ServiceIngressShared as ServiceShared,
+};
+
+/// Build the transport-neutral ingress runtime for one channel.
+pub(crate) fn channel_runtime(
+    shared: Arc<ServiceShared>,
+    channel_id: String,
+) -> Arc<ServiceRuntime> {
+    Arc::new(ServiceRuntime::new(channel_id, shared))
 }
 
 /// Whether a channel is one this daemon knows how to bind, logging the reason
@@ -682,586 +678,21 @@ pub(crate) fn bindable_port(
     Some(port)
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct PersistedState {
-    #[serde(default)]
-    sessions: HashMap<String, String>,
-    /// Every session this service is allowed to expose through its result
-    /// endpoint. This is broader than `sessions`: per-event sessions have no
-    /// routing key but still need to remain queryable.
-    #[serde(default)]
-    owned_sessions: HashSet<String>,
-}
-
-impl PersistedState {
-    fn normalize_legacy_ownership(&mut self) {
-        self.owned_sessions.extend(self.sessions.values().cloned());
-    }
-}
-
-/// Per-service state that outlives any one definition.
-///
-/// **Exactly one of these exists per service name for the life of the daemon.**
-/// A reload swaps [`ServiceShared::config`] in place; it must never build a
-/// second `ServiceShared` for a name that already has one. Two of them would
-/// both persist to the same state file — last writer wins, and the routed
-/// session map silently loses entries — and the dedup ring, which is memory
-/// only, would reset, so a retried delivery would open a second conversation.
-pub(crate) struct ServiceShared {
-    name: String,
-    /// Read through [`ServiceShared::config`] at the point of use, never
-    /// cached across an await, so an edit reaches the next read.
-    config: std::sync::RwLock<Arc<ServiceConfig>>,
-    manager: Arc<SessionManager>,
-    state_path: PathBuf,
-    state: Mutex<PersistedState>,
-    seen_requests: Mutex<(VecDeque<String>, std::collections::HashSet<String>)>,
-}
-
-impl ServiceShared {
-    pub(crate) fn load(
-        name: String,
-        config: ServiceConfig,
-        manager: Arc<SessionManager>,
-        data_dir: PathBuf,
-    ) -> Arc<Self> {
-        let state_path = data_dir.join("services").join(format!("{name}.json"));
-        let mut state: PersistedState = std::fs::read(&state_path)
-            .ok()
-            .and_then(|raw| serde_json::from_slice(&raw).ok())
-            .unwrap_or_default();
-        state.normalize_legacy_ownership();
-        Arc::new(Self {
-            name,
-            config: std::sync::RwLock::new(Arc::new(config)),
-            manager,
-            state_path,
-            state: Mutex::new(state),
-            seen_requests: Mutex::new(Default::default()),
-        })
-    }
-
-    /// The definition in force right now. The guard is released before the
-    /// caller can await, so a reload is never blocked by an in-flight turn.
-    pub(crate) fn config(&self) -> Arc<ServiceConfig> {
-        self.config
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    /// Publish a new definition to every in-flight and future reader.
-    pub(crate) fn set_config(&self, config: ServiceConfig) {
-        let mut slot = self
-            .config
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *slot = Arc::new(config);
-    }
-
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-}
-
-pub(crate) struct ServiceRuntime {
-    channel_id: String,
-    shared: Arc<ServiceShared>,
-}
-
-impl ServiceRuntime {
-    fn name(&self) -> &str {
-        &self.shared.name
-    }
-
-    /// The credential this channel currently accepts, or `None` if the channel
-    /// has been detached or stripped of its secret since the listener bound.
-    fn token(&self) -> Option<String> {
-        self.shared
-            .config()
-            .channels
-            .get(&self.channel_id)
-            .and_then(|channel| channel.token.clone())
-            .filter(|token| !token.is_empty())
-    }
-
-    /// Whether this channel should answer right now. Consulted per request so
-    /// pausing a service stops it serving even before its listener is torn
-    /// down.
-    fn serving(&self) -> bool {
-        let cfg = self.shared.config();
-        !cfg.paused
-            && cfg
-                .channels
-                .get(&self.channel_id)
-                .is_some_and(|channel| channel.enabled)
-    }
-
-    async fn route(&self, body: ServiceRequest) -> Result<String> {
-        if body.message.trim().is_empty() {
-            return Err(anyhow!("message must not be empty"));
-        }
-        if let Some(request_id) = body.request_id.as_deref() {
-            let mut seen = self.shared.seen_requests.lock().await;
-            let request_key = format!("{}:{request_id}", self.channel_id);
-            if seen.1.contains(&request_key) {
-                return Err(anyhow!("duplicate request_id"));
-            }
-            seen.0.push_back(request_key.clone());
-            seen.1.insert(request_key);
-            if seen.0.len() > REQUEST_DEDUP_CAP {
-                if let Some(old) = seen.0.pop_front() {
-                    seen.1.remove(&old);
-                }
-            }
-        }
-        let cfg = self.shared.config();
-        let key = match cfg.routing {
-            ServiceRouting::PerEvent => None,
-            ServiceRouting::Single => Some("__single__".to_string()),
-            ServiceRouting::SessionKey => Some(
-                body.session_key
-                    .filter(|key| !key.is_empty())
-                    .ok_or_else(|| anyhow!("session_key is required for session-key routing"))?,
-            ),
-        };
-        if let Some(key) = key {
-            let lookup_key = format!("{}:{key}", self.channel_id);
-            // Keep lookup + creation atomic for this service. Without this,
-            // two concurrent first deliveries for the same key would each
-            // create a conversation and one would become orphaned.
-            let mut state = self.shared.state.lock().await;
-            let existing = state.sessions.get(&lookup_key).cloned().or_else(|| {
-                // State written by the original single-channel v1 runtime used
-                // the bare session key. Preserve those conversations when the
-                // legacy channel id is still `http`.
-                (self.channel_id == "http")
-                    .then(|| state.sessions.get(&key).cloned())
-                    .flatten()
-            });
-            if let Some(id) = existing {
-                drop(state);
-                self.shared.manager.send_input(&id, body.message).await?;
-                return Ok(id);
-            }
-            let id = self
-                .create(body.message, Some(format!("service:{}:{}:{key}", self.shared.name, self.channel_id)))
-                .await?;
-            state.sessions.insert(lookup_key, id.clone());
-            state.owned_sessions.insert(id.clone());
-            self.persist_state(&state).await?;
-            Ok(id)
-        } else {
-            let id = self
-                .create(body.message, Some(format!("service:{}:{}", self.shared.name, self.channel_id)))
-                .await?;
-            let mut state = self.shared.state.lock().await;
-            state.owned_sessions.insert(id.clone());
-            self.persist_state(&state).await?;
-            Ok(id)
-        }
-    }
-
-    async fn persist_state(&self, state: &PersistedState) -> Result<()> {
-        let snapshot = serde_json::to_vec_pretty(state)?;
-        if let Some(parent) = self.shared.state_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        // Write and rename like the definition writer does. This file is the
-        // only record of which session serves which key; a crash partway
-        // through a plain write would strand every live conversation.
-        let temporary = self.shared.state_path.with_extension("json.tmp");
-        tokio::fs::write(&temporary, snapshot).await?;
-        tokio::fs::rename(&temporary, &self.shared.state_path).await?;
-        Ok(())
-    }
-
-    async fn session_result(&self, session_id: &str) -> Result<Option<serde_json::Value>> {
-        let owned = self
-            .shared
-            .state
-            .lock()
-            .await
-            .owned_sessions
-            .contains(session_id);
-        if !owned {
-            return Ok(None);
-        }
-        let Ok(detail) = self.shared.manager.detail(session_id).await else {
-            return Ok(None);
-        };
-        let reply = latest_assistant_reply(detail.events.iter().map(|event| &event.event));
-        let ready = matches!(
-            detail.summary.state,
-            SessionState::AwaitingInput | SessionState::Done | SessionState::Errored
-        );
-
-        // A turn stopped at an approval looks exactly like a slow turn from
-        // outside, so say which it is. Left unsaid, a caller polls a session
-        // that will never move until a human it cannot reach acts.
-        let mut blocked = None;
-        if let Some(pending) = pending_approval(&detail.events) {
-            let waited = (chrono::Utc::now() - pending.since).num_seconds().max(0);
-            let timeout = self.shared.config().approval_timeout_secs;
-            if timeout > 0 && waited >= timeout as i64 {
-                // Nobody answered in the window the operator allowed, so stop
-                // holding the caller: deny, let the turn resume, and report the
-                // refusal rather than reporting "still working" forever.
-                let _ = self
-                    .shared
-                    .manager
-                    .tool_decision(session_id, pending.call_id.clone(), "deny".to_string())
-                    .await;
-                tracing::info!(
-                    service = %self.shared.name,
-                    session = %session_id,
-                    tool = %pending.tool,
-                    waited,
-                    "service approval timed out; denied"
-                );
-                blocked = Some(serde_json::json!({
-                    "tool": pending.tool,
-                    "waited_seconds": waited,
-                    "outcome": "denied_on_timeout",
-                }));
-            } else {
-                blocked = Some(serde_json::json!({
-                    "tool": pending.tool,
-                    "summary": pending.summary,
-                    "waited_seconds": waited,
-                    "outcome": "awaiting_operator",
-                }));
-            }
-        }
-
-        Ok(Some(serde_json::json!({
-            "service": self.shared.name,
-            "channel": self.channel_id,
-            "session": session_id,
-            "status": detail.summary.state,
-            "ready": ready,
-            "reply": reply,
-            "approval": blocked,
-        })))
-    }
-
-    async fn create(&self, message: String, title: Option<String>) -> Result<String> {
-        // One snapshot for the whole creation: a reload landing mid-create
-        // must not build a session from half of one definition and half of
-        // another.
-        let cfg = self.shared.config();
-        let prompt = if cfg.instruction.trim().is_empty() {
-            message
-        } else {
-            format!("{}\n\n{}", cfg.instruction.trim(), message)
-        };
-        self.shared.manager
-            .create(CreateSessionParams {
-                harness: cfg.harness.clone(),
-                cwd: cfg.cwd.clone(),
-                prompt: Some(prompt),
-                model: cfg.model.clone(),
-                title,
-                mode: Some("headless".to_string()),
-                pty_size: None,
-                worktree: false,
-                env: cfg.sandbox.session_env(),
-                args: Vec::new(),
-                kind: SessionKind::User,
-                parent_session_id: None,
-                group_id: None,
-                position_after_session_id: None,
-                forked_from: None,
-            })
-            .await
-    }
-}
-
-#[derive(Deserialize)]
-struct ServiceRequest {
-    message: String,
-    #[serde(default)]
-    session_key: Option<String>,
-    #[serde(default)]
-    request_id: Option<String>,
-}
-
-/// Accept loop for one bound channel.
-///
-/// The listener is bound by the caller so a bind failure is reported to
-/// whoever asked for the reload instead of vanishing into a detached task.
-///
-/// Cancellation stops *accepting* and drops the socket, freeing the port; it
-/// deliberately does not touch connections already in flight, because each one
-/// has an agent turn behind it. Connections hold their own `Arc<ServiceRuntime>`,
-/// so they keep working through a rebind. In short: connections drain, sockets
-/// rebind.
+/// Drive one supervisor-owned HTTP listener until it is cancelled.
 pub(crate) async fn serve(
     runtime: Arc<ServiceRuntime>,
-    listener: TcpListener,
+    listener: tokio::net::TcpListener,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let port = listener.local_addr().map(|addr| addr.port()).unwrap_or(0);
-    tracing::info!(service = %runtime.name(), channel = %runtime.channel_id, port, "service http endpoint ready (loopback only)");
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                tracing::info!(service = %runtime.name(), channel = %runtime.channel_id, port, "service http endpoint released");
-                return Ok(());
-            }
-            accepted = listener.accept() => {
-                let (stream, _) = accepted?;
-                let runtime = runtime.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = handle(stream, runtime).await {
-                        tracing::debug!(%error, "service request failed");
-                    }
-                });
-            }
-        }
-    }
-}
-
-async fn handle(mut stream: TcpStream, runtime: Arc<ServiceRuntime>) -> Result<()> {
-    let mut bytes = Vec::new();
-    let mut chunk = [0_u8; 8192];
-    loop {
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            return Ok(());
-        }
-        bytes.extend_from_slice(&chunk[..n]);
-        if bytes.len() > MAX_HTTP_BYTES {
-            return respond(&mut stream, 413, "request too large").await;
-        }
-        if let Some(end) = find_headers_end(&bytes) {
-            let length = content_length(&bytes[..end])?;
-            while bytes.len() < end + length {
-                let n = stream.read(&mut chunk).await?;
-                if n == 0 {
-                    return respond(&mut stream, 400, "truncated request").await;
-                }
-                bytes.extend_from_slice(&chunk[..n]);
-            }
-            break;
-        }
-    }
-    let end = find_headers_end(&bytes).unwrap();
-    let headers = std::str::from_utf8(&bytes[..end]).map_err(|_| anyhow!("invalid headers"))?;
-    let mut lines = headers.split("\r\n");
-    let request_line = lines.next().unwrap_or("");
-    let route = match parse_http_route(runtime.name(), request_line) {
-        Ok(route) => route,
-        Err((status, message)) => return respond(&mut stream, status, message).await,
-    };
-    // Read the credential per request, so a rotation takes effect on the next
-    // call without rebinding the socket. A channel detached out from under a
-    // live listener has no credential at all, and nothing can authenticate.
-    let expected = runtime.token();
-    let authorized = expected.is_some_and(|token| {
-        lines
-            .filter_map(|line| line.split_once(':'))
-            .any(|(name, value)| {
-                name.eq_ignore_ascii_case("authorization")
-                    && value.trim() == format!("Bearer {token}")
-            })
-    });
-    if !authorized {
-        return respond(&mut stream, 401, "unauthorized").await;
-    }
-    // Checked after auth: an unauthenticated caller should not be able to
-    // learn which services exist by comparing 401 against 503. The listener
-    // also goes down on pause, so this covers the window between the config
-    // swap and the socket actually closing.
-    if !runtime.serving() {
-        return respond(&mut stream, 503, "service paused").await;
-    }
-    match route {
-        HttpRoute::Submit => {
-            let result = match serde_json::from_slice::<ServiceRequest>(&bytes[end..]) {
-                Ok(request) => runtime.route(request).await,
-                Err(_) => Err(anyhow!("invalid JSON")),
-            };
-            match result {
-                Ok(session) => {
-                    json_response(
-                        &mut stream,
-                        202,
-                        &serde_json::json!({
-                            "accepted": true,
-                "service": runtime.name(),
-                "channel": runtime.channel_id,
-                            "session": session,
-                        }),
-                    )
-                    .await
-                }
-                Err(error) => respond(&mut stream, 400, &error.to_string()).await,
-            }
-        }
-        HttpRoute::Session(session_id) => match runtime.session_result(&session_id).await? {
-            Some(result) => json_response(&mut stream, 200, &result).await,
-            None => respond(&mut stream, 404, "session not found").await,
-        },
-    }
-}
-
-/// Reconstruct the caller-facing reply from a session transcript.
-///
-/// Harnesses stream an assistant turn as many small `Message` events (one per
-/// token delta), so the reply is the *concatenation* of the trailing assistant
-/// run, not its last element. Walking backwards, transcript bookkeeping
-/// (status, cost, usage, reasoning) is skipped, and collection stops at the
-/// first boundary that ends the turn's final answer — the user's own message,
-/// or a tool call whose narration precedes it — so a tool-using turn reports
-/// the answer rather than the commentary leading up to it.
-fn latest_assistant_reply<'a>(
-    events: impl DoubleEndedIterator<Item = &'a SessionEvent>,
-) -> Option<String> {
-    let mut parts: Vec<&str> = Vec::new();
-    for event in events.rev() {
-        match event {
-            SessionEvent::Message {
-                role: MessageRole::Assistant,
-                text,
-            } => parts.push(text.as_str()),
-            SessionEvent::Message { .. }
-            | SessionEvent::ToolUse { .. }
-            | SessionEvent::ToolResult { .. } => break,
-            _ => {}
-        }
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    parts.reverse();
-    Some(parts.concat())
-}
-
-/// A tool call this session is stopped at, waiting for the operator.
-struct PendingApproval {
-    call_id: String,
-    tool: String,
-    summary: String,
-    since: chrono::DateTime<chrono::Utc>,
-}
-
-/// The approval a turn is currently stopped at, if any.
-///
-/// Resolutions are not recorded in the transcript, so a pending approval is
-/// identified positionally: it is pending exactly when the request is the last
-/// thing of consequence in the transcript. Once the operator answers, the turn
-/// resumes and appends past it — a tool result, more assistant text — and the
-/// request stops trailing.
-fn pending_approval(events: &[construct_protocol::TimestampedEvent]) -> Option<PendingApproval> {
-    for event in events.iter().rev() {
-        match &event.event {
-            SessionEvent::ToolApprovalRequest {
-                call_id,
-                tool,
-                args_summary,
-                ..
-            } => {
-                return Some(PendingApproval {
-                    call_id: call_id.clone(),
-                    tool: tool.clone(),
-                    summary: args_summary.clone(),
-                    since: event.at,
-                })
-            }
-            SessionEvent::Message { .. }
-            | SessionEvent::ToolUse { .. }
-            | SessionEvent::ToolResult { .. } => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum HttpRoute {
-    Submit,
-    Session(String),
-}
-
-fn parse_http_route(
-    service_name: &str,
-    request_line: &str,
-) -> std::result::Result<HttpRoute, (u16, &'static str)> {
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let target = parts.next().unwrap_or("");
-    let version = parts.next().unwrap_or("");
-    if parts.next().is_some() || !version.starts_with("HTTP/") {
-        return Err((400, "invalid request line"));
-    }
-    let submit = format!("/svc/{service_name}");
-    if target == submit {
-        return if method == "POST" {
-            Ok(HttpRoute::Submit)
-        } else {
-            Err((405, "POST required"))
-        };
-    }
-    let session_prefix = format!("{submit}/sessions/");
-    if let Some(session_id) = target.strip_prefix(&session_prefix) {
-        if session_id.is_empty() || session_id.contains('/') {
-            return Err((404, "not found"));
-        }
-        return if method == "GET" {
-            Ok(HttpRoute::Session(session_id.to_string()))
-        } else {
-            Err((405, "GET required"))
-        };
-    }
-    Err((404, "not found"))
-}
-
-fn find_headers_end(bytes: &[u8]) -> Option<usize> {
-    bytes
-        .windows(4)
-        .position(|x| x == b"\r\n\r\n")
-        .map(|i| i + 4)
-}
-fn content_length(headers: &[u8]) -> Result<usize> {
-    let text = std::str::from_utf8(headers)?;
-    Ok(text
-        .lines()
-        .find_map(|line| {
-            line.split_once(':')
-                .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                .and_then(|(_, v)| v.trim().parse().ok())
-        })
-        .unwrap_or(0))
-}
-async fn respond(stream: &mut TcpStream, status: u16, message: &str) -> Result<()> {
-    json_response(stream, status, &serde_json::json!({"error": message})).await
-}
-async fn json_response(
-    stream: &mut TcpStream,
-    status: u16,
-    value: &serde_json::Value,
-) -> Result<()> {
-    let body = serde_json::to_vec(value)?;
-    let reason = match status {
-        200 => "OK",
-        202 => "Accepted",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        413 => "Payload Too Large",
-        _ => "Error",
-    };
-    stream.write_all(format!("HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await?;
-    stream.write_all(&body).await?;
-    Ok(())
+    http::serve(runtime, listener, cancel).await
 }
 
 #[cfg(test)]
 mod tests {
+    use super::http::{content_length, find_headers_end, parse_http_route, HttpRoute};
+    use super::ingress::{latest_assistant_reply, pending_approval, PersistedState};
     use super::*;
+    use construct_protocol::{MessageRole, SessionEvent, SessionState};
 
     /// A live service plus one channel runtime, so the tests below read
     /// configuration the way a request does rather than inspecting the struct.
@@ -1314,11 +745,11 @@ mod tests {
         // read per request. Before this, the old secret kept working until the
         // daemon restarted.
         let (shared, runtime) = live_service(config_with_channel("first", true, false)).await;
-        assert_eq!(runtime.token().as_deref(), Some("first"));
+        assert_eq!(http::token(&runtime).as_deref(), Some("first"));
 
         shared.set_config(config_with_channel("second", true, false));
         assert_eq!(
-            runtime.token().as_deref(),
+            http::token(&runtime).as_deref(),
             Some("second"),
             "the next request authenticates against the rotated secret"
         );
@@ -1328,22 +759,22 @@ mod tests {
         let mut detached = config_with_channel("second", true, false);
         detached.channels.clear();
         shared.set_config(detached);
-        assert_eq!(runtime.token(), None);
+        assert_eq!(http::token(&runtime), None);
     }
 
     #[tokio::test]
     async fn pausing_or_disabling_stops_a_channel_serving() {
         let (shared, runtime) = live_service(config_with_channel("t", true, false)).await;
-        assert!(runtime.serving());
+        assert!(http::serving(&runtime));
 
         shared.set_config(config_with_channel("t", true, true));
-        assert!(!runtime.serving(), "a paused service refuses requests");
+        assert!(!http::serving(&runtime), "a paused service refuses requests");
 
         shared.set_config(config_with_channel("t", false, false));
-        assert!(!runtime.serving(), "a disabled channel refuses requests");
+        assert!(!http::serving(&runtime), "a disabled channel refuses requests");
 
         shared.set_config(config_with_channel("t", true, false));
-        assert!(runtime.serving(), "resuming serves again");
+        assert!(http::serving(&runtime), "resuming serves again");
     }
 
     #[tokio::test]
