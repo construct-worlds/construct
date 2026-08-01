@@ -12072,50 +12072,6 @@ impl App {
             }
             return;
         }
-        if self.focus == PaneFocus::View
-            && self.selection.service_name().is_some()
-            && self.service_dialog.is_none()
-        {
-            match key.code {
-                KeyCode::Char('e') | KeyCode::Enter => {
-                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
-                        self.open_edit_service_view(&name);
-                    }
-                    return;
-                }
-                KeyCode::Char('a') => {
-                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
-                        if self.open_edit_service_view(&name) {
-                            self.open_new_service_channel();
-                        }
-                    }
-                    return;
-                }
-                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
-                        self.open_edit_service_view(&name);
-                        if let Some(dialog) = self.service_dialog.as_mut() {
-                            dialog.confirm_delete = true;
-                            dialog.note = Some(
-                                "Delete this service? Enter/y confirms; Esc/n cancels."
-                                    .to_string(),
-                            );
-                        }
-                    }
-                    return;
-                }
-                _ => {}
-            }
-            let is_ctrl_x = matches!(key.code, KeyCode::Char('x'))
-                && key.modifiers.contains(KeyModifiers::CONTROL);
-            // Once C-x has started a chord, let its continuation reach the
-            // global keymap. Without this guard the service-view fast path
-            // returns on the second key, so bindings such as C-x . appear to
-            // do nothing while a service is focused.
-            if !is_ctrl_x && self.chord_state.is_empty() {
-                return;
-            }
-        }
         // An in-progress inline title rename owns every keystroke, same
         // precedence class as the minibuffer/session-picker below — it must
         // come first so a rename started by clicking a pane's name doesn't
@@ -12225,6 +12181,54 @@ impl App {
             }
             self.handle_minibuffer_key(key).await;
             return;
+        }
+        // Service-view commands are a normal pane-level fast path, but they
+        // must run only after every transient keyboard surface above has had
+        // first claim. Otherwise a service's default `return` path consumes
+        // keys from an already-open remote-control dialog or minibuffer.
+        if self.focus == PaneFocus::View
+            && self.selection.service_name().is_some()
+            && self.service_dialog.is_none()
+        {
+            match key.code {
+                KeyCode::Char('e') | KeyCode::Enter => {
+                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                        self.open_edit_service_view(&name);
+                    }
+                    return;
+                }
+                KeyCode::Char('a') => {
+                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                        if self.open_edit_service_view(&name) {
+                            self.open_new_service_channel();
+                        }
+                    }
+                    return;
+                }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                        self.open_edit_service_view(&name);
+                        if let Some(dialog) = self.service_dialog.as_mut() {
+                            dialog.confirm_delete = true;
+                            dialog.note = Some(
+                                "Delete this service? Enter/y confirms; Esc/n cancels."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            let is_ctrl_x = matches!(key.code, KeyCode::Char('x'))
+                && key.modifiers.contains(KeyModifiers::CONTROL);
+            // Once C-x has started a chord, let its continuation reach the
+            // global keymap. Without this guard the service-view fast path
+            // returns on the second key, so bindings such as C-x . appear to
+            // do nothing while a service is focused.
+            if !is_ctrl_x && self.chord_state.is_empty() {
+                return;
+            }
         }
         if self.handle_inline_dynamic_ui_key(key).await {
             return;
@@ -40561,6 +40565,64 @@ mod tests {
             Some(ServiceDialogMode::Edit)
         ));
         assert!(app.service_title_menu.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_yields_keys_to_open_transient_surfaces() {
+        use construct_protocol::{RemoteProviderInfo, TunnelProvider};
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".into());
+
+        app.remote_control_popup = Some(RemoteControlPopup::Choose(RemoteControlChoose {
+            base: remote_ok_fixture(false),
+            options: vec![
+                RemoteProviderInfo {
+                    provider: TunnelProvider::Cloudflare,
+                    available: true,
+                    detail: None,
+                },
+                RemoteProviderInfo {
+                    provider: TunnelProvider::Construct,
+                    available: true,
+                    detail: None,
+                },
+            ],
+            selected: 0,
+            active: None,
+        }));
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.remote_control_popup
+                .as_ref()
+                .and_then(|popup| match popup {
+                    RemoteControlPopup::Choose(choose) => Some(choose.selected),
+                    _ => None,
+                }),
+            Some(1),
+            "an open remote-control dialog must own keys over the service view"
+        );
+
+        app.remote_control_popup = None;
+        app.harnesses = vec![construct_protocol::HarnessInfo {
+            name: "shell".into(),
+            available: true,
+            detail: None,
+            binary: None,
+            description: None,
+            capabilities: Default::default(),
+        }];
+        app.run_action(KeyAction::OpenNewSession).await;
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.minibuffer.as_ref().map(|minibuffer| minibuffer.input.as_str()),
+            Some("s"),
+            "an open minibuffer must own keys over the service view"
+        );
         server.abort();
     }
 

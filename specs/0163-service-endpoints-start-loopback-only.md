@@ -51,7 +51,10 @@ Space attaches or detaches the selected available/owned channel; Enter edits
 an attached channel. The routed-session list is a separate `Sessions` section
 below the channel catalog. Global `C-x` chords remain available while the service view is
 focused; session-only commands such as `C-x .` explain their scope instead of
-being silently swallowed.
+being silently swallowed. When a remote-control dialog, session picker, or
+other minibuffer is open, that transient surface owns keyboard input before
+the service view's default key handling; service-view commands resume when it
+closes.
 
 While editing, `C-n` and `C-p` move between definition fields alongside the
 arrow and Tab keys. Harness and model are picker-only fields: typed, pasted,
