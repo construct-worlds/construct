@@ -40483,6 +40483,7 @@ mod tests {
         app.sessions.push(routed);
         app.services.push(service_summary_for_test("assistant"));
         app.select_service("assistant".into());
+        app.session_transitions.clear();
 
         let backend = ratatui::backend::TestBackend::new(120, 60);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
