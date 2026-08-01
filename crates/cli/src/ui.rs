@@ -2657,6 +2657,12 @@ fn format_age_ms(ms: u64) -> String {
     }
 }
 
+/// The "this session wants the operator" marker (spec 0054): a blue dot,
+/// trailing the session's title on its row and standing in for the
+/// wants-you count in the list title. One constant because the two must
+/// look identical — the tally is a count of exactly these dots.
+const ATTENTION_MARKER_GLYPH: &str = "●";
+
 /// One bucket of the session list's fleet tally.
 ///
 /// Deliberately not a run state. "Wants the operator" is the sticky
@@ -2671,12 +2677,16 @@ enum FleetTally {
 }
 
 impl FleetTally {
-    /// Distinct glyphs, so the tally survives a monochrome terminal: two
-    /// counts separated only by hue would be unreadable side by side.
+    /// The wants-you tally wears the per-row attention marker's own dot, not
+    /// a glyph of its own: the operator learns the blue dot from the rows,
+    /// and a summary that counts those dots should look like the thing it
+    /// counts. That deliberately leaves working and wants-you separated only
+    /// by hue — the tradeoff is accepted and carried by the tooltip, which
+    /// names each bucket in words on hover (spec 0169).
     fn glyph(self) -> &'static str {
         match self {
             FleetTally::Working => SessionState::Running.glyph(),
-            FleetTally::NeedsYou => "!",
+            FleetTally::NeedsYou => ATTENTION_MARKER_GLYPH,
             FleetTally::Errored => SessionState::Errored.glyph(),
         }
     }
@@ -2847,10 +2857,16 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 area.y,
                 kind.tooltip(*n),
             ));
-            title_spans.push(Span::styled(
-                text,
-                Style::default().fg(kind.color(&app.theme)),
-            ));
+            // Dimmed by attribute rather than shifted toward gray while the
+            // sidebar is unfocused: the bucket hue is the only thing telling
+            // working apart from wants-you now that they share a glyph, so
+            // it has to survive the dimming. The tally still reads at a
+            // glance — it just stops competing with the focused pane.
+            let mut style = Style::default().fg(kind.color(&app.theme));
+            if !focused {
+                style = style.add_modifier(Modifier::DIM);
+            }
+            title_spans.push(Span::styled(text, style));
             cursor = cursor.saturating_add(w);
         }
     }
@@ -3011,9 +3027,15 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         ),
                         Span::styled(name_display, name_style),
                         // Unblock marker: a blue dot trailing the title when the
-                        // session needs the operator (spec 0054).
+                        // session needs the operator (spec 0054). The list
+                        // title's wants-you tally counts these dots and wears
+                        // the same glyph and hue.
                         Span::styled(
-                            if marker_w > 0 { " ●" } else { "" }.to_string(),
+                            if marker_w > 0 {
+                                format!(" {ATTENTION_MARKER_GLYPH}")
+                            } else {
+                                String::new()
+                            },
                             Style::default().fg(app.theme.info),
                         ),
                         Span::raw(gap_str),
@@ -23373,19 +23395,29 @@ mod tests {
         assert_eq!(shown, 3);
     }
 
-    /// The tally is glyph-first: two counts distinguished only by color
-    /// would be unreadable side by side on a monochrome terminal.
+    /// The wants-you tally is a count of the per-row attention dots, so it
+    /// has to *be* that dot — a tally wearing a different glyph than the
+    /// markers it counts asks the operator to learn the mapping twice.
     #[test]
-    fn fleet_tally_glyphs_are_distinct() {
-        let glyphs: Vec<&str> = FleetStatusCounts::default()
-            .entries()
-            .iter()
-            .map(|(kind, _)| kind.glyph())
-            .collect();
-        let mut sorted = glyphs.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sorted.len(), glyphs.len(), "tally glyphs collide: {glyphs:?}");
+    fn wants_you_tally_wears_the_attention_marker() {
+        assert_eq!(FleetTally::NeedsYou.glyph(), ATTENTION_MARKER_GLYPH);
+        let theme = Theme::dark();
+        assert_eq!(
+            FleetTally::NeedsYou.color(&theme),
+            theme.info,
+            "the tally must take the same hue the row marker paints with"
+        );
+    }
+
+    /// Working and wants-you deliberately share the dot, so failure is
+    /// legible in exactly one place: errored must stay distinct from both.
+    /// If it ever collides, the tally loses the only reading that survives a
+    /// terminal with no color at all.
+    #[test]
+    fn errored_tally_stays_distinct_from_the_dots() {
+        let errored = FleetTally::Errored.glyph();
+        assert_ne!(errored, FleetTally::Working.glyph());
+        assert_ne!(errored, FleetTally::NeedsYou.glyph());
     }
 
     /// Singular attention reads as a sentence, not as a template with a

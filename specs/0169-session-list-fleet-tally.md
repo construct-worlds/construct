@@ -14,12 +14,22 @@ per reading worth acting on:
 - **wants you** — sessions carrying the sticky attention marker (spec 0054)
 - **errored** — sessions that failed
 
-Each entry is a count plus a glyph. Glyphs are distinct from one another, so
-the tally survives a terminal that drops color; color reinforces, and the
-"wants you" entry takes the same hue as the per-row attention marker so the
-count and the dots it counts read as one signal. Hovering an entry names it
-in words — the glyphs are compact by design, and the tooltip is where the
-vocabulary is actually spelled out.
+Each entry is a count plus a glyph. **The "wants you" entry wears the
+per-row attention marker itself** — the same glyph and the same hue — so the
+count and the markers it counts are visibly one signal rather than two
+vocabularies the operator has to learn separately. Failure keeps a glyph of
+its own, so the one reading that must survive a terminal with no color at
+all still does.
+
+This accepts a real cost: "working" and "wants you" are then separated only
+by hue. That is the deliberate tradeoff — the marker's recognizability is
+worth more than glyph-level distinctness on the two buckets that are both
+"alive and fine." Hovering an entry names it in words, and that hover text
+is what carries the distinction when color cannot.
+
+While the list is unfocused the tally dims **by attribute, not by
+desaturation**. Shifting it toward gray would collapse the only channel
+separating two of its three buckets.
 
 The tally obeys four rules:
 
@@ -62,18 +72,32 @@ actually looks.
 Tallying idle sessions was rejected for the same reason: it would put the
 largest and least actionable number in the title.
 
-Glyph-first because color is the least reliable channel available: terminal
-themes remap it, monochrome and low-contrast terminals drop it, and a
-meaningful share of operators cannot separate two adjacent hues. Two counts
-distinguished only by hue, rendered side by side, would be unreadable.
+On glyphs: color is the least reliable channel available — terminal themes
+remap it, monochrome and low-contrast terminals drop it, and a meaningful
+share of operators cannot separate two adjacent hues. The first draft
+therefore minted a distinct glyph per bucket. That was wrong for the
+wants-you entry specifically: the operator already knows the blue dot from
+the rows, and a summary that counts those dots while wearing a different
+mark reads as a fourth thing to learn rather than as their total. Matching
+the marker is worth more than the distinctness it costs, because the cost
+falls between "working" and "wants you" — two buckets that are both fine —
+while the reading that actually needs to survive a colorless terminal is
+failure, which keeps its own glyph.
 
 ## Consequences
 
 - Whatever detects "this session wants the operator" now feeds two surfaces
   — the per-row marker and the tally. Weakening that detection weakens the
   summary the operator scans, not just one row.
-- Adding a tally bucket means minting a glyph distinct from the existing
-  ones, and adding hover text for it.
+- The wants-you tally and the per-row marker must change together. They are
+  one signal rendered at two scales, and a change to either that is not
+  mirrored in the other breaks the equivalence this decision rests on.
+- Adding a tally bucket means minting a glyph — distinct from the existing
+  ones unless it, too, mirrors a marker the operator already reads — and
+  adding hover text for it.
+- Because two buckets share a glyph, hover text is load-bearing rather than
+  a convenience. Any surface that renders the tally without a hover
+  affordance owes the operator another way to tell those two apart.
 - The tally's placement is not fixed by this spec, but wherever it renders
   it must be able to yield: the title bar is shared with controls that own
   their geometry, and a summary is never worth overlapping a control.
@@ -90,8 +114,10 @@ distinguished only by hue, rendered side by side, would be unreadable.
   a flagged session.
 - Does not replace the per-session attention marker (spec 0054). The marker
   says *which* row; the tally says *how many*. Both render.
-- Does not standardize which specific glyph means which bucket. That is a
-  client-visible detail free to evolve, as long as distinctness holds.
+- Does not standardize which specific glyph means which bucket, beyond the
+  two constraints above: wants-you mirrors the attention marker, and failure
+  stays distinct from both other buckets. Within that, glyph choice is a
+  client-visible detail free to evolve.
 
 ## Examples
 
@@ -100,8 +126,14 @@ distinguished only by hue, rendered side by side, would be unreadable.
   and no failures. The title reports four working and three wanting the
   operator; the twenty-three idle sessions are not tallied and no errored
   entry renders.
+  The two counts render with the same mark, told apart by hue and by their
+  hover text; three of the rows below carry that same mark individually, and
+  the title's count of them is the total.
 - The operator focuses one of the three flagged sessions. Its marker clears,
   and the tally drops to two — without any run state having changed.
+- Focus moves to the transcript. The tally fades but keeps its colors, so
+  "which of these is waiting on me" is still answerable from the corner of
+  the eye without clicking back into the list.
 - The same fleet in a narrow sidebar, where the title bar has only enough
   room for the view-mode toggle: the tally renders nothing and the toggle
   keeps its position.

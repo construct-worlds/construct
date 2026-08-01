@@ -23380,8 +23380,9 @@ mod tests {
             .expect("list should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
-            text.contains("1● 1! 1✗"),
-            "one session per bucket should tally as `1● 1! 1✗`: {text}"
+            text.contains("1● 1● 1✗"),
+            "one session per bucket should tally as `1● 1● 1✗` — working and \
+             wants-you share the dot and are told apart by hue: {text}"
         );
 
         let hits = app.layout.list_title_tally_hits.clone();
@@ -23390,18 +23391,28 @@ mod tests {
         // guessable from its glyph, so it is the one worth pinning down.
         let (xs, xe, y, ref label) = hits[1];
         assert_eq!(label, " 1 session needs you ");
+        // Working and wants-you now render the same `1●` text, so matching
+        // symbols proves nothing about which tally the zone landed on — a
+        // hit zone drifted one tally to the left would read identically.
+        // Color is the only thing that separates them, so assert on that.
         for x in xs..xe {
             let cell = term
                 .backend()
                 .buffer()
                 .cell((x, y))
                 .expect("cell inside the hit zone")
-                .symbol()
-                .to_string();
+                .clone();
             assert!(
-                cell == "1" || cell == "!",
+                cell.symbol() == "1" || cell.symbol() == "●",
                 "the wants-you hit zone must cover its own count and glyph, \
-                 found {cell:?} at x={x}"
+                 found {:?} at x={x}",
+                cell.symbol()
+            );
+            assert_eq!(
+                cell.style().fg,
+                Some(app.theme.info),
+                "the hit zone must sit on the wants-you tally, not the \
+                 identically-spelled working tally beside it (x={x})"
             );
         }
 
@@ -23412,6 +23423,66 @@ mod tests {
         assert!(
             hovered.contains("1 session needs you"),
             "hovering the wants-you tally should name it in words: {hovered}"
+        );
+        server.abort();
+    }
+
+    /// Unfocused, the tally recedes — but by attribute, not by desaturating
+    /// to gray. Working and wants-you share a glyph and are told apart by
+    /// hue alone, so a dimming that dropped the color would merge them into
+    /// two identical numbers.
+    #[tokio::test]
+    async fn unfocused_tally_dims_but_keeps_its_bucket_hue() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut flagged = summary_with_kind(construct_protocol::SessionKind::User);
+        flagged.id = "ask".into();
+        flagged.state = construct_protocol::SessionState::AwaitingInput;
+        flagged.needs_attention = true;
+        app.sessions = vec![flagged];
+        app.selection = Selection::Session("ask".into());
+
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+
+        app.focus = PaneFocus::List;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("focused list should render");
+        let (xs, _, y, _) = app.layout.list_title_tally_hits[0].clone();
+        let focused_cell = term
+            .backend()
+            .buffer()
+            .cell((xs, y))
+            .expect("tally cell")
+            .clone();
+        assert!(
+            !focused_cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM),
+            "a focused sidebar should show the tally at full strength"
+        );
+
+        app.focus = PaneFocus::View;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("unfocused list should render");
+        let unfocused_cell = term
+            .backend()
+            .buffer()
+            .cell((xs, y))
+            .expect("tally cell")
+            .clone();
+        assert!(
+            unfocused_cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM),
+            "an unfocused sidebar should dim the tally"
+        );
+        assert_eq!(
+            unfocused_cell.style().fg,
+            focused_cell.style().fg,
+            "dimming must not drop the bucket hue — it is the only thing \
+             separating working from wants-you"
         );
         server.abort();
     }
