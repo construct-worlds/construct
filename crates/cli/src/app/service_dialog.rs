@@ -103,7 +103,31 @@ impl ServiceDialog {
                     detail: "let the selected harness choose its default model".to_string(),
                     available: true,
                 }];
-                if let Some(harness) = app
+                if !app.service_route_catalog.is_empty() {
+                    for route in &app.service_route_catalog {
+                        let models = if route.models.is_empty() {
+                            vec![route.model.clone()]
+                        } else {
+                            route.models.clone()
+                        };
+                        for model in models {
+                            if model.trim().is_empty() {
+                                continue;
+                            }
+                            let detail = if let Some(reason) = route.unavailable_reason.as_deref() {
+                                format!("{} · {reason}", route.name)
+                            } else {
+                                format!("route: {}", route.name)
+                            };
+                            options.push(ServiceDialogPickerOption {
+                                value: model.clone(),
+                                label: format!("{} / {model}", route.name),
+                                detail,
+                                available: route.unavailable_reason.is_none(),
+                            });
+                        }
+                    }
+                } else if let Some(harness) = app
                     .harnesses
                     .iter()
                     .find(|harness| harness.name == self.service.harness)
@@ -308,12 +332,10 @@ impl App {
         match dialog.selected_field {
             0 => edit(&mut dialog.service.name),
             1 => edit(&mut dialog.service.instruction),
-            2 => edit(&mut dialog.service.harness),
-            3 => {
-                let mut value = dialog.service.model.take().unwrap_or_default();
-                edit(&mut value);
-                dialog.service.model = (!value.is_empty()).then_some(value);
-            }
+            // Harness and model are catalog-backed fields. They deliberately
+            // do not accept typed or pasted text: Enter opens the picker and
+            // the picker is the only way to change either value.
+            2 | 3 => return,
             4 => edit(&mut dialog.service.cwd),
             6 => {
                 let mut value = dialog

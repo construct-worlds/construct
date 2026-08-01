@@ -553,12 +553,12 @@ fn service_dialog_field_help(
         2 => (
             "Harness",
             "Agent harness used for new service sessions, such as smith, claude, or codex.",
-            "Type to edit · applies after restart.",
+            "Enter opens the picker · applies after restart.",
         ),
         3 => (
             "Model",
             "Optional model override passed to the harness. Leave it blank to use that harness's default model.",
-            "Type to edit · applies after restart.",
+            "Enter opens the picker · applies after restart.",
         ),
         4 => (
             "Working directory",
@@ -8074,13 +8074,6 @@ fn render_service_view(
             current.service.name == name && current.selected_field == index
         });
         let locked = index == 0 && dialog.mode == crate::app::ServiceDialogMode::Edit;
-        let suffix = match index {
-            5 => "  ←/→ cycle",
-            7 => "  Space toggle",
-            2 | 3 => "  Enter picker",
-            _ if locked => "  locked",
-            _ => "",
-        };
         let value = dialog.field_value(index);
         let marker = if selected { "›" } else { " " };
         let mut style = Style::default().fg(if locked {
@@ -8092,7 +8085,7 @@ fn render_service_view(
             style = style.fg(app.theme.highlight_fg).bg(app.theme.highlight_bg);
         }
         field_lines.push(Line::from(Span::styled(
-            format!("{marker} {label:<12} {value}{suffix}"),
+            format!("{marker} {label:<12} {value}"),
             style,
         )));
     }

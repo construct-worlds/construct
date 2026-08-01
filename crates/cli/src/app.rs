@@ -1747,6 +1747,10 @@ pub struct App {
     /// `features/state` notification. Drives the configure dialog's
     /// Features tab and the modeline degradation notice.
     pub features: Vec<construct_protocol::FeatureInfo>,
+    /// Route/model catalog used by service-definition model pickers. This is
+    /// the same catalog the pin-router picker receives, but service editing
+    /// stores only the selected model override.
+    pub service_route_catalog: Vec<construct_protocol::RouteOption>,
     /// Whether the daemon has actually skipped ambient work (auto-title,
     /// suggestions) for lack of a smith credential this run — the gate for
     /// showing the modeline degradation notice at all.
@@ -5036,6 +5040,11 @@ async fn run_with_socket_initial_selection(
     let mut services = client.list_services().await.unwrap_or_default();
     services.sort_by(|a, b| a.name.cmp(&b.name));
     let harnesses = client.harnesses().await.unwrap_or_default();
+    let service_route_catalog = client
+        .list_routes(None)
+        .await
+        .map(|result| result.routes)
+        .unwrap_or_default();
     let features_status = client.features_status().await.ok();
     let plugin_actions = client.plugin_actions().await.unwrap_or_default();
     let playbook_templates = client
@@ -5218,6 +5227,7 @@ async fn run_with_socket_initial_selection(
             .as_ref()
             .map(|s| s.features.clone())
             .unwrap_or_default(),
+        service_route_catalog,
         features_degradation_observed: features_status
             .as_ref()
             .is_some_and(|s| s.degradation_observed),
@@ -16204,6 +16214,7 @@ mod tests {
             minibuffer_hint_context: None,
             harnesses: Vec::new(),
             features: Vec::new(),
+            service_route_catalog: Vec::new(),
             features_degradation_observed: false,
             plugin_actions: Vec::new(),
             playbook_templates: Vec::new(),
@@ -40538,6 +40549,123 @@ mod tests {
             .await;
         assert_eq!(
             app.service_dialog.as_ref().unwrap().service.model.as_deref(),
+            Some("gpt-5")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_editor_harness_and_model_ignore_typed_or_pasted_text() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.open_edit_service_view("assistant");
+
+        if let Some(dialog) = app.service_dialog.as_mut() {
+            dialog.selected_field = 2;
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().service.harness,
+            "smith",
+            "harness is changed only through its picker"
+        );
+
+        if let Some(dialog) = app.service_dialog.as_mut() {
+            dialog.selected_field = 3;
+            dialog.service.model = Some("gpt-5".to_string());
+        }
+        assert!(app.insert_service_dialog_text("-typed"));
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .service
+                .model
+                .as_deref(),
+            Some("gpt-5"),
+            "model is changed only through its picker"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_model_picker_uses_the_pin_router_catalog() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.services[0].model = None;
+        app.service_route_catalog = vec![
+            construct_protocol::RouteOption {
+                name: "openai".to_string(),
+                dialect: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                models: vec!["gpt-5".to_string(), "gpt-5-mini".to_string()],
+                base_url: "https://api.openai.com".to_string(),
+                unavailable_reason: None,
+                login_command: None,
+            },
+            construct_protocol::RouteOption {
+                name: "anthropic".to_string(),
+                dialect: "anthropic".to_string(),
+                model: "claude-sonnet".to_string(),
+                models: vec!["claude-sonnet".to_string()],
+                base_url: "https://api.anthropic.com".to_string(),
+                unavailable_reason: None,
+                login_command: None,
+            },
+        ];
+        app.open_edit_service_view("assistant");
+        app.service_dialog.as_mut().unwrap().selected_field = 3;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().picker,
+            Some(ServiceDialogPickerKind::Model)
+        );
+        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 3);
+
+        let dialog = app.service_dialog.as_ref().unwrap();
+        let options = dialog.picker_options(&app);
+        assert_eq!(options[0].label, "Default");
+        assert!(options.iter().any(|option| option.label == "openai / gpt-5"));
+        assert!(options
+            .iter()
+            .any(|option| option.label == "openai / gpt-5-mini"));
+        assert!(options
+            .iter()
+            .any(|option| option.label == "anthropic / claude-sonnet"));
+        assert!(!app.service_dialog.as_ref().unwrap().confirm_delete);
+
+        // The first move leaves Default and selects the same first model that
+        // the pin router would show under the openai target.
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().picker_selected,
+            1,
+            "C-n should advance the model picker"
+        );
+        let selected = app.service_dialog.as_ref().unwrap().clone();
+        assert_eq!(
+            selected.picker_options(&app)[selected.picker_selected].value,
+            "gpt-5"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .service
+                .model
+                .as_deref(),
             Some("gpt-5")
         );
         server.abort();

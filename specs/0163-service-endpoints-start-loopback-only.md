@@ -31,11 +31,14 @@ focused; session-only commands such as `C-x .` explain their scope instead of
 being silently swallowed.
 
 While editing, `C-n` and `C-p` move between definition fields alongside the
-arrow and Tab keys. Harness and model are picker-backed fields: Enter opens an
-inline list of detected harnesses or harness-advertised models, and the same
-motion keys move the highlighted choice before Enter applies it. The current
-value remains selectable when it is not present in the detected catalog, so
-editing an older or custom definition never silently discards its value.
+arrow and Tab keys. Harness and model are picker-only fields: typed, pasted,
+and backspace input never edits them. Enter opens an inline list of detected
+harnesses or the same route/model catalog used by the pin-router picker; the
+same motion keys move the highlighted choice before Enter applies it. The
+current value remains selectable when it is not present in the detected
+catalog, so editing an older or custom definition never silently discards its
+value. Row text stays focused on the value; the contextual guidance column
+provides the action hint instead of repeating key instructions on every row.
 
 The WebTUI mirrors this surface at `/services/<name>`. Services appear in the
 same list model as sessions, using the same `◈` glyph and row selection. Its
