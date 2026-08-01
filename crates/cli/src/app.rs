@@ -40813,6 +40813,26 @@ mod tests {
             .collect::<String>();
         assert!(view_text.contains("Loopback port"));
         assert!(view_text.contains("unique among services"));
+        let view_rows = buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .skip(view.y as usize)
+            .take(view.height as usize)
+            .map(|row| {
+                row[view.x as usize + 1..view.right() as usize - 1]
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let note_row = view_rows
+            .iter()
+            .position(|row| row.contains("Changes apply after the daemon restarts."))
+            .expect("service restart note is visible");
+        assert!(
+            note_row > 0 && view_rows[note_row - 1].trim().is_empty(),
+            "restart note has a spacer above it"
+        );
 
         app.service_dialog.as_mut().unwrap().selected_field = 5;
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");

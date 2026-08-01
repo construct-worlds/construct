@@ -8178,6 +8178,7 @@ fn render_service_view(
         )));
     }
     if let Some(note) = &dialog.note {
+        activity.push(Line::from(""));
         activity.push(Line::from(Span::styled(
             note.clone(),
             Style::default().fg(if dialog.confirm_delete { app.theme.danger } else { app.theme.dim }),
