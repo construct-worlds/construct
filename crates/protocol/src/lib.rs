@@ -1234,6 +1234,8 @@ pub mod ipc_method {
     pub const SERVICE_CHANNEL_ATTACH: &str = "service.channel.attach";
     pub const SERVICE_CHANNEL_DETACH: &str = "service.channel.detach";
     pub const SERVICE_CHANNEL_ROTATE_SECRET: &str = "service.channel.rotate_secret";
+    pub const SERVICE_CHANNEL_PUBLISH: &str = "service.channel.publish";
+    pub const SERVICE_CHANNEL_UNPUBLISH: &str = "service.channel.unpublish";
     pub const SESSION_CREATE: &str = "session.create";
     pub const SESSION_GET: &str = "session.get";
     pub const SESSION_INPUT: &str = "session.input";
@@ -1417,6 +1419,7 @@ pub mod ipc_notif {
     /// actually skips work for lack of a smith credential, so clients can
     /// surface the degradation without polling.
     pub const FEATURES_STATE: &str = "features/state";
+    pub const CHANNEL_PUBLICATION_STATE: &str = "service/channel-publication-state";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3257,10 +3260,88 @@ pub struct ServiceChannelSummary {
     pub allowed_channels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_to: Option<String>,
+    /// Live public exposure, when this channel has been explicitly published.
+    /// Publication is runtime state rather than service configuration: daemon
+    /// restart, pause, detach, and endpoint replacement all withdraw it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<ChannelPublicationSummary>,
 }
 
 fn default_service_channel_true() -> bool {
     true
+}
+
+/// A public address returned by a channel-publication provider.
+///
+/// "Endpoint" is deliberately broader than URL: HTTP and WebSocket channels
+/// receive a URL, while a future raw TCP channel can receive a host and port.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ChannelPublicEndpoint {
+    Url { url: String },
+    Socket { host: String, port: u16 },
+}
+
+impl std::fmt::Display for ChannelPublicEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Url { url } => f.write_str(url),
+            Self::Socket { host, port } if host.contains(':') && !host.starts_with('[') => {
+                write!(f, "[{host}]:{port}")
+            }
+            Self::Socket { host, port } => write!(f, "{host}:{port}"),
+        }
+    }
+}
+
+/// Lifecycle of one explicit channel publication.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChannelPublicationPhase {
+    Authorizing,
+    Connecting,
+    Ready,
+    Error,
+}
+
+/// Runtime status shown beside a channel in every client.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelPublicationSummary {
+    pub service_name: String,
+    pub channel_id: String,
+    /// Provider identifier rather than an enum so plugins can add providers
+    /// without extending the core wire protocol.
+    pub provider: String,
+    pub phase: ChannelPublicationPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_endpoint: Option<ChannelPublicEndpoint>,
+    /// Short-lived owner authorization URL. It is not a channel credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Push notification for one channel's publication state. `None` means the
+/// route was explicitly or automatically withdrawn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelPublicationNotificationPayload {
+    pub service_name: String,
+    pub channel_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<ChannelPublicationSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelPublicationParams {
+    pub service_name: String,
+    pub channel_id: String,
+    #[serde(default = "default_channel_publication_provider")]
+    pub provider: String,
+}
+
+fn default_channel_publication_provider() -> String {
+    "construct".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

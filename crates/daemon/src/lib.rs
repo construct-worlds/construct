@@ -17,6 +17,7 @@ use std::sync::OnceLock;
 
 mod adapter;
 mod availability;
+mod channel_publication;
 mod config;
 mod cost_history;
 pub mod doctor;
@@ -165,7 +166,6 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             .with_plugin_verb_dirs(plugin_set.verb_dirs())
             .with_plugin_template_dirs(plugin_set.template_dirs()),
     );
-    let service_definitions = service::load_definitions(&paths.services_dir())?;
     let (manager, remote_rx, mut restart_rx) =
         session::SessionManager::new(storage.clone(), Arc::new(config), paths.runtime_dir.clone())
             .await
@@ -236,6 +236,20 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
         });
     }
     manager.spawn_widget_watcher();
+    // Public exposure is a capability layered over channel-owned local
+    // endpoints. Its supervisor starts empty: only an explicit publish RPC
+    // creates a route, and daemon restart intentionally withdraws all routes.
+    {
+        let backend = Arc::new(tunnel::channel::ConstructChannelBackend);
+        let (publication_handle, publication_rx) = channel_publication::channel();
+        manager.set_channel_publications(publication_handle.clone());
+        tokio::spawn(channel_publication::run(
+            vec![backend],
+            publication_handle,
+            publication_rx,
+            Some(manager.clone()),
+        ));
+    }
     // Service endpoints are deliberately a separate, loopback-only ingress
     // surface.  They do not reuse the remote-control listener: a service's
     // bearer credential is scoped to that service, while remote control

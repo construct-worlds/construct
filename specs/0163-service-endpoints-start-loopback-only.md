@@ -9,7 +9,9 @@ Scope: The initial service-endpoint ingress boundary.
 
 Services are daemon-owned definitions. In v1 each service is declared in its
 own `services/<name>.toml` file under the Construct configuration directory and
-expose a generic HTTP webhook only on loopback. A service owns its instruction,
+start a generic HTTP webhook only on loopback. Public reachability, when
+explicitly requested for an active channel, is layered over that listener by
+the channel-publication boundary in 0174. A service owns its instruction,
 harness, model, working directory, and routing policy; a channel supplies the
 transport-specific credential and listener configuration. A service may own
 zero or more named channel instances. Channel ids are stable keys inside the
@@ -112,11 +114,11 @@ visible and recoverable in the fleet.
 - Channel-scoped routing and request deduplication keep equal caller keys or
   request ids on different channels from colliding accidentally.
 - Bearer credentials are service-scoped and never logged.
-- A future tunnel route, plugin channel, or synchronous reply mechanism extends
-  this boundary; none is implied by enabling a service.
+- A tunnel route extends this boundary only through an explicit per-channel
+  publication action; none is implied by enabling or attaching a service.
 - Service views participate in shared split layout state across TUI and
   WebTUI, while keyboard/pointer focus remains client-local.
-- V1 does not promise channel plugins, response streaming, or public exposure.
+- V1 does not promise channel plugins or response streaming.
   Runtime definition reload was subsequently added; see the spec on applying
   service definitions without a restart, which supersedes this consequence.
 

@@ -6,16 +6,16 @@
 //! the service's browser gateway supplies social login and maps the
 //! stable hostname to the runtime-only port.
 
-use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 use wstunnel::executor::JoinSetTokioExecutor;
 
 use crate::remote::RemoteState;
+use crate::tunnel::auth::{self, AuthorizationDisplay};
 
 const DEFAULT_API_URL: &str = "https://tunnel.zarvis.ai/api/v1/tunnels";
 
@@ -103,21 +103,6 @@ fn forget_refused(
     }
 }
 
-#[derive(Deserialize)]
-struct AuthRequest {
-    verification_url: String,
-    poll_url: String,
-    poll_token: String,
-    expires_in_seconds: u64,
-    interval_seconds: u64,
-}
-
-#[derive(Deserialize)]
-struct AuthPoll {
-    #[serde(default)]
-    owner_token: Option<String>,
-}
-
 pub fn preflight() -> Result<(), String> {
     Ok(())
 }
@@ -149,7 +134,7 @@ pub async fn run_once(
     let credential = match select_credential(cached_reregistration_token, cached_owner_token) {
         Some(credential) => credential,
         None => {
-            let token = authorize(&http, remote, &api_url).await?;
+            let token = auth::authorize(&http, remote, &api_url).await?;
             *cached_owner_token = Some(token.clone());
             Credential::Owner(token)
         }
@@ -303,106 +288,11 @@ async fn tunnel_ready(http: &reqwest::Client, ready_url: &str, tunnel_token: &st
         .unwrap_or(false)
 }
 
-async fn authorize(
-    http: &reqwest::Client,
-    remote: &RemoteState,
-    tunnel_api_url: &str,
-) -> Result<String> {
-    let auth_api_url = auth_api_url(tunnel_api_url)?;
-    let request = http
-        .post(auth_api_url)
-        .send()
-        .await
-        .context("start tunnel.zarvis.ai login")?
-        .error_for_status()
-        .context("tunnel.zarvis.ai rejected login request")?
-        .json::<AuthRequest>()
-        .await
-        .context("decode tunnel.zarvis.ai login request")?;
-
-    let verification_url = validate_https_url(&request.verification_url)?;
-    remote.set_auth_url(Some(verification_url.clone())).await;
-    tracing::info!(url = %verification_url, "authorize tunnel.zarvis.ai in a browser");
-    if let Err(error) = open_browser(&verification_url) {
-        tracing::info!(%error, url = %verification_url, "could not open login browser; showing URL in remote-connect dialog");
+#[async_trait]
+impl AuthorizationDisplay for RemoteState {
+    async fn set_authorization_url(&self, url: Option<String>) {
+        self.set_auth_url(url).await;
     }
-
-    let interval = Duration::from_secs(request.interval_seconds.clamp(1, 10));
-    let deadline = tokio::time::Instant::now()
-        + Duration::from_secs(request.expires_in_seconds.clamp(1, 10 * 60));
-    let result = async {
-        loop {
-            let response = match http
-                .get(&request.poll_url)
-                .bearer_auth(&request.poll_token)
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(error) if tokio::time::Instant::now() < deadline => {
-                    tracing::debug!(%error, "login poll failed; retrying");
-                    tokio::time::sleep(interval).await;
-                    continue;
-                }
-                Err(error) => break Err(error).context("poll tunnel.zarvis.ai login"),
-            };
-            if response.status() == reqwest::StatusCode::ACCEPTED {
-                if tokio::time::Instant::now() >= deadline {
-                    break Err(anyhow!("tunnel.zarvis.ai login expired; start again"));
-                }
-                tokio::time::sleep(interval).await;
-                continue;
-            }
-            let poll = response
-                .error_for_status()
-                .context("tunnel.zarvis.ai login failed")?
-                .json::<AuthPoll>()
-                .await
-                .context("decode tunnel.zarvis.ai login result")?;
-            match poll.owner_token {
-                Some(token) if !token.is_empty() => break Ok(token),
-                _ => break Err(anyhow!("tunnel.zarvis.ai login omitted authorization")),
-            }
-        }
-    }
-    .await;
-    remote.set_auth_url(None).await;
-    result
-}
-
-fn auth_api_url(tunnel_api_url: &str) -> Result<reqwest::Url> {
-    let mut url =
-        reqwest::Url::parse(tunnel_api_url).context("invalid Construct tunnel API URL")?;
-    let path = url.path().trim_end_matches('/');
-    let prefix = path
-        .strip_suffix("/tunnels")
-        .ok_or_else(|| anyhow!("Construct tunnel API URL must end in /tunnels"))?;
-    url.set_path(&format!("{prefix}/auth/requests"));
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url)
-}
-
-fn open_browser(url: &str) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    let mut command = Command::new("open");
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", ""]);
-        command
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = Command::new("xdg-open");
-
-    command
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("open browser for {url}"))?;
-    Ok(())
 }
 
 fn normalize_public_url(value: &str) -> Result<String> {
@@ -411,14 +301,6 @@ fn normalize_public_url(value: &str) -> Result<String> {
         anyhow::bail!("service returned a non-HTTPS public URL");
     }
     Ok(format!("{}/", value.trim_end_matches('/')))
-}
-
-fn validate_https_url(value: &str) -> Result<String> {
-    let url = reqwest::Url::parse(value).context("service returned an invalid HTTPS URL")?;
-    if url.scheme() != "https" || url.host_str().is_none() {
-        anyhow::bail!("service returned a non-HTTPS URL");
-    }
-    Ok(value.to_string())
 }
 
 fn valid_tunnel_name(value: &str) -> bool {
@@ -442,17 +324,6 @@ mod tests {
             "https://swift-willow-4827.tunnel.zarvis.ai/"
         );
         assert!(normalize_public_url("http://demo.example").is_err());
-    }
-
-    #[test]
-    fn auth_endpoint_is_derived_from_tunnel_endpoint() {
-        assert_eq!(
-            auth_api_url("https://tunnel.zarvis.ai/api/v1/tunnels")
-                .unwrap()
-                .as_str(),
-            "https://tunnel.zarvis.ai/api/v1/auth/requests"
-        );
-        assert!(auth_api_url("https://tunnel.zarvis.ai/wrong").is_err());
     }
 
     #[test]

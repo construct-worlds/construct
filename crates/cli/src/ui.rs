@@ -322,6 +322,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.lineage_hscrollbar = None;
     app.layout.lineage_box_hits.clear();
     app.layout.service_session_hits.clear();
+    app.layout.service_channel_action_hits.clear();
     app.layout.lineage_subagent_toggle_hits.clear();
     app.layout.lineage_segment_tooltip = None;
     app.window_pane_sizes.clear();
@@ -550,7 +551,7 @@ fn service_dialog_field_help(
         6 => (
             "Channels",
             "The daemon-wide channel catalog. A filled square is attached here; an empty square is available to attach. Channels owned by another service are unavailable.",
-            "Space attaches/detaches · Enter edits an attached channel · a creates a channel.",
+            "Space attaches/detaches · p publishes/withdraws · o opens · y copies · Enter edits · a creates.",
         ),
         7 => (
             "State",
@@ -7863,6 +7864,110 @@ fn service_session_route_label(
     (channel.to_string(), label)
 }
 
+/// Append the selected channel's visible action bar and register button-sized
+/// hit targets. Buttons wrap as whole units on narrow panes, so their click
+/// geometry always matches what was painted.
+fn append_service_channel_actions(
+    activity: &mut Vec<Line<'static>>,
+    app: &mut App,
+    area: Rect,
+    actions: &crate::app::ServiceChannelActions,
+) {
+    struct ActionRow {
+        spans: Vec<Span<'static>>,
+        buttons: Vec<(crate::app::ServiceChannelAction, u16, u16)>,
+        width: u16,
+    }
+
+    if area.width == 0 {
+        return;
+    }
+    let mut buttons = vec![(
+        crate::app::ServiceChannelAction::TogglePublication,
+        if actions.published {
+            "[p Withdraw]"
+        } else {
+            "[p Publish]"
+        },
+    )];
+    let address: Option<&crate::app::ServiceChannelActionAddress> = actions.address.as_ref();
+    if let Some(address) = address {
+        if address.can_open() {
+            buttons.push((crate::app::ServiceChannelAction::OpenAddress, "[o Open]"));
+        }
+        buttons.push((crate::app::ServiceChannelAction::CopyAddress, "[y Copy]"));
+    }
+
+    let prefix = truncate_to_width(
+        &format!("Actions {}  ", actions.channel_id),
+        area.width as usize,
+    );
+    let prefix_width = prefix.chars().count().min(u16::MAX as usize) as u16;
+    let mut rows = vec![ActionRow {
+        spans: vec![Span::styled(
+            prefix,
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )],
+        buttons: Vec::new(),
+        width: prefix_width,
+    }];
+    let button_style = Style::default()
+        .fg(app.theme.highlight_fg)
+        .bg(app.theme.highlight_bg)
+        .add_modifier(Modifier::BOLD);
+
+    for (action, label) in buttons {
+        let label_width = label.len().min(u16::MAX as usize) as u16;
+        let needs_separator = !rows.last().expect("action row").buttons.is_empty();
+        let required = label_width.saturating_add(u16::from(needs_separator));
+        if rows
+            .last()
+            .expect("action row")
+            .width
+            .saturating_add(required)
+            > area.width
+        {
+            rows.push(ActionRow {
+                spans: vec![Span::raw("  ")],
+                buttons: Vec::new(),
+                width: 2,
+            });
+        }
+        let row = rows.last_mut().expect("action row");
+        if !row.buttons.is_empty() {
+            row.spans.push(Span::raw(" "));
+            row.width = row.width.saturating_add(1);
+        }
+        let x = row.width;
+        row.spans.push(Span::styled(label, button_style));
+        row.buttons.push((action, x, label_width));
+        row.width = row.width.saturating_add(label_width);
+    }
+
+    let first_row = activity.len();
+    for (offset, row) in rows.into_iter().enumerate() {
+        let y = area
+            .y
+            .saturating_add(first_row as u16)
+            .saturating_add(offset as u16);
+        if y < area.bottom() {
+            app.layout
+                .service_channel_action_hits
+                .extend(row.buttons.into_iter().map(|(action, x, width)| {
+                    crate::app::ServiceChannelActionHit {
+                        service_name: actions.service_name.clone(),
+                        channel_index: actions.channel_index,
+                        action,
+                        area: Rect::new(area.x.saturating_add(x), y, width, 1),
+                    }
+                }));
+        }
+        activity.push(Line::from(row.spans));
+    }
+}
+
 /// Render a service as a normal split-pane surface. The editor state is the
 /// same editor state used before the service view existed, but the service now owns the whole
 /// pane: its definition and contextual help stay visible while the operator
@@ -8027,8 +8132,10 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
                 title == service_prefix || title.starts_with(&format!("{service_prefix}:"))
             })
         })
+        .cloned()
         .collect();
-    let catalog = &app.service_channel_catalog;
+    let selected_channel_actions = app.selected_service_channel_actions(name);
+    let catalog = app.service_channel_catalog.clone();
     let attached_count = catalog
         .iter()
         .filter(|channel| channel.attached_to.as_deref() == Some(summary.name.as_str()))
@@ -8072,6 +8179,30 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
                 .filter(|owner| *owner != summary.name.as_str())
                 .map(|owner| format!("  [attached to {owner}]"))
                 .unwrap_or_default();
+            let publication = channel
+                .publication
+                .as_ref()
+                .map(|publication| {
+                    use construct_protocol::ChannelPublicationPhase as Phase;
+                    match publication.phase {
+                        Phase::Ready => publication
+                            .public_endpoint
+                            .as_ref()
+                            .map(|endpoint| format!("  public {endpoint}"))
+                            .unwrap_or_else(|| "  public ready".to_string()),
+                        Phase::Authorizing => publication
+                            .auth_url
+                            .as_ref()
+                            .map(|url| format!("  authorize {url}"))
+                            .unwrap_or_else(|| "  authorizing".to_string()),
+                        Phase::Connecting => "  publishing".to_string(),
+                        Phase::Error => format!(
+                            "  publish error: {}",
+                            publication.error.as_deref().unwrap_or("unknown error")
+                        ),
+                    }
+                })
+                .unwrap_or_else(|| if attached { "  loopback".to_string() } else { String::new() });
             let style = if selected {
                 Style::default()
                     .fg(app.theme.highlight_fg)
@@ -8081,14 +8212,18 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
             } else {
                 Style::default().fg(app.theme.text)
             };
+            let row = format!(
+                "{marker} {checkbox} {}  {:<5} {endpoint}  {state}{owner}{publication}",
+                channel.id, channel.kind
+            );
             activity.push(Line::from(Span::styled(
-                format!(
-                    "{marker} {checkbox} {}  {:<5} {endpoint}  {state}{owner}",
-                    channel.id, channel.kind
-                ),
+                truncate_to_width(&row, chunks[2].width as usize),
                 style,
             )));
         }
+    }
+    if let Some(actions) = selected_channel_actions.as_ref() {
+        append_service_channel_actions(&mut activity, app, chunks[2], actions);
     }
     activity.push(Line::from(""));
     activity.push(Line::from(vec![
@@ -8115,7 +8250,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
             .take(chunks[2].height.saturating_sub(3) as usize)
         {
             let (channel, label) =
-                service_session_route_label(session, &summary.name, catalog, &summary.channels);
+                service_session_route_label(session, &summary.name, &catalog, &summary.channels);
             let row = chunks[2].y + activity.len() as u16;
             activity.push(Line::from(vec![
                 Span::styled(
@@ -8161,7 +8296,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
     } else if dialog.mode == crate::app::ServiceDialogMode::Create {
         "Enter/C-s save · Space attach · a create channel · Esc close · C-x keeps global commands"
     } else {
-        "Enter/C-s save · Space attach/detach · Enter edit · a create · Esc close"
+        "Enter/C-s save · Space attach · p publish/withdraw · o open · y copy · Esc close"
     };
     activity.push(Line::from(""));
     activity.push(Line::from(Span::styled(

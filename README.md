@@ -241,7 +241,9 @@ For an optimized build, use `cargo build --workspace --release` and replace
   and template packs, IPC clients, and the `construct-plugin` publishing
   convention.
 - [Remote control](docs/remote-control.md) — phone/browser access, QR setup,
-  credentials, and local debug mode.
+  LAN binding, authentication, public tunnel providers, and local debug mode.
+- [Services and channels](docs/services.md) — authenticated headless session
+  ingress, routing, and explicit per-channel publication.
 
 ## License
 
