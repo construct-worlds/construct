@@ -105,9 +105,18 @@ The rules exist because each protects against a specific failure:
   keychain or a user-configured host). Rule 5 wins: fidelity to the
   daemon's behavior is worth more than a strict no-syscall guarantee, and
   the deviation is documented rather than avoided.
-- Output is plain ASCII and pipe-friendly. The TUI's styling helpers are
-  unavailable to a plain subcommand, and the text is meant to survive
-  being pasted into an issue.
+- The report's layout is plain ASCII, and color is strictly additive on top
+  of it. Severity coloring is an accelerant for reading a long report on a
+  terminal, never the carrier of a distinction — every severity is stated in
+  words in the same line it colors, so the report survives being redirected
+  to a file, piped through a stripper, read with `NO_COLOR` set, or pasted
+  into an issue. Removing every escape code must yield exactly the plain
+  render, which also means column math runs on unstyled text.
+- Color follows the platform conventions rather than the TUI's. It is on
+  only for a terminal that wants it, overridable both by `NO_COLOR` and by
+  an explicit flag, and always off for the machine-readable output. The
+  palette stays within the basic ANSI colors so the user's own terminal
+  theme decides the hues.
 
 ## Non-Goals
 
