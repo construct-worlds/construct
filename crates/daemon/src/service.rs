@@ -764,17 +764,7 @@ impl ServiceRuntime {
         let Ok(detail) = self.shared.manager.detail(session_id).await else {
             return Ok(None);
         };
-        let reply = detail.events.iter().rev().find_map(|event| {
-            if let SessionEvent::Message {
-                role: MessageRole::Assistant,
-                text,
-            } = &event.event
-            {
-                Some(text.clone())
-            } else {
-                None
-            }
-        });
+        let reply = latest_assistant_reply(detail.events.iter().map(|event| &event.event));
         let ready = matches!(
             detail.summary.state,
             SessionState::AwaitingInput | SessionState::Done | SessionState::Errored
@@ -913,6 +903,38 @@ async fn handle(mut stream: TcpStream, runtime: Arc<ServiceRuntime>) -> Result<(
     }
 }
 
+/// Reconstruct the caller-facing reply from a session transcript.
+///
+/// Harnesses stream an assistant turn as many small `Message` events (one per
+/// token delta), so the reply is the *concatenation* of the trailing assistant
+/// run, not its last element. Walking backwards, transcript bookkeeping
+/// (status, cost, usage, reasoning) is skipped, and collection stops at the
+/// first boundary that ends the turn's final answer — the user's own message,
+/// or a tool call whose narration precedes it — so a tool-using turn reports
+/// the answer rather than the commentary leading up to it.
+fn latest_assistant_reply<'a>(
+    events: impl DoubleEndedIterator<Item = &'a SessionEvent>,
+) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for event in events.rev() {
+        match event {
+            SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text,
+            } => parts.push(text.as_str()),
+            SessionEvent::Message { .. }
+            | SessionEvent::ToolUse { .. }
+            | SessionEvent::ToolResult { .. } => break,
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.reverse();
+    Some(parts.concat())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HttpRoute {
     Submit,
@@ -996,6 +1018,93 @@ async fn json_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn msg(role: MessageRole, text: &str) -> SessionEvent {
+        SessionEvent::Message {
+            role,
+            text: text.to_string(),
+        }
+    }
+
+    fn status(state: SessionState) -> SessionEvent {
+        SessionEvent::Status {
+            state,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn reply_joins_streamed_assistant_deltas() {
+        // Transcript shape observed from a live smith turn: the answer arrives
+        // as one Message event per token delta, wrapped in bookkeeping events.
+        let events = vec![
+            msg(MessageRole::User, "What is 2 plus 2?"),
+            status(SessionState::Running),
+            msg(MessageRole::Assistant, "2"),
+            msg(MessageRole::Assistant, " plus"),
+            msg(MessageRole::Assistant, " "),
+            msg(MessageRole::Assistant, "2"),
+            msg(MessageRole::Assistant, " is"),
+            msg(MessageRole::Assistant, " "),
+            msg(MessageRole::Assistant, "4"),
+            msg(MessageRole::Assistant, "."),
+            status(SessionState::AwaitingInput),
+        ];
+        assert_eq!(
+            latest_assistant_reply(events.iter()),
+            Some("2 plus 2 is 4.".to_string())
+        );
+    }
+
+    #[test]
+    fn reply_covers_only_the_latest_turn() {
+        let events = vec![
+            msg(MessageRole::User, "first"),
+            msg(MessageRole::Assistant, "old answer"),
+            msg(MessageRole::User, "second"),
+            msg(MessageRole::Assistant, "new "),
+            msg(MessageRole::Assistant, "answer"),
+        ];
+        assert_eq!(
+            latest_assistant_reply(events.iter()),
+            Some("new answer".to_string())
+        );
+    }
+
+    #[test]
+    fn reply_after_tool_use_excludes_preceding_narration() {
+        let events = vec![
+            msg(MessageRole::User, "check the disk"),
+            msg(MessageRole::Assistant, "Let me look."),
+            SessionEvent::ToolUse {
+                tool: "bash".into(),
+                args: serde_json::Value::Null,
+                call_id: None,
+            },
+            SessionEvent::ToolResult {
+                tool: "bash".into(),
+                ok: true,
+                output: "42%".into(),
+                call_id: None,
+            },
+            msg(MessageRole::Assistant, "Disk is "),
+            msg(MessageRole::Assistant, "42% full."),
+        ];
+        assert_eq!(
+            latest_assistant_reply(events.iter()),
+            Some("Disk is 42% full.".to_string())
+        );
+    }
+
+    #[test]
+    fn reply_is_absent_before_the_assistant_speaks() {
+        let events = vec![
+            msg(MessageRole::User, "hello"),
+            status(SessionState::Running),
+        ];
+        assert_eq!(latest_assistant_reply(events.iter()), None);
+        assert_eq!(latest_assistant_reply([].iter()), None);
+    }
+
     #[test]
     fn header_boundary_and_content_length() {
         let request = b"POST / HTTP/1.1\r\nContent-Length: 12\r\n\r\nhello world!";
