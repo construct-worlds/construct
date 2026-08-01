@@ -260,7 +260,7 @@ impl App {
             mode: ServiceDialogMode::Edit,
             service,
             selected_field: 1,
-            note: Some("Changes apply after the daemon restarts.".to_string()),
+            note: Some("Saved edits apply live — see each field for when.".to_string()),
             confirm_delete: false,
             picker: None,
             picker_selected: 0,
@@ -328,7 +328,7 @@ impl App {
                 attached_to: Some(dialog.service.name.clone()),
             },
             selected_field: 0,
-            note: Some("HTTP channels listen on loopback after the daemon restarts.".to_string()),
+            note: Some("HTTP channels bind on loopback as soon as they are saved.".to_string()),
             new_secret: None,
             confirm_delete: false,
         });
@@ -352,7 +352,7 @@ impl App {
             service_name: dialog.service.name.clone(),
             channel,
             selected_field: 2,
-            note: Some("Channel changes apply after the daemon restarts.".to_string()),
+            note: Some("Channel changes bind or unbind the listener immediately.".to_string()),
             new_secret: None,
             confirm_delete: false,
         });
@@ -795,7 +795,7 @@ impl App {
                     self.sync_active_window_selection();
                 }
                 self.set_status(format!(
-                    "{name} deleted; restart daemon to withdraw the endpoint"
+                    "{name} deleted; its endpoint is withdrawn"
                 ));
             }
             Err(error) => {

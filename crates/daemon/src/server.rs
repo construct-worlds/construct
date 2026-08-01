@@ -1080,6 +1080,40 @@ fn parse_params<T: serde::de::DeserializeOwned>(
     serde_json::from_value(v).map_err(|e| ErrorObject::invalid_params(e.to_string()))
 }
 
+/// Apply a just-persisted service edit to the running daemon and describe what
+/// happened.
+///
+/// The write already succeeded by the time this runs, so a reload failure is
+/// reported rather than raised: the operator's edit is saved either way, and
+/// what they need to know is which part of it is not yet live.
+async fn apply_service_edit(
+    manager: &Arc<SessionManager>,
+    method: &'static str,
+) -> construct_protocol::ServiceApplyResult {
+    match manager
+        .reload_services(crate::service_supervisor::ReloadReason::Ipc(method))
+        .await
+    {
+        Ok(report) => construct_protocol::ServiceApplyResult {
+            reloaded: true,
+            started: report.started.len(),
+            stopped: report.stopped.len(),
+            rebound: report.rebound.len(),
+            failures: report
+                .failures
+                .into_iter()
+                .map(|((service, channel), port, error)| {
+                    format!("{service}/{channel} on port {port}: {error}")
+                })
+                .collect(),
+        },
+        Err(error) => {
+            tracing::debug!(%error, "service edit persisted without a live reload");
+            construct_protocol::ServiceApplyResult::default()
+        }
+    }
+}
+
 async fn dispatch(
     manager: &Arc<SessionManager>,
     sub_cmd_tx: &mpsc::Sender<SubCmd>,
@@ -1240,7 +1274,11 @@ async fn dispatch(
             &construct_protocol::paths::Paths::discover().services_dir(),
             p,
         ) {
-            Ok(result) => ok!(req, &result),
+            Ok(mut result) => {
+                result.applied =
+                    apply_service_edit(manager, ipc_method::SERVICE_PUT).await;
+                ok!(req, &result)
+            }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
@@ -1250,7 +1288,12 @@ async fn dispatch(
             &construct_protocol::paths::Paths::discover().services_dir(),
             &p.name,
         ) {
-            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Ok(()) => {
+                // Deletion must still withdraw the endpoint, but the response
+                // stays null: clients deserialize it as unit.
+                let _ = apply_service_edit(manager, ipc_method::SERVICE_DELETE).await;
+                Response::ok(req.id.clone(), serde_json::Value::Null)
+            }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
@@ -1278,7 +1321,11 @@ async fn dispatch(
             &construct_protocol::paths::Paths::discover().services_dir(),
             p,
         ) {
-            Ok(result) => ok!(req, &result),
+            Ok(mut result) => {
+                result.applied =
+                    apply_service_edit(manager, ipc_method::SERVICE_CHANNEL_PUT).await;
+                ok!(req, &result)
+            }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
@@ -1288,7 +1335,12 @@ async fn dispatch(
             &construct_protocol::paths::Paths::discover().services_dir(),
             p,
         ) {
-            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Ok(()) => {
+                // Deletion must still withdraw the endpoint, but the response
+                // stays null: clients deserialize it as unit.
+                let _ = apply_service_edit(manager, ipc_method::SERVICE_CHANNEL_DELETE).await;
+                Response::ok(req.id.clone(), serde_json::Value::Null)
+            }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
@@ -1298,7 +1350,11 @@ async fn dispatch(
             &construct_protocol::paths::Paths::discover().services_dir(),
             p,
         ) {
-            Ok(result) => ok!(req, &result),
+            Ok(mut result) => {
+                result.applied =
+                    apply_service_edit(manager, ipc_method::SERVICE_CHANNEL_ATTACH).await;
+                ok!(req, &result)
+            }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
@@ -1308,7 +1364,11 @@ async fn dispatch(
             &construct_protocol::paths::Paths::discover().services_dir(),
             p,
         ) {
-            Ok(result) => ok!(req, &result),
+            Ok(mut result) => {
+                result.applied =
+                    apply_service_edit(manager, ipc_method::SERVICE_CHANNEL_DETACH).await;
+                ok!(req, &result)
+            }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
@@ -1318,7 +1378,11 @@ async fn dispatch(
             &construct_protocol::paths::Paths::discover().services_dir(),
             p,
         ) {
-            Ok(result) => ok!(req, &result),
+            Ok(mut result) => {
+                result.applied =
+                    apply_service_edit(manager, ipc_method::SERVICE_CHANNEL_ROTATE_SECRET).await;
+                ok!(req, &result)
+            }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
