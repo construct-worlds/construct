@@ -50,12 +50,12 @@ pub use configure::{
     feature_guidance, harness_guidance, no_agent_harness_available, smith_method_guidance,
     ConfigurePopup, ConfigureTab, CONFIGURE_TABS,
 };
-pub use session_picker::{
-    session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
-};
 pub use service_dialog::{
     ServiceChannelDialog, ServiceChannelDialogMode, ServiceDialog, ServiceDialogMode,
     ServiceDialogPickerKind, SERVICE_PICKER_VISIBLE_ROWS,
+};
+pub use session_picker::{
+    session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
 };
 #[cfg(test)]
 pub use tutorial::Step1Phase;
@@ -378,8 +378,12 @@ fn prune_window_tree(
         } => MainWindowTree::Split {
             direction,
             ratio_percent,
-            first: Box::new(prune_window_tree(*first, sessions, groups, services, fallback)),
-            second: Box::new(prune_window_tree(*second, sessions, groups, services, fallback)),
+            first: Box::new(prune_window_tree(
+                *first, sessions, groups, services, fallback,
+            )),
+            second: Box::new(prune_window_tree(
+                *second, sessions, groups, services, fallback,
+            )),
         },
     }
 }
@@ -406,7 +410,7 @@ fn pane_sizes_diverged(
 #[derive(Debug, PartialEq, Eq)]
 enum ResizeFire {
     /// No visible window pane reported a size: fall back to broadcasting the
-    /// active-pane size to the pinned + selected sessions.
+    /// active-pane size to the selected session.
     Window((u16, u16)),
     /// Send `pty_resize` to each session at its own visible pane size.
     Panes(Vec<(String, (u16, u16))>),
@@ -591,13 +595,10 @@ pub(crate) fn list_session_indent_cells(
     if is_subagent_session(s) || s.forked_from.is_some() {
         // Align the child's STATUS glyph with its parent session's name.
         // A grouped parent starts one cell later. Account for the child's
-        // own disclosure, optional lineage marker, pin marker, and the
-        // leading space before its status glyph.
+        // own disclosure, optional lineage marker, and the leading space
+        // before its status glyph.
         let parent_name_col = 5 + u16::from(s.group_id.is_some());
-        let child_prefix = u16::from(has_children)
-            + 1 // pin marker
-            + u16::from(s.forked_from.is_some())
-            + 1; // leading space before status
+        let child_prefix = u16::from(has_children) + u16::from(s.forked_from.is_some()) + 1; // leading space before status
         parent_name_col.saturating_sub(child_prefix)
     } else if indented && has_children {
         1
@@ -626,9 +627,7 @@ pub(crate) fn list_archive_indent_cells(
 impl ListItem {
     pub fn matches(&self, sel: &Selection) -> bool {
         match (self, sel) {
-            (ListItem::Service { summary, .. }, Selection::Service(name)) => {
-                summary.name == *name
-            }
+            (ListItem::Service { summary, .. }, Selection::Service(name)) => summary.name == *name,
             (ListItem::Session { summary, .. }, Selection::Session(id)) => summary.id == *id,
             (ListItem::GroupHeader { group, .. }, Selection::Group(id)) => group.id == *id,
             (ListItem::ArchivedRow { section, .. }, Selection::ArchivedRow(sel)) => section == sel,
@@ -758,7 +757,11 @@ impl MainWindowTree {
     /// its own empty state.
     pub fn from_shared(node: &construct_protocol::LayoutNode) -> Self {
         match node {
-            construct_protocol::LayoutNode::Leaf { id, session_id, service_name } => Self::Leaf {
+            construct_protocol::LayoutNode::Leaf {
+                id,
+                session_id,
+                service_name,
+            } => Self::Leaf {
                 id: *id,
                 selection: match (session_id, service_name) {
                     (Some(s), _) => Selection::Session(s.clone()),
@@ -793,7 +796,11 @@ impl MainWindowTree {
     /// leaf id still exists locally; an incoming session always wins.
     pub fn merge_shared(&self, incoming: &construct_protocol::LayoutNode) -> Self {
         match incoming {
-            construct_protocol::LayoutNode::Leaf { id, session_id, service_name } => {
+            construct_protocol::LayoutNode::Leaf {
+                id,
+                session_id,
+                service_name,
+            } => {
                 let selection = match (session_id, service_name) {
                     (Some(s), _) => Selection::Session(s.clone()),
                     (None, Some(name)) => Selection::Service(name.clone()),
@@ -1893,9 +1900,8 @@ pub struct App {
     /// replay at, so alternating between two widths for the same session
     /// within one frame rebuilds that parser from scratch on every single
     /// call — cheap for a nearly-empty session, catastrophic for one with
-    /// substantial scrollback (same failure mode as the pin-strip/split-pane
-    /// thrash `pin_tile_reuses_cached_size_to_avoid_split_thrash` guards
-    /// against). The second (and later) pane showing an already-rendered
+    /// substantial scrollback. The second (and later) pane showing an
+    /// already-rendered
     /// session this frame reuses the first pane's cached size instead of its
     /// own, trading a slightly-off-size duplicate render for avoiding the
     /// rebuild.
@@ -1924,7 +1930,7 @@ pub struct App {
     /// can have different widths/heights, so adapters like claude need the
     /// focused split's actual inner area rather than the whole right pane.
     pub window_pane_sizes: HashMap<u64, (u16, u16)>,
-    /// Zoom: hide list / pin strip / modeline; the session view fills the
+    /// Zoom: hide list / modeline; the session view fills the
     /// screen except for the minibuffer line at the bottom. Toggled with
     /// `C-x z` (emacs) / `z` (vim), matching tmux's prefix-z.
     pub zoom: ZoomMode,
@@ -1966,7 +1972,7 @@ pub struct App {
     pub skip_redraw_after_event: bool,
     /// Set by `on_notification` to report whether the just-handled
     /// notification changed something currently *visible* (a focused /
-    /// split / pinned pane, the orchestrator panel, or any structural /
+    /// split pane, the orchestrator panel, or any structural /
     /// status change shown in the list). The run loop reads it to avoid a
     /// full-frame `terminal.draw()` for the high-frequency background
     /// `Pty` chunks of off-screen sessions — those only warm history /
@@ -1976,7 +1982,7 @@ pub struct App {
     /// needed repaint. A heartbeat in the loop still forces a draw at
     /// least every tick under sustained background load.
     pub notification_dirtied_view: bool,
-    /// Sessions whose selected/pinned terminal history is being rehydrated in
+    /// Sessions whose visible terminal history is being rehydrated in
     /// the background. Renderers use this to show a loading placeholder while
     /// the TUI stays responsive instead of blocking startup on full transcript
     /// replay.
@@ -2101,20 +2107,11 @@ pub struct App {
     /// pane's width at drag start. On each `Drag` event we apply
     /// the column delta to the anchor width, so it doesn't matter
     /// whether the user grabbed the list's right border, the
-    /// view's left border, or the first pin tile's left border —
+    /// view's left border —
     /// the divider follows the cursor either way. Cleared on
     /// `Up(Left)`.
     pub resizing_list: Option<(u16, u16)>,
-    /// User-preferred pin strip height in cells. `None` =
-    /// auto-compute via `ui::pin_strip_height(total)` (≈ ⅓ of the
-    /// right pane, clamped to 7..=18). Adjustable by dragging the
-    /// bottom border of the main view (= top border of the pin
-    /// strip). Persisted across launches.
-    pub pin_strip_h: Option<u16>,
     /// `Some((anchor_row, anchor_height))` while the user is
-    /// mid-drag on the view/pin-strip horizontal divider — mirrors
-    /// the `resizing_list` model but for the vertical axis.
-    pub resizing_pin_strip: Option<(u16, u16)>,
     /// User-preferred Matrix-rain panel height in cells. `None` =
     /// default to about 200px worth of terminal rows, clamped to the empty
     /// space below the list items.
@@ -2322,8 +2319,6 @@ pub struct App {
     /// different session. Keyed per main-window id so split panes don't
     /// glitch together.
     pub session_transitions: HashMap<u64, SessionTransition>,
-    /// Short visual transitions for newly visible pinned-session tiles.
-    pub pin_transitions: HashMap<String, Instant>,
     /// OP-XY feedback link state for the modeline indicator: `None` until
     /// the feedback loop reports (or when no OP-XY profile is enabled — the
     /// indicator only renders once a report arrives), then `Some(connected)`.
@@ -3635,16 +3630,6 @@ pub const LIST_PANEL_W_DEFAULT: u16 = 40;
 /// the main view's left border (see `view_uncollapse_glyph_pos`).
 pub const LIST_PANEL_W_COLLAPSED: u16 = 0;
 
-/// Bounds for the pin strip's user-adjustable height. The minimum
-/// must keep the top + bottom border + one row of content visible
-/// (3 cells); the maximum keeps the main session view from being
-/// crushed below ~10 rows on a typical terminal — the upper end is
-/// also clamped at render time against `right_area.height − 10` so
-/// we never starve the main view on a small terminal regardless of
-/// what was persisted.
-pub const PIN_STRIP_H_MIN: u16 = 3;
-pub const PIN_STRIP_H_MAX: u16 = 40;
-
 /// Matrix-rain panel height in terminal rows. The product request was
 /// "about 200px"; terminal UIs do not know pixel height, so the default is
 /// a compact 12-row panel and render-time clamping shrinks it on short panes.
@@ -3778,9 +3763,8 @@ pub struct ListScrollbarHit {
 }
 
 /// One rendered display row of the session list: which item it belongs to
-/// and whether it is that item's first line. Gutter affordances (disclosure
-/// triangle, pin diamond) live on the first line only; a click anywhere in
-/// the item's rows selects it.
+/// and whether it is that item's first line. The disclosure triangle lives on
+/// the first line only; a click anywhere in the item's rows selects it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ListRowHit {
     pub item_index: usize,
@@ -3955,7 +3939,6 @@ pub struct LayoutSnapshot {
     pub view_area: Option<ratatui::layout::Rect>,
     pub main_window_areas: Vec<WindowPaneHit>,
     pub main_window_dividers: Vec<WindowDividerHit>,
-    pub pin_strip_area: Option<ratatui::layout::Rect>,
     pub matrix_rain_area: Option<ratatui::layout::Rect>,
     pub minibuffer_area: Option<ratatui::layout::Rect>,
     /// Last rendered chat areas by session id to conditionally clear only
@@ -4284,7 +4267,7 @@ impl MainSlideState {
 /// Vertical translation applied to the main block's recorded geometry once the
 /// frame buffer has been scrolled (spec 0112).
 ///
-/// The main block — session list, split panes, lineage, pin strip, playbook
+/// The main block — session list, split panes, lineage, playbook
 /// popups — is always laid out at the size it has when the footer occupies a
 /// single row. A taller footer (operator panel, harness picker) slides that
 /// block up out of the viewport instead of shrinking it, so no pane changes
@@ -4394,7 +4377,6 @@ impl LayoutSnapshot {
             view_area,
             main_window_areas,
             main_window_dividers,
-            pin_strip_area,
             matrix_rain_area,
             list_items_area,
             list_visible_rows,
@@ -4495,7 +4477,6 @@ impl LayoutSnapshot {
 
         shift.opt_rect(list_area);
         shift.opt_rect(view_area);
-        shift.opt_rect(pin_strip_area);
         shift.opt_rect(matrix_rain_area);
         shift.opt_rect(lineage_area);
         shift.opt_rect(lineage_header_hit);
@@ -4909,7 +4890,6 @@ pub enum RemoteControlHitAction {
 
 fn selection_bounds_for_layout(
     layout: &LayoutSnapshot,
-    pinned_count: usize,
     is_orchestrator_panel: bool,
     col: u16,
     row: u16,
@@ -4944,15 +4924,6 @@ fn selection_bounds_for_layout(
             let view_inner = inner(view);
             if contains(view_inner, col, row) {
                 return Some(view_inner);
-            }
-        }
-    }
-
-    if let Some(strip) = layout.pin_strip_area {
-        for tile in crate::ui::pin_tile_layout(strip, pinned_count) {
-            let tile_inner = inner(tile);
-            if contains(tile_inner, col, row) {
-                return Some(tile_inner);
             }
         }
     }
@@ -5091,10 +5062,7 @@ async fn run_with_socket_initial_selection(
     // a client is attached, so a restarted TUI shows the minutes it missed
     // instead of a hole where the fleet kept working.
     let token_history = client
-        .token_history(
-            TOKEN_HISTORY_WINDOW_SECS,
-            TOKEN_HISTORY_MAX_SAMPLES,
-        )
+        .token_history(TOKEN_HISTORY_WINDOW_SECS, TOKEN_HISTORY_MAX_SAMPLES)
         .await
         .ok();
     // Theme config is parsed now; the final palette (light vs dark) is resolved
@@ -5374,8 +5342,6 @@ async fn run_with_socket_initial_selection(
         orchestrator_id: initial_orch_id,
         list_panel_w: persisted.list_panel_w.unwrap_or(LIST_PANEL_W_DEFAULT),
         resizing_list: None,
-        pin_strip_h: persisted.pin_strip_h,
-        resizing_pin_strip: None,
         matrix_rain_h: persisted.matrix_rain_h,
         resizing_matrix_rain: None,
         resizing_main_window: None,
@@ -5409,7 +5375,6 @@ async fn run_with_socket_initial_selection(
         dynamic_ui_scroll_offsets: HashMap::new(),
         image_resize_cache: Vec::new(),
         session_transitions: HashMap::new(),
-        pin_transitions: HashMap::new(),
         op_xy_link_connected: None,
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
         matrix_rain_intensity: 0.0,
@@ -5481,7 +5446,7 @@ async fn run_with_socket_initial_selection(
     if let Err(e) = client.subscribe(None).await {
         app.status = Some((format!("subscribe failed: {e}"), Instant::now()));
     }
-    // Do not hydrate the selected or pinned sessions here: full transcript
+    // Do not hydrate the selected or visible sessions here: full transcript
     // replay can be hundreds of MB for long-lived sessions. The run loop paints
     // the first frame immediately, then starts background hydration and renders
     // loading placeholders until each history is ready.
@@ -5501,7 +5466,6 @@ async fn run_with_socket_initial_selection(
     for id in app
         .main_window_sessions_needing_hydration()
         .into_iter()
-        .chain(app.pinned_sessions_needing_hydration())
         .chain(app.orchestrator_session_needing_hydration())
     {
         app.hydrating_sessions.insert(id);
@@ -5603,7 +5567,6 @@ async fn run_with_socket_initial_selection(
         last_selected_session_id: app.selection.session_id().map(|s| s.to_string()),
         zoom: app.zoom,
         list_panel_w: Some(app.list_panel_w),
-        pin_strip_h: app.pin_strip_h,
         orchestrator_panel_h: app.orchestrator_panel_h,
         matrix_rain_h: app.matrix_rain_h,
         list_collapsed: app.list_collapsed,
@@ -5747,10 +5710,11 @@ async fn run_loop(
     let mut hydration_tasks: tokio::task::JoinSet<(String, Result<SessionHydration>)> =
         tokio::task::JoinSet::new();
     let mut hydration_sessions: HashSet<String> = HashSet::new();
-    let mut pinned_hydration_queue: std::collections::VecDeque<String> =
+    let mut background_hydration_queue: std::collections::VecDeque<String> =
         std::collections::VecDeque::new();
-    let mut pinned_hydration_task: Option<tokio::task::JoinHandle<Result<SessionHydration>>> = None;
-    let mut pinned_hydration_session: Option<String> = None;
+    let mut background_hydration_task: Option<tokio::task::JoinHandle<Result<SessionHydration>>> =
+        None;
+    let mut background_hydration_session: Option<String> = None;
     while !app.should_quit {
         while let Ok(msg) = app.pty_input_errors.try_recv() {
             app.set_status(msg);
@@ -5775,11 +5739,11 @@ async fn run_loop(
                         main_resize.reset();
                         last_orch_sent = (0, 0);
                         hydration_sessions.clear();
-                        pinned_hydration_session = None;
-                        pinned_hydration_queue.clear();
+                        background_hydration_session = None;
+                        background_hydration_queue.clear();
                         app.hydrating_sessions.clear();
                         hydration_tasks.abort_all();
-                        if let Some(task) = pinned_hydration_task.take() {
+                        if let Some(task) = background_hydration_task.take() {
                             task.abort();
                         }
                     }
@@ -5845,28 +5809,29 @@ async fn run_loop(
             for id in app
                 .main_window_sessions_needing_hydration()
                 .into_iter()
-                .chain(app.pinned_sessions_needing_hydration())
                 .chain(app.orchestrator_session_needing_hydration())
                 .chain(app.playbook_referenced_sessions_needing_hydration())
             {
                 if selected_hydrating.contains(&id)
-                    || pinned_hydration_session.as_deref() == Some(id.as_str())
-                    || pinned_hydration_queue.iter().any(|queued| queued == &id)
+                    || background_hydration_session.as_deref() == Some(id.as_str())
+                    || background_hydration_queue
+                        .iter()
+                        .any(|queued| queued == &id)
                 {
                     continue;
                 }
                 app.hydrating_sessions.insert(id.clone());
-                pinned_hydration_queue.push_back(id);
+                background_hydration_queue.push_back(id);
             }
-            if pinned_hydration_task.is_none() {
-                while let Some(id) = pinned_hydration_queue.pop_front() {
+            if background_hydration_task.is_none() {
+                while let Some(id) = background_hydration_queue.pop_front() {
                     if selected_hydrating.contains(&id) || app.histories.contains_key(&id) {
                         app.hydrating_sessions.remove(&id);
                         continue;
                     }
                     let req = app.session_hydration_request(&id, true);
-                    pinned_hydration_session = Some(id);
-                    pinned_hydration_task = Some(tokio::spawn(load_session_hydration(req)));
+                    background_hydration_session = Some(id);
+                    background_hydration_task = Some(tokio::spawn(load_session_hydration(req)));
                     break;
                 }
             }
@@ -6144,21 +6109,21 @@ async fn run_loop(
                     None => {}
                 }
             }
-            pinned_hydrated = async {
-                match pinned_hydration_task.as_mut() {
+            background_hydrated = async {
+                match background_hydration_task.as_mut() {
                     Some(task) => task.await,
                     None => futures::future::pending().await,
                 }
-            }, if pinned_hydration_task.is_some() => {
-                pinned_hydration_task = None;
-                let completed_session = pinned_hydration_session.take();
-                match pinned_hydrated {
-                    Ok(Ok(h)) => app.apply_pinned_session_hydration(h).await,
+            }, if background_hydration_task.is_some() => {
+                background_hydration_task = None;
+                let completed_session = background_hydration_session.take();
+                match background_hydrated {
+                    Ok(Ok(h)) => app.apply_hydration_state(h, false).await,
                     Ok(Err(e)) => {
                         if let Some(id) = completed_session.as_ref() {
                             app.hydrating_sessions.remove(id);
                         }
-                        app.set_status(format!("load pinned transcript: {e}"));
+                        app.set_status(format!("load transcript: {e}"));
                     }
                     Err(e) if e.is_cancelled() => {
                         if let Some(id) = completed_session.as_ref() {
@@ -6169,7 +6134,7 @@ async fn run_loop(
                         if let Some(id) = completed_session.as_ref() {
                             app.hydrating_sessions.remove(id);
                         }
-                        app.set_status(format!("load pinned transcript task failed: {e}"));
+                        app.set_status(format!("load transcript task failed: {e}"));
                     }
                 }
             }
@@ -6571,8 +6536,8 @@ impl App {
         // shell repaint on resume without a full screen clear, so feeding
         // the new child's output on top of the stale grid leaves the pane
         // half-rendered — typically blank until the user resizes. Drop the
-        // histories so the visible/pinned sessions re-hydrate from the
-        // daemon's (now clean) pty.log, mirroring the daemon-side truncate.
+        // histories so the visible sessions re-hydrate from the daemon's
+        // (now clean) pty.log, mirroring the daemon-side truncate.
         self.histories.clear();
         self.refresh_daemon_build_id().await;
         self.connected = true;
@@ -6586,7 +6551,6 @@ impl App {
             .map(|s| s.id.clone());
         self.transcript_session = None;
         self.refresh_selected_transcript().await;
-        self.ensure_pinned_parsers().await;
         self.set_status("reconnected to daemon".to_string());
         Ok(notifications)
     }
@@ -7188,11 +7152,6 @@ impl App {
         );
     }
 
-    pub fn start_pin_transition(&mut self, session_id: impl Into<String>) {
-        self.pin_transitions
-            .insert(session_id.into(), Instant::now());
-    }
-
     pub fn select_session(&mut self, id: String) {
         self.select_session_inner(id, true, true);
     }
@@ -7224,10 +7183,6 @@ impl App {
     pub fn select_created_session(&mut self, id: String) {
         self.select_session(id);
         self.set_active_view(ViewMode::Terminal);
-    }
-
-    fn select_session_without_transition(&mut self, id: String) {
-        self.select_session_inner(id, false, false);
     }
 
     fn select_session_inner(&mut self, id: String, transition: bool, sync_window: bool) {
@@ -7477,7 +7432,6 @@ impl App {
         let done = |started: Instant| started.elapsed().as_millis() >= SESSION_TRANSITION_MS;
         self.session_transitions
             .retain(|_, transition| !done(transition.started_at));
-        self.pin_transitions.retain(|_, started| !done(*started));
     }
 
     pub fn selected_session(&self) -> Option<&SessionSummary> {
@@ -7641,7 +7595,7 @@ impl App {
             // Hydrate at the session's *own* pane width when it's visible in a
             // split — not the active pane's — so its parser grid matches the
             // width it will render at. Falls back to the active pane for a
-            // session not currently in a window leaf (e.g. pinned-strip).
+            // session not currently in a window leaf.
             terminal_pane_size: self
                 .session_pane_size(id)
                 .unwrap_or_else(|| self.active_pane_size()),
@@ -7725,14 +7679,6 @@ impl App {
             .collect()
     }
 
-    fn pinned_sessions_needing_hydration(&self) -> Vec<String> {
-        self.sessions
-            .iter()
-            .filter(|s| s.pinned && s.has_pty && !self.histories.contains_key(&s.id))
-            .map(|s| s.id.clone())
-            .collect()
-    }
-
     fn orchestrator_session_needing_hydration(&self) -> Option<String> {
         let id = self.orchestrator_id.as_ref()?;
         let needs_history = self
@@ -7750,7 +7696,7 @@ impl App {
     /// tail the instant the pointer lands on the clip. (The shimmer-text hover
     /// always targets the playbook's own dispatching session, which is already
     /// warm, so it doesn't need this.) These workers are usually neither
-    /// selected, pinned, nor the orchestrator, so without this nothing else
+    /// selected nor the orchestrator, so without this nothing else
     /// hydrates them and the clip-chip preview silently degrades to the bare
     /// text tooltip.
     fn playbook_referenced_sessions_needing_hydration(&self) -> Vec<String> {
@@ -7808,10 +7754,6 @@ impl App {
         }
 
         self.apply_hydration_state(hydration, true).await;
-    }
-
-    async fn apply_pinned_session_hydration(&mut self, hydration: SessionHydration) {
-        self.apply_hydration_state(hydration, false).await;
     }
 
     async fn apply_hydration_state(
@@ -8141,7 +8083,11 @@ impl App {
             .filter(|s| Some(s.id.as_str()) != orch_id)
             .filter(|s| is_user_list_session(s))
             .filter(|s| s.forked_from.is_none())
-            .filter(|s| !services.iter().any(|service| service_session_matches(s, &service.name)))
+            .filter(|s| {
+                !services
+                    .iter()
+                    .any(|service| service_session_matches(s, &service.name))
+            })
             .collect();
         ungrouped.sort_by(|a, b| {
             a.position
@@ -8179,7 +8125,11 @@ impl App {
                 .filter(|s| s.group_id.as_deref() == Some(g.id.as_str()))
                 .filter(|s| is_user_list_session(s))
                 .filter(|s| s.forked_from.is_none())
-                .filter(|s| !services.iter().any(|service| service_session_matches(s, &service.name)))
+                .filter(|s| {
+                    !services
+                        .iter()
+                        .any(|service| service_session_matches(s, &service.name))
+                })
                 .collect();
             members.sort_by_key(|s| s.position);
             let (active, archived): (Vec<&SessionSummary>, Vec<&SessionSummary>) =
@@ -8380,33 +8330,6 @@ impl App {
         }
     }
 
-    /// Bootstrap a vt100 parser for every pinned PTY-backed session that
-    /// doesn't have one yet. Called at startup and whenever a session is
-    /// freshly pinned (so the pin strip never shows a blank tile for a
-    /// session that has had output).
-    pub async fn ensure_pinned_parsers(&mut self) {
-        let mut ids: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|s| s.pinned && s.has_pty && !self.histories.contains_key(&s.id))
-            .map(|s| s.id.clone())
-            .collect();
-        // The orchestrator session is always rendered (in the
-        // minibuffer panel) but never appears in `list_items` and
-        // isn't pinnable — so bootstrap its history alongside the
-        // pinned ones so the panel has the daemon's `pty_log`
-        // backfill on TUI launch instead of starting empty until
-        // the next event.
-        if let Some(orch_id) = self.orchestrator_id.clone() {
-            if !self.histories.contains_key(&orch_id) {
-                ids.push(orch_id);
-            }
-        }
-        for id in ids {
-            self.bootstrap_terminal(&id).await;
-        }
-    }
-
     async fn bootstrap_terminal(&mut self, id: &str) {
         if self.histories.contains_key(id) {
             return;
@@ -8514,63 +8437,6 @@ impl App {
                 .await;
         }
         let _ = self.client.pty_resize(id, cols, rows).await;
-    }
-
-    async fn toggle_pin_on_selection(&mut self) {
-        match self.selection.clone() {
-            Selection::Session(id) => {
-                let s = match self.sessions.iter().find(|s| s.id == id) {
-                    Some(s) => s.clone(),
-                    None => return,
-                };
-                let want = !s.pinned;
-                if let Err(e) = self.client.set_pinned(&id, want).await {
-                    self.set_status(format!("set_pinned failed: {e}"));
-                    return;
-                }
-                if let Some(i) = self.sessions.iter().position(|x| x.id == id) {
-                    self.sessions[i].pinned = want;
-                }
-                if want && s.has_pty {
-                    self.start_pin_transition(id.clone());
-                    self.bootstrap_terminal(&id).await;
-                }
-                self.set_status(if want { "pinned" } else { "unpinned" }.into());
-            }
-            Selection::Group(group_id) => {
-                let members: Vec<SessionSummary> = self
-                    .sessions
-                    .iter()
-                    .filter(|s| s.group_id.as_deref() == Some(group_id.as_str()))
-                    .cloned()
-                    .collect();
-                if members.is_empty() {
-                    self.set_status("project has no members".into());
-                    return;
-                }
-                let all_pinned = members.iter().all(|s| s.pinned);
-                let want = !all_pinned;
-                for s in &members {
-                    if s.pinned == want {
-                        continue;
-                    }
-                    if let Err(e) = self.client.set_pinned(&s.id, want).await {
-                        self.set_status(format!("set_pinned {}: {}", short_id(&s.id), e));
-                    }
-                }
-                self.set_status(if want {
-                    format!("pinned {} member(s)", members.len())
-                } else {
-                    format!("unpinned {} member(s)", members.len())
-                });
-            }
-            Selection::None => {
-                self.set_status("nothing selected".into());
-            }
-            Selection::Service(_) => {}
-            // The "N archived" disclosure row isn't a pin target.
-            Selection::ArchivedRow(_) => {}
-        }
     }
 
     async fn move_selected(&mut self, up: bool) {
@@ -9272,11 +9138,10 @@ impl App {
 
     /// True when the session is currently rendered somewhere on screen:
     /// a pane of the active window (including splits), the orchestrator
-    /// panel, or the pinned strip. Used to decide whether a background
-    /// `Pty` chunk needs an immediate full-frame repaint. Conservative —
-    /// treats pinned / orchestrator as always-visible so the gate never
-    /// drops a needed redraw; the cost of an occasional extra paint is
-    /// far cheaper than missing one.
+    /// panel. Used to decide whether a background `Pty` chunk needs an
+    /// immediate full-frame repaint. Conservative — treats the orchestrator
+    /// as always-visible so the gate never drops a needed redraw; the cost
+    /// of an occasional extra paint is far cheaper than missing one.
     /// Bin one session's `Cost` report into the fleet token meter (spec
     /// 0167). Attribution prefers the model the report itself names; when
     /// the harness stated none, the session's currently-tracked model stands
@@ -9346,8 +9211,7 @@ impl App {
         let live: HashSet<String> = seen.into_iter().map(str::to_string).collect();
         self.token_meter_busy.retain(|id, _| live.contains(id));
         for (model, delta) in deltas {
-            self.token_meter
-                .observe_busy(model.as_deref(), delta, now);
+            self.token_meter.observe_busy(model.as_deref(), delta, now);
         }
     }
 
@@ -9363,7 +9227,7 @@ impl App {
         if self.orchestrator_id.as_deref() == Some(id) {
             return true;
         }
-        self.sessions.iter().any(|s| s.id == id && s.pinned)
+        false
     }
 
     async fn on_notification(&mut self, n: construct_protocol::Notification) {
@@ -9810,20 +9674,12 @@ impl App {
                 if let Some(p) = n.params {
                     if let Ok(payload) = serde_json::from_value::<StateNotificationPayload>(p) {
                         let id = payload.session.id.clone();
-                        let was_pinned = self
-                            .sessions
-                            .iter()
-                            .find(|s| s.id == id)
-                            .map(|s| s.pinned)
-                            .unwrap_or(false);
                         let was_archived = self
                             .sessions
                             .iter()
                             .find(|s| s.id == id)
                             .map(|s| s.archived)
                             .unwrap_or(false);
-                        let now_pinned = payload.session.pinned;
-                        let has_pty = payload.session.has_pty;
                         // Move focus only on the transition into the archive
                         // disclosure row, not on every update to an already-
                         // archived session (e.g. a reorder swap between two
@@ -9855,13 +9711,6 @@ impl App {
                             self.report_seen(&id);
                         }
                         self.refresh_orchestrator_id();
-                        // Newly pinned PTY session: bootstrap so its tile
-                        // populates immediately, even when the pin came from
-                        // outside this TUI process.
-                        if has_pty && now_pinned && !was_pinned {
-                            self.start_pin_transition(id.clone());
-                            self.bootstrap_terminal(&id).await;
-                        }
                     }
                 }
             }
@@ -9933,7 +9782,11 @@ impl App {
                         construct_protocol::PlaybookStateNotificationPayload,
                     >(p)
                     {
-                        self.on_playbook_state(payload.playbook, payload.active_run, payload.blocks);
+                        self.on_playbook_state(
+                            payload.playbook,
+                            payload.active_run,
+                            payload.blocks,
+                        );
                     }
                 }
             }
@@ -9971,7 +9824,8 @@ impl App {
             }
         } else {
             self.playbook_collaborators.remove(&cursor.client_id);
-            self.playbook_agent_reveal_receipts.remove(&cursor.client_id);
+            self.playbook_agent_reveal_receipts
+                .remove(&cursor.client_id);
         }
     }
 
@@ -10120,7 +9974,8 @@ impl App {
         // view is open for this session.
         self.playbook_markdown_cache
             .insert(playbook.session_id.clone(), playbook.markdown.clone());
-        self.playbook_projection_pending.remove(&playbook.session_id);
+        self.playbook_projection_pending
+            .remove(&playbook.session_id);
         let previous_pending = self
             .playbook_runs
             .get(&playbook.session_id)
@@ -10606,7 +10461,6 @@ impl App {
             // underneath instead of the menu.
             && self.route_menu.is_none()
             && self.resizing_list.is_none()
-            && self.resizing_pin_strip.is_none()
             && self.resizing_orchestrator_panel.is_none()
             && self.resizing_matrix_rain.is_none()
             && self.resizing_main_window.is_none()
@@ -10655,7 +10509,6 @@ impl App {
             // sees it — the menu looks dead while rendering perfectly.
             && self.route_menu.is_none()
             && self.resizing_list.is_none()
-            && self.resizing_pin_strip.is_none()
             && self.resizing_orchestrator_panel.is_none()
             && self.resizing_matrix_rain.is_none()
             && self.resizing_main_window.is_none()
@@ -10866,15 +10719,6 @@ impl App {
                         return;
                     }
                 }
-                // View ↔ pin-strip horizontal divider: clicking the
-                // view's bottom border (or equivalently the pin
-                // strip's top border, the same row) starts a
-                // vertical resize-drag for the pin strip.
-                if self.is_on_pin_strip_divider(ev.column, ev.row) {
-                    let cur_h = self.layout.pin_strip_area.map(|s| s.height).unwrap_or(0);
-                    self.resizing_pin_strip = Some((ev.row, cur_h));
-                    return;
-                }
                 // Operator/minibuffer panel: the top border is the panel's title
                 // area and acts as a vertical resize handle.
                 if self.is_on_orchestrator_panel_divider(ev.column, ev.row) {
@@ -10950,15 +10794,6 @@ impl App {
                         .max(LIST_PANEL_W_MIN as i32)
                         .min(u16::MAX as i32) as u16;
                     self.list_panel_w = want;
-                } else if let Some((anchor_row, anchor_h)) = self.resizing_pin_strip {
-                    // Dragging the divider DOWN (row grows) shrinks
-                    // the pin strip; dragging UP grows it. Negate
-                    // the row delta to match cursor direction.
-                    let delta = anchor_row as i32 - ev.row as i32;
-                    let want = (anchor_h as i32 + delta)
-                        .max(PIN_STRIP_H_MIN as i32)
-                        .min(PIN_STRIP_H_MAX as i32) as u16;
-                    self.pin_strip_h = Some(want);
                 } else if let Some((anchor_row, anchor_h)) = self.resizing_orchestrator_panel {
                     // Dragging the top border UP grows the panel; dragging it
                     // DOWN shrinks it. The render path still clamps to the
@@ -11019,7 +10854,6 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 let was_resizing = self.resizing_list.is_some()
-                    || self.resizing_pin_strip.is_some()
                     || self.resizing_orchestrator_panel.is_some()
                     || self.dragging_terminal_scrollbar.is_some()
                     || self.dragging_list_scrollbar.is_some()
@@ -11029,7 +10863,6 @@ impl App {
                     || self.resizing_lineage.is_some()
                     || self.resizing_playbook_attachment.is_some();
                 self.resizing_list = None;
-                self.resizing_pin_strip = None;
                 self.resizing_orchestrator_panel = None;
                 self.dragging_terminal_scrollbar = None;
                 self.dragging_list_scrollbar = None;
@@ -11394,12 +11227,6 @@ impl App {
                     }
                 }
                 self.click_minibuffer(mb_area, col, row).await;
-                return;
-            }
-        }
-        if let Some(strip) = self.layout.pin_strip_area {
-            if contains(strip, col, row) {
-                self.click_pin_strip(strip, col, row).await;
                 return;
             }
         }
@@ -11877,7 +11704,7 @@ impl App {
             .filter(|s| {
                 s.has_pty
                     && !s.state.is_terminal()
-                    && (s.pinned || Some(s.id.as_str()) == self.selected_id().as_deref())
+                    && Some(s.id.as_str()) == self.selected_id().as_deref()
             })
             .map(|s| s.id.clone())
             .collect();
@@ -12212,8 +12039,7 @@ impl App {
                         if let Some(dialog) = self.service_dialog.as_mut() {
                             dialog.confirm_delete = true;
                             dialog.note = Some(
-                                "Delete this service? Enter/y confirms; Esc/n cancels."
-                                    .to_string(),
+                                "Delete this service? Enter/y confirms; Esc/n cancels.".to_string(),
                             );
                         }
                     }
@@ -12662,7 +12488,9 @@ impl App {
                         error: None,
                     });
                 }
-                Selection::Service(_) => self.set_status("delete the service from its view (C-d)".into()),
+                Selection::Service(_) => {
+                    self.set_status("delete the service from its view (C-d)".into())
+                }
                 Selection::None => {}
                 // The "N archived" disclosure row cascade-deletes every
                 // archived session it stands in for (each with the subagent
@@ -12961,9 +12789,6 @@ impl App {
             }
             MoveSelectedUp => self.move_selected(true).await,
             MoveSelectedDown => self.move_selected(false).await,
-            TogglePin => {
-                self.toggle_pin_on_selection().await;
-            }
             ExpandGroup => {
                 if let Some(section) = self.selection.archive_section().cloned() {
                     self.set_archive_section_revealed(&section, true);
@@ -13751,14 +13576,14 @@ impl App {
                     self.set_status(format!(
                         "services: {}",
                         self.services
-                        .iter()
-                        .map(|service| format!(
-                            "{}{}",
-                            service.name,
-                            if service.paused { " (paused)" } else { "" }
-                        ))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                            .iter()
+                            .map(|service| format!(
+                                "{}{}",
+                                service.name,
+                                if service.paused { " (paused)" } else { "" }
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                 }
             }
@@ -13780,9 +13605,7 @@ impl App {
                         service.paused = action == "pause";
                         match self
                             .client
-                            .put_service(construct_protocol::ServicePutParams {
-                                service,
-                            })
+                            .put_service(construct_protocol::ServicePutParams { service })
                             .await
                         {
                             Ok(result) => {
@@ -13792,7 +13615,9 @@ impl App {
                                     result.service.name
                                 ));
                             }
-                            Err(error) => self.set_status(format!("service update failed: {error}")),
+                            Err(error) => {
+                                self.set_status(format!("service update failed: {error}"))
+                            }
                         }
                     }
                     ("rotate-token", Some(service)) => {
@@ -13802,7 +13627,10 @@ impl App {
                             .find(|channel| channel.kind == "http")
                             .map(|channel| channel.id.clone());
                         let Some(channel_id) = channel_id else {
-                            self.set_status(format!("service {} has no HTTP channel", service.name));
+                            self.set_status(format!(
+                                "service {} has no HTTP channel",
+                                service.name
+                            ));
                             return;
                         };
                         match self
@@ -13810,16 +13638,18 @@ impl App {
                             .rotate_service_channel_secret(&service.name, &channel_id)
                             .await
                         {
-                        Ok(result) => {
-                            self.refresh_services().await;
-                            self.set_status(format!(
-                                "new credential for {} / {}: {} (shown once; restart to apply)",
-                                service.name,
-                                result.channel.id,
-                                result.new_secret.unwrap_or_default()
-                            ));
-                        }
-                        Err(error) => self.set_status(format!("credential rotation failed: {error}")),
+                            Ok(result) => {
+                                self.refresh_services().await;
+                                self.set_status(format!(
+                                    "new credential for {} / {}: {} (shown once; restart to apply)",
+                                    service.name,
+                                    result.channel.id,
+                                    result.new_secret.unwrap_or_default()
+                                ));
+                            }
+                            Err(error) => {
+                                self.set_status(format!("credential rotation failed: {error}"))
+                            }
                         }
                     }
                     ("delete", Some(service)) => {
@@ -13827,9 +13657,7 @@ impl App {
                             prompt: format!("Delete service {}? [y/N] ", service.name),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::ServiceDeleteConfirm {
-                                name: service.name,
-                            },
+                            intent: MinibufferIntent::ServiceDeleteConfirm { name: service.name },
                             error: None,
                         });
                     }
@@ -16095,7 +15923,6 @@ mod tests {
                 inner_area: Rect::new(21, 1, 78, 18),
             }],
             main_window_dividers: Vec::new(),
-            pin_strip_area: Some(Rect::new(20, 20, 80, 8)),
             matrix_rain_area: None,
             minibuffer_area: Some(Rect::new(0, 29, 100, 4)),
             last_chat_areas: std::collections::HashMap::new(),
@@ -16396,8 +16223,6 @@ mod tests {
             orchestrator_id: None,
             list_panel_w: LIST_PANEL_W_DEFAULT,
             resizing_list: None,
-            pin_strip_h: None,
-            resizing_pin_strip: None,
             matrix_rain_h: None,
             resizing_matrix_rain: None,
             resizing_main_window: None,
@@ -16449,7 +16274,6 @@ mod tests {
             dynamic_ui_scroll_offsets: HashMap::new(),
             image_resize_cache: Vec::new(),
             session_transitions: HashMap::new(),
-            pin_transitions: HashMap::new(),
             op_xy_link_connected: None,
             matrix_rain: crate::matrix_rain::MatrixRain::default(),
             matrix_rain_intensity: 0.0,
@@ -16598,11 +16422,11 @@ mod tests {
 
     #[test]
     fn selection_bounds_use_list_inner_area() {
-        let bounds = selection_bounds_for_layout(&test_layout(), 0, false, 1, 1);
+        let bounds = selection_bounds_for_layout(&test_layout(), false, 1, 1);
 
         assert_eq!(bounds, Some(Rect::new(1, 1, 18, 8)));
         assert_eq!(
-            selection_bounds_for_layout(&test_layout(), 0, false, 0, 1),
+            selection_bounds_for_layout(&test_layout(), false, 0, 1),
             None
         );
     }
@@ -18873,9 +18697,8 @@ mod tests {
     // every item from scratch — measured non-linear, multiple *seconds* for
     // just a couple thousand accumulated lines when cols alternate every
     // call, vs. instant when cols stay stable. Same failure family as
-    // `pin_tile_reuses_cached_size_to_avoid_split_thrash`
     // (crates/cli/src/pty_render.rs), which already guards the
-    // split+pin-strip case — just never guarded two ordinary split panes.
+    // split-pane case — just never guarded two ordinary split panes.
     // Regression for the fix: `render_terminal_for_window` now reuses the
     // first pane's cached size for any later pane rendering an
     // already-replayed-this-frame session, so cols never actually alternate.
@@ -20996,12 +20819,18 @@ mod tests {
         app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
         // Typing the trigger opens the inline smart-clip picker.
         app.insert_playbook_text("@");
-        assert!(app.playbook_smart_clip_active(), "typing @ opens the picker");
+        assert!(
+            app.playbook_smart_clip_active(),
+            "typing @ opens the picker"
+        );
 
         app.handle_playbook_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
             .await;
 
-        assert!(!app.playbook_smart_clip_active(), "C-g dismisses the picker");
+        assert!(
+            !app.playbook_smart_clip_active(),
+            "C-g dismisses the picker"
+        );
         assert!(
             app.playbook_popup.is_some(),
             "C-g must not close the playbook"
@@ -23689,7 +23518,10 @@ mod tests {
             .await;
 
         assert!(!consumed, "exposed terminal click should fall through");
-        let popup = app.playbook_popup.as_ref().expect("Playbook remains visible");
+        let popup = app
+            .playbook_popup
+            .as_ref()
+            .expect("Playbook remains visible");
         assert!(popup.terminal_focus);
         assert!(
             popup.slide_changed_at.is_some(),
@@ -24697,9 +24529,7 @@ mod tests {
         app.activate_fleet_panel_row(&crate::ui::FleetPanelRow {
             target: crate::ui::FleetPanelTarget::Session(target.clone()),
             label: "session 29".into(),
-            glyph: crate::ui::FleetPanelGlyph::State(
-                construct_protocol::SessionState::Running,
-            ),
+            glyph: crate::ui::FleetPanelGlyph::State(construct_protocol::SessionState::Running),
         });
         let _ = rendered(&mut app, 120, 20);
         assert!(
@@ -24872,12 +24702,11 @@ mod tests {
 
     /// REGRESSION: hovering a `@{session:…}` clip must CROP the session's
     /// existing viewport, never resize it. `ItemHistory` is shared with the
-    /// main view, split panes, and pin tiles, and `replay` resizes the cached
+    /// main view and split panes, and `replay` resizes the cached
     /// vt100 parser to the requested dims — so a hover card replaying at its
     /// own 64x22 preview size visibly reflowed the session everywhere else it
     /// was shown and thrashed the shared parser between the two sizes on
-    /// every frame while both were on screen (the same failure shape as
-    /// `pin_tile_reuses_cached_size_to_avoid_split_thrash`).
+    /// every frame while both were on screen.
     #[tokio::test]
     async fn playbook_session_hover_card_crops_without_resizing_shared_parser() {
         use crate::pty_render::ItemHistory;
@@ -27107,7 +26936,8 @@ mod tests {
         );
 
         let (first_method, first_params) = seen_rx.recv().await.expect("playbook update request");
-        let (second_method, second_params) = seen_rx.recv().await.expect("playbook execute request");
+        let (second_method, second_params) =
+            seen_rx.recv().await.expect("playbook execute request");
         assert_eq!(first_method, ipc_method::PLAYBOOK_UPDATE);
         assert_eq!(
             first_params.get("markdown").and_then(Value::as_str),
@@ -27865,7 +27695,10 @@ mod tests {
         let spans = construct_protocol::playbook_block_spans(md);
         assert_eq!(spans[0].signature, "# Todo");
         assert_eq!(spans[1].signature, "- a");
-        assert_eq!(blocks[3].id, construct_protocol::playbook_block_id("# Done"));
+        assert_eq!(
+            blocks[3].id,
+            construct_protocol::playbook_block_id("# Done")
+        );
     }
 
     #[test]
@@ -32144,8 +31977,12 @@ mod tests {
                 let max = app.list_max_scroll(&items, visible_rows);
                 for target in 0..items.len() {
                     for current in [0usize, 3, 9] {
-                        let got =
-                            app.list_scroll_offset_for_visible(&items, target, visible_rows, current);
+                        let got = app.list_scroll_offset_for_visible(
+                            &items,
+                            target,
+                            visible_rows,
+                            current,
+                        );
                         assert!(
                             got <= max.max(current),
                             "{mode:?}: target {target} at {visible_rows} rows gave \
@@ -32248,18 +32085,12 @@ mod tests {
         app.on_mouse(release(col, items_area.y + 3)).await;
         assert_eq!(app.selection, Selection::Session("s2".into()));
 
-        // The pin gutter only exists on a card's first line: the same
-        // columns on s1's detail line are a plain row selection, not a pin
-        // toggle.
+        // A click on s1's detail line selects the session, not a control.
         app.on_mouse(click(items_area.x + 2, items_area.y + 1))
             .await;
         app.on_mouse(release(items_area.x + 2, items_area.y + 1))
             .await;
         assert_eq!(app.selection, Selection::Session("s1".into()));
-        assert!(
-            !app.sessions.iter().any(|s| s.pinned),
-            "a detail-line click must not toggle pinning"
-        );
         server.abort();
     }
 
@@ -32553,38 +32384,6 @@ mod tests {
         assert_eq!(
             app.selection_for_window(2),
             Some(Selection::Session("s2".into()))
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn mouse_pin_strip_click_focuses_tile_without_changing_main_window_or_glitching() {
-        let (mut app, _dir, server) = captured_app().await;
-        app.sessions[0].pinned = true;
-        let mut second = summary_with_kind(construct_protocol::SessionKind::User);
-        second.id = "s2".into();
-        second.position = 1;
-        second.pinned = true;
-        app.sessions.push(second);
-        app.main_windows = MainWindowTree::single(1, Selection::Session("s1".into()));
-        app.active_window_id = 1;
-        app.layout = test_layout();
-        app.session_transitions.clear();
-
-        // Second tile in an 80-cell, two-tile pin strip starts at x=60; click
-        // inside its body, not on the top-border unpin diamond.
-        app.click_pin_strip(Rect::new(20, 20, 80, 8), 62, 22).await;
-
-        assert_eq!(app.focus, PaneFocus::View);
-        assert_eq!(app.selection, Selection::Session("s2".into()));
-        assert_eq!(
-            app.selection_for_window(1),
-            Some(Selection::Session("s1".into())),
-            "pin-strip clicks focus the tile for input without replacing the main pane"
-        );
-        assert!(
-            app.session_transitions.is_empty(),
-            "clicking a live pinned preview should not paint the main-pane glitch overlay"
         );
         server.abort();
     }
@@ -34432,9 +34231,9 @@ mod tests {
             "▕",
             "list scrollbar must not overwrite the last column with a bar glyph"
         );
-        if let Some(track_y) = (bar.area.y..bar.area.y + bar.area.height).find(|&y| {
-            y < bar.thumb.y || y >= bar.thumb.y.saturating_add(bar.thumb.height)
-        }) {
+        if let Some(track_y) = (bar.area.y..bar.area.y + bar.area.height)
+            .find(|&y| y < bar.thumb.y || y >= bar.thumb.y.saturating_add(bar.thumb.height))
+        {
             let track_cell = buf
                 .cell(ratatui::layout::Position {
                     x: bar.area.x,
@@ -34442,8 +34241,7 @@ mod tests {
                 })
                 .expect("track cell");
             assert_ne!(
-                thumb_cell.bg,
-                track_cell.bg,
+                thumb_cell.bg, track_cell.bg,
                 "thumb and track should use distinct background tints"
             );
         }
@@ -35500,7 +35298,10 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert!(wanted.is_empty(), "cached playbook must not request a fetch");
+        assert!(
+            wanted.is_empty(),
+            "cached playbook must not request a fetch"
+        );
         assert!(
             rendered.iter().any(|l| l.contains("Progress")),
             "{rendered:?}"
@@ -35685,16 +35486,16 @@ mod tests {
         ];
 
         assert_eq!(
-            selection_bounds_for_layout(&layout, 0, false, 65, 5),
+            selection_bounds_for_layout(&layout, false, 65, 5),
             Some(Rect::new(61, 1, 38, 18))
         );
         assert_eq!(
-            selection_bounds_for_layout(&layout, 0, false, 60, 5),
+            selection_bounds_for_layout(&layout, false, 60, 5),
             None,
             "split borders should not be selectable text"
         );
         assert_eq!(
-            selection_bounds_for_layout(&layout, 0, false, 55, 5),
+            selection_bounds_for_layout(&layout, false, 55, 5),
             Some(Rect::new(21, 1, 38, 18))
         );
     }
@@ -35747,7 +35548,7 @@ mod tests {
         // The run loop reads `notification_dirtied_view` to skip a full-frame
         // repaint for background PTY chunks. Verify the gate: visible session
         // PTY -> dirties; off-screen session PTY -> does not; structural events
-        // and pinned/orchestrator sessions -> always dirty.
+        // and orchestrator sessions -> always dirty.
         let (mut app, _dir, server) = empty_app().await;
         let mut vis = summary_with_kind(construct_protocol::SessionKind::User);
         vis.id = "vis".into();
@@ -35806,14 +35607,6 @@ mod tests {
         assert!(
             app.notification_dirtied_view,
             "non-PTY events must always repaint"
-        );
-
-        // Pinning the off-screen session makes its PTY visible (pin strip).
-        app.sessions[1].pinned = true;
-        feed(&mut app, "bg", pty()).await;
-        assert!(
-            app.notification_dirtied_view,
-            "pinned session PTY is visible and must repaint"
         );
 
         server.abort();
@@ -39745,26 +39538,29 @@ mod tests {
             "a freshly launched TUI should hydrate the hidden orchestrator before live widget events arrive"
         );
 
-        app.apply_pinned_session_hydration(SessionHydration {
-            session_id: "orch".into(),
-            transcript: Vec::new(),
-            history: Some(crate::pty_render::ItemHistory::new()),
-            editor_state: None,
-            agent_status: None,
-            ui_panels: HashMap::from([(
-                "fleet-pulse".into(),
-                UiPanel {
-                    id: "fleet-pulse".into(),
-                    source: Some("fleet-pulse.md".into()),
-                    title: Some("Fleet pulse".into()),
-                    created_at_ms: 1,
-                    placement: UiPlacement::Sticky,
-                    markdown: "# Fleet pulse".into(),
-                },
-            )]),
-            status_messages: Vec::new(),
-            history_is_alt_screen: false,
-        })
+        app.apply_hydration_state(
+            SessionHydration {
+                session_id: "orch".into(),
+                transcript: Vec::new(),
+                history: Some(crate::pty_render::ItemHistory::new()),
+                editor_state: None,
+                agent_status: None,
+                ui_panels: HashMap::from([(
+                    "fleet-pulse".into(),
+                    UiPanel {
+                        id: "fleet-pulse".into(),
+                        source: Some("fleet-pulse.md".into()),
+                        title: Some("Fleet pulse".into()),
+                        created_at_ms: 1,
+                        placement: UiPlacement::Sticky,
+                        markdown: "# Fleet pulse".into(),
+                    },
+                )]),
+                status_messages: Vec::new(),
+                history_is_alt_screen: false,
+            },
+            false,
+        )
         .await;
 
         assert!(app.orchestrator_session_needing_hydration().is_none());
@@ -40430,12 +40226,10 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
 
         let row = app.layout.list_items_area.expect("session list");
-        app.click_list(app.layout.list_area.expect("list"), row.x + 1, row.y).await;
+        app.click_list(app.layout.list_area.expect("list"), row.x + 1, row.y)
+            .await;
         assert!(app.service_dialog.is_none());
-        assert_eq!(
-            app.selection,
-            Selection::Service("assistant".into())
-        );
+        assert_eq!(app.selection, Selection::Service("assistant".into()));
         assert_eq!(app.focus, PaneFocus::View);
 
         app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
@@ -40472,7 +40266,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("service: assistant"));
-        assert!(text.contains("☰"), "service view should expose title actions");
+        assert!(
+            text.contains("☰"),
+            "service view should expose title actions"
+        );
         assert!(text.contains("Instruction"));
         assert!(text.contains("Service name"));
         assert!(text.contains("Channels"));
@@ -40507,7 +40304,10 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("channel: http"), "rendered service view:\n{text}");
+        assert!(
+            text.contains("channel: http"),
+            "rendered service view:\n{text}"
+        );
         assert!(text.contains("demo-conversation"));
 
         let hit = app
@@ -40556,7 +40356,8 @@ mod tests {
             .service_title_menu
             .clone()
             .expect("service actions menu should open");
-        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw menu");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw menu");
         let menu_text = term
             .backend()
             .buffer()
@@ -40631,7 +40432,9 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.minibuffer.as_ref().map(|minibuffer| minibuffer.input.as_str()),
+            app.minibuffer
+                .as_ref()
+                .map(|minibuffer| minibuffer.input.as_str()),
             Some("s"),
             "an open minibuffer must own keys over the service view"
         );
@@ -40753,7 +40556,12 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().service.model.as_deref(),
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .service
+                .model
+                .as_deref(),
             Some("gpt-5")
         );
         server.abort();
@@ -40893,8 +40701,14 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("▣"), "attached catalog channel should be checked");
-        assert!(text.contains("▢"), "available catalog channels should be selectable");
+        assert!(
+            text.contains("▣"),
+            "attached catalog channel should be checked"
+        );
+        assert!(
+            text.contains("▢"),
+            "available catalog channels should be selectable"
+        );
         assert!(text.contains("http"));
         assert!(text.contains("shared"));
         assert!(text.contains("busy"));
@@ -40943,7 +40757,9 @@ mod tests {
         let dialog = app.service_dialog.as_ref().unwrap();
         let options = dialog.picker_options(&app);
         assert_eq!(options[0].label, "Default");
-        assert!(options.iter().any(|option| option.label == "openai / gpt-5"));
+        assert!(options
+            .iter()
+            .any(|option| option.label == "openai / gpt-5"));
         assert!(options
             .iter()
             .any(|option| option.label == "openai / gpt-5-mini"));
@@ -40954,11 +40770,8 @@ mod tests {
 
         // The first move leaves Default and selects the same first model that
         // the pin router would show under the openai target.
-        app.on_key(KeyEvent::new(
-            KeyCode::Char('n'),
-            KeyModifiers::CONTROL,
-        ))
-        .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
         assert_eq!(
             app.service_dialog.as_ref().unwrap().picker_selected,
             1,
@@ -41067,11 +40880,8 @@ mod tests {
         app.services.push(service_summary_for_test("assistant"));
         app.select_service("assistant".to_string());
 
-        app.on_key(KeyEvent::new(
-            KeyCode::Char('x'),
-            KeyModifiers::CONTROL,
-        ))
-        .await;
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .await;
         app.on_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
             .await;
 
@@ -41394,15 +41204,14 @@ mod tests {
             "▁",
             "the transparent scrollbar must not paint a bottom-edge glyph"
         );
-        if let Some(track_x) = (hbar.area.x..hbar.area.x + hbar.area.width).find(|&x| {
-            x < hbar.thumb.x || x >= hbar.thumb.x.saturating_add(hbar.thumb.width)
-        }) {
+        if let Some(track_x) = (hbar.area.x..hbar.area.x + hbar.area.width)
+            .find(|&x| x < hbar.thumb.x || x >= hbar.thumb.x.saturating_add(hbar.thumb.width))
+        {
             let track_cell = buf
                 .cell((track_x, hbar.area.y))
                 .expect("horizontal track cell");
             assert_ne!(
-                thumb_cell.bg,
-                track_cell.bg,
+                thumb_cell.bg, track_cell.bg,
                 "horizontal thumb and track should use distinct background tints"
             );
         }
@@ -41485,9 +41294,9 @@ mod tests {
             "▕",
             "vertical lineage scrollbar must not overwrite the diagram glyph"
         );
-        if let Some(track_y) = (vbar.area.y..vbar.area.y + vbar.area.height).find(|&y| {
-            y < vbar.thumb.y || y >= vbar.thumb.y.saturating_add(vbar.thumb.height)
-        }) {
+        if let Some(track_y) = (vbar.area.y..vbar.area.y + vbar.area.height)
+            .find(|&y| y < vbar.thumb.y || y >= vbar.thumb.y.saturating_add(vbar.thumb.height))
+        {
             let vertical_track = buffer
                 .cell(ratatui::layout::Position {
                     x: vbar.area.x,
@@ -41495,8 +41304,7 @@ mod tests {
                 })
                 .expect("vertical track cell");
             assert_ne!(
-                vertical_thumb.bg,
-                vertical_track.bg,
+                vertical_thumb.bg, vertical_track.bg,
                 "vertical lineage thumb and track should use distinct background tints"
             );
         }
@@ -41512,9 +41320,9 @@ mod tests {
             "▁",
             "horizontal lineage scrollbar must not overwrite the diagram glyph"
         );
-        if let Some(track_x) = (hbar.area.x..hbar.area.x + hbar.area.width).find(|&x| {
-            x < hbar.thumb.x || x >= hbar.thumb.x.saturating_add(hbar.thumb.width)
-        }) {
+        if let Some(track_x) = (hbar.area.x..hbar.area.x + hbar.area.width)
+            .find(|&x| x < hbar.thumb.x || x >= hbar.thumb.x.saturating_add(hbar.thumb.width))
+        {
             let horizontal_track = buffer
                 .cell(ratatui::layout::Position {
                     x: track_x,
@@ -41522,8 +41330,7 @@ mod tests {
                 })
                 .expect("horizontal track cell");
             assert_ne!(
-                horizontal_thumb.bg,
-                horizontal_track.bg,
+                horizontal_thumb.bg, horizontal_track.bg,
                 "horizontal lineage thumb and track should use distinct background tints"
             );
         }
@@ -43362,15 +43169,15 @@ mod tests {
         assert_eq!(list_session_indent_cells(&user, false, false), 0);
         assert_eq!(list_session_indent_cells(&user, true, false), 2);
         assert_eq!(list_session_indent_cells(&user, true, true), 1);
-        assert_eq!(list_session_indent_cells(&subagent, true, false), 3);
-        assert_eq!(list_session_indent_cells(&fork, true, false), 2);
+        assert_eq!(list_session_indent_cells(&subagent, true, false), 4);
+        assert_eq!(list_session_indent_cells(&fork, true, false), 3);
         let mut grouped_subagent = subagent.clone();
         grouped_subagent.group_id = Some("group".into());
         let mut grouped_fork = fork.clone();
         grouped_fork.group_id = Some("group".into());
-        assert_eq!(list_session_indent_cells(&grouped_subagent, true, false), 4);
-        assert_eq!(list_session_indent_cells(&grouped_fork, true, false), 3);
-        assert_eq!(list_session_indent_cells(&subagent, true, true), 2);
+        assert_eq!(list_session_indent_cells(&grouped_subagent, true, false), 5);
+        assert_eq!(list_session_indent_cells(&grouped_fork, true, false), 4);
+        assert_eq!(list_session_indent_cells(&subagent, true, true), 3);
         assert_eq!(
             list_archive_indent_cells(&ArchiveSection::Ungrouped, true, false),
             2
@@ -44404,29 +44211,18 @@ mod tests {
 
     #[test]
     fn selection_bounds_use_view_inner_area() {
-        let bounds = selection_bounds_for_layout(&test_layout(), 0, false, 21, 1);
+        let bounds = selection_bounds_for_layout(&test_layout(), false, 21, 1);
 
         assert_eq!(bounds, Some(Rect::new(21, 1, 78, 18)));
         assert_eq!(
-            selection_bounds_for_layout(&test_layout(), 0, false, 20, 1),
-            None
-        );
-    }
-
-    #[test]
-    fn selection_bounds_use_pinned_tile_inner_area() {
-        let bounds = selection_bounds_for_layout(&test_layout(), 2, false, 21, 21);
-
-        assert_eq!(bounds, Some(Rect::new(21, 21, 38, 6)));
-        assert_eq!(
-            selection_bounds_for_layout(&test_layout(), 2, false, 20, 21),
+            selection_bounds_for_layout(&test_layout(), false, 20, 1),
             None
         );
     }
 
     #[test]
     fn selection_bounds_use_minibuffer_line_for_operator_area() {
-        let bounds = selection_bounds_for_layout(&test_layout(), 0, false, 0, 29);
+        let bounds = selection_bounds_for_layout(&test_layout(), false, 0, 29);
 
         assert_eq!(bounds, Some(Rect::new(0, 29, 100, 4)));
     }
@@ -44434,11 +44230,11 @@ mod tests {
     #[test]
     fn selection_bounds_exclude_orchestrator_panel_top_border() {
         assert_eq!(
-            selection_bounds_for_layout(&test_layout(), 0, true, 0, 29),
+            selection_bounds_for_layout(&test_layout(), true, 0, 29),
             None
         );
         assert_eq!(
-            selection_bounds_for_layout(&test_layout(), 0, true, 0, 30),
+            selection_bounds_for_layout(&test_layout(), true, 0, 30),
             Some(Rect::new(0, 30, 100, 3))
         );
     }

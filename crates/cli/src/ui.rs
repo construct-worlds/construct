@@ -4,12 +4,12 @@ use crate::app::{
     feature_guidance, harness_guidance, harness_picker_entries, smith_method_guidance, App,
     ConfigureTab, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
     MinibufferChoiceAction, MinibufferChoiceHit, MinibufferIntent, PaneFocus, RemoteControlHit,
-    RemoteControlHitAction, ScreenPoint, Selection, ServiceTitleMenuAction,
-    SessionTitleMenuAction, TextSelectionRange,
-    TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit, WindowSplitDirection, ZoomMode,
-    CONFIGURE_TABS, PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS, PLAYBOOK_CLIP_HOVER_PREVIEW_COLS,
-    PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS, PLAYBOOK_COLLAB_CURSOR_TTL_MS, PLAYBOOK_CONTENT_PADDING_X,
-    PLAYBOOK_CONTENT_PADDING_Y, PLAYBOOK_REVEAL_MS,
+    RemoteControlHitAction, ScreenPoint, Selection, ServiceTitleMenuAction, SessionTitleMenuAction,
+    TextSelectionRange, TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit,
+    WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS,
+    PLAYBOOK_CLIP_HOVER_PREVIEW_COLS, PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS,
+    PLAYBOOK_COLLAB_CURSOR_TTL_MS, PLAYBOOK_CONTENT_PADDING_X, PLAYBOOK_CONTENT_PADDING_Y,
+    PLAYBOOK_REVEAL_MS,
 };
 use crate::keymap::{KeyAction, Profile};
 use crate::text_util::wrap_to_width;
@@ -128,7 +128,7 @@ const MODELINE_H: u16 = 1;
 /// How one frame splits between the sliding main block and the pinned footer
 /// (spec 0112).
 ///
-/// The block — session list, split panes, lineage, pin strip, playbook popups —
+/// The block — session list, split panes, lineage, playbook popups —
 /// is laid out at `main`, the size it has when the footer is a single row, no
 /// matter how tall the footer actually gets. A taller footer slides the block
 /// up by `shift.delta` rows and crops what leaves the viewport, so panes keep
@@ -384,40 +384,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .split(main_area);
     let right_area = cols[1];
 
-    // Split the right area into main + pin strip if any sessions are pinned.
-    // Walk the materialized list so the pin strip's order matches what the
-    // user sees in the left list (including groups and within-group order).
-    let pinned_ids: Vec<String> = app
-        .list_items()
-        .into_iter()
-        .filter_map(|it| match it {
-            AppListItem::Session { summary, .. } if summary.pinned => Some(summary.id),
-            _ => None,
-        })
-        .collect();
-    let (detail_area, pin_strip_area) = if pinned_ids.is_empty() {
-        (right_area, None)
-    } else {
-        // Honor the user's persisted preference when present; clamp
-        // against the right pane so we never starve the main view on
-        // a small terminal regardless of what was saved.
-        let upper = right_area
-            .height
-            .saturating_sub(10)
-            .max(crate::app::PIN_STRIP_H_MIN);
-        let strip_h = app
-            .pin_strip_h
-            .map(|h| h.clamp(crate::app::PIN_STRIP_H_MIN, upper))
-            .unwrap_or_else(|| pin_strip_height(right_area.height));
-        let vsplit = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(strip_h)])
-            .split(right_area);
-        (vsplit[0], Some(vsplit[1]))
-    };
+    let detail_area = right_area;
 
-    // The PTY pane size tracks the *main* view's inner area; pinned tiles
-    // are passive tails reading from the same parser. Resize all parsers
+    // The PTY pane size tracks the view's inner area. Resize all parsers
     // before drawing so the current frame's parser screen geometry matches
     // the area we're rendering into (otherwise zoom-in shows blank rows at
     // the bottom and zoom-out clips content).
@@ -432,7 +401,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // map terminal coordinates back to a region.
     app.layout.list_area = Some(cols[0]);
     app.layout.view_area = Some(detail_area);
-    app.layout.pin_strip_area = pin_strip_area;
     app.layout.matrix_rain_area = None;
     app.layout.minibuffer_area = Some(minibuffer_area);
     app.layout.modal_area = None;
@@ -444,9 +412,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_sessions(f, cols[0], app);
     }
     render_main_windows(f, detail_area, app);
-    if let Some(strip) = pin_strip_area {
-        render_pin_strip(f, strip, app, &pinned_ids);
-    }
     // When the list is collapsed, overlay a `»` uncollapse glyph
     // on the main view's left border so the user can recover the
     // hidden pane without a key chord. Painted AFTER `render_detail`
@@ -460,8 +425,6 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     // Tooltips anchored to the block (spec 0081) travel with it, so they are
     // painted while the block still owns its own coordinates.
-    render_diamond_tooltip(f, app);
-    render_pin_diamond_tooltip(f, app, &pinned_ids);
     render_view_playbook_toggle_tooltip(f, app);
     render_view_close_tooltip(f, app);
     render_browser_preview_close_tooltip(f, app);
@@ -845,74 +808,16 @@ fn normalized_points(a: ScreenPoint, b: ScreenPoint) -> (ScreenPoint, ScreenPoin
     }
 }
 
-fn session_list_markers(summary: &SessionSummary) -> (&'static str, &'static str) {
-    let lineage = if summary.forked_from.is_some() {
+fn session_list_marker(summary: &SessionSummary) -> &'static str {
+    if summary.forked_from.is_some() {
         "⑂"
     } else {
         " "
-    };
-    let pin = if summary.pinned { "★" } else { " " };
-    (lineage, pin)
+    }
 }
 
 fn session_list_marker_width(summary: &SessionSummary) -> usize {
     1 + usize::from(summary.forked_from.is_some())
-}
-
-/// Hover hit-test: if the mouse cursor is currently sitting on the
-/// pin-diamond cell of a session row, return that row's info. Returns
-/// `None` on terminals that don't forward motion events (Terminal.app),
-/// since `app.mouse_pos` stays at the last click/scroll position there.
-fn hovered_diamond(app: &App) -> Option<(u16, u16, &SessionSummary)> {
-    let (mx, my) = app.mouse_pos?;
-    let list_area = app.layout.list_area?;
-    if mx <= list_area.x
-        || mx + 1 >= list_area.x + list_area.width
-        || my <= list_area.y
-        || my + 1 >= list_area.y + list_area.height
-    {
-        return None;
-    }
-    let row = (my - list_area.y - 1) as usize;
-    // Same display-row → item mapping as `App::click_list`: the render-time
-    // row map when the list was drawn this frame (full-mode cards span two
-    // rows; the diamond gutter lives on the first), 1:1 otherwise.
-    let idx = match app.layout.list_visible_rows.get(row) {
-        Some(hit) if hit.first_line => hit.item_index,
-        Some(_) => return None,
-        None if app.layout.list_visible_rows.is_empty() => row,
-        None => return None,
-    };
-    let items = app.list_items();
-    let item = items.into_iter().nth(idx)?;
-    let (summary, indented, has_children) = match item {
-        AppListItem::Session {
-            summary,
-            indented,
-            has_children,
-            ..
-        } => (summary, indented, has_children),
-        _ => return None,
-    };
-    let indent = crate::app::list_session_indent_cells(&summary, indented, has_children);
-    // Hit zone is the 4-cell gutter to the left of the session name. Forks
-    // alone add a lineage column before the pin marker:
-    //   [disclosure][lineage?][diamond][ ][status-circle][ ] ← name
-    // Wider than the bare diamond glyph so it's easier to click —
-    // the visual overlay still anchors on the diamond cell itself.
-    let zone_start = list_area.x
-        + 1
-        + indent
-        + u16::from(has_children)
-        + session_list_marker_width(&summary).saturating_sub(1) as u16;
-    let zone_end = zone_start + 4; // exclusive
-    if mx < zone_start || mx >= zone_end {
-        return None;
-    }
-    // Walk the live summary list so the caller sees up-to-date `pinned`
-    // state (the materialized item from list_items() is a snapshot).
-    let s = app.sessions.iter().find(|s| s.id == summary.id)?;
-    Some((zone_start, my, s))
 }
 
 /// Hit zone for the `+` button on the session-list pane's title
@@ -1378,54 +1283,6 @@ fn hovered_view_playbook_toggle_button(app: &App, view_area: Rect) -> bool {
     };
     let (x_start, x_end, y) = view_playbook_toggle_button_range(view_area);
     my == y && mx >= x_start && mx < x_end
-}
-
-/// Hit zone for the pin-tile unpin diamond: 4 cells on the top
-/// border, starting after the corner. Title shape is ` ★ <status>
-/// <label> <harness> `, so cells `tile.x + 1 ..= tile.x + 4`
-/// (inclusive) cover `[ ][★][ ][status]` — the same 4-cell zone
-/// idiom as the list-view diamond. Returns `(diamond_x,
-/// tile_top_y)` so the tooltip can anchor on the diamond cell.
-fn pin_tile_diamond_zone(tile: Rect) -> (u16, u16) {
-    (tile.x + 1, tile.x + 5)
-}
-
-fn hovered_pin_diamond<'a>(
-    app: &'a App,
-    pinned_ids: &[String],
-) -> Option<(u16, u16, &'a SessionSummary)> {
-    let (mx, my) = app.mouse_pos?;
-    let strip = app.layout.pin_strip_area?;
-    if pinned_ids.is_empty() {
-        return None;
-    }
-    let tiles = pin_tile_layout(strip, pinned_ids.len());
-    for (tile, id) in tiles.iter().zip(pinned_ids.iter()) {
-        let (zone_start, zone_end) = pin_tile_diamond_zone(*tile);
-        if my == tile.y && mx >= zone_start && mx < zone_end {
-            // Diamond glyph itself sits at offset +1 in the title
-            // (after the leading space).
-            let diamond_x = tile.x + 2;
-            let summary = app.sessions.iter().find(|s| &s.id == id)?;
-            return Some((diamond_x, tile.y, summary));
-        }
-    }
-    None
-}
-
-fn render_pin_diamond_tooltip(f: &mut Frame, app: &App, pinned_ids: &[String]) {
-    let Some((dx, dy, _summary)) = hovered_pin_diamond(app, pinned_ids) else {
-        return;
-    };
-
-    // Overlay the diamond cell in red+bold — same "about to unpin"
-    // affordance the list-view diamond uses for pinned rows.
-    let overlay_style = Style::default()
-        .fg(app.theme.danger)
-        .add_modifier(Modifier::BOLD);
-    f.buffer_mut().set_string(dx, dy, "★", overlay_style);
-
-    render_tooltip_at(f, &app.theme, " Unpin session ", dx, dy, 2, -1);
 }
 
 fn render_view_close_tooltip(f: &mut Frame, app: &App) {
@@ -2270,32 +2127,6 @@ fn render_minibuffer_choices(
     });
 }
 
-fn render_diamond_tooltip(f: &mut Frame, app: &App) {
-    let Some((dx, dy, summary)) = hovered_diamond(app) else {
-        return;
-    };
-
-    // Shadow / highlight diamond on the hover cell. Pinned → dimmed
-    // red (about to remove); unpinned → faint yellow (preview pin).
-    let overlay_style = if summary.pinned {
-        Style::default()
-            .fg(app.theme.danger)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(app.theme.warning)
-            .add_modifier(Modifier::DIM)
-    };
-    f.buffer_mut().set_string(dx, dy, "★", overlay_style);
-
-    let label = if summary.pinned {
-        " Unpin session "
-    } else {
-        " Pin session "
-    };
-    render_tooltip_at(f, &app.theme, label, dx, dy, 2, -1);
-}
-
 /// Hover detail for a lineage turn-info line (spec 0103): the window's
 /// message count plus its input/output/cached token breakdown. Armed by
 /// the lineage section's hit walk when the pointer sits on a token-bearing
@@ -2305,10 +2136,6 @@ fn render_lineage_segment_tooltip(f: &mut Frame, app: &App) {
         return;
     };
     render_tooltip_at(f, &app.theme, &label, anchor.x, anchor.y, 0, -1);
-}
-
-fn pin_strip_height(total_h: u16) -> u16 {
-    (total_h / 3).clamp(7, 18)
 }
 
 pub fn matrix_rain_panel_height(preferred: Option<u16>, available_h: u16) -> u16 {
@@ -2321,7 +2148,7 @@ pub fn matrix_rain_panel_height(preferred: Option<u16>, available_h: u16) -> u16
 }
 
 /// Zoom layout: the session view takes the entire screen except for the
-/// minibuffer line at the bottom. No list, no pin strip, no modeline, no
+/// minibuffer line at the bottom. No list, no modeline, no
 /// borders — edge-to-edge so the underlying TUI (vim / claude / htop /
 /// whatever is running) gets the most real estate possible. Matches
 /// tmux's `prefix z` zoomed-pane behavior.
@@ -2341,7 +2168,6 @@ fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
     // Zoomed layout snapshot: only the view + minibuffer exist.
     app.layout.list_area = None;
     app.layout.view_area = Some(main_area);
-    app.layout.pin_strip_area = None;
     app.layout.matrix_rain_area = None;
     app.layout.minibuffer_area = Some(minibuffer_area);
     app.layout.modal_area = None;
@@ -2379,7 +2205,6 @@ fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
     // Zoomed-list layout snapshot: only the list + minibuffer exist.
     app.layout.list_area = Some(main_area);
     app.layout.view_area = None;
-    app.layout.pin_strip_area = None;
     app.layout.matrix_rain_area = None;
     app.layout.minibuffer_area = Some(minibuffer_area);
     app.layout.modal_area = None;
@@ -3005,8 +2830,7 @@ pub(crate) fn fleet_tally_panel_geometry(
         .max()
         .unwrap_or(0)
         .max(UnicodeWidthStr::width(title));
-    let inner_w =
-        (widest as u16 + FLEET_PANEL_PAD_W * 2).min(FLEET_PANEL_MAX_INNER_W);
+    let inner_w = (widest as u16 + FLEET_PANEL_PAD_W * 2).min(FLEET_PANEL_MAX_INNER_W);
     let w = (inner_w + 2).min(frame.width.max(3));
     let h = (body_rows as u16 + 2).min(frame.height.max(3));
     (
@@ -3199,7 +3023,11 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     // harness label, so service rows still scan with the
                     // rest of the fleet.
                     let disclosure = if *session_count > 0 {
-                        if *sessions_expanded { "▼ " } else { "▶ " }
+                        if *sessions_expanded {
+                            "▼ "
+                        } else {
+                            "▶ "
+                        }
                     } else {
                         "  "
                     };
@@ -3239,14 +3067,14 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     } else {
                         None
                     };
-                    let (lineage_glyph, pin_glyph) = session_list_markers(s);
+                    let lineage_glyph = session_list_marker(s);
                     let indent_prefix = " ".repeat(crate::app::list_session_indent_cells(
                         s,
                         *indented,
                         *has_children,
                     ) as usize);
                     // Fixed-width left side: indent + optional disclosure (1)
-                    // + optional lineage (1) + pin (1) + " glyph " (3).
+                    // + optional lineage (1) + " glyph " (3).
                     // Only forks reserve the lineage cell, keeping ordinary
                     // project members at their established position.
                     let prefix_w = indent_prefix.chars().count()
@@ -3312,7 +3140,6 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         ));
                     }
                     spans.extend([
-                        Span::styled(pin_glyph.to_string(), Style::default().fg(app.theme.info)),
                         Span::styled(
                             format!(" {} ", session_status_glyph(app, s)),
                             state_style(&app.theme, s.state),
@@ -4404,11 +4231,7 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
     // is unreadable, and on a narrow panel a single row only ever fits one
     // name. The graph keeps the rest of the panel.
     let entries = app.token_meter.legend(area.width as usize);
-    let grid = layout_legend(
-        &entries,
-        area.width as usize,
-        legend_max_rows(area.height),
-    );
+    let grid = layout_legend(&entries, area.width as usize, legend_max_rows(area.height));
     let legend_h = grid.rows.len() as u16;
     let graph = Rect {
         x: area.x,
@@ -4727,7 +4550,10 @@ fn layout_legend(
     max_rows: usize,
 ) -> LegendGrid {
     if entries.is_empty() || max_rows == 0 || width == 0 {
-        return LegendGrid { rows: Vec::new(), col_w: width.max(1) };
+        return LegendGrid {
+            rows: Vec::new(),
+            col_w: width.max(1),
+        };
     }
     let widest = entries
         .iter()
@@ -4817,7 +4643,9 @@ fn render_token_meter_legend(
         // cursor, which steps by whole columns whatever a cell drew.
         let mut x = area.x;
         for (slot, &i) in row.iter().enumerate() {
-            let Some(entry) = entries.get(i) else { continue };
+            let Some(entry) = entries.get(i) else {
+                continue;
+            };
             let cell_x = area.x + (slot * grid.col_w) as u16;
             if cell_x >= limit {
                 break;
@@ -4834,7 +4662,8 @@ fn render_token_meter_legend(
             if !rate.is_empty() {
                 let rate_x = x + gap as u16;
                 let rate_style = legend_rate_style(entry.color, entry.rate);
-                f.buffer_mut().set_string(rate_x, y, rate.as_str(), rate_style);
+                f.buffer_mut()
+                    .set_string(rate_x, y, rate.as_str(), rate_style);
                 x = rate_x + UnicodeWidthStr::width(rate.as_str()) as u16;
             }
             // Step past the cell's gutter, so anything appended to the row
@@ -5928,16 +5757,6 @@ fn render_main_transitions(f: &mut Frame, app: &App) {
         };
         render_glitch_overlay(f, pane.inner_area, &app.theme, seed, amount);
     }
-}
-
-fn render_pin_transition(f: &mut Frame, area: Rect, app: &App, session_id: &str) {
-    let Some(started_at) = app.pin_transitions.get(session_id).copied() else {
-        return;
-    };
-    let Some(amount) = transition_amount(started_at) else {
-        return;
-    };
-    render_glitch_overlay(f, area, &app.theme, hash_str(session_id) ^ 0x70696e, amount);
 }
 
 fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
@@ -7520,20 +7339,17 @@ fn render_fleet_tally_panel(f: &mut Frame, app: &App) {
             text_area.x.saturating_add(1),
             row,
             entry.glyph.glyph(),
-            style.fg(
-                entry
-                    .glyph
-                    .style(&app.theme)
-                    .fg
-                    .unwrap_or(app.theme.text),
-            ),
+            style.fg(entry.glyph.style(&app.theme).fg.unwrap_or(app.theme.text)),
         );
     }
     // Long buckets summarize their tail rather than growing past the pane
     // they describe. Dim and unclickable — it names what was left out, it
     // isn't somewhere to go.
     if panel.overflow > 0 {
-        let row = area.y.saturating_add(1).saturating_add(panel.rows.len() as u16);
+        let row = area
+            .y
+            .saturating_add(1)
+            .saturating_add(panel.rows.len() as u16);
         if row < last_row {
             render_session_title_menu_row(
                 f,
@@ -7685,8 +7501,7 @@ fn service_title_menu_action_binding(
         (ServiceTitleMenuAction::CloseSplit, Profile::Emacs) => Some("C-x 0"),
         (ServiceTitleMenuAction::CloseSplit, Profile::Vim) => Some("C-w c"),
         (ServiceTitleMenuAction::Delete, _) => Some("C-d"),
-        (ServiceTitleMenuAction::RotateToken, _)
-        | (ServiceTitleMenuAction::PauseResume, _) => None,
+        (ServiceTitleMenuAction::RotateToken, _) | (ServiceTitleMenuAction::PauseResume, _) => None,
     }
 }
 
@@ -7952,7 +7767,11 @@ fn service_picker_lines(
             .skip(dialog.picker_scroll)
             .take(crate::app::SERVICE_PICKER_VISIBLE_ROWS)
         {
-            let marker = if index == dialog.picker_selected { "›" } else { " " };
+            let marker = if index == dialog.picker_selected {
+                "›"
+            } else {
+                " "
+            };
             let detail = if option.available {
                 option.detail.as_str()
             } else {
@@ -7969,9 +7788,7 @@ fn service_picker_lines(
                 Style::default().fg(app.theme.dim)
             };
             if index == dialog.picker_selected {
-                style = style
-                    .fg(app.theme.highlight_fg)
-                    .bg(app.theme.highlight_bg);
+                style = style.fg(app.theme.highlight_fg).bg(app.theme.highlight_bg);
             }
             lines.push(Line::from(Span::styled(
                 truncate_to_width(&text, width.saturating_sub(1) as usize),
@@ -8037,13 +7854,7 @@ fn service_session_route_label(
 /// pane: its definition and contextual help stay visible while the operator
 /// edits it, and the lower section gives the service's routed sessions a
 /// direct entry point.
-fn render_service_view(
-    f: &mut Frame,
-    area: Rect,
-    app: &mut App,
-    name: &str,
-    focused: bool,
-) {
+fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, focused: bool) {
     let Some(summary) = app
         .services
         .iter()
@@ -8127,9 +7938,10 @@ fn render_service_view(
     ];
     let mut field_lines = Vec::with_capacity(labels.len());
     for (index, label) in labels.iter().enumerate() {
-        let selected = app.service_dialog.as_ref().is_some_and(|current| {
-            current.service.name == name && current.selected_field == index
-        });
+        let selected = app
+            .service_dialog
+            .as_ref()
+            .is_some_and(|current| current.service.name == name && current.selected_field == index);
         let locked = index == 0 && dialog.mode == crate::app::ServiceDialogMode::Edit;
         let value = dialog.field_value(index);
         let marker = if selected { "›" } else { " " };
@@ -8197,20 +8009,22 @@ fn render_service_view(
         .sessions
         .iter()
         .filter(|session| {
-            session
-                .title
-                .as_deref()
-                .is_some_and(|title| title == service_prefix || title.starts_with(&format!("{service_prefix}:")))
+            session.title.as_deref().is_some_and(|title| {
+                title == service_prefix || title.starts_with(&format!("{service_prefix}:"))
+            })
         })
         .collect();
     let catalog = &app.service_channel_catalog;
-    let attached_count = catalog.iter().filter(|channel| {
-        channel.attached_to.as_deref() == Some(summary.name.as_str())
-    }).count();
+    let attached_count = catalog
+        .iter()
+        .filter(|channel| channel.attached_to.as_deref() == Some(summary.name.as_str()))
+        .count();
     let mut activity = vec![Line::from(vec![
         Span::styled(
             "Channels  ",
-            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{} attached · {} in catalog", attached_count, catalog.len()),
@@ -8229,7 +8043,11 @@ fn render_service_view(
             let attached = channel.attached_to.as_deref() == Some(summary.name.as_str());
             let owned_by_other = channel.attached_to.is_some() && !attached;
             let checkbox = if attached { "▣" } else { "▢" };
-            let state = if channel.enabled { "enabled" } else { "disabled" };
+            let state = if channel.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
             let endpoint = channel
                 .port
                 .map(|port| format!("127.0.0.1:{port}"))
@@ -8241,14 +8059,19 @@ fn render_service_view(
                 .map(|owner| format!("  [attached to {owner}]"))
                 .unwrap_or_default();
             let style = if selected {
-                Style::default().fg(app.theme.highlight_fg).bg(app.theme.highlight_bg)
+                Style::default()
+                    .fg(app.theme.highlight_fg)
+                    .bg(app.theme.highlight_bg)
             } else if owned_by_other {
                 Style::default().fg(app.theme.dim)
             } else {
                 Style::default().fg(app.theme.text)
             };
             activity.push(Line::from(Span::styled(
-                format!("{marker} {checkbox} {}  {:<5} {endpoint}  {state}{owner}", channel.id, channel.kind),
+                format!(
+                    "{marker} {checkbox} {}  {:<5} {endpoint}  {state}{owner}",
+                    channel.id, channel.kind
+                ),
                 style,
             )));
         }
@@ -8257,7 +8080,9 @@ fn render_service_view(
     activity.push(Line::from(vec![
         Span::styled(
             "Sessions  ",
-            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("{} routed", routed.len()),
@@ -8271,19 +8096,27 @@ fn render_service_view(
         )));
     } else {
         let mut session_hits = Vec::new();
-        for session in routed.iter().take(chunks[2].height.saturating_sub(3) as usize) {
-            let (channel, label) = service_session_route_label(
-                session,
-                &summary.name,
-                catalog,
-                &summary.channels,
-            );
+        for session in routed
+            .iter()
+            .take(chunks[2].height.saturating_sub(3) as usize)
+        {
+            let (channel, label) =
+                service_session_route_label(session, &summary.name, catalog, &summary.channels);
             let row = chunks[2].y + activity.len() as u16;
             activity.push(Line::from(vec![
-                Span::styled(format!("  {} ", session_status_glyph(app, session)), state_style(&app.theme, session.state)),
-                Span::styled(format!("channel: {channel:<10} "), Style::default().fg(app.theme.accent)),
+                Span::styled(
+                    format!("  {} ", session_status_glyph(app, session)),
+                    state_style(&app.theme, session.state),
+                ),
+                Span::styled(
+                    format!("channel: {channel:<10} "),
+                    Style::default().fg(app.theme.accent),
+                ),
                 Span::styled(label, Style::default().fg(app.theme.text)),
-                Span::styled(format!("  {}", session.state.label()), Style::default().fg(app.theme.dim)),
+                Span::styled(
+                    format!("  {}", session.state.label()),
+                    Style::default().fg(app.theme.dim),
+                ),
             ]));
             if row < chunks[2].bottom() {
                 session_hits.push(crate::app::ServiceSessionHit {
@@ -8298,7 +8131,11 @@ fn render_service_view(
         activity.push(Line::from(""));
         activity.push(Line::from(Span::styled(
             note.clone(),
-            Style::default().fg(if dialog.confirm_delete { app.theme.danger } else { app.theme.dim }),
+            Style::default().fg(if dialog.confirm_delete {
+                app.theme.danger
+            } else {
+                app.theme.dim
+            }),
         )));
     }
     let editing = app
@@ -8313,7 +8150,10 @@ fn render_service_view(
         "Enter/C-s save · Space attach/detach · Enter edit · a create · Esc close"
     };
     activity.push(Line::from(""));
-    activity.push(Line::from(Span::styled(footer, Style::default().fg(app.theme.dim))));
+    activity.push(Line::from(Span::styled(
+        footer,
+        Style::default().fg(app.theme.dim),
+    )));
     f.render_widget(
         Paragraph::new(activity).wrap(Wrap { trim: false }),
         chunks[2],
@@ -8330,19 +8170,35 @@ fn render_service_channel_editor(
     let values = [
         editor.channel.id.clone(),
         editor.channel.kind.clone(),
-        editor.channel.port.map(|port| port.to_string()).unwrap_or_default(),
-        if editor.channel.enabled { "enabled".to_string() } else { "disabled".to_string() },
+        editor
+            .channel
+            .port
+            .map(|port| port.to_string())
+            .unwrap_or_default(),
+        if editor.channel.enabled {
+            "enabled".to_string()
+        } else {
+            "disabled".to_string()
+        },
     ];
-    let mut fields = vec![Line::from(Span::styled(
-        format!("Channel · {}", editor.service_name),
-        Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
-    )), Line::from("")];
+    let mut fields = vec![
+        Line::from(Span::styled(
+            format!("Channel · {}", editor.service_name),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
     for (index, (label, value)) in labels.iter().zip(values.iter()).enumerate() {
         let selected = editor.selected_field == index;
-        let locked = (index == 0 && editor.mode == crate::app::ServiceChannelDialogMode::Edit) || index == 1;
+        let locked =
+            (index == 0 && editor.mode == crate::app::ServiceChannelDialogMode::Edit) || index == 1;
         let marker = if selected { "›" } else { " " };
         let style = if selected {
-            Style::default().fg(app.theme.highlight_fg).bg(app.theme.highlight_bg)
+            Style::default()
+                .fg(app.theme.highlight_fg)
+                .bg(app.theme.highlight_bg)
         } else if locked {
             Style::default().fg(app.theme.dim)
         } else {
@@ -8355,12 +8211,17 @@ fn render_service_channel_editor(
     }
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(56), Constraint::Length(3), Constraint::Min(20)])
+        .constraints([
+            Constraint::Percentage(56),
+            Constraint::Length(3),
+            Constraint::Min(20),
+        ])
         .split(area);
     f.render_widget(Paragraph::new(fields), columns[0]);
     let divider_x = columns[1].x.saturating_add(columns[1].width / 2);
     for y in columns[1].top()..columns[1].bottom() {
-        f.buffer_mut().set_string(divider_x, y, "│", Style::default().fg(app.theme.border));
+        f.buffer_mut()
+            .set_string(divider_x, y, "│", Style::default().fg(app.theme.border));
     }
     let (title, body, hint) = match editor.selected_field {
         0 => ("Channel ID", "Stable name for this channel. It becomes part of the service's local configuration and is locked after creation.", "Type to edit when creating.") ,
@@ -8369,14 +8230,35 @@ fn render_service_channel_editor(
         3 => ("State", "Disabled channels remain configured but do not accept requests after the daemon restarts.", "Space or ←/→ toggles."),
         _ => ("Channel", "", ""),
     };
-    let mut help = vec![Line::from(Span::styled(title, Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD))), Line::from(""), Line::from(Span::styled(body, Style::default().fg(app.theme.text))), Line::from(""), Line::from(Span::styled(hint, Style::default().fg(app.theme.dim)))];
+    let mut help = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(body, Style::default().fg(app.theme.text))),
+        Line::from(""),
+        Line::from(Span::styled(hint, Style::default().fg(app.theme.dim))),
+    ];
     if let Some(secret) = &editor.new_secret {
         help.push(Line::from(""));
-        help.push(Line::from(Span::styled(format!("Credential (shown once): {secret}"), Style::default().fg(app.theme.warning))));
+        help.push(Line::from(Span::styled(
+            format!("Credential (shown once): {secret}"),
+            Style::default().fg(app.theme.warning),
+        )));
     }
     if let Some(note) = &editor.note {
         help.push(Line::from(""));
-        help.push(Line::from(Span::styled(note, Style::default().fg(if editor.confirm_delete { app.theme.danger } else { app.theme.dim }))));
+        help.push(Line::from(Span::styled(
+            note,
+            Style::default().fg(if editor.confirm_delete {
+                app.theme.danger
+            } else {
+                app.theme.dim
+            }),
+        )));
     }
     f.render_widget(Paragraph::new(help).wrap(Wrap { trim: false }), columns[2]);
     let footer = if editor.mode == crate::app::ServiceChannelDialogMode::Create {
@@ -8385,7 +8267,18 @@ fn render_service_channel_editor(
         "Enter/C-s save · C-r rotate credential · C-d delete · Esc back"
     };
     let footer_y = area.bottom().saturating_sub(1);
-    f.render_widget(Paragraph::new(Line::from(Span::styled(footer, Style::default().fg(app.theme.dim)))), Rect { x: area.x, y: footer_y, width: area.width, height: 1 });
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            footer,
+            Style::default().fg(app.theme.dim),
+        ))),
+        Rect {
+            x: area.x,
+            y: footer_y,
+            width: area.width,
+            height: 1,
+        },
+    );
 }
 
 fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
@@ -8884,8 +8777,8 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
     // cache is sized to whichever width it was *last* replayed at; alternating
     // between two widths for the same session within one frame rebuilds it
     // from scratch on every call — fine for a nearly-empty session, ruinous
-    // for one with real scrollback (see `terminal_replayed_sessions_this_frame`
-    // and `pin_tile_reuses_cached_size_to_avoid_split_thrash`). The second
+    // for one with real scrollback (see `terminal_replayed_sessions_this_frame`).
+    // The second
     // (and later) pane to render an already-replayed session this frame reuses
     // the first pane's cached size instead of forcing its own.
     let already_replayed_this_frame = !app.terminal_replayed_sessions_this_frame.insert(id.clone());
@@ -13333,9 +13226,6 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     C-v / M-v       scroll page down/up
     g g / G         scroll top / bottom
 
-  pinning (live tile in the pin strip below the main view)
-    Space / C-x p   toggle pin on selected session
-
   reorder list
     C-x C-p         move selected session up   (Meta-free, works everywhere)
     C-x C-n         move selected session down
@@ -13409,9 +13299,6 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
     C-d / C-u       scroll half page down/up
     C-e / C-y       scroll line down/up
     g g / G         scroll top / bottom
-
-  pinning (live tile in the pin strip below the main view)
-    Space / p       toggle pin on selected session
 
   reorder list
     C-x C-p         move selected session up   (Meta-free, works everywhere)
@@ -14044,159 +13931,6 @@ fn visible_edit_window(text: &str, cursor: usize, budget: usize) -> (String, u16
     (visible, cursor_col, start)
 }
 
-fn render_pin_strip(f: &mut Frame, area: Rect, app: &mut App, pinned_ids: &[String]) {
-    if pinned_ids.is_empty() || area.height < 3 || area.width < 6 {
-        return;
-    }
-    let tiles = pin_tile_layout(area, pinned_ids.len());
-    let selected_id = app.selected_id();
-    for (tile_area, id) in tiles.iter().zip(pinned_ids.iter()) {
-        let summary = app.sessions.iter().find(|s| &s.id == id);
-        let is_selected = selected_id.as_deref() == Some(id.as_str());
-        // Title: ` ★ <status> <label> `. The star on the top
-        // border is the unpin affordance — same gesture as the
-        // diamond in the list view. Click anywhere in the 4-cell
-        // gutter that holds the diamond + status glyph to unpin;
-        // `render_pin_diamond_tooltip` paints a hover tooltip and
-        // recolors the diamond on hover. The harness name is shown
-        // right-aligned on the same top border (mirrors the main
-        // session view's title layout) in the border color, and the
-        // session label ellipsizes when the tile is too narrow to
-        // fit both.
-        let total_pin = tile_area.width as usize;
-        let harness_w = summary
-            .map(|s| 2 + UnicodeWidthStr::width(harness_label(s).as_str()))
-            .unwrap_or(0);
-        let glyph_w = summary
-            .map(|s| UnicodeWidthStr::width(session_status_glyph(app, s)))
-            .unwrap_or(0);
-        // Title shape ` ★ <glyph> <label> ` = 5 cells of scaffolding
-        // (1 leading + diamond + 1 + glyph + 1 + label + 1 trailing
-        // = label + 4 + diamond + glyph; diamond is 1 cell).
-        let pin_label_budget = total_pin
-            .saturating_sub(2) // corners
-            .saturating_sub(harness_w)
-            .saturating_sub(5 + glyph_w);
-        // ` ★ <status> <label> ` — the star is the pinned marker (same
-        // shape + bluish `info` color as the list-view pin); the rest of
-        // the title stays in the border style.
-        let title_rest = match summary {
-            Some(s) => format!(
-                " {} {} ",
-                session_status_glyph(app, s),
-                truncate_to_width(&primary_label(s), pin_label_budget),
-            ),
-            None => format!(" {} ", short_id(id)),
-        };
-        let title = Line::from(vec![
-            Span::raw(" "),
-            Span::styled("★", Style::default().fg(app.theme.info)),
-            Span::raw(title_rest),
-        ]);
-        let harness_right = summary.map(|s| {
-            Line::from(Span::styled(
-                format!(" {} ", harness_label(s)),
-                pane_border_style(&app.theme, is_selected),
-            ))
-            .alignment(ratatui::layout::Alignment::Right)
-        });
-        let mut block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(pane_border_style(&app.theme, is_selected))
-            .title(title);
-        if let Some(h) = harness_right {
-            block = block.title(h);
-        }
-        let inner = block.inner(*tile_area);
-        f.render_widget(block, *tile_area);
-        clear_pane_side_borders(f, *tile_area, app);
-        let (main_cols, main_rows) = app.terminal_pane_size;
-        if let Some(history) = app.histories.get_mut(id) {
-            // Render the pin tile at the parser's CURRENT cached size when
-            // it has one. Each `ItemHistory` is shared between the main
-            // view and the pin tile, and `replay` resizes the cached vt100
-            // parser to the requested dims — so rendering the pin at a
-            // different width than the main view just used re-feeds the
-            // pending chunk through a freshly-sized grid every frame
-            // (~45000x slower than a no-op resize; see the regression test
-            // `pin_tile_reuses_cached_size_to_avoid_split_thrash`).
-            //
-            // The main/split render runs earlier this frame and leaves the
-            // parser sized to whichever pane is showing this session, so
-            // reusing that size makes the pin's replay a no-op resize.
-            // Forcing a single "main view" size used to be safe — but split
-            // view gives each pane its own width, so a session shown in a
-            // split pane (width A) and a pin tile (width B) thrashed the
-            // shared parser on every frame: the split+pin lag. Fall back to
-            // the main-view size only to seed a session with no cached
-            // parser yet (pin-only, never opened in the main view).
-            // `render_pty_tail` crops the rendered screen to `inner`.
-            let (cols, rows) = history.cached_dims().unwrap_or((
-                main_cols.max(inner.width).max(1),
-                main_rows.max(inner.height).max(1),
-            ));
-            let out = history.replay(cols, rows, 0);
-            render_pty_tail(f, inner, out.screen, &app.theme);
-        } else {
-            // No PTY data yet — show a placeholder.
-            let label = if app.hydrating_sessions.contains(id) {
-                "loading history…"
-            } else {
-                "(no data yet)"
-            };
-            let p = Paragraph::new(label).style(Style::default().fg(app.theme.dim));
-            f.render_widget(p, inner);
-        }
-        render_pin_transition(f, inner, app, id);
-    }
-}
-
-pub fn pin_tile_layout(area: Rect, n: usize) -> Vec<Rect> {
-    let n = n.max(1);
-    let cols = n.min(4).max(1);
-    let rows = (n + cols - 1) / cols;
-    let row_constraints: Vec<Constraint> = (0..rows)
-        .map(|_| Constraint::Ratio(1, rows as u32))
-        .collect();
-    let row_areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(area);
-    let mut tiles: Vec<Rect> = Vec::with_capacity(n);
-    for (r_idx, row_area) in row_areas.iter().enumerate() {
-        let placed = r_idx * cols;
-        let remaining = n.saturating_sub(placed);
-        if remaining == 0 {
-            break;
-        }
-        let cols_here = remaining.min(cols).max(1);
-        let col_constraints: Vec<Constraint> = (0..cols_here)
-            .map(|_| Constraint::Ratio(1, cols_here as u32))
-            .collect();
-        let col_areas = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints(col_constraints)
-            .split(*row_area);
-        for col_area in col_areas.iter() {
-            tiles.push(*col_area);
-        }
-    }
-    tiles
-}
-
-/// Render a slice of a vt100 screen into `area`, preserving colors and
-/// attributes. The window is anchored at the bottom of the source screen so
-/// harness status/input bars (smith, codex, claude all park them in the
-/// last few rows) stay visible on pinned tiles. Used by the pin strip.
-/// Translate tool-block hit-rects from full-parser-screen rows into
-/// `chat_area`-relative rows when the chat is rendered as the bottom
-/// slice of a taller parser (see `render_pty_screen`). Blocks scrolled
-/// entirely above the visible slice are dropped; partially-visible ones
-/// are clipped. Header/button hit zones only survive if the header row
-/// itself is visible. A `row_offset` of 0 is the identity transform.
-/// Map replay-relative turn-boundary rows (spec 0163) to absolute
-/// screen-space hit zones within the painted pane area. The `⑂` glyph
-/// zone hugs the pane's right edge on the boundary row.
 fn translate_turn_marks(
     marks: &[crate::pty_render::TurnMark],
     row_offset: u16,
@@ -14283,7 +14017,7 @@ fn translate_block_hits(
         .into_iter()
         .filter_map(|b| {
             if b.row_end <= row_offset {
-                return None; // entirely above the visible slice
+                return None;
             }
             let row_start = b.row_start.saturating_sub(row_offset);
             let row_end = (b.row_end - row_offset).min(visible_h);
@@ -14309,13 +14043,8 @@ fn translate_block_hits(
 }
 
 /// Paint `screen` into `area`, showing the rows starting at `row_offset`.
-///
-/// `row_offset` is non-zero only when the parser is taller than the chat
-/// area — i.e. a smith editor pane is carved out below. We keep the
-/// parser at the full pane height (so the editor growing/shrinking on
-/// every keystroke never resizes — and rebuilds — it) and render only
-/// its bottom `area.height` rows here. `row_offset = full_height -
-/// area.height`.
+/// The parser can be taller than the chat area when a session editor is
+/// carved out below it; only the visible bottom slice is painted here.
 fn render_pty_screen(
     f: &mut Frame,
     area: Rect,
@@ -14325,9 +14054,6 @@ fn render_pty_screen(
     row_offset: u16,
     col_offset: u16,
 ) {
-    // Paint a slice of the vt100 screen into `area`, starting at
-    // (`row_offset`, `col_offset`). Caller is responsible for clearing the
-    // target area if needed.
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -14371,8 +14097,6 @@ fn render_pty_screen(
 }
 
 /// Count the number of content-bearing rows on the screen (exclusive end row).
-/// Scans from the bottom up and returns the index of the last row that has
-/// any cell with visible contents, plus one. Returns 0 when the screen is empty.
 fn non_empty_row_span(screen: &vt100::Screen) -> u16 {
     let (rows, cols) = screen.size();
     if rows == 0 || cols == 0 {
@@ -14390,13 +14114,6 @@ fn non_empty_row_span(screen: &vt100::Screen) -> u16 {
     0
 }
 
-/// Unlike `cell.has_contents()` (true for *any* explicitly-written cell,
-/// including a plain space painted only for its background color), this
-/// requires an actual visible glyph. Some harnesses (confirmed live for
-/// grok) paint their entire viewport with an explicit background color on
-/// every cell, even where nothing is displayed — `has_contents()` would
-/// treat that whole screen as "content" and defeat the bounding-box trim
-/// below entirely.
 fn row_has_visible_glyph(screen: &vt100::Screen, row: u16, cols: u16) -> bool {
     (0..cols).any(|c| {
         screen
@@ -14406,15 +14123,6 @@ fn row_has_visible_glyph(screen: &vt100::Screen, row: u16, cols: u16) -> bool {
 }
 
 /// Tight bounding box of non-blank content: `(first_row, last_row_inclusive)`.
-/// `None` when the whole screen is blank. Unlike `non_empty_row_span` (which
-/// assumes content is gapless from row 0 — true for `render_pty_tail`'s
-/// chat-pane use case, where output always starts printing at the top), a
-/// harness's usage/status panel is a full-screen TUI dialog that can be
-/// positioned starting at any row — confirmed live for spec 0086's hover
-/// tooltip: codex's real panel starts around row 11, claude's around row 2,
-/// with unrelated blank rows above. Rendering from a hardcoded row 0 showed
-/// only that leading blank margin (or, worse, whatever stray content sat
-/// there), never the actual panel.
 fn non_blank_row_bounds(screen: &vt100::Screen) -> Option<(u16, u16)> {
     let (rows, cols) = screen.size();
     if rows == 0 || cols == 0 {
@@ -14427,25 +14135,8 @@ fn non_blank_row_bounds(screen: &vt100::Screen) -> Option<(u16, u16)> {
     Some((first, last))
 }
 
-/// Interior runs of glyph-less rows longer than this are collapsed down to
-/// this many rows by `usage_panel_render_rows`. A short gap of a row or two
-/// between two sections is normal formatting (a blank line separating two
-/// paragraphs) and stays untouched; a long run only shows up when a harness
-/// paints its entire viewport background (confirmed live for grok: ~29 rows
-/// of a single solid near-black fill color between its header line and its
-/// input box) — reproducing that verbatim just fills the tooltip with a
-/// giant blank-colored rectangle around a sliver of real text.
 const MAX_INTERIOR_BLANK_RUN: u16 = 1;
 
-/// Which source rows of `screen` to actually paint into the tooltip, in
-/// order, given the trimmed `(first, last)` bounds from
-/// `non_blank_row_bounds`. Rows with a visible glyph are always kept; a run
-/// of consecutive glyph-less rows longer than `MAX_INTERIOR_BLANK_RUN` is
-/// truncated to that many rows rather than reproduced in full — see
-/// `MAX_INTERIOR_BLANK_RUN` for why. The dropped rows are simply omitted
-/// (not replaced by synthesized content), so every row this returns is a
-/// real row from the capture, just not always contiguous with its
-/// neighbor.
 fn usage_panel_render_rows(screen: &vt100::Screen, first: u16, last: u16) -> Vec<u16> {
     let (_, cols) = screen.size();
     let mut out = Vec::new();
@@ -14464,58 +14155,11 @@ fn usage_panel_render_rows(screen: &vt100::Screen, first: u16, last: u16) -> Vec
     out
 }
 
-fn render_pty_tail(f: &mut Frame, area: Rect, screen: &vt100::Screen, theme: &Theme) {
-    let (rows, _cols) = screen.size();
-    // End of window is exclusive; always show the bottom `visible_h` rows.
-    let visible_h = area.height.min(rows);
-    let start_row = rows.saturating_sub(visible_h);
-    render_vt100_screen_rows(f, area, screen, theme, start_row, visible_h);
-}
-
-/// Shared cell-painting loop behind `render_pty_tail`'s bottom-anchored
-/// scrollback view and the harness-usage hover tooltip's top-anchored
-/// snapshot view (spec 0086): paints up to `visible_h` rows of `screen`
-/// starting at `start_row`, cell for cell, preserving vt100 color and
-/// attributes. Needs no live session state — `screen` can come from a
-/// throwaway parser fed a captured byte buffer.
-fn render_vt100_screen_rows(
-    f: &mut Frame,
-    area: Rect,
-    screen: &vt100::Screen,
-    theme: &Theme,
-    start_row: u16,
-    visible_h: u16,
-) {
-    let (rows, cols) = screen.size();
-    if rows == 0 || cols == 0 || area.width == 0 || area.height == 0 {
-        return;
-    }
-    let visible_h = visible_h
-        .min(area.height)
-        .min(rows.saturating_sub(start_row));
-    let visible_w = area.width.min(cols);
-    let buf = f.buffer_mut();
-    for r in 0..visible_h {
-        for c in 0..visible_w {
-            let src_row = start_row + r;
-            let src_col = c;
-            let Some(cell) = screen.cell(src_row, src_col) else {
-                continue;
-            };
-            let x = area.x + c;
-            let y = area.y + r;
-            if let Some(buf_cell) = buf.cell_mut(Position { x, y }) {
-                paint_vt100_cell(buf_cell, cell, theme);
-            }
-        }
-    }
-}
-
-/// Same per-cell painting as `render_vt100_screen_rows`, but for an
-/// explicit, possibly-non-contiguous list of source rows (in display
-/// order) rather than a contiguous `start_row..start_row+visible_h` span —
-/// what `usage_panel_render_rows` returns after collapsing long interior
-/// blank runs.
+/// Paint an explicit, possibly-non-contiguous list of source rows in display
+/// order after collapsing long interior blank runs.
+///
+/// The rows come from `usage_panel_render_rows`, which is used for harness
+/// usage/status snapshots.
 fn render_vt100_screen_rows_indexed(
     f: &mut Frame,
     area: Rect,
@@ -14563,7 +14207,7 @@ fn vt100_cell_style(cell: &vt100::Cell, theme: &Theme) -> Style {
     if cell.bold() {
         mods.insert(Modifier::BOLD);
     }
-    // `\x1b[2m` (dim/faint) — without this the pin tile renders
+    // `\x1b[2m` (dim/faint) — without this the per-cell renderer renders
     // styled-dim text (e.g. smith's `[+N lines — click to expand]`
     // markers and tool args) at full intensity, while the main view
     // shows them correctly because `tui_term::PseudoTerminal`
@@ -15941,7 +15585,11 @@ fn playbook_popup_visible_rect(base_rect: Rect, visible_h: u16, slide: f32) -> R
 /// Spans the pane's full row range (not just the popup's) so title tooltips
 /// and popovers hanging below the popup are cropped too. `None` when the
 /// popup stays inside the pane.
-fn playbook_popup_crop_region(base_rect: Rect, popup_rect: Rect, buffer_area: Rect) -> Option<Rect> {
+fn playbook_popup_crop_region(
+    base_rect: Rect,
+    popup_rect: Rect,
+    buffer_area: Rect,
+) -> Option<Rect> {
     if popup_rect.right() <= base_rect.right() {
         return None;
     }
@@ -16107,7 +15755,8 @@ fn playbook_run_shimmer(
     if !any {
         return None;
     }
-    let phase = now.saturating_duration_since(run.started_at).as_secs_f32() * PLAYBOOK_SHIMMER_SPEED;
+    let phase =
+        now.saturating_duration_since(run.started_at).as_secs_f32() * PLAYBOOK_SHIMMER_SPEED;
     Some(PlaybookShimmer {
         active_lines,
         phase,
@@ -16661,7 +16310,8 @@ fn render_playbook_popup_at(
         // `dynamic_ui_widget_hits` from `render_session_widget_title`) so the
         // playbook click handlers in `app.rs` line up with what's painted.
         app.layout.playbook_title_run_hit = clamp_title_hit_to_pane(left.run, pane_right);
-        app.layout.playbook_title_toggle_hit = clamp_title_hit_to_pane(title_toggle_hit, pane_right);
+        app.layout.playbook_title_toggle_hit =
+            clamp_title_hit_to_pane(title_toggle_hit, pane_right);
         app.layout.playbook_title_close_hit = clamp_title_hit_to_pane(
             show_close.then(|| view_close_button_range(rect)),
             pane_right,
@@ -16954,7 +16604,8 @@ fn render_playbook_collab_cursors(
             let max_w = inner
                 .right()
                 .saturating_sub(pos.x.saturating_add(1))
-                .min(PLAYBOOK_COLLAB_CURSOR_LABEL_MAX_WIDTH as u16) as usize;
+                .min(PLAYBOOK_COLLAB_CURSOR_LABEL_MAX_WIDTH as u16)
+                as usize;
             if max_w > 0 {
                 let label = truncate_to_width(label, max_w);
                 let label_w = UnicodeWidthStr::width(label.as_str()) as u16;
@@ -17126,7 +16777,9 @@ fn playbook_agent_activity_edge(
     let viewport_rows = inner.height as usize;
     let max_cursor = popup.buffer.chars().count();
     app.playbook_collaborators.values().find_map(|cursor| {
-        if !cursor.active || cursor.kind != "agent" || cursor.session_id != popup.playbook.session_id
+        if !cursor.active
+            || cursor.kind != "agent"
+            || cursor.session_id != popup.playbook.session_id
         {
             return None;
         }
@@ -17359,14 +17012,11 @@ fn render_session_hover_card(
     let owned_size = pinned.and_then(|view| view.owned);
     // Without size ownership, replay at the parser's CURRENT cached size,
     // never at the card's size. The `ItemHistory` is shared with the main
-    // view, split panes, and pin tiles, and `replay` resizes the cached
-    // vt100 parser (and the shadow parser) to the requested dims — replaying
-    // at card dims here would visibly reflow the session everywhere else
-    // it's shown and, while it's also on screen, rebuild the shared parser
-    // on every frame (the same thrash
-    // `pin_tile_reuses_cached_size_to_avoid_split_thrash` guards against for
-    // pin tiles; see `render_pin_strip`). The card CROPS the full-size
-    // screen instead, exactly like a pin tile. Fall back to the main-view
+    // view and split panes, and `replay` resizes the cached vt100 parser (and
+    // the shadow parser) to the requested dims — replaying at card dims here
+    // would visibly reflow the session everywhere else it's shown and, while
+    // it's also on screen, rebuild the shared parser on every frame. The card
+    // CROPS the full-size screen instead. Fall back to the main-view
     // pane size only to seed a session that has never been rendered
     // anywhere yet.
     //
@@ -24122,9 +23772,8 @@ mod tests {
         let room = 26;
         for entry in legend_entries(&["a", "claude-opus-5", "a-name-that-needs-clipping"]) {
             let (head, gap, rate) = legend_cell(&entry, room).expect("fits");
-            let used = UnicodeWidthStr::width(head.as_str())
-                + gap
-                + UnicodeWidthStr::width(rate.as_str());
+            let used =
+                UnicodeWidthStr::width(head.as_str()) + gap + UnicodeWidthStr::width(rate.as_str());
             assert_eq!(
                 used,
                 room - LEGEND_COL_GAP,
@@ -24369,7 +24018,12 @@ mod tests {
         let mut archived = clip_test_session("archived", None, "claude", SessionState::Running);
         archived.archived = true;
         let items = vec![
-            tally_row(clip_test_session("a", None, "claude", SessionState::Running)),
+            tally_row(clip_test_session(
+                "a",
+                None,
+                "claude",
+                SessionState::Running,
+            )),
             tally_row(archived),
         ];
 
@@ -24450,7 +24104,8 @@ mod tests {
     /// row the operator can actually reach and expand.
     #[test]
     fn fleet_counts_a_collapsed_subtree_rollup_once() {
-        let mut parent = clip_test_session("parent", Some("Parent"), "claude", SessionState::Paused);
+        let mut parent =
+            clip_test_session("parent", Some("Parent"), "claude", SessionState::Paused);
         parent.needs_attention = false;
         let items = vec![AppListItem::Session {
             summary: parent,
@@ -24540,7 +24195,8 @@ mod tests {
             end_col: 16,
         };
         let frame = Rect::new(0, 0, 120, 30);
-        let (area, shown) = fleet_tally_panel_geometry(&rows, " 27 sessions working ", &anchor, frame);
+        let (area, shown) =
+            fleet_tally_panel_geometry(&rows, " 27 sessions working ", &anchor, frame);
 
         assert!(shown < rows.len(), "a 27-row bucket must not list in full");
         // Body = the shown rows plus the one "+N more" line, inside borders.
@@ -24561,9 +24217,13 @@ mod tests {
             end_col: 16,
         };
         let frame = Rect::new(0, 0, 60, 10);
-        let (area, shown) = fleet_tally_panel_geometry(&rows, " 9 sessions need you ", &anchor, frame);
+        let (area, shown) =
+            fleet_tally_panel_geometry(&rows, " 9 sessions need you ", &anchor, frame);
 
-        assert!(area.y + area.height <= frame.height, "panel ran off the bottom");
+        assert!(
+            area.y + area.height <= frame.height,
+            "panel ran off the bottom"
+        );
         assert!(area.x + area.width <= frame.width);
         assert!(shown >= 1, "a panel with no rows is not worth opening");
     }
@@ -24579,9 +24239,8 @@ mod tests {
     }
 
     #[test]
-    fn pinned_fork_keeps_separate_lineage_and_pin_markers() {
+    fn fork_keeps_its_lineage_marker() {
         let mut fork = clip_test_session("fork", Some("fork"), "codex", SessionState::Running);
-        fork.pinned = true;
         fork.forked_from = Some(construct_protocol::ForkedFrom {
             session_id: "parent".into(),
             transcript_seq: 0,
@@ -24592,7 +24251,7 @@ mod tests {
             is_reset_snapshot: false,
         });
 
-        assert_eq!(session_list_markers(&fork), ("⑂", "★"));
+        assert_eq!(session_list_marker(&fork), "⑂");
         assert_eq!(session_list_marker_width(&fork), 2);
 
         let project_member = clip_test_session(
@@ -24710,14 +24369,20 @@ mod tests {
 
     #[test]
     fn playbook_session_chip_is_dimmed_only_for_done() {
-        assert!(!playbook_session_chip_is_dimmed(Some(SessionState::Pending)));
-        assert!(!playbook_session_chip_is_dimmed(Some(SessionState::Running)));
+        assert!(!playbook_session_chip_is_dimmed(Some(
+            SessionState::Pending
+        )));
+        assert!(!playbook_session_chip_is_dimmed(Some(
+            SessionState::Running
+        )));
         assert!(!playbook_session_chip_is_dimmed(Some(
             SessionState::AwaitingInput
         )));
         assert!(!playbook_session_chip_is_dimmed(Some(SessionState::Paused)));
         assert!(playbook_session_chip_is_dimmed(Some(SessionState::Done)));
-        assert!(!playbook_session_chip_is_dimmed(Some(SessionState::Errored)));
+        assert!(!playbook_session_chip_is_dimmed(Some(
+            SessionState::Errored
+        )));
         assert!(!playbook_session_chip_is_dimmed(None));
     }
 
@@ -24743,7 +24408,10 @@ mod tests {
             playbook_session_clip_status_tooltip(Some(SessionState::Errored)),
             "exited with error"
         );
-        assert_eq!(playbook_session_clip_status_tooltip(None), "session deleted");
+        assert_eq!(
+            playbook_session_clip_status_tooltip(None),
+            "session deleted"
+        );
     }
 
     #[test]
@@ -25064,7 +24732,8 @@ mod tests {
         let theme = crate::theme::Theme::default();
         let templates = vec![placeholder_template("tasks", "Tasks")];
         // Too narrow to fit even the indent + bullet: plain description + syntax only.
-        let (_, hits) = playbook_empty_placeholder(&theme, &templates, None, Rect::new(0, 0, 4, 20));
+        let (_, hits) =
+            playbook_empty_placeholder(&theme, &templates, None, Rect::new(0, 0, 4, 20));
         assert!(hits.is_empty());
     }
 
@@ -26872,10 +26541,10 @@ mod tests {
     /// for markers like `[+N lines — click to expand]` and tool
     /// args. The main session view renders that as dim/gray because
     /// `tui_term::PseudoTerminal` translates the attribute itself,
-    /// but the pin tile uses `render_pty_tail` which copies cells
-    /// through `vt100_cell_style`. If `vt100_cell_style` doesn't
-    /// emit `Modifier::DIM`, the pin tile shows the same content at
-    /// full intensity — visually inconsistent with the main view.
+    /// but the alternate per-cell renderer copies cells through
+    /// `vt100_cell_style`. If `vt100_cell_style` doesn't emit
+    /// `Modifier::DIM`, that renderer shows the same content at full
+    /// intensity — visually inconsistent with the main view.
     ///
     /// This test feeds dim bytes through a vt100 parser, looks up
     /// the resulting cell, runs it through `vt100_cell_style`, and

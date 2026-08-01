@@ -484,7 +484,6 @@ pub enum MidiAction {
     Interrupt,
     SwitchSession,
     CommandPalette,
-    TogglePin,
     ToggleAutomode,
     ToggleZoom,
     SplitBelow,
@@ -517,7 +516,6 @@ impl MidiAction {
             Self::Interrupt => K::Interrupt,
             Self::SwitchSession => K::OpenSwitchSession,
             Self::CommandPalette => K::OpenCommandPalette,
-            Self::TogglePin => K::TogglePin,
             Self::ToggleAutomode => K::ToggleAutomode,
             Self::ToggleZoom => K::ToggleZoom,
             Self::SplitBelow => K::SplitWindowBelow,
@@ -2845,4 +2843,3 @@ mod tests {
         std::env::remove_var("CONSTRUCT_CONFIG_DIR");
     }
 }
-

@@ -513,11 +513,8 @@ impl ItemHistory {
     }
 
     /// Dimensions the live (non-shadow) parser was last built/sized at,
-    /// or `None` before the first replay. The pin-strip render reuses this
-    /// so it can replay a session at whatever width the main/split render
-    /// already sized the shared parser to, avoiding a per-frame rebuild
-    /// (see `pin_tile_reuses_cached_size_to_avoid_split_thrash`). Tests
-    /// also use it to assert editor-pane growth doesn't resize the chat
+    /// or `None` before the first replay. Tests and the playbook preview
+    /// use this to assert that editor-pane growth doesn't resize the chat
     /// parser.
     pub fn cached_dims(&self) -> Option<(u16, u16)> {
         self.cached.as_ref().map(|c| (c.cols, c.rows))
@@ -2056,6 +2053,9 @@ fn compact_tool_args(args: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::prelude::Widget;
 
     fn block_count(h: &ItemHistory) -> usize {
         h.items
@@ -2188,46 +2188,6 @@ mod tests {
             us < 120_000,
             "resize on a 300k-line history took {us} µs — bound removed? \
              (should re-feed only the scrollback tail, not all history)"
-        );
-    }
-
-    /// REGRESSION: split-view + pin-strip lag. A pinned session shown in a
-    /// split pane (width A) is also rendered by the pin tile. If the pin
-    /// forces a different width (B), the shared cached parser rebuilds on
-    /// every frame — ~45000x slower than a no-op resize, which is the
-    /// "extremely laggy with both split + pinned" report. The fix renders
-    /// the pin at the parser's current `cached_dims()`, so reusing the
-    /// width the split pane just set makes the pin's replay a no-op.
-    #[test]
-    fn pin_tile_reuses_cached_size_to_avoid_split_thrash() {
-        let mut h = ItemHistory::new();
-        for i in 1..=200_000u32 {
-            h.feed_pty(format!("L{i}\r\n").as_bytes());
-        }
-        // BUG shape: pin forces a width that differs from the split pane's,
-        // so each frame does two parser rebuilds.
-        let _ = h.replay(60, 30, 0); // settle at the split-pane width
-        let t_thrash = std::time::Instant::now();
-        for _ in 0..10 {
-            let _ = h.replay(60, 30, 0); // split pane (main render)
-            let _ = h.replay(120, 30, 0); // pin forcing main-view width → rebuild
-        }
-        let thrash_us = t_thrash.elapsed().as_micros();
-
-        // FIX shape: pin reuses the parser's current cached size → no-op.
-        let _ = h.replay(60, 30, 0);
-        let t_fixed = std::time::Instant::now();
-        for _ in 0..10 {
-            let _ = h.replay(60, 30, 0); // split pane (main render)
-            let (c, r) = h.cached_dims().expect("parser cached after replay");
-            let _ = h.replay(c, r, 0); // pin reuses cached dims → no rebuild
-        }
-        let fixed_us = t_fixed.elapsed().as_micros();
-
-        assert!(
-            fixed_us * 10 < thrash_us,
-            "pin reusing cached size should avoid the rebuild thrash: \
-             fixed={fixed_us}us thrash={thrash_us}us"
         );
     }
 
@@ -3891,7 +3851,7 @@ mod tests {
         let mut h = ItemHistory::new();
         codex_feed_long_session(&mut h);
         // First replay — this is what `bootstrap_terminal` triggers
-        // on TUI restart for a focused/pinned codex session.
+        // on TUI restart for a focused codex session.
         let t = Instant::now();
         let out = h.replay(80, 24, 0);
         let first_us = t.elapsed().as_micros();
@@ -3920,279 +3880,6 @@ mod tests {
         assert!(
             second_us < 1_000,
             "follow-up render not cached: {second_us} µs (should be <1ms)"
-        );
-    }
-
-    // ============================================================
-    // Pinned-session tests
-    //
-    // The pin strip shows each pinned session as a small tile at the
-    // bottom of the view pane. Each tile drives `history.replay()`
-    // (same ItemHistory cache as the main view) and renders via
-    // `render_pty_tail`, which iterates the screen's bottom-N rows
-    // into a ratatui Buffer. With many pinned sessions every frame
-    // pays the per-session cost N times.
-    //
-    // Tests below exercise:
-    //   * tile correctness after bootstrap / resize,
-    //   * single-tile render performance,
-    //   * aggregate cost when many sessions are pinned.
-    //
-    // They render through `tui_term::PseudoTerminal` into a fresh
-    // ratatui Buffer the same way the TUI does, so cell-level
-    // assertions reflect what the outer terminal would receive.
-    // ============================================================
-
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
-    use ratatui::widgets::Widget;
-
-    /// Render a session's screen into a fresh ratatui Buffer the
-    /// same way `render_pty_tail` does for a pinned tile (via
-    /// `PseudoTerminal::render` into the tile's Rect).
-    fn render_tile(h: &mut ItemHistory, area: Rect) -> Buffer {
-        // Replay at the main view's cols so the wrap matches what
-        // the focused session would render — pin strip currently
-        // does this (see render_pin_strip).
-        let out = h.replay(area.width.max(60), area.height.max(3), 0);
-        let mut buf = Buffer::empty(area);
-        let no_cursor = tui_term::widget::Cursor::default().visibility(false);
-        tui_term::widget::PseudoTerminal::new(out.screen)
-            .cursor(no_cursor)
-            .render(area, &mut buf);
-        buf
-    }
-
-    /// Count cells with a non-blank symbol in the buffer.
-    fn populated_cells(buf: &Buffer) -> usize {
-        let area = *buf.area();
-        let mut n = 0;
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                if let Some(cell) = buf.cell(ratatui::layout::Position { x, y }) {
-                    let s = cell.symbol();
-                    if !s.is_empty() && s != " " {
-                        n += 1;
-                    }
-                }
-            }
-        }
-        n
-    }
-
-    /// Regression: when a session is both visible in the main view
-    /// and shown in the pin strip, the pin tile rendering must not
-    /// clobber the main view's rendering on subsequent frames.
-    ///
-    /// Mechanism of the bug (pre-fix): each `ItemHistory` carries a
-    /// cached vt100 parser. `replay(cols, rows, _)` resizes that
-    /// parser to the requested dims. The old pin-strip code called
-    /// `replay(tile.width, tile.height, 0)` — i.e. the pin tile's
-    /// narrow dims — which shrank the shared parser. The next
-    /// main-view render at the wider dims re-resized the parser,
-    /// but the prior pending-chunk content had already been
-    /// re-fed/reflowed at the narrow width inside the cache.
-    /// Visible effect: main view appeared clipped at the pin's
-    /// width, content wrapped wrong, rows looked truncated.
-    ///
-    /// New behavior: pin tile renders the parser at the *main*
-    /// view's dims (same as the main view itself), then
-    /// `render_pty_tail` crops to the tile's smaller Rect for
-    /// display. Cache stays stable.
-    #[test]
-    fn pinned_tile_render_does_not_clobber_main_view() {
-        fn feed(h: &mut ItemHistory) {
-            for i in 0..30 {
-                h.feed_pty(
-                    format!(
-                        "session line {i:02} with enough content that it would wrap visibly differently at narrow vs wide widths and we can detect cache thrash\r\n"
-                    )
-                    .as_bytes(),
-                );
-            }
-        }
-
-        // Reference: main view rendered alone, no pin tile in the loop.
-        let mut ref_hist = ItemHistory::new();
-        feed(&mut ref_hist);
-        let _ = render_main_view_buffer(&mut ref_hist, 120, 30); // warm
-        let reference = render_main_view_buffer(&mut ref_hist, 120, 30);
-
-        // With pin tile in the loop: render main view, then pin
-        // tile, then main view again. The two main-view renders
-        // must produce identical content.
-        let mut shared = ItemHistory::new();
-        feed(&mut shared);
-        let _ = render_main_view_buffer(&mut shared, 120, 30); // warm
-        let main_before = render_main_view_buffer(&mut shared, 120, 30);
-
-        // Simulate render_pin_strip's NEW behavior: replay at main
-        // dims, ignore the crop step (we only care about cache
-        // state here; the crop is a pure read of the produced
-        // screen and can't affect the cache).
-        let (pin_cols, pin_rows) = (30u16, 6u16);
-        let (main_cols, main_rows) = (120u16, 30u16);
-        let cols = main_cols.max(pin_cols).max(1);
-        let rows = main_rows.max(pin_rows).max(1);
-        let _ = shared.replay(cols, rows, 0);
-
-        let main_after = render_main_view_buffer(&mut shared, 120, 30);
-
-        assert_eq!(
-            reference.content(),
-            main_before.content(),
-            "two consecutive main-view renders should match"
-        );
-        assert_eq!(
-            main_before.content(),
-            main_after.content(),
-            "main view render after pin tile render must equal main view render before (pin tile must not thrash the cache)"
-        );
-
-        // Note: the OLD pin-strip behavior (replay at narrow tile
-        // dims) didn't actually corrupt the *content* of the next
-        // main render — `replay_cached` rebuilds the parser on
-        // cols-change, so the next main render recovered correctly
-        // from the cache thrash. The fix's value is purely in
-        // performance: rebuilding on every frame is O(history),
-        // and pinning a long-history session would make every
-        // frame pay that cost. By keeping the parser at main-view
-        // dims across both render paths the cache stays warm.
-    }
-
-    #[test]
-    fn pinned_tile_renders_content_after_bootstrap() {
-        let mut h = ItemHistory::new();
-        for i in 0..20 {
-            h.feed_pty(format!("pinned session line {i}\r\n").as_bytes());
-        }
-        let tile_area = Rect::new(0, 0, 40, 5);
-        let buf = render_tile(&mut h, tile_area);
-        let n = populated_cells(&buf);
-        assert!(
-            n > 20,
-            "pinned tile should show recent content, got {n} populated cells"
-        );
-    }
-
-    #[test]
-    fn pinned_tile_renders_content_after_resize() {
-        let mut h = ItemHistory::new();
-        for i in 0..20 {
-            h.feed_pty(format!("pinned session line {i}\r\n").as_bytes());
-        }
-        // First render at one tile size, then at another (simulating
-        // user widening the list pane → narrower tile).
-        let _ = render_tile(&mut h, Rect::new(0, 0, 40, 5));
-        let buf = render_tile(&mut h, Rect::new(0, 0, 25, 5));
-        let n = populated_cells(&buf);
-        assert!(
-            n > 10,
-            "narrower pin tile should still show content, got {n} populated cells"
-        );
-    }
-
-    #[test]
-    fn pinned_tile_single_render_is_fast() {
-        let mut h = ItemHistory::new();
-        // A long-lived pinned session — realistic chat history.
-        for i in 0..5_000 {
-            h.feed_pty(format!("pinned line {i} of accumulated chat\r\n").as_bytes());
-        }
-        let tile_area = Rect::new(0, 0, 60, 4);
-        // Warm.
-        let _ = render_tile(&mut h, tile_area);
-        // Measure 100 steady-state renders.
-        let t = Instant::now();
-        for _ in 0..100 {
-            let _ = render_tile(&mut h, tile_area);
-        }
-        let us = t.elapsed().as_micros();
-        let per = us / 100;
-        eprintln!("pinned tile render: 100 frames in {us} µs ({per} µs/frame)");
-        assert!(
-            per < 1_000,
-            "single pin tile render too slow: {per} µs/frame at 5000-line history"
-        );
-    }
-
-    #[test]
-    fn many_pinned_sessions_render_within_frame_budget() {
-        // 20 pinned sessions, each with a modest history. Aggregate
-        // render cost across all of them should fit comfortably in
-        // one TUI frame (we tick at ~120 ms; budget here is much
-        // tighter).
-        let n_pinned = 20;
-        let mut histories: Vec<ItemHistory> = (0..n_pinned)
-            .map(|i| {
-                let mut h = ItemHistory::new();
-                for line in 0..200 {
-                    h.feed_pty(format!("session {i} line {line}\r\n").as_bytes());
-                }
-                h
-            })
-            .collect();
-        let tile_area = Rect::new(0, 0, 50, 4);
-        // Warm every cache.
-        for h in histories.iter_mut() {
-            let _ = render_tile(h, tile_area);
-        }
-        // Measure aggregate render across all pinned tiles for 50
-        // frames.
-        let frames = 50;
-        let t = Instant::now();
-        for _ in 0..frames {
-            for h in histories.iter_mut() {
-                let _ = render_tile(h, tile_area);
-            }
-        }
-        let us = t.elapsed().as_micros();
-        let per_frame = us / frames as u128;
-        let per_tile = per_frame / n_pinned as u128;
-        eprintln!(
-            "{n_pinned} pin tiles, {frames} frames: total {us} µs, {per_frame} µs/frame, \
-             {per_tile} µs/tile"
-        );
-        assert!(
-            per_frame < 10_000,
-            "{n_pinned} pinned tiles render too slow per frame: {per_frame} µs"
-        );
-    }
-
-    #[test]
-    fn many_pinned_sessions_resize_within_budget() {
-        // Resizing the TUI when many sessions are pinned triggers a
-        // replay per pinned tile (the tile's cols may change). Make
-        // sure the aggregate doesn't blow the frame budget.
-        let n_pinned = 10;
-        let mut histories: Vec<ItemHistory> = (0..n_pinned)
-            .map(|i| {
-                let mut h = ItemHistory::new();
-                for line in 0..1_000 {
-                    h.feed_pty(format!("pinned-{i} chat line {line}\r\n").as_bytes());
-                }
-                h
-            })
-            .collect();
-        // Warm at one size.
-        for h in histories.iter_mut() {
-            let _ = render_tile(h, Rect::new(0, 0, 60, 4));
-        }
-        // Resize (cols change for each tile).
-        let t = Instant::now();
-        for h in histories.iter_mut() {
-            let _ = render_tile(h, Rect::new(0, 0, 80, 4));
-        }
-        let us = t.elapsed().as_micros();
-        eprintln!("{n_pinned} pin tiles on resize: total {us} µs");
-        // Currently this passes because the per-tile content is
-        // small (1000 lines) so the rebuild is fast. With a long
-        // codex-like history per tile it would fail — same root
-        // cause as the codex test above. Threshold loose enough to
-        // not be flaky.
-        assert!(
-            us < 50_000,
-            "{n_pinned} pinned tiles too slow on resize: {us} µs"
         );
     }
 
@@ -4705,7 +4392,7 @@ mod tests {
     /// an unzoomed codex view jumps past recent content because
     /// the shadow doesn't reflect what codex actually rendered.
     ///
-    /// The fix has two halves, both pinned here:
+    /// The fix has two halves, both documented here:
     ///   1. `replay(cols, rows, _)` resizes the shadow to match
     ///      the pane on every frame — not just scrollback>0.
     ///   2. `set_pty_size(cols, rows)` is a public hook so the

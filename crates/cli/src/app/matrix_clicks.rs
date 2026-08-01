@@ -420,11 +420,9 @@ impl App {
         if idx >= items.len() {
             return;
         }
-        // Session rows reserve disclosure before the 4-cell pin/status gutter.
-        // Disclosure clicks toggle nested subagents/forks; the gutter toggles
-        // pinning. Must stay in lockstep with `hovered_diamond` in ui.rs.
-        // Both affordances are drawn on a card's first line only — a click in
-        // the same columns of the detail line is a plain row selection.
+        // Disclosure clicks toggle nested subagents/forks. The disclosure is
+        // drawn on a card's first line only — a click in the same columns of
+        // the detail line is a plain row selection.
         if let ListItem::Session {
             summary,
             indented,
@@ -439,16 +437,6 @@ impl App {
                     let id = summary.id.clone();
                     if !self.children_collapsed.insert(id.clone()) {
                         self.children_collapsed.remove(&id);
-                    }
-                    return;
-                }
-                let zone_start = disclosure_col + u16::from(*has_children);
-                let zone_end = zone_start + 4;
-                if col >= zone_start && col < zone_end {
-                    let id = summary.id.clone();
-                    let next = !summary.pinned;
-                    if let Err(e) = self.client.set_pinned(&id, next).await {
-                        self.set_status(format!("set_pinned failed: {e}"));
                     }
                     return;
                 }
@@ -496,56 +484,6 @@ impl App {
                 self.sync_active_window_selection();
                 self.toggle_archive_section(&section);
             }
-        }
-    }
-
-    pub(super) async fn click_pin_strip(
-        &mut self,
-        strip: ratatui::layout::Rect,
-        col: u16,
-        row: u16,
-    ) {
-        let pinned_ids: Vec<String> = self
-            .list_items()
-            .into_iter()
-            .filter_map(|it| match it {
-                ListItem::Session { summary, .. } if summary.pinned => Some(summary.id),
-                _ => None,
-            })
-            .collect();
-        if pinned_ids.is_empty() {
-            return;
-        }
-        let tiles = crate::ui::pin_tile_layout(strip, pinned_ids.len());
-        for (tile, id) in tiles.iter().zip(pinned_ids.iter()) {
-            if !(col >= tile.x
-                && col < tile.x + tile.width
-                && row >= tile.y
-                && row < tile.y + tile.height)
-            {
-                continue;
-            }
-            // Diamond zone: 4 cells on the top border, starting
-            // after the corner — covers `[ ][⬩][ ][status]` in the
-            // title ` ⬩ <status> <label> <harness> `. Same gesture
-            // as clicking the list-view diamond. Must stay in
-            // lockstep with `pin_tile_diamond_zone` in ui.rs.
-            let diamond_zone_start = tile.x + 1;
-            let diamond_zone_end = tile.x + 5;
-            if row == tile.y && col >= diamond_zone_start && col < diamond_zone_end {
-                if let Err(e) = self.client.set_pinned(id, false).await {
-                    self.set_status(format!("unpin failed: {e}"));
-                }
-                return;
-            }
-            // Body click: focus the pinned preview for input, but do not
-            // replace the active main-window session. Main-window session
-            // changes still use the normal glitch transition; clicking a live
-            // pinned tile is only a focus handoff to that tile.
-            self.select_session_without_transition(id.clone());
-            self.collapse_orchestrator_panel_on_focus_change();
-            self.focus = PaneFocus::View;
-            return;
         }
     }
 }

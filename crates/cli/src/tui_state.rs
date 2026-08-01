@@ -41,8 +41,6 @@ pub struct TuiState {
     #[serde(default)]
     pub list_panel_w: Option<u16>,
     #[serde(default)]
-    pub pin_strip_h: Option<u16>,
-    #[serde(default)]
     pub orchestrator_panel_h: Option<u16>,
     #[serde(default)]
     pub matrix_rain_h: Option<u16>,
@@ -113,7 +111,6 @@ impl Default for TuiState {
             last_selected_session_id: None,
             zoom: crate::app::ZoomMode::default(),
             list_panel_w: None,
-            pin_strip_h: None,
             orchestrator_panel_h: None,
             matrix_rain_h: None,
             list_collapsed: false,

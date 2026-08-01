@@ -31,8 +31,7 @@ impl App {
             }
         }
 
-        (self.is_on_pin_strip_divider(col, row)
-            || self.is_on_orchestrator_panel_divider(col, row)
+        (self.is_on_orchestrator_panel_divider(col, row)
             || self.is_on_matrix_rain_title_bar(col, row)
             || self
                 .layout
@@ -48,35 +47,11 @@ impl App {
         .then_some("↕")
     }
     pub(super) fn selection_bounds_at(&self, col: u16, row: u16) -> Option<ratatui::layout::Rect> {
-        let pinned_count = self
-            .list_items()
-            .into_iter()
-            .filter(|it| matches!(it, ListItem::Session { summary, .. } if summary.pinned))
-            .count();
         let is_orchestrator_panel = matches!(
             self.minibuffer.as_ref().map(|m| &m.intent),
             Some(MinibufferIntent::Orchestrator)
         );
-        selection_bounds_for_layout(&self.layout, pinned_count, is_orchestrator_panel, col, row)
-    }
-
-    /// True if `(col, row)` sits on the main view's bottom border
-    /// row — the divider directly above the pin strip. The view's
-    /// bottom border is at `pin_strip.y − 1` (one row above the
-    /// strip's top border / title row). Only meaningful when there
-    /// IS a pin strip and we're in the normal split layout.
-    pub(super) fn is_on_pin_strip_divider(&self, col: u16, row: u16) -> bool {
-        if !matches!(self.zoom, ZoomMode::None) {
-            return false;
-        }
-        let Some(strip) = self.layout.pin_strip_area else {
-            return false;
-        };
-        let view_bottom = match strip.y.checked_sub(1) {
-            Some(r) => r,
-            None => return false,
-        };
-        row == view_bottom && col >= strip.x && col < strip.x + strip.width
+        selection_bounds_for_layout(&self.layout, is_orchestrator_panel, col, row)
     }
 
     /// True if `(col, row)` sits on the orchestrator/operator panel's top border.
@@ -96,13 +71,7 @@ impl App {
     /// The grab zone covers three cells side-by-side:
     ///   * `list.x + list.width − 1` — list's right border
     ///   * `view_area.x` — main session view's left border
-    ///   * `pin_strip.x` — first pin tile's left border (when any
-    ///     sessions are pinned)
-    /// The two "left border" cells are at the same column as each
-    /// other (view and pin strip stack vertically), but at row-
-    /// disjoint y ranges, so each contributes to one half of the
-    /// vertical span. Returns false in zoomed layouts (no borders
-    /// to grab there).
+    /// Returns false in zoomed layouts (no borders to grab there).
     pub(super) fn is_on_list_divider(&self, col: u16, row: u16) -> bool {
         if !matches!(self.zoom, ZoomMode::None) {
             return false;
@@ -122,13 +91,6 @@ impl App {
         // right border).
         if let Some(view) = self.layout.view_area {
             if col == view.x && row >= view.y && row < view.y + view.height {
-                return true;
-            }
-        }
-        // First pin tile's left border. The strip's x is the same
-        // column as view.x; we just need the strip's y range.
-        if let Some(strip) = self.layout.pin_strip_area {
-            if col == strip.x && row >= strip.y && row < strip.y + strip.height {
                 return true;
             }
         }

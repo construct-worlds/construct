@@ -1,9 +1,11 @@
 # 0025-pin-tiles-share-the-main-parser-at-one-size
 
-Status: accepted
+Status: superseded
 Date: 2026-06-07
 Area: tui
 Scope: Applies to rendering a PTY session that is both visible in the main/split view and shown in the pin strip.
+
+This decision is superseded by [0173-tui-split-panes-replace-pinned-session-view](0173-tui-split-panes-replace-pinned-session-view.md), which removes the TUI pin strip entirely. The parser-sharing guidance remains historical context for why that surface was removed.
 
 ## Decision
 
