@@ -550,7 +550,7 @@ fn service_dialog_field_help(
         6 => (
             "Channels",
             "The daemon-wide channel catalog. A filled square is attached here; an empty square is available to attach. Channels owned by another service are unavailable.",
-            "Space attaches/detaches · Enter edits an attached channel · a creates a channel.",
+            "Space attaches/detaches · Enter edits · p publishes/withdraws · a creates.",
         ),
         7 => (
             "State",
@@ -8072,6 +8072,30 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
                 .filter(|owner| *owner != summary.name.as_str())
                 .map(|owner| format!("  [attached to {owner}]"))
                 .unwrap_or_default();
+            let publication = channel
+                .publication
+                .as_ref()
+                .map(|publication| {
+                    use construct_protocol::ChannelPublicationPhase as Phase;
+                    match publication.phase {
+                        Phase::Ready => publication
+                            .public_endpoint
+                            .as_ref()
+                            .map(|endpoint| format!("  public {endpoint}"))
+                            .unwrap_or_else(|| "  public ready".to_string()),
+                        Phase::Authorizing => publication
+                            .auth_url
+                            .as_ref()
+                            .map(|url| format!("  authorize {url}"))
+                            .unwrap_or_else(|| "  authorizing".to_string()),
+                        Phase::Connecting => "  publishing".to_string(),
+                        Phase::Error => format!(
+                            "  publish error: {}",
+                            publication.error.as_deref().unwrap_or("unknown error")
+                        ),
+                    }
+                })
+                .unwrap_or_else(|| if attached { "  loopback".to_string() } else { String::new() });
             let style = if selected {
                 Style::default()
                     .fg(app.theme.highlight_fg)
@@ -8083,7 +8107,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
             };
             activity.push(Line::from(Span::styled(
                 format!(
-                    "{marker} {checkbox} {}  {:<5} {endpoint}  {state}{owner}",
+                    "{marker} {checkbox} {}  {:<5} {endpoint}  {state}{owner}{publication}",
                     channel.id, channel.kind
                 ),
                 style,

@@ -4953,6 +4953,40 @@ async function rotateServiceChannel(id) {
   }
 }
 
+function applyChannelPublicationState(payload) {
+  if (!payload?.service_name || !payload?.channel_id) return;
+  const apply = (channel) => channel.id === payload.channel_id
+    ? { ...channel, publication: payload.publication || null }
+    : channel;
+  state.serviceChannelCatalog = (state.serviceChannelCatalog || []).map((channel) => {
+    if (channel.attached_to !== payload.service_name) return channel;
+    return apply(channel);
+  });
+  state.services = (state.services || []).map((service) => service.name === payload.service_name
+    ? { ...service, channels: (service.channels || []).map(apply) }
+    : service);
+  if (state.currentServiceName === payload.service_name) renderServiceView();
+}
+
+async function toggleChannelPublication(id) {
+  const name = state.currentServiceName;
+  const channel = (state.serviceChannelCatalog || []).find((item) => item.id === id && item.attached_to === name);
+  if (!name || !channel) return;
+  try {
+    if (channel.publication) {
+      await rpc("service.channel.unpublish", { service_name: name, channel_id: id });
+      applyChannelPublicationState({ service_name: name, channel_id: id, publication: null });
+      serviceViewFooterEl.textContent = `Channel '${id}' is loopback-only.`;
+    } else {
+      const publication = await rpc("service.channel.publish", { service_name: name, channel_id: id, provider: "construct" });
+      applyChannelPublicationState({ service_name: name, channel_id: id, publication });
+      serviceViewFooterEl.textContent = `Publishing '${id}' through the Construct tunnel…`;
+    }
+  } catch (e) {
+    serviceViewFooterEl.textContent = `Channel publication failed: ${e.message}`;
+  }
+}
+
 function serviceSessionRouteLabel(session, serviceName, catalog, serviceChannels) {
   const attached = (catalog || [])
     .filter((channel) => channel.attached_to === serviceName)
@@ -5030,16 +5064,33 @@ function renderServiceView() {
   const channelDraft = state.serviceChannelDraft && state.serviceChannelDraft.serviceName === name ? state.serviceChannelDraft : null;
   const channelRows = channels.length
     ? channels.map((channel) => {
-      const endpoint = channel.kind === "slack"
+      const localEndpoint = channel.kind === "slack"
         ? `Socket Mode · ${channel.allowed_workspace_count || 0} workspace / ${channel.allowed_channel_count || 0} channel filters`
         : (channel.port ? `127.0.0.1:${channel.port}` : "no port");
       const channelState = channel.enabled ? "enabled" : "disabled";
       const attached = channel.attached_to === name;
       const ownedByOther = !!channel.attached_to && !attached;
       const owner = ownedByOther ? `<span class="service-channel-owner">attached to ${escape(channel.attached_to)}</span>` : "";
+      const publication = channel.publication || null;
+      const publicationEndpoint = publication?.public_endpoint?.kind === "url"
+        ? publication.public_endpoint.url
+        : publication?.public_endpoint?.kind === "socket"
+          ? `${publication.public_endpoint.host}:${publication.public_endpoint.port}`
+          : null;
+      const publicationDetail = publication?.phase === "ready" && publicationEndpoint
+        ? ` · public ${publicationEndpoint}`
+        : publication?.phase === "authorizing" && publication.auth_url
+          ? ` · authorize ${publication.auth_url}`
+          : publication?.phase === "error"
+            ? ` · publish error: ${publication.error || "unknown error"}`
+            : publication ? ` · ${publication.phase}` : channel.kind === "http" ? " · loopback only" : "";
+      const endpoint = `${localEndpoint}${publicationDetail}`;
+      const publish = channel.kind === "http"
+        ? `<button type="button" data-channel-publish="${attr(channel.id)}">${publication ? "unpublish" : "publish"}</button>`
+        : "";
       const rotate = channel.kind === "http" ? `<button type="button" data-channel-rotate="${attr(channel.id)}">rotate</button>` : "";
       const controls = attached
-        ? `<span class="service-channel-actions"><button type="button" data-channel-edit="${attr(channel.id)}">edit</button>${rotate}<button type="button" class="danger" data-channel-delete="${attr(channel.id)}">detach</button></span>`
+        ? `<span class="service-channel-actions">${publish}<button type="button" data-channel-edit="${attr(channel.id)}">edit</button>${rotate}<button type="button" class="danger" data-channel-delete="${attr(channel.id)}">detach</button></span>`
         : "";
       return `<div class="service-channel-row${ownedByOther ? " unavailable" : ""}"><input class="channel-toggle" type="checkbox" data-channel-toggle="${attr(channel.id)}" ${attached ? "checked" : ""} ${ownedByOther || !service ? "disabled" : ""} aria-label="${attr(attached ? `Detach ${channel.id}` : `Attach ${channel.id}`)}"><span class="channel-id">${escape(channel.id)}</span><span>${escape(channel.kind || "http")}</span><span class="channel-endpoint">${escape(endpoint)}</span><span class="channel-state ${channel.enabled ? "" : "disabled"}">${channelState}</span>${owner}${controls}</div>`;
     }).join("")
@@ -5057,7 +5108,7 @@ function renderServiceView() {
   const tokenNote = state.serviceNewToken ? `Token (shown once): ${state.serviceNewToken}` : "";
   serviceViewFooterEl.textContent = editing
     ? `Enter saves · Esc cancels${tokenNote ? `\n${tokenNote}` : ""}`
-    : `HTTP is loopback-only · Slack uses outbound Socket Mode · credentials are never returned${tokenNote ? `\n${tokenNote}` : ""}`;
+    : `HTTP publishing is explicit · Slack uses outbound Socket Mode · stored credentials are never returned${tokenNote ? `\n${tokenNote}` : ""}`;
   serviceEditBtn.textContent = editing ? "Save" : "Edit";
   serviceRotateBtn.hidden = !service;
   serviceDeleteBtn.hidden = !service;
@@ -5094,6 +5145,7 @@ function renderServiceView() {
   serviceActivityEl.querySelector("[data-channel-add]")?.addEventListener("click", beginNewServiceChannel);
   serviceActivityEl.querySelectorAll("[data-channel-toggle]").forEach((control) => control.addEventListener("change", () => toggleServiceChannel(control.dataset.channelToggle)));
   serviceActivityEl.querySelectorAll("[data-channel-edit]").forEach((button) => button.addEventListener("click", () => beginEditServiceChannel(button.dataset.channelEdit)));
+  serviceActivityEl.querySelectorAll("[data-channel-publish]").forEach((button) => button.addEventListener("click", () => toggleChannelPublication(button.dataset.channelPublish)));
   serviceActivityEl.querySelectorAll("[data-channel-delete]").forEach((button) => button.addEventListener("click", () => deleteServiceChannel(button.dataset.channelDelete)));
   serviceActivityEl.querySelectorAll("[data-channel-rotate]").forEach((button) => button.addEventListener("click", () => rotateServiceChannel(button.dataset.channelRotate)));
   serviceActivityEl.querySelector("[data-channel-save]")?.addEventListener("click", saveServiceChannelDraft);
@@ -12779,6 +12831,10 @@ setInterval(() => {
 }, 3000);
 
 function handleNotification(method, params) {
+  if (method === "service/channel-publication-state") {
+    applyChannelPublicationState(params);
+    return;
+  }
   if (method === "layout/state") {
     applySharedLayout(params && params.layout);
     return;

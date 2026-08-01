@@ -798,6 +798,7 @@ name = "construct-daemon"
 version = "0.16.8"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "clap",

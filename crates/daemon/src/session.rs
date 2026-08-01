@@ -335,6 +335,7 @@ pub enum BroadcastMsg {
     /// listener starts/stops and on every client accept/drop so the local TUI
     /// can show a persistent remote-control affordance.
     RemoteState(construct_protocol::RemoteStateNotificationPayload),
+    ChannelPublicationState(construct_protocol::ChannelPublicationNotificationPayload),
     /// Ambient-feature status (spec 0151). Emitted once, the first time an
     /// ambient feature actually skips work for lack of a smith credential,
     /// so clients can surface the degradation without polling.
@@ -1349,6 +1350,11 @@ pub struct SessionManager {
     /// definition reload without depending on its internals. Set once from
     /// daemon startup; absent in tests, which never spawn one.
     services: std::sync::OnceLock<crate::service_supervisor::ServiceHandle>,
+    /// Provider-neutral public exposure for channel-owned ingress endpoints.
+    /// Separate from `services`: future channel implementations can register
+    /// endpoints without depending on service definition internals.
+    channel_publications:
+        std::sync::OnceLock<crate::channel_publication::PublicationHandle>,
     adapter_runtime_dir: PathBuf,
     sessions: RwLock<HashMap<String, Arc<SessionEntry>>>,
     /// The sessions the operator currently has visible/focused (via `mark_seen` or `set_focused_sessions`).
@@ -1892,6 +1898,7 @@ impl SessionManager {
                 config,
                 plugins: std::sync::OnceLock::new(),
                 services: std::sync::OnceLock::new(),
+                channel_publications: std::sync::OnceLock::new(),
                 adapter_runtime_dir,
                 sessions: RwLock::new(sessions),
                 focused_sessions: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1973,6 +1980,19 @@ impl SessionManager {
         &self,
     ) -> Option<&crate::service_supervisor::ServiceHandle> {
         self.services.get()
+    }
+
+    pub fn set_channel_publications(
+        &self,
+        handle: crate::channel_publication::PublicationHandle,
+    ) {
+        let _ = self.channel_publications.set(handle);
+    }
+
+    pub(crate) fn channel_publications(
+        &self,
+    ) -> Option<&crate::channel_publication::PublicationHandle> {
+        self.channel_publications.get()
     }
 
     /// Every plugin-contributed action, for `plugin.list_actions`.
@@ -2326,6 +2346,15 @@ impl SessionManager {
     pub fn broadcast_remote_state(&self) {
         let payload = self.remote_state_payload();
         let _ = self.broadcast.send(BroadcastMsg::RemoteState(payload));
+    }
+
+    pub(crate) fn broadcast_channel_publication(
+        &self,
+        payload: construct_protocol::ChannelPublicationNotificationPayload,
+    ) {
+        let _ = self
+            .broadcast
+            .send(BroadcastMsg::ChannelPublicationState(payload));
     }
 
     /// Start (or look up) the remote WS listener and return a URL + QR

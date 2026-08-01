@@ -23,6 +23,8 @@
 
 pub mod cloudflare;
 pub mod construct;
+pub(crate) mod channel;
+pub(crate) mod auth;
 
 use std::io::Write;
 use std::time::Duration;
@@ -195,7 +197,7 @@ async fn run_once(
     }
 }
 
-fn stable_construct_instance_id() -> anyhow::Result<String> {
+pub(crate) fn stable_construct_instance_id() -> anyhow::Result<String> {
     let dir = construct_protocol::paths::Paths::discover()
         .data_dir
         .join("tunnel");

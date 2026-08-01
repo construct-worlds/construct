@@ -972,6 +972,7 @@ fn forward_broadcast(
             BroadcastMsg::GroupState(_)
             | BroadcastMsg::GroupDeleted(_)
             | BroadcastMsg::RemoteState(_)
+            | BroadcastMsg::ChannelPublicationState(_)
             | BroadcastMsg::FeaturesState(_)
             | BroadcastMsg::LayoutState(_) => true,
         };
@@ -1051,6 +1052,13 @@ fn forward_broadcast(
             };
             Notification::new(ipc_notif::REMOTE_STATE, Some(p))
         }
+        BroadcastMsg::ChannelPublicationState(state) => {
+            let p = match serde_json::to_value(&state) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            Notification::new(ipc_notif::CHANNEL_PUBLICATION_STATE, Some(p))
+        }
         BroadcastMsg::FeaturesState(fs) => {
             let p = match serde_json::to_value(&fs) {
                 Ok(v) => v,
@@ -1110,6 +1118,61 @@ async fn apply_service_edit(
         Err(error) => {
             tracing::debug!(%error, "service edit persisted without a live reload");
             construct_protocol::ServiceApplyResult::default()
+        }
+    }
+}
+
+async fn channel_publication_map(
+    manager: &Arc<SessionManager>,
+) -> std::collections::HashMap<(String, String), construct_protocol::ChannelPublicationSummary> {
+    let Some(handle) = manager.channel_publications() else {
+        return Default::default();
+    };
+    handle
+        .list()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|publication| {
+            (
+                (
+                    publication.service_name.clone(),
+                    publication.channel_id.clone(),
+                ),
+                publication,
+            )
+        })
+        .collect()
+}
+
+fn enrich_channel_publications(
+    channels: &mut [construct_protocol::ServiceChannelSummary],
+    publications: &std::collections::HashMap<
+        (String, String),
+        construct_protocol::ChannelPublicationSummary,
+    >,
+) {
+    for channel in channels {
+        channel.publication = channel
+            .attached_to
+            .as_ref()
+            .and_then(|service| publications.get(&(service.clone(), channel.id.clone())))
+            .cloned();
+    }
+}
+
+fn enrich_service_publications(
+    services: &mut [construct_protocol::ServiceSummary],
+    publications: &std::collections::HashMap<
+        (String, String),
+        construct_protocol::ChannelPublicationSummary,
+    >,
+) {
+    for service in services {
+        for channel in &mut service.channels {
+            channel.publication = publications
+                .get(&(service.name.clone(), channel.id.clone()))
+                .cloned();
         }
     }
 }
@@ -1264,7 +1327,11 @@ async fn dispatch(
     });
     dispatch_entry!(ipc_method::SERVICE_LIST, {
         match crate::service::list_summaries(&construct_protocol::paths::Paths::discover().services_dir()) {
-            Ok(services) => ok!(req, &services),
+            Ok(mut services) => {
+                let publications = channel_publication_map(manager).await;
+                enrich_service_publications(&mut services, &publications);
+                ok!(req, &services)
+            },
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
@@ -1303,7 +1370,11 @@ async fn dispatch(
             &construct_protocol::paths::Paths::discover().services_dir(),
             &p.name,
         ) {
-            Ok(channels) => ok!(req, &channels),
+            Ok(mut channels) => {
+                let publications = channel_publication_map(manager).await;
+                enrich_channel_publications(&mut channels, &publications);
+                ok!(req, &channels)
+            },
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
@@ -1311,7 +1382,11 @@ async fn dispatch(
         match crate::service::list_channel_catalog(
             &construct_protocol::paths::Paths::discover().services_dir(),
         ) {
-            Ok(channels) => ok!(req, &channels),
+            Ok(mut channels) => {
+                let publications = channel_publication_map(manager).await;
+                enrich_channel_publications(&mut channels, &publications);
+                ok!(req, &channels)
+            },
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
@@ -1384,6 +1459,38 @@ async fn dispatch(
                 ok!(req, &result)
             }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::SERVICE_CHANNEL_PUBLISH, {
+        let p = params!(req, construct_protocol::ChannelPublicationParams);
+        let Some(publications) = manager.channel_publications() else {
+            return Response::err(
+                req.id.clone(),
+                ErrorObject::internal("channel publication supervisor is not running"),
+            );
+        };
+        match publications
+            .publish(p.service_name, p.channel_id, p.provider)
+            .await
+        {
+            Ok(summary) => ok!(req, &summary),
+            Err(error) => Response::err(
+                req.id.clone(),
+                ErrorObject::invalid_params(error.to_string()),
+            ),
+        }
+    });
+    dispatch_entry!(ipc_method::SERVICE_CHANNEL_UNPUBLISH, {
+        let p = params!(req, construct_protocol::ServiceChannelNameParams);
+        let Some(publications) = manager.channel_publications() else {
+            return Response::err(
+                req.id.clone(),
+                ErrorObject::internal("channel publication supervisor is not running"),
+            );
+        };
+        match publications.unpublish(p.service_name, p.channel_id).await {
+            Ok(withdrawn) => ok!(req, &serde_json::json!({ "withdrawn": withdrawn })),
+            Err(error) => Response::err(req.id.clone(), ErrorObject::internal(error.to_string())),
         }
     });
     dispatch_entry!(ipc_method::SESSION_CREATE, {
@@ -2001,6 +2108,31 @@ mod tests {
         );
         let viewer = viewer_rx.try_recv().expect("viewer notification");
         assert_eq!(viewer["params"]["event"]["owner"], false);
+    }
+
+    #[test]
+    fn forward_broadcast_delivers_channel_publication_through_session_filter() {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        forward_broadcast(
+            &out_tx,
+            &Some("s1".to_string()),
+            BroadcastMsg::ChannelPublicationState(
+                construct_protocol::ChannelPublicationNotificationPayload {
+                    service_name: "alerts".into(),
+                    channel_id: "http".into(),
+                    publication: None,
+                },
+            ),
+            7,
+        );
+
+        let notification = out_rx.try_recv().expect("publication notification");
+        assert_eq!(
+            notification["method"],
+            construct_protocol::ipc_notif::CHANNEL_PUBLICATION_STATE
+        );
+        assert_eq!(notification["params"]["service_name"], "alerts");
+        assert_eq!(notification["params"]["channel_id"], "http");
     }
 
     #[test]

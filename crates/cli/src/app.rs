@@ -9768,6 +9768,16 @@ impl App {
                     }
                 }
             }
+            m if m == construct_protocol::ipc_notif::CHANNEL_PUBLICATION_STATE => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        construct_protocol::ChannelPublicationNotificationPayload,
+                    >(p)
+                    {
+                        self.apply_channel_publication(payload);
+                    }
+                }
+            }
             m if m == construct_protocol::ipc_notif::FEATURES_STATE => {
                 if let Some(p) = n.params {
                     if let Ok(payload) =
@@ -13593,6 +13603,7 @@ impl App {
                 let mut words = arg.split_whitespace();
                 let action = words.next().unwrap_or("");
                 let name = words.next().unwrap_or("");
+                let requested_channel = words.next().map(str::to_string);
                 self.refresh_services().await;
                 let found = self
                     .services
@@ -13655,6 +13666,58 @@ impl App {
                             }
                         }
                     }
+                    ("publish" | "unpublish", Some(service)) => {
+                        let channel_id = requested_channel.or_else(|| {
+                            service
+                                .channels
+                                .iter()
+                                .find(|channel| channel.enabled)
+                                .map(|channel| channel.id.clone())
+                        });
+                        let Some(channel_id) = channel_id else {
+                            self.set_status(format!(
+                                "service {} has no enabled channel",
+                                service.name
+                            ));
+                            return;
+                        };
+                        if action == "publish" {
+                            match self
+                                .client
+                                .publish_service_channel(
+                                    &service.name,
+                                    &channel_id,
+                                    "construct",
+                                )
+                                .await
+                            {
+                                Ok(publication) => self.set_status(format!(
+                                    "publishing {}/{} via {} ({:?})",
+                                    service.name,
+                                    channel_id,
+                                    publication.provider,
+                                    publication.phase
+                                )),
+                                Err(error) => {
+                                    self.set_status(format!("channel publish failed: {error}"))
+                                }
+                            }
+                        } else {
+                            match self
+                                .client
+                                .unpublish_service_channel(&service.name, &channel_id)
+                                .await
+                            {
+                                Ok(_) => self.set_status(format!(
+                                    "{}/{} is loopback-only",
+                                    service.name, channel_id
+                                )),
+                                Err(error) => {
+                                    self.set_status(format!("channel unpublish failed: {error}"))
+                                }
+                            }
+                        }
+                    }
                     ("delete", Some(service)) => {
                         self.minibuffer = Some(Minibuffer {
                             prompt: format!("Delete service {}? [y/N] ", service.name),
@@ -13665,7 +13728,7 @@ impl App {
                         });
                     }
                     _ => self.set_status(
-                        "service: use edit|pause|resume|rotate-token|delete <name>".to_string(),
+                        "service: use edit|pause|resume|publish|unpublish|rotate-token|delete <name> [channel]".to_string(),
                     ),
                 }
             }
@@ -40180,6 +40243,7 @@ mod tests {
                 allowed_workspaces: Vec::new(),
                 allowed_channels: Vec::new(),
                 attached_to: Some(name.to_string()),
+                publication: None,
             }],
         }
     }
@@ -40289,6 +40353,46 @@ mod tests {
         assert!(text.contains("Sessions"));
         assert!(!text.contains("Activity"));
         assert!(app.layout.modal_area.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_renders_typed_public_channel_endpoint() {
+        let (mut app, _dir, server) = captured_app().await;
+        let service = service_summary_for_test("assistant");
+        app.service_channel_catalog = service.channels.clone();
+        app.services.push(service);
+        app.select_service("assistant".to_string());
+        app.apply_channel_publication(
+            construct_protocol::ChannelPublicationNotificationPayload {
+                service_name: "assistant".into(),
+                channel_id: "http".into(),
+                publication: Some(construct_protocol::ChannelPublicationSummary {
+                    service_name: "assistant".into(),
+                    channel_id: "http".into(),
+                    provider: "construct".into(),
+                    phase: construct_protocol::ChannelPublicationPhase::Ready,
+                    public_endpoint: Some(construct_protocol::ChannelPublicEndpoint::Url {
+                        url: "https://alerts.example.test/".into(),
+                    }),
+                    auth_url: None,
+                    error: None,
+                }),
+            },
+        );
+        app.session_transitions.clear();
+
+        let backend = ratatui::backend::TestBackend::new(160, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let text = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("public https://alerts.example.test/"), "{text}");
         server.abort();
     }
 
@@ -40746,6 +40850,7 @@ mod tests {
                 allowed_workspaces: Vec::new(),
                 allowed_channels: Vec::new(),
                 attached_to: None,
+                publication: None,
             },
             construct_protocol::ServiceChannelSummary {
                 id: "busy".to_string(),
@@ -40760,6 +40865,7 @@ mod tests {
                 allowed_workspaces: Vec::new(),
                 allowed_channels: Vec::new(),
                 attached_to: Some("other-service".to_string()),
+                publication: None,
             },
         ];
         app.select_service("assistant".to_string());

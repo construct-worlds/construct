@@ -106,6 +106,7 @@ impl ServiceHandle {
 
 struct ListenerHandle {
     port: u16,
+    endpoint: crate::channel_publication::ChannelIngressEndpoint,
     cancel: CancellationToken,
     task: JoinHandle<()>,
 }
@@ -259,6 +260,7 @@ pub async fn run(
                         ServiceMsg::ListenerDied(key) => {
                             registry.listeners.remove(&key);
                             registry.slack.remove(&key);
+                            reconcile_publications(&manager, &registry);
                         }
                     }
                 }
@@ -270,6 +272,7 @@ pub async fn run(
             ServiceMsg::ListenerDied(key) => {
                 registry.listeners.remove(&key);
                 registry.slack.remove(&key);
+                reconcile_publications(&manager, &registry);
             }
         }
     }
@@ -352,6 +355,10 @@ async fn reload(
             let _ = listener.task.await;
         }
     }
+    // A stopped listener withdraws publication before any replacement binds.
+    // If the replacement succeeds it becomes locally available, but explicit
+    // publication intent is deliberately not restored.
+    reconcile_publications(manager, registry);
 
     for action in actions {
         let (key, port, rebound) = match action {
@@ -365,7 +372,19 @@ async fn reload(
         let Some(shared) = registry.shared.get(&key.0).cloned() else {
             continue;
         };
-        match start_listener(handle, shared, key.clone(), port).await {
+        let Some(endpoint) = defs
+            .get(&key.0)
+            .and_then(|service| service.channels.get(&key.1))
+            .and_then(|channel| service::ingress_endpoint(&key.0, &key.1, channel))
+        else {
+            report.failures.push((
+                key,
+                port,
+                "channel has no supported local ingress endpoint".to_string(),
+            ));
+            continue;
+        };
+        match start_listener(handle, shared, key.clone(), port, endpoint).await {
             Ok(listener) => {
                 registry.listeners.insert(key.clone(), listener);
                 if rebound {
@@ -430,6 +449,11 @@ async fn reload(
     // dropped, and only after its listeners are down.
     registry.shared.retain(|name, _| defs.contains_key(name));
 
+    // Reconcile publication against sockets that are actually live, not just
+    // requested in configuration. A failed bind can never receive a public
+    // route, and pause/detach/port replacement withdraws an existing route.
+    reconcile_publications(manager, registry);
+
     tracing::info!(
         reason = reason.label(),
         started = report.started.len(),
@@ -446,6 +470,7 @@ async fn start_listener(
     shared: Arc<ServiceShared>,
     key: ListenerKey,
     port: u16,
+    endpoint: crate::channel_publication::ChannelIngressEndpoint,
 ) -> Result<ListenerHandle> {
     // Bound here rather than inside the spawned task so a failure is reported
     // to whoever asked for the reload instead of becoming a stray log line.
@@ -467,7 +492,24 @@ async fn start_listener(
             let _ = task_handle.0.send(ServiceMsg::ListenerDied(task_key));
         }
     });
-    Ok(ListenerHandle { port, cancel, task })
+    Ok(ListenerHandle {
+        port,
+        endpoint,
+        cancel,
+        task,
+    })
+}
+
+fn reconcile_publications(manager: &SessionManager, registry: &Registry) {
+    if let Some(publications) = manager.channel_publications() {
+        publications.reconcile(
+            registry
+                .listeners
+                .iter()
+                .map(|(key, listener)| (key.clone(), listener.endpoint.clone()))
+                .collect(),
+        );
+    }
 }
 
 fn start_slack(
@@ -569,6 +611,38 @@ fn file_stamp(path: &std::path::Path) -> (String, u64, u128) {
 mod tests {
     use super::*;
     use crate::service::{ServiceChannelConfig, ServiceRouting, ServiceSandboxConfig};
+
+    struct FakePublicationBackend;
+
+    #[async_trait::async_trait]
+    impl crate::channel_publication::PublicationBackend for FakePublicationBackend {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+
+        fn supports(
+            &self,
+            _endpoint: &crate::channel_publication::ChannelIngressEndpoint,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn run(
+            &self,
+            _key: crate::channel_publication::PublicationKey,
+            _endpoint: crate::channel_publication::ChannelIngressEndpoint,
+            events: crate::channel_publication::BackendEvents,
+            cancel: CancellationToken,
+        ) -> Result<()> {
+            events.send(crate::channel_publication::BackendEvent::Ready(
+                construct_protocol::ChannelPublicEndpoint::Url {
+                    url: "https://example.test/svc/svc".into(),
+                },
+            ));
+            cancel.cancelled().await;
+            Ok(())
+        }
+    }
 
     fn service(channels: &[(&str, u16, bool)], paused: bool) -> ServiceConfig {
         ServiceConfig {
@@ -702,6 +776,7 @@ mod tests {
         paths: Paths,
         manager: Arc<SessionManager>,
         handle: ServiceHandle,
+        publications: crate::channel_publication::PublicationHandle,
         registry: Registry,
     }
 
@@ -722,12 +797,22 @@ mod tests {
                 SessionManager::new(storage, config, paths.runtime_dir.clone())
                     .await
                     .expect("session manager");
+            let manager = Arc::new(manager);
+            let (publications, publication_rx) = crate::channel_publication::channel();
+            manager.set_channel_publications(publications.clone());
+            tokio::spawn(crate::channel_publication::run(
+                vec![Arc::new(FakePublicationBackend)],
+                publications.clone(),
+                publication_rx,
+                None,
+            ));
             let (handle, _rx) = channel();
             Self {
                 _tmp: tmp,
                 paths,
-                manager: Arc::new(manager),
+                manager,
                 handle,
+                publications,
                 registry: Registry::default(),
             }
         }
@@ -850,12 +935,20 @@ mod tests {
         let report = fx.reload().await.expect("reload");
         assert_eq!(report.started.len(), 1, "the channel was bound");
         assert!(port_in_use(first_port).await, "port answers once bound");
+        fx.publications
+            .publish("svc".into(), "http1".into(), "fake".into())
+            .await
+            .expect("publish bound channel");
 
         fx.write("svc", &with_channel(second_port, false));
         let report = fx.reload().await.expect("reload");
         assert_eq!(report.rebound.len(), 1, "a port change rebinds");
         assert!(!port_in_use(first_port).await, "the old port is released");
         assert!(port_in_use(second_port).await, "the new port answers");
+        assert!(
+            fx.publications.list().await.unwrap().is_empty(),
+            "rebind withdraws publication without restoring intent"
+        );
 
         // Pausing releases the port; this is the behavior that silently did
         // nothing before definitions were applied live.

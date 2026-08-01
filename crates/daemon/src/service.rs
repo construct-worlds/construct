@@ -685,6 +685,7 @@ fn channel_summary(
         allowed_workspaces: config.allowed_workspaces.clone(),
         allowed_channels: config.allowed_channels.clone(),
         attached_to,
+        publication: None,
     }
 }
 
@@ -764,6 +765,23 @@ pub(crate) fn bindable_port(
         return None;
     }
     Some(port)
+}
+
+/// Describe the local ingress this channel adapter owns. Publication code
+/// consumes this typed endpoint and never inspects `ServiceChannelConfig`.
+/// A future channel kind adds its adapter mapping here (or in a registry)
+/// without adding protocol branches to the tunnel supervisor.
+pub(crate) fn ingress_endpoint(
+    service: &str,
+    channel_id: &str,
+    channel: &ServiceChannelConfig,
+) -> Option<crate::channel_publication::ChannelIngressEndpoint> {
+    bindable_port(service, channel_id, channel).map(|port| {
+        crate::channel_publication::ChannelIngressEndpoint::loopback_http(
+            port,
+            format!("/svc/{service}"),
+        )
+    })
 }
 
 /// Drive one supervisor-owned HTTP listener until it is cancelled.

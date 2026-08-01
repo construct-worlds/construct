@@ -554,6 +554,42 @@ impl Client {
         )
         .await
     }
+    pub async fn publish_service_channel(
+        &self,
+        service_name: &str,
+        channel_id: &str,
+        provider: &str,
+    ) -> Result<construct_protocol::ChannelPublicationSummary> {
+        self.request(
+            construct_protocol::ipc_method::SERVICE_CHANNEL_PUBLISH,
+            &construct_protocol::ChannelPublicationParams {
+                service_name: service_name.to_string(),
+                channel_id: channel_id.to_string(),
+                provider: provider.to_string(),
+            },
+        )
+        .await
+    }
+    pub async fn unpublish_service_channel(
+        &self,
+        service_name: &str,
+        channel_id: &str,
+    ) -> Result<bool> {
+        #[derive(serde::Deserialize)]
+        struct ResultBody {
+            withdrawn: bool,
+        }
+        let result: ResultBody = self
+            .request(
+                construct_protocol::ipc_method::SERVICE_CHANNEL_UNPUBLISH,
+                &construct_protocol::ServiceChannelNameParams {
+                    service_name: service_name.to_string(),
+                    channel_id: channel_id.to_string(),
+                },
+            )
+            .await?;
+        Ok(result.withdrawn)
+    }
     pub async fn get(&self, id: &str) -> Result<SessionDetail> {
         self.request(
             ipc_method::SESSION_GET,
