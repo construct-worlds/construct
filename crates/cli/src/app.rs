@@ -38983,18 +38983,36 @@ mod tests {
                 .collect()
         };
         let bottom = area.y + area.height - 1;
-        assert!(
-            row_syms(bottom).trim().chars().all(|ch| ch == '▁'),
-            "the scrollbar row carries only the slim scrollbar, no diagram content"
+        assert_eq!(
+            row_syms(bottom).trim(),
+            "",
+            "the transparent scrollbar row preserves its blank glyphs"
         );
-        assert!(
-            (area.x..area.x + area.width).any(|x| {
-                buf.cell((x, bottom))
-                    .map(|c| c.symbol() == "▁" && c.style().fg.is_some())
-                    .unwrap_or(false)
-            }),
-            "the bottom row shows the slim scrollbar"
+        let hbar = app
+            .layout
+            .lineage_hscrollbar
+            .as_ref()
+            .expect("horizontal scrollbar");
+        let thumb_cell = buf
+            .cell((hbar.thumb.x, hbar.thumb.y))
+            .expect("horizontal thumb cell");
+        assert_ne!(
+            thumb_cell.symbol(),
+            "▁",
+            "the transparent scrollbar must not paint a bottom-edge glyph"
         );
+        if let Some(track_x) = (hbar.area.x..hbar.area.x + hbar.area.width).find(|&x| {
+            x < hbar.thumb.x || x >= hbar.thumb.x.saturating_add(hbar.thumb.width)
+        }) {
+            let track_cell = buf
+                .cell((track_x, hbar.area.y))
+                .expect("horizontal track cell");
+            assert_ne!(
+                thumb_cell.bg,
+                track_cell.bg,
+                "horizontal thumb and track should use distinct background tints"
+            );
+        }
         assert_eq!(
             row_syms(bottom - 1).trim(),
             "",
