@@ -7470,11 +7470,6 @@ fn render_service_title_menu(f: &mut Frame, app: &App) {
     let Some(menu) = &app.service_title_menu else {
         return;
     };
-    let paused = app
-        .services
-        .iter()
-        .find(|service| service.name == menu.name)
-        .is_some_and(|service| service.paused);
 
     let area = menu.area;
     if area.width < 4 || area.height < 3 {
@@ -7513,7 +7508,7 @@ fn render_service_title_menu(f: &mut Frame, app: &App) {
             f,
             area,
             row,
-            action.label(paused),
+            action.label(),
             service_title_menu_action_binding(app, action),
             style,
         );
@@ -7525,8 +7520,6 @@ fn service_title_menu_action_binding(
     action: ServiceTitleMenuAction,
 ) -> Option<&'static str> {
     match (action, app.profile) {
-        (ServiceTitleMenuAction::Edit, Profile::Emacs)
-        | (ServiceTitleMenuAction::Edit, Profile::Vim) => Some("e"),
         (ServiceTitleMenuAction::SplitHorizontal, Profile::Emacs) => Some("C-x 3"),
         (ServiceTitleMenuAction::SplitHorizontal, Profile::Vim) => Some("C-w v"),
         (ServiceTitleMenuAction::SplitVertical, Profile::Emacs) => Some("C-x 2"),
@@ -7534,7 +7527,6 @@ fn service_title_menu_action_binding(
         (ServiceTitleMenuAction::CloseSplit, Profile::Emacs) => Some("C-x 0"),
         (ServiceTitleMenuAction::CloseSplit, Profile::Vim) => Some("C-w c"),
         (ServiceTitleMenuAction::Delete, _) => Some("C-d"),
-        (ServiceTitleMenuAction::RotateToken, _) | (ServiceTitleMenuAction::PauseResume, _) => None,
     }
 }
 

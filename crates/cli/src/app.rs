@@ -1498,9 +1498,6 @@ pub enum SessionTitleMenuAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceTitleMenuAction {
-    Edit,
-    RotateToken,
-    PauseResume,
     SplitHorizontal,
     SplitVertical,
     CloseSplit,
@@ -1508,22 +1505,15 @@ pub enum ServiceTitleMenuAction {
 }
 
 impl ServiceTitleMenuAction {
-    pub const ALL: [Self; 7] = [
-        Self::Edit,
-        Self::RotateToken,
-        Self::PauseResume,
+    pub const ALL: [Self; 4] = [
         Self::SplitHorizontal,
         Self::SplitVertical,
         Self::CloseSplit,
         Self::Delete,
     ];
 
-    pub fn label(self, paused: bool) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Edit => "edit service",
-            Self::RotateToken => "rotate HTTP token",
-            Self::PauseResume if paused => "resume service",
-            Self::PauseResume => "pause service",
             Self::SplitHorizontal => "split horizontal",
             Self::SplitVertical => "split vertical",
             Self::CloseSplit => "close split",
@@ -41178,7 +41168,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_view_title_menu_opens_and_edits_service() {
+    async fn service_view_title_menu_shows_only_pane_actions() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
@@ -41199,9 +41189,8 @@ mod tests {
             .await;
         app.on_mouse(click(MouseEventKind::Up(MouseButton::Left)))
             .await;
-        let menu = app
-            .service_title_menu
-            .clone()
+        app.service_title_menu
+            .as_ref()
             .expect("service actions menu should open");
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("draw menu");
@@ -41212,19 +41201,21 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(menu_text.contains("rotate HTTP token"));
-        assert!(menu_text.contains("pause service"));
-        let edit_index = ServiceTitleMenuAction::ALL
-            .iter()
-            .position(|action| *action == ServiceTitleMenuAction::Edit)
-            .expect("edit action");
-        app.handle_left_click(menu.area.x + 2, menu.area.y + 1 + edit_index as u16)
-            .await;
-        assert!(matches!(
-            app.service_dialog.as_ref().map(|dialog| dialog.mode),
-            Some(ServiceDialogMode::Edit)
-        ));
-        assert!(app.service_title_menu.is_none());
+        for removed_item in [
+            "edit service",
+            "rotate HTTP token",
+            "pause service",
+            "resume service",
+        ] {
+            assert!(
+                !menu_text.contains(removed_item),
+                "unexpected menu item: {removed_item}"
+            );
+        }
+        for action in ServiceTitleMenuAction::ALL {
+            assert!(menu_text.contains(action.label()));
+        }
+        assert!(app.service_title_menu.is_some());
         server.abort();
     }
 
