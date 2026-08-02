@@ -29,6 +29,12 @@ pub fn parse_request(body: &Value) -> CanonRequest {
             continue;
         }
         let mut blocks = Vec::new();
+        // Reasoning-model dialects carry the model's own thinking beside
+        // the content. It leads the turn so it stays ahead of the text it
+        // produced when the blocks are emitted again.
+        if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) {
+            blocks.push(CanonBlock::Thinking(reasoning.to_string()));
+        }
         match message.get("content") {
             Some(Value::String(t)) if !t.is_empty() => blocks.push(CanonBlock::Text(t.clone())),
             Some(Value::Array(parts)) => {
@@ -191,6 +197,7 @@ pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
         // conversation otherwise.
         let mut parts: Vec<Value> = Vec::new();
         let mut calls: Vec<Value> = Vec::new();
+        let mut reasoning: Option<String> = None;
         for block in &message.blocks {
             match block {
                 CanonBlock::Text(t) => parts.push(json!({"type":"text","text":t})),
@@ -204,7 +211,12 @@ pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
                 CanonBlock::ToolResult { id, text, .. } => {
                     messages.push(json!({"role":"tool","tool_call_id":id,"content":text}));
                 }
-                CanonBlock::Thinking(_) => {}
+                // A thinking target rejects a turn whose reasoning it
+                // issued and cannot see again, so it is carried rather
+                // than dropped (spec 0181).
+                CanonBlock::Thinking(t) => {
+                    reasoning.get_or_insert_with(String::new).push_str(t);
+                }
             }
         }
         if parts.is_empty() && calls.is_empty() {
@@ -233,6 +245,9 @@ pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
         }
         if !calls.is_empty() {
             m.insert("tool_calls".into(), json!(calls));
+        }
+        if let Some(reasoning) = reasoning.filter(|_| message.role == CanonRole::Assistant) {
+            m.insert("reasoning_content".into(), json!(reasoning));
         }
         messages.push(Value::Object(m));
     }
@@ -305,6 +320,13 @@ pub fn decode_event(data: &Value) -> Vec<CanonEvent> {
         return out;
     };
     if let Some(delta) = choice.get("delta") {
+        if let Some(reasoning) = delta
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            out.push(CanonEvent::ThinkingDelta(reasoning.to_string()));
+        }
         if let Some(text) = delta
             .get("content")
             .and_then(Value::as_str)
@@ -368,6 +390,13 @@ pub fn decode_full_response(body: &Value) -> Vec<CanonEvent> {
         .and_then(Value::as_array)
         .and_then(|c| c.first());
     let message = choice.and_then(|c| c.get("message"));
+    if let Some(reasoning) = message
+        .and_then(|m| m.get("reasoning_content"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        events.push(CanonEvent::ThinkingDelta(reasoning.to_string()));
+    }
     if let Some(text) = message
         .and_then(|m| m.get("content"))
         .and_then(Value::as_str)
@@ -490,6 +519,9 @@ impl StreamEncoder {
             CanonEvent::TextDelta(text) => {
                 out.push_str(&self.chunk(json!({"content":text}), Value::Null, Value::Null));
             }
+            // Reasoning is remembered by the proxy, not replayed to the
+            // harness: no client dialect asked for it (spec 0181).
+            CanonEvent::ThinkingDelta(_) => {}
             CanonEvent::ToolStart { index, id, name } => {
                 if self.tool_args.contains_key(index) {
                     return out;
@@ -585,6 +617,7 @@ pub fn encode_full(events: &[CanonEvent], model: &str) -> Value {
             CanonEvent::Start { id: event_id } if !event_id.is_empty() => id = event_id.clone(),
             CanonEvent::Start { .. } => {}
             CanonEvent::TextDelta(delta) => text.push_str(delta),
+            CanonEvent::ThinkingDelta(_) => {}
             CanonEvent::ToolStart { index, id, name } => {
                 tools
                     .entry(*index)
@@ -679,6 +712,104 @@ mod tests {
         assert_eq!(messages[0]["tool_calls"][0]["function"]["name"], "ls");
         assert_eq!(messages[1]["role"], "tool");
         assert_eq!(messages[1]["tool_call_id"], "t1");
+    }
+
+    /// A thinking target refuses a replayed tool-calling turn whose
+    /// reasoning it cannot see again, so the turn has to carry it (spec
+    /// 0181) — including the empty reasoning that stands for "no longer
+    /// remembered".
+    #[test]
+    fn an_assistant_turn_carries_its_reasoning_back() {
+        let req = CanonRequest {
+            messages: vec![
+                CanonMessage {
+                    role: CanonRole::Assistant,
+                    blocks: vec![
+                        CanonBlock::Thinking("the repo root is the place to look".into()),
+                        CanonBlock::Text("Looking.".into()),
+                        CanonBlock::ToolUse {
+                            id: "call_1".into(),
+                            name: "ls".into(),
+                            input: json!({"p": "/"}),
+                        },
+                    ],
+                },
+                CanonMessage {
+                    role: CanonRole::Assistant,
+                    blocks: vec![
+                        CanonBlock::Thinking(String::new()),
+                        CanonBlock::ToolUse {
+                            id: "call_2".into(),
+                            name: "ls".into(),
+                            input: json!({"p": "/src"}),
+                        },
+                    ],
+                },
+            ],
+            ..Default::default()
+        };
+        let out = emit_request(&req, "deepseek-v4-flash");
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0]["reasoning_content"],
+            "the repo root is the place to look"
+        );
+        assert_eq!(messages[1]["reasoning_content"], "");
+    }
+
+    /// Reasoning must survive a round trip, or replaying a conversation
+    /// this dialect produced would strip what the target demands back.
+    #[test]
+    fn reasoning_round_trips_through_canonical_form() {
+        let original = json!({
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "Looking.",
+                 "reasoning_content": "they want a listing",
+                 "tool_calls": [{"id":"call_1","type":"function",
+                                 "function":{"name":"ls","arguments":"{}"}}]},
+            ]
+        });
+        let canon = parse_request(&original);
+        assert_eq!(
+            canon.messages[1].blocks[0],
+            CanonBlock::Thinking("they want a listing".into())
+        );
+        let back = emit_request(&canon, "deepseek-v4-flash");
+        assert_eq!(back["messages"][1]["reasoning_content"], "they want a listing");
+    }
+
+    /// A user turn never carries reasoning, whatever a client put on it.
+    #[test]
+    fn only_assistant_turns_carry_reasoning() {
+        let req = CanonRequest {
+            messages: vec![CanonMessage {
+                role: CanonRole::User,
+                blocks: vec![
+                    CanonBlock::Thinking("stray".into()),
+                    CanonBlock::Text("hi".into()),
+                ],
+            }],
+            ..Default::default()
+        };
+        let out = emit_request(&req, "deepseek-v4-flash");
+        assert!(out["messages"][0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn decodes_streamed_and_whole_reasoning() {
+        assert_eq!(
+            decode_event(&json!({"choices":[{"delta":{"reasoning_content":"weighing"}}]})),
+            vec![CanonEvent::ThinkingDelta("weighing".into())]
+        );
+        let whole = decode_full_response(&json!({
+            "id":"cmpl_1",
+            "choices":[{"message":{"role":"assistant","reasoning_content":"weighing","content":"ok"},
+                        "finish_reason":"stop"}]
+        }));
+        assert!(whole.contains(&CanonEvent::ThinkingDelta("weighing".into())));
+        assert!(whole.contains(&CanonEvent::TextDelta("ok".into())));
     }
 
     #[test]

@@ -127,6 +127,10 @@ pub enum CanonEvent {
         id: String,
     },
     TextDelta(String),
+    /// Model-private reasoning as the target streamed it. Not re-encoded
+    /// into any client dialect — it exists so the proxy can remember what
+    /// a target reasoned and hand it back on the next request (spec 0181).
+    ThinkingDelta(String),
     ToolStart {
         index: usize,
         id: String,
@@ -464,7 +468,31 @@ impl ClientEncoder {
     }
 }
 
+/// Decode a whole non-streaming response into canonical events.
+pub fn decode_full_response_with_context(
+    target: Dialect,
+    body: &Value,
+    context: &TranslationContext,
+) -> Vec<CanonEvent> {
+    match target {
+        Dialect::AnthropicMessages => anthropic::decode_full_response(body),
+        Dialect::GoogleGemini => google::decode_full_response(body, context),
+        Dialect::OpenAiResponses => responses::decode_full_response(body),
+        Dialect::OpenAiChat => openai_chat::decode_full_response(body),
+    }
+}
+
+/// Re-encode decoded events as a non-streaming body in `dialect`.
+pub fn encode_full_response(dialect: Dialect, events: &[CanonEvent], model: &str) -> Value {
+    match dialect {
+        Dialect::OpenAiChat => openai_chat::encode_full(events, model),
+        Dialect::OpenAiResponses => responses::encode_full(events, model),
+        _ => anthropic::encode_full(events, model),
+    }
+}
+
 /// Non-streaming response body in the client's dialect.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn encode_response_with_context(
     dialect: Dialect,
     target: Dialect,
@@ -472,17 +500,8 @@ pub fn encode_response_with_context(
     model: &str,
     context: &TranslationContext,
 ) -> Value {
-    let events = match target {
-        Dialect::AnthropicMessages => anthropic::decode_full_response(body),
-        Dialect::GoogleGemini => google::decode_full_response(body, context),
-        Dialect::OpenAiResponses => responses::decode_full_response(body),
-        Dialect::OpenAiChat => openai_chat::decode_full_response(body),
-    };
-    match dialect {
-        Dialect::OpenAiChat => openai_chat::encode_full(&events, model),
-        Dialect::OpenAiResponses => responses::encode_full(&events, model),
-        _ => anthropic::encode_full(&events, model),
-    }
+    let events = decode_full_response_with_context(target, body, context);
+    encode_full_response(dialect, &events, model)
 }
 
 /// Rough token estimate for endpoints a target cannot answer.

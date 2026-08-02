@@ -734,6 +734,9 @@ impl StreamEncoder {
         }
         match event {
             CanonEvent::Start { .. } => {}
+            // Reasoning is remembered by the proxy, not replayed to the
+            // harness: no client dialect asked for it (spec 0181).
+            CanonEvent::ThinkingDelta(_) => {}
             CanonEvent::TextDelta(text) => {
                 if !self.message_open {
                     out.push_str(&self.open_message());
@@ -895,6 +898,7 @@ pub fn encode_full(events: &[CanonEvent], model: &str) -> Value {
     for event in events {
         match event {
             CanonEvent::TextDelta(t) => text.push_str(t),
+            CanonEvent::ThinkingDelta(_) => {}
             CanonEvent::ToolStart { id, name, .. } => {
                 calls.push((id.clone(), name.clone(), String::new()))
             }

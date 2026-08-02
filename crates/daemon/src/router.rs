@@ -24,7 +24,7 @@ pub mod oauth;
 pub mod proxy;
 pub mod translate;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,6 +100,16 @@ pub fn provider_dialect(provider: &str) -> Option<Dialect> {
         }
         _ => None,
     }
+}
+
+/// Whether a target refuses an assistant turn that does not carry back the
+/// reasoning it produced for that turn (spec 0181).
+///
+/// Measured, not documented: DeepSeek's thinking mode rejects a replayed
+/// tool-calling turn whose `reasoning_content` is missing, while accepting
+/// the same turn when it is present — including when it is empty.
+pub fn provider_echoes_reasoning(provider: &str) -> bool {
+    matches!(provider.to_ascii_lowercase().as_str(), "deepseek")
 }
 
 /// How a route's target consumes a requested reasoning effort (spec 0160).
@@ -400,6 +410,9 @@ pub struct ArmedRoute {
     pub client_dialect: Dialect,
     /// Whether and how the target honors a requested reasoning effort.
     pub effort: EffortSupport,
+    /// The target requires each assistant turn to carry back the reasoning
+    /// it produced for that turn (spec 0181).
+    pub reasoning_echo: bool,
     /// Pin-chosen effort applied when this arm is the session's durable
     /// pin (spec 0165). Catalog-resolved request-scoped arms leave this
     /// `None` so the harness request body remains authoritative.
@@ -434,6 +447,9 @@ impl ArmedRoute {
             || self.system_prefix.is_some()
             || !self.extra_headers.is_empty()
             || !self.drop_params.is_empty()
+            // Carrying reasoning back is a rewrite of the request body,
+            // which byte-forwarding never performs (spec 0181).
+            || self.reasoning_echo
     }
 }
 
@@ -456,6 +472,9 @@ pub struct SessionRouting {
     /// request.
     role_models: HashSet<String>,
     route: RwLock<Option<ArmedRoute>>,
+    /// Reasoning the session's target has produced, kept so a later request
+    /// can hand each assistant turn its own back (spec 0181).
+    reasoning: RwLock<ReasoningMemo>,
     /// Bumped on every route change. Open pass-through tunnels compare it
     /// against the value they started with to notice they are stale: a
     /// tunnel decides tunnel-vs-intercept once, at CONNECT, and a harness
@@ -468,9 +487,62 @@ pub struct SessionRouting {
     observed_tx: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
+/// Reasoning a target produced for one of its own tool-calling turns,
+/// keyed by the tool-call id that turn carried (spec 0181).
+///
+/// Bounded rather than complete: an entry that has aged out degrades to an
+/// empty echo, which the target accepts, instead of growing a session's
+/// memory with every turn it has ever taken.
+#[derive(Default)]
+pub struct ReasoningMemo {
+    entries: VecDeque<(String, String)>,
+    bytes: usize,
+}
+
+impl ReasoningMemo {
+    /// Reasoning kept per session before the oldest turns are forgotten.
+    const MAX_BYTES: usize = 1 << 20;
+
+    fn remember(&mut self, id: String, reasoning: String) {
+        if id.is_empty() || self.entries.iter().any(|(known, _)| *known == id) {
+            return;
+        }
+        self.bytes += id.len() + reasoning.len();
+        self.entries.push_back((id, reasoning));
+        while self.bytes > Self::MAX_BYTES {
+            let Some((id, reasoning)) = self.entries.pop_front() else {
+                break;
+            };
+            self.bytes -= id.len() + reasoning.len();
+        }
+    }
+
+    fn recall(&self, id: &str) -> Option<String> {
+        self.entries
+            .iter()
+            .find(|(known, _)| known == id)
+            .map(|(_, reasoning)| reasoning.clone())
+    }
+}
+
 impl SessionRouting {
     pub fn armed_route(&self) -> Option<ArmedRoute> {
         self.route.read().unwrap().clone()
+    }
+
+    /// Record the reasoning a target produced for the turn that made these
+    /// tool calls. Each call id resolves to it, since the harness may
+    /// replay the turn's calls in any order.
+    pub fn remember_reasoning(&self, tool_call_ids: &[String], reasoning: &str) {
+        let mut memo = self.reasoning.write().unwrap();
+        for id in tool_call_ids {
+            memo.remember(id.clone(), reasoning.to_string());
+        }
+    }
+
+    /// The reasoning that accompanied `tool_call_id`, if still remembered.
+    pub fn recall_reasoning(&self, tool_call_id: &str) -> Option<String> {
+        self.reasoning.read().unwrap().recall(tool_call_id)
     }
 
     /// Whether a request's model names an internal seat the harness chose
@@ -796,6 +868,7 @@ impl Router {
             catalog_enabled: AtomicBool::new(catalog_enabled),
             role_models,
             route: RwLock::new(None),
+            reasoning: RwLock::new(ReasoningMemo::default()),
             route_epoch: std::sync::atomic::AtomicU64::new(0),
             observed: AtomicBool::new(false),
             observed_tx: self.observed_tx.clone(),
@@ -1023,6 +1096,7 @@ impl Router {
             target_dialect: provider.dialect(),
             client_dialect: routing.dialect,
             effort: oauth::effort_support(provider, &model),
+            reasoning_echo: false,
             pin_effort: None,
             client: reqwest::Client::new(),
         })
@@ -1148,6 +1222,7 @@ impl Router {
             target_dialect,
             client_dialect: routing.dialect,
             effort: profile_effort_support(&profile.provider, &resolved_model),
+            reasoning_echo: provider_echoes_reasoning(&profile.provider),
             model: resolved_model,
             pin_effort: None,
             client: reqwest::Client::new(),
@@ -2019,6 +2094,72 @@ mod tests {
         );
     }
 
+    /// A session remembers the reasoning its target produced, and forgets
+    /// the oldest of it rather than growing without bound. A forgotten
+    /// turn is a miss, which the caller answers with an empty echo — never
+    /// with another turn's reasoning (spec 0181).
+    #[test]
+    fn a_session_remembers_reasoning_per_tool_call_and_then_forgets_it() {
+        let mut memo = ReasoningMemo::default();
+        memo.remember("call_1".into(), "first".into());
+        memo.remember("call_2".into(), "second".into());
+        memo.remember("call_1".into(), "a later turn must not overwrite".into());
+        assert_eq!(memo.recall("call_1").as_deref(), Some("first"));
+        assert_eq!(memo.recall("call_2").as_deref(), Some("second"));
+        assert_eq!(memo.recall("call_unknown"), None);
+
+        memo.remember(String::new(), "an id-less turn is not addressable".into());
+        assert_eq!(memo.recall(""), None);
+
+        let bulk = "x".repeat(64 * 1024);
+        for i in 0..24 {
+            memo.remember(format!("call_bulk_{i}"), bulk.clone());
+        }
+        assert_eq!(
+            memo.recall("call_1"),
+            None,
+            "the oldest reasoning is dropped once the budget is spent"
+        );
+        assert_eq!(memo.recall("call_bulk_23").as_deref(), Some(bulk.as_str()));
+        assert!(memo.bytes <= ReasoningMemo::MAX_BYTES);
+    }
+
+    /// DeepSeek refuses a replayed tool-calling turn whose reasoning is
+    /// missing, so its arms must rebuild the request even when the harness
+    /// already speaks the target's dialect (spec 0181).
+    #[test]
+    fn a_deepseek_arm_carries_reasoning_and_always_rebuilds() {
+        assert!(provider_echoes_reasoning("deepseek"));
+        assert!(provider_echoes_reasoning("DeepSeek"));
+        assert!(!provider_echoes_reasoning("openai"));
+        assert!(!provider_echoes_reasoning("anthropic"));
+
+        let mut route = ArmedRoute {
+            name: "deepseek".into(),
+            endpoint: "https://api.deepseek.com/v1/chat/completions".into(),
+            base_url: "https://api.deepseek.com/v1".into(),
+            model: "deepseek-v4-flash".into(),
+            api_key: "sk-test".into(),
+            auth: TargetAuth::Bearer,
+            system_prefix: None,
+            extra_headers: Vec::new(),
+            drop_params: &[],
+            target_dialect: Dialect::OpenAiChat,
+            client_dialect: Dialect::OpenAiChat,
+            effort: EffortSupport::DeepSeek,
+            reasoning_echo: provider_echoes_reasoning("deepseek"),
+            pin_effort: None,
+            client: reqwest::Client::new(),
+        };
+        assert!(!route.translates(), "same dialect on both ends");
+        assert!(
+            route.needs_rebuild(),
+            "byte-forwarding would ship the turn without its reasoning"
+        );
+        route.reasoning_echo = false;
+        assert!(!route.needs_rebuild());
+    }
+
     /// The built-in DeepSeek target (spec 0179) reaches the router as an
     /// ordinary profile, so it must be selectable from an Anthropic harness
     /// and carry every model the shared catalog lists for the provider —
@@ -2061,6 +2202,10 @@ mod tests {
             .unwrap();
         assert_eq!(armed.model, "deepseek-v4-pro");
         let ctx = r.sessions.read().unwrap()["s1"].clone();
+        assert!(
+            ctx.armed_route().unwrap().reasoning_echo,
+            "a DeepSeek arm must carry reasoning back (spec 0181)"
+        );
         assert!(
             ctx.armed_route().unwrap().translates(),
             "a chat-completions target from an anthropic harness must translate"
