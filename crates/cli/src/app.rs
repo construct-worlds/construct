@@ -40379,6 +40379,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_view_highlights_the_serving_state() {
+        use ratatui::style::Modifier;
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".into());
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(0);
+        app.session_transitions.clear();
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let state = "serving";
+        let view = app.layout.view_area.expect("service view");
+        let buffer = term.backend().buffer();
+        let serving_row = (view.y..view.bottom())
+            .find(|&y| {
+                let row = (view.x..view.right())
+                    .filter_map(|x| buffer.cell((x, y)))
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                row.contains(state)
+            })
+            .expect("service view should render its state");
+        let serving_x = (view.x..view.right())
+            .find(|&x| {
+                (0..state.len() as u16).all(|offset| {
+                    buffer
+                        .cell((x + offset, serving_row))
+                        .is_some_and(|cell| {
+                            cell.symbol()
+                                == state
+                                    .get(offset as usize..offset as usize + 1)
+                                    .expect("state is ASCII")
+                        })
+                })
+            })
+            .expect("service view should render the serving value");
+
+        for offset in 0..state.len() as u16 {
+            let cell = buffer
+                .cell((serving_x + offset, serving_row))
+                .expect("serving value cell");
+            assert_eq!(cell.style().fg, Some(app.theme.success));
+            assert!(
+                cell.style().add_modifier.contains(Modifier::BOLD),
+                "serving state should be bold"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn bare_tab_follows_sidebar_visual_order() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
