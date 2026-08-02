@@ -3288,6 +3288,14 @@ pub struct ServiceChannelSummary {
     pub allowed_workspaces: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_channels: Vec<String>,
+    /// Slack behavior options, reported so a client can show what it is about
+    /// to preserve. `None` on a channel whose kind has no such option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_context: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_to: Option<String>,
     /// Live public exposure, when this channel has been explicitly published.
@@ -3443,6 +3451,9 @@ pub enum ServiceField {
     ChannelPort,
     ChannelState,
     ChannelCredential,
+    ChannelProgress,
+    ChannelFollowUp,
+    ChannelThreadContext,
 }
 
 impl ServiceField {
@@ -3460,15 +3471,24 @@ impl ServiceField {
         ServiceField::ChannelPort,
         ServiceField::ChannelState,
         ServiceField::ChannelCredential,
+        ServiceField::ChannelProgress,
+        ServiceField::ChannelFollowUp,
+        ServiceField::ChannelThreadContext,
     ];
 
     pub fn propagation(self) -> PropagationClass {
         match self {
-            // Channel shape is listener state: saving it binds or unbinds.
+            // Channel shape is listener state: saving it binds or unbinds. A
+            // Slack channel has no port, but its behavior options are held by
+            // the running connection, so saving one replaces that connection
+            // exactly as a changed allowlist does.
             ServiceField::ChannelAttachment
             | ServiceField::ChannelPort
             | ServiceField::ChannelState
-            | ServiceField::ChannelCredential => PropagationClass::Immediate,
+            | ServiceField::ChannelCredential
+            | ServiceField::ChannelProgress
+            | ServiceField::ChannelFollowUp
+            | ServiceField::ChannelThreadContext => PropagationClass::Immediate,
             // Consulted while handling a request, before any session is touched.
             ServiceField::Routing | ServiceField::Paused | ServiceField::ApprovalTimeout => {
                 PropagationClass::NextRequest
@@ -3562,7 +3582,31 @@ pub struct ServiceChannelPut {
     pub allowed_workspaces: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_channels: Vec<String>,
+    /// Slack behavior options. An omitted option keeps the stored value, so a
+    /// client that does not offer these fields never resets them by saving an
+    /// unrelated one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_context: Option<usize>,
 }
+
+/// Accepted values for a Slack channel's behavior options, in the order a
+/// client cycles them. Clients and the daemon's validator read the same lists,
+/// so an option added here is offered and accepted by the same change.
+pub const SLACK_PROGRESS_VALUES: &[&str] = &["off", "placeholder", "reaction", "both"];
+pub const SLACK_FOLLOW_UP_VALUES: &[&str] = &["off", "thread", "channel"];
+/// Slack's own ceiling on one `conversations.replies` page.
+pub const SLACK_THREAD_CONTEXT_MAX: usize = 1000;
+
+/// What a channel created without these options gets. Published so a client
+/// can show a new channel the values it will be saved with, rather than three
+/// blanks that mean "whatever the daemon decides".
+pub const SLACK_PROGRESS_DEFAULT: &str = "placeholder";
+pub const SLACK_FOLLOW_UP_DEFAULT: &str = "thread";
+pub const SLACK_THREAD_CONTEXT_DEFAULT: usize = 50;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceChannelPutResult {

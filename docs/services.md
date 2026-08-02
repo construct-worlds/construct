@@ -43,6 +43,14 @@ follow_up = "thread"       # off | thread | channel
 thread_context = 50        # earlier thread messages to read on joining; 0 = none
 ```
 
+The last three are also editable where the channel is. Select a Slack channel
+in the service view and press `e`: the editor lists **Progress**, **Follow-up**,
+and **Thread context** below the allowlists, with what each one needs from your
+Slack app in the help column. Space or `→` steps an option forward and `←` back;
+thread context is typed. The web client offers the same fields. Saving any of
+them reconnects that channel's Socket Mode connection, the same as changing an
+allowlist does.
+
 ### Answering without being mentioned
 
 A bot you must `@`-mention for every message cannot hold a conversation. DMs
