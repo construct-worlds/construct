@@ -16854,6 +16854,37 @@ fn render_playbook_popup_at(
     })
 }
 
+/// Left edge of the first run of `width` blank cells on `row`, at or right of
+/// `from`, within `inner` — or `None` when the row has no room.
+///
+/// "Blank" means the cell holds no visible glyph. A cell that is only styled
+/// (a shimmer band, a selection tint) still counts: painting a name flag over
+/// a background is fine, painting it over a character is not.
+fn playbook_collab_label_slot(
+    buf: &ratatui::buffer::Buffer,
+    inner: Rect,
+    row: u16,
+    from: u16,
+    width: u16,
+) -> Option<u16> {
+    if width == 0 || row < inner.y || row >= inner.bottom() {
+        return None;
+    }
+    let last_start = inner.right().checked_sub(width)?;
+    let mut x = from.max(inner.x);
+    while x <= last_start {
+        let free = (x..x + width).all(|cx| {
+            buf.cell((cx, row))
+                .is_none_or(|cell| cell.symbol().trim().is_empty())
+        });
+        if free {
+            return Some(x);
+        }
+        x += 1;
+    }
+    None
+}
+
 fn render_playbook_collab_cursors(
     f: &mut Frame,
     app: &App,
@@ -16961,13 +16992,41 @@ fn render_playbook_collab_cursors(
                 let label = truncate_to_width(label, max_w);
                 let label_w = UnicodeWidthStr::width(label.as_str()) as u16;
                 if label_w > 0 {
-                    let rect = Rect::new(pos.x.saturating_add(1), pos.y - 1, label_w, 1);
-                    let mut label_style =
-                        playbook_collab_cursor_label_style(&app.theme, cursor.color_index);
-                    if is_agent {
-                        label_style = label_style.add_modifier(Modifier::ITALIC);
+                    // Find somewhere the flag fits without covering a glyph.
+                    // It used to be painted unconditionally just above the
+                    // caret, straight over whatever was already there — a peer
+                    // editing one line below turned `- build the thing` into
+                    // `- build tWeb 1ing`, and the user had no way to tell the
+                    // badge from their own text (#1093).
+                    //
+                    // Preferred spot first (the row above, beside the caret),
+                    // then the caret's own row, whose trailing blanks are free
+                    // on any line shorter than the pane. When neither has room
+                    // the flag is dropped: the caret cell itself is already
+                    // painted in the collaborator's colour, so they stay
+                    // identifiable without a badge eating the document.
+                    let start = pos.x.saturating_add(1);
+                    let slot = playbook_collab_label_slot(
+                        f.buffer_mut(),
+                        inner,
+                        pos.y - 1,
+                        start,
+                        label_w,
+                    )
+                    .map(|x| (x, pos.y - 1))
+                    .or_else(|| {
+                        playbook_collab_label_slot(f.buffer_mut(), inner, pos.y, start, label_w)
+                            .map(|x| (x, pos.y))
+                    });
+                    if let Some((x, y)) = slot {
+                        let rect = Rect::new(x, y, label_w, 1);
+                        let mut label_style =
+                            playbook_collab_cursor_label_style(&app.theme, cursor.color_index);
+                        if is_agent {
+                            label_style = label_style.add_modifier(Modifier::ITALIC);
+                        }
+                        f.render_widget(Paragraph::new(label).style(label_style), rect);
                     }
-                    f.render_widget(Paragraph::new(label).style(label_style), rect);
                 }
             }
         }
@@ -23992,6 +24051,66 @@ mod tests {
     /// column right of the real edit point for every character after it. The
     /// renderer now paints one space per leading tab, which both restores the
     /// agreement and makes the indentation visible.
+    /// Build a one-buffer fixture with `rows` painted at x=0 and run the slot
+    /// search over it.
+    fn label_slot_over(rows: &[&str], row: u16, from: u16, width: u16) -> Option<u16> {
+        let w = rows.iter().map(|r| r.len()).max().unwrap_or(0) as u16;
+        let area = Rect::new(0, 0, w, rows.len() as u16);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        for (y, text) in rows.iter().enumerate() {
+            buf.set_string(0, y as u16, text, Style::default());
+        }
+        playbook_collab_label_slot(&buf, area, row, from, width)
+    }
+
+    /// Regression for #1093: a collaborator's name flag never lands on a cell
+    /// that holds a character.
+    ///
+    /// It used to be painted unconditionally just above the caret, straight
+    /// over whatever was there — a peer editing one line below turned
+    /// `- build the thing` into `- build tWeb 1ing`.
+    #[test]
+    fn playbook_collab_label_never_covers_a_glyph() {
+        // The preferred spot (beside the caret, row above) is occupied, so the
+        // search slides right to the line's trailing blanks.
+        let slot = label_slot_over(
+            &["- build the thing        ", "- verify it              "],
+            0,
+            9,
+            5,
+        );
+        assert_eq!(
+            slot,
+            Some(17),
+            "the flag must sit past the end of the text, not on top of it"
+        );
+
+        // A row with no room at all yields nothing: the caller drops the flag
+        // rather than eat a character.
+        assert_eq!(
+            label_slot_over(&["0123456789"], 0, 0, 5),
+            None,
+            "a full row has nowhere to put a flag"
+        );
+    }
+
+    /// The preferred placement is kept when it is actually free, so this fix
+    /// does not move flags that were already sitting in blank space.
+    #[test]
+    fn playbook_collab_label_keeps_the_preferred_slot_when_free() {
+        assert_eq!(label_slot_over(&["          ", "- verify  "], 0, 3, 5), Some(3));
+    }
+
+    /// A styled-but-empty cell — a shimmer band, a selection tint — is still
+    /// free: the flag covers a background, not a character.
+    #[test]
+    fn playbook_collab_label_may_sit_on_a_styled_blank() {
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        buf.set_string(0, 0, "          ", Style::default().bg(Color::Rgb(0, 40, 0)));
+        assert_eq!(playbook_collab_label_slot(&buf, area, 0, 0, 5), Some(0));
+    }
+
     #[test]
     fn playbook_cursor_position_matches_the_paint_on_a_tab_indented_line() {
         let area = Rect::new(0, 0, 40, 4);
