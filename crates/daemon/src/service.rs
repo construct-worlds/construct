@@ -453,18 +453,42 @@ pub fn put_channel(
     })
 }
 
+/// Remove a channel from the catalog for good, detaching it from the caller's
+/// service first when it is attached there. Deletion is honest — unlike
+/// [`detach_channel`], the channel does not survive as an available catalog
+/// entry. A channel owned by another service is refused rather than stolen.
 pub fn delete_channel(
     dir: &std::path::Path,
     params: construct_protocol::ServiceChannelNameParams,
 ) -> Result<()> {
-    detach_channel(
-        dir,
-        construct_protocol::ServiceChannelAttachParams {
-            service_name: params.service_name,
-            channel_id: params.channel_id,
-        },
-    )
-    .map(|_| ())
+    validate_service_name(&params.service_name)?;
+    validate_channel_id(&params.channel_id)?;
+    let mut services = load_definitions(dir)?;
+    let mut catalog = load_channel_catalog(dir)?;
+    migrate_legacy_channels(dir, &services, &mut catalog)?;
+    if !catalog.channels.contains_key(&params.channel_id) {
+        return Err(anyhow!(
+            "channel `{}` not found in catalog",
+            params.channel_id
+        ));
+    }
+    let owners = channel_owners(&services);
+    if let Some(owner) = owner_label(&owners, &params.channel_id) {
+        if owner != params.service_name {
+            return Err(anyhow!(
+                "channel `{}` is attached to service `{owner}`; delete it from there",
+                params.channel_id
+            ));
+        }
+        let service = services
+            .get_mut(&params.service_name)
+            .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
+        service.channels.remove(&params.channel_id);
+        write_definition(dir, &params.service_name, service)?;
+    }
+    catalog.channels.remove(&params.channel_id);
+    write_channel_catalog(dir, &catalog)?;
+    Ok(())
 }
 
 pub fn attach_channel(
@@ -1352,6 +1376,7 @@ mod tests {
             .unwrap()
             .channels
             .is_empty());
+        assert!(list_channel_catalog(&services).unwrap().is_empty());
     }
 
     #[test]
@@ -1455,9 +1480,9 @@ mod tests {
         .unwrap_err();
         assert!(rejected.to_string().contains("already attached"));
 
-        delete_channel(
+        detach_channel(
             &services,
-            construct_protocol::ServiceChannelNameParams {
+            construct_protocol::ServiceChannelAttachParams {
                 service_name: "alerts".into(),
                 channel_id: "http".into(),
             },
@@ -1482,6 +1507,91 @@ mod tests {
                 .as_deref(),
             Some("backup")
         );
+    }
+
+    #[test]
+    fn deleting_a_channel_removes_it_from_the_catalog() {
+        let config = tempfile::tempdir().unwrap();
+        let services = config.path().join("services");
+        std::fs::create_dir_all(&services).unwrap();
+        for name in ["alerts", "backup"] {
+            put_definition(
+                &services,
+                construct_protocol::ServicePutParams {
+                    service: construct_protocol::ServiceSummary {
+                        name: name.into(),
+                        instruction: String::new(),
+                        harness: "smith".into(),
+                        model: None,
+                        cwd: ".".into(),
+                        routing: "session-key".into(),
+                        paused: false,
+                        channels: Vec::new(),
+                    },
+                },
+            )
+            .unwrap();
+        }
+        put_channel(
+            &services,
+            construct_protocol::ServiceChannelPutParams {
+                service_name: "alerts".into(),
+                channel: construct_protocol::ServiceChannelPut {
+                    id: "http".into(),
+                    kind: "http".into(),
+                    enabled: true,
+                    port: Some(8787),
+                    app_token: None,
+                    bot_token: None,
+                    allowed_workspaces: Vec::new(),
+                    allowed_channels: Vec::new(),
+                },
+                rotate_secret: false,
+            },
+        )
+        .unwrap();
+
+        // Another service may not delete a channel out from under its owner.
+        let stolen = delete_channel(
+            &services,
+            construct_protocol::ServiceChannelNameParams {
+                service_name: "backup".into(),
+                channel_id: "http".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(stolen.to_string().contains("attached to service `alerts`"));
+        assert_eq!(list_channel_catalog(&services).unwrap().len(), 1);
+
+        // An unattached channel is deleted from the catalog outright.
+        detach_channel(
+            &services,
+            construct_protocol::ServiceChannelAttachParams {
+                service_name: "alerts".into(),
+                channel_id: "http".into(),
+            },
+        )
+        .unwrap();
+        delete_channel(
+            &services,
+            construct_protocol::ServiceChannelNameParams {
+                service_name: "backup".into(),
+                channel_id: "http".into(),
+            },
+        )
+        .unwrap();
+        assert!(list_channel_catalog(&services).unwrap().is_empty());
+
+        // A channel that is not in the catalog at all cannot be deleted.
+        let missing = delete_channel(
+            &services,
+            construct_protocol::ServiceChannelNameParams {
+                service_name: "alerts".into(),
+                channel_id: "http".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(missing.to_string().contains("not found in catalog"));
     }
 
     #[test]

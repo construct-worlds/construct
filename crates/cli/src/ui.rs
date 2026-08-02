@@ -8332,9 +8332,9 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
     } else if dialog.mode == crate::app::ServiceDialogMode::Create {
         "Enter/C-s save · Space attach · a create channel · Esc discards this draft"
     } else if unsaved.is_empty() {
-        "Enter/C-s save · Space attach · p publish/withdraw · o open · y copy · Esc to session list"
+        "Enter/C-s save · Space attach · d delete channel · p publish/withdraw · o open · y copy · Esc to session list"
     } else {
-        "Enter/C-s save · Space attach · p publish/withdraw · o open · y copy · Esc reverts edits"
+        "Enter/C-s save · Space attach · d delete channel · p publish/withdraw · o open · y copy · Esc reverts edits"
     };
     activity.push(Line::from(""));
     activity.push(Line::from(Span::styled(
