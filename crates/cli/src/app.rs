@@ -40399,12 +40399,26 @@ mod tests {
             Some(ServiceDialogMode::Create)
         ));
 
-        // Typing lands in the editor's Name field, not anywhere else.
+        // Typing lands in the editor's Name field, not anywhere else, and the
+        // pane keeps following the name it is being given.
         app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog.as_ref().map(|dialog| dialog.service.name.as_str()),
+            app.service_dialog
+                .as_ref()
+                .map(|dialog| dialog.service.name.as_str()),
             Some("demo2")
+        );
+        assert_eq!(app.selection, Selection::Service("demo2".into()));
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        app.session_transitions.clear();
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let text = rendered_text(term.backend().buffer());
+        assert!(text.contains("service: demo2*"), "{text}");
+        assert!(
+            !text.contains("no longer available"),
+            "renaming a draft must not orphan its pane: {text}"
         );
         server.abort();
     }

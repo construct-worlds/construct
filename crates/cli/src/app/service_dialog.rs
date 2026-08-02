@@ -581,7 +581,8 @@ impl App {
             .cloned()
         {
             // A service still being created has no daemon-side definition to
-            // reopen; `open_new_service_view` installs that editor itself.
+            // reopen; `open_new_service_view` installs that editor itself, and
+            // the selection follows the name field so this stays in step.
             None => self.service_dialog = None,
             Some(service) => self.service_dialog = Some(ServiceDialog::editing(service)),
         }
@@ -1271,6 +1272,16 @@ impl App {
         }
         dialog.note = None;
         dialog.confirm_delete = false;
+        // A service being named doesn't exist yet, so the pane is bound to it
+        // by the name in the editor. Keep the selection following the field or
+        // the next selection sync finds no such service and drops the draft.
+        if field == 0 {
+            let name = dialog.service.name.clone();
+            if self.selection.service_name() != Some(name.as_str()) {
+                self.selection = Selection::Service(name);
+                self.sync_active_window_selection();
+            }
+        }
     }
 
     pub(super) fn insert_service_dialog_text(&mut self, text: &str) -> bool {
