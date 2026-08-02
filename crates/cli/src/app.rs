@@ -41066,6 +41066,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unattached_catalog_channels_can_be_deleted_but_owned_ones_cannot() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        let mut available = app.services[0].channels[0].clone();
+        available.id = "shared".to_string();
+        available.attached_to = None;
+        let mut owned_elsewhere = app.services[0].channels[0].clone();
+        owned_elsewhere.id = "busy".to_string();
+        owned_elsewhere.attached_to = Some("other-service".to_string());
+        app.service_channel_catalog = vec![
+            app.services[0].channels[0].clone(),
+            available,
+            owned_elsewhere,
+        ];
+        app.open_edit_service_view("assistant");
+
+        // An available catalog row arms the delete confirmation.
+        {
+            let dialog = app.service_dialog.as_mut().unwrap();
+            dialog.selected_field = 6;
+            dialog.selected_channel = 1;
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .await;
+        let editor = app
+            .service_dialog
+            .as_ref()
+            .unwrap()
+            .channel_editor
+            .as_ref()
+            .expect("an unattached channel should open the delete confirmation");
+        assert!(editor.confirm_delete);
+        assert_eq!(editor.channel.id, "shared");
+        assert!(editor.note.as_deref().unwrap().contains("unattached"));
+
+        // A channel owned by another service is refused with an explanation.
+        {
+            let dialog = app.service_dialog.as_mut().unwrap();
+            dialog.channel_editor = None;
+            dialog.selected_field = 6;
+            dialog.selected_channel = 2;
+        }
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .await;
+        let dialog = app.service_dialog.as_ref().unwrap();
+        assert!(dialog.channel_editor.is_none());
+        assert!(dialog
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("already attached to service `other-service`"));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn service_model_picker_uses_the_pin_router_catalog() {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));

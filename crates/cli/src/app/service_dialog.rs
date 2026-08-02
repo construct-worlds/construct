@@ -410,13 +410,21 @@ impl App {
     }
 
     pub fn open_edit_service_channel(&mut self, index: usize) -> bool {
+        self.open_service_channel_editor(index, false)
+    }
+
+    /// Open the channel editor on catalog row `index`. Editing is limited to
+    /// channels attached to this service; `for_delete` also admits unattached
+    /// catalog rows, since dropping one takes nothing away from any service.
+    fn open_service_channel_editor(&mut self, index: usize, for_delete: bool) -> bool {
         let Some(dialog) = self.service_dialog.as_mut() else {
             return false;
         };
         let Some(channel) = self.service_channel_catalog.get(index).cloned() else {
             return false;
         };
-        if channel.attached_to.as_deref() != Some(dialog.service.name.as_str()) {
+        let attached_here = channel.attached_to.as_deref() == Some(dialog.service.name.as_str());
+        if !attached_here && !(for_delete && channel.attached_to.is_none()) {
             return false;
         }
         dialog.selected_field = 6;
@@ -426,13 +434,60 @@ impl App {
             service_name: dialog.service.name.clone(),
             channel,
             selected_field: 2,
-            note: Some("Channel changes bind or unbind the listener immediately.".to_string()),
+            note: Some(if attached_here {
+                "Channel changes bind or unbind the listener immediately.".to_string()
+            } else {
+                "This channel is not attached to any service.".to_string()
+            }),
             new_secret: None,
             confirm_delete: false,
             app_token: String::new(),
             bot_token: String::new(),
         });
         true
+    }
+
+    /// Arm the delete-confirm prompt for the selected catalog row. A channel
+    /// owned by another service is refused: deleting it here would pull the
+    /// endpoint out from under that service.
+    fn confirm_delete_service_channel(&mut self, index: usize) {
+        let Some(dialog) = self.service_dialog.as_ref() else {
+            return;
+        };
+        let service_name = dialog.service.name.clone();
+        let Some(channel) = self.service_channel_catalog.get(index).cloned() else {
+            return;
+        };
+        if let Some(owner) = channel.attached_to.as_deref() {
+            if owner != service_name {
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    dialog.note = Some(format!(
+                        "Channel `{}` is already attached to service `{owner}`.",
+                        channel.id
+                    ));
+                }
+                return;
+            }
+        }
+        let attached_here = channel.attached_to.is_some();
+        if !self.open_service_channel_editor(index, true) {
+            return;
+        }
+        if let Some(editor) = self
+            .service_dialog
+            .as_mut()
+            .and_then(|dialog| dialog.channel_editor.as_mut())
+        {
+            editor.confirm_delete = true;
+            editor.note = Some(if attached_here {
+                "Delete this channel? Enter/y confirms; Esc/n cancels.".to_string()
+            } else {
+                format!(
+                    "Delete unattached channel `{}` from the catalog? Enter/y confirms; Esc/n cancels.",
+                    editor.channel.id
+                )
+            });
+        }
     }
 
     async fn toggle_service_channel(&mut self, index: usize) {
@@ -832,6 +887,9 @@ impl App {
         };
         let service_name = editor.service_name.clone();
         let channel_id = editor.channel.id.clone();
+        // An unattached channel has no live endpoint to withdraw; say so
+        // instead of claiming a withdrawal that never happened.
+        let was_attached = editor.channel.attached_to.is_some();
         match self
             .client
             .delete_service_channel(&service_name, &channel_id)
@@ -849,7 +907,11 @@ impl App {
                         parent.service = service;
                     }
                     parent.channel_editor = None;
-                    parent.note = Some(format!("Channel `{channel_id}` deleted and withdrawn."));
+                    parent.note = Some(if was_attached {
+                        format!("Channel `{channel_id}` deleted and withdrawn.")
+                    } else {
+                        format!("Channel `{channel_id}` deleted from the catalog.")
+                    });
                 }
             }
             Err(error) => {
@@ -1275,16 +1337,7 @@ impl App {
                 self.open_edit_service_channel(snapshot.selected_channel);
             }
             KeyCode::Char('d') if snapshot.selected_field == 6 => {
-                if self.open_edit_service_channel(snapshot.selected_channel) {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
-                        if let Some(editor) = dialog.channel_editor.as_mut() {
-                            editor.confirm_delete = true;
-                            editor.note = Some(
-                                "Delete this channel? Enter/y confirms; Esc/n cancels.".to_string(),
-                            );
-                        }
-                    }
-                }
+                self.confirm_delete_service_channel(snapshot.selected_channel);
             }
             KeyCode::Char('r') if snapshot.selected_field == 6 => {
                 if self.open_edit_service_channel(snapshot.selected_channel) {
