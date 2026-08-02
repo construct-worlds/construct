@@ -462,17 +462,18 @@ impl App {
                 self.select_session(summary.id.clone());
                 self.sync_active_window_selection();
             }
+            // Group and archived headers take two clicks to fold: the first
+            // only moves the selection there, the second toggles. Reaching
+            // for a project row with the mouse — to select it, rename it, or
+            // just see it highlighted — shouldn't collapse the thing you were
+            // aiming at and shift every row below out from under the cursor.
             ListItem::GroupHeader { group, .. } => {
                 let id = group.id.clone();
                 let next = !group.collapsed;
-                if self
-                    .selection
-                    .group_id()
-                    .map(|s| s != id.as_str())
-                    .unwrap_or(true)
-                {
-                    self.select_group(id.clone());
+                if self.selection.group_id() != Some(id.as_str()) {
+                    self.select_group(id);
                     self.sync_active_window_selection();
+                    return;
                 }
                 if let Err(e) = self.client.set_project_collapsed(&id, next).await {
                     self.set_status(format!("collapse failed: {e}"));
@@ -480,8 +481,11 @@ impl App {
             }
             ListItem::ArchivedRow { section, .. } => {
                 let section = section.clone();
-                self.select_archive_row(section.clone());
-                self.sync_active_window_selection();
+                if self.selection.archive_section() != Some(&section) {
+                    self.select_archive_row(section);
+                    self.sync_active_window_selection();
+                    return;
+                }
                 self.toggle_archive_section(&section);
             }
         }

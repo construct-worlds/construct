@@ -44274,6 +44274,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clicking_a_project_header_selects_before_it_collapses() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut member = summary_with_kind(construct_protocol::SessionKind::User);
+        member.id = "s1".into();
+        member.group_id = Some("project".into());
+        app.sessions = vec![member];
+        app.groups = vec![GroupSummary {
+            id: "project".into(),
+            name: "Project".into(),
+            created_at: chrono::Utc::now(),
+            position: 0,
+            collapsed: false,
+        }];
+        app.selection = Selection::Session("s1".into());
+        app.status = None;
+        app.layout = test_layout();
+        app.layout.list_row_count = app.list_items().len();
+        app.layout.list_items_area = Some(Rect::new(1, 1, 18, 8));
+        assert!(matches!(
+            &app.list_items()[0],
+            ListItem::GroupHeader { group, .. } if group.id == "project"
+        ));
+
+        // First click on the unselected header: selection only. Collapsing
+        // here would fold the project the user was merely reaching for.
+        app.click_list(Rect::new(0, 0, 20, 10), 5, 1).await;
+        assert_eq!(app.selection, Selection::Group("project".into()));
+        assert!(
+            app.status.is_none(),
+            "the first click must not attempt a collapse"
+        );
+
+        // Second click, now that it's selected: toggle. The mock daemon
+        // never answers, so the resulting failure status is the evidence
+        // that the collapse RPC was actually issued.
+        app.click_list(Rect::new(0, 0, 20, 10), 5, 1).await;
+        assert_eq!(app.selection, Selection::Group("project".into()));
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.starts_with("collapse failed")),
+            "a click on the already-selected header toggles collapse"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn clicking_an_archived_row_selects_before_it_expands() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut active = summary_with_kind(construct_protocol::SessionKind::User);
+        active.id = "active".into();
+        active.position = 0;
+        let mut archived = summary_with_kind(construct_protocol::SessionKind::User);
+        archived.id = "arch".into();
+        archived.position = 1;
+        archived.archived = true;
+        app.sessions = vec![active, archived];
+        app.selection = Selection::Session("active".into());
+        app.layout = test_layout();
+        app.layout.list_row_count = app.list_items().len();
+        app.layout.list_items_area = Some(Rect::new(1, 1, 18, 8));
+        assert!(matches!(
+            &app.list_items()[1],
+            ListItem::ArchivedRow {
+                section: ArchiveSection::Ungrouped,
+                ..
+            }
+        ));
+
+        // First click selects the row without revealing the archive.
+        app.click_list(Rect::new(0, 0, 20, 10), 5, 2).await;
+        assert_eq!(
+            app.selection,
+            Selection::ArchivedRow(ArchiveSection::Ungrouped)
+        );
+        assert!(!app.show_archived_ungrouped);
+
+        // Second click on the selected row toggles it open, third closes it.
+        app.click_list(Rect::new(0, 0, 20, 10), 5, 2).await;
+        assert!(app.show_archived_ungrouped);
+        app.click_list(Rect::new(0, 0, 20, 10), 5, 2).await;
+        assert!(!app.show_archived_ungrouped);
+        assert_eq!(
+            app.selection,
+            Selection::ArchivedRow(ArchiveSection::Ungrouped)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn next_session_skips_collapsed_top_level_archived_row_before_project() {
         use construct_client::Client;
         use tokio::net::UnixListener;
