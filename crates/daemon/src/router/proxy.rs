@@ -664,7 +664,7 @@ where
     {
         ctx.mark_observed();
         let streaming = wants_stream(&body);
-        return match forward_translated(body, &route, client_dialect).await {
+        return match forward_translated(body, &route, client_dialect, &ctx).await {
             Ok(forwarded) => {
                 write_translated_response(
                     stream,
@@ -673,6 +673,7 @@ where
                     client_dialect,
                     streaming,
                     &forwarded.context,
+                    &ctx,
                 )
                 .await
             }
@@ -1004,10 +1005,14 @@ async fn forward_translated(
     body: Vec<u8>,
     route: &ArmedRoute,
     client_dialect: Dialect,
+    ctx: &SessionRouting,
 ) -> Result<TranslatedResponse> {
     let source: serde_json::Value =
         serde_json::from_slice(&body).context("parse intercepted request body")?;
     let mut canon = translate::parse_request(client_dialect, &source);
+    if route.reasoning_echo {
+        restore_reasoning(&mut canon, |id| ctx.recall_reasoning(id));
+    }
     // Durable pin effort overrides the harness body on pin-routed turns
     // (spec 0165). Catalog-resolved arms leave pin_effort empty so the
     // request body remains the authority.
@@ -1096,6 +1101,45 @@ async fn forward_translated(
     })
 }
 
+/// Give each replayed assistant turn back the reasoning the target
+/// produced for it (spec 0181).
+///
+/// A harness that speaks a dialect without a reasoning field cannot carry
+/// it, so the proxy remembers it instead — keyed by the turn's tool-call
+/// ids, which the harness does replay. A turn whose reasoning is no longer
+/// remembered gets an empty one: the target accepts that, and an empty
+/// echo is the honest statement that we no longer have it. Nothing is
+/// invented.
+fn restore_reasoning(
+    canon: &mut translate::CanonRequest,
+    recall: impl Fn(&str) -> Option<String>,
+) {
+    for message in &mut canon.messages {
+        if message.role != translate::CanonRole::Assistant {
+            continue;
+        }
+        // The harness carried it itself — leave its own account alone.
+        if message
+            .blocks
+            .iter()
+            .any(|block| matches!(block, translate::CanonBlock::Thinking(_)))
+        {
+            continue;
+        }
+        let called = message.blocks.iter().find_map(|block| match block {
+            translate::CanonBlock::ToolUse { id, .. } => Some(id.clone()),
+            _ => None,
+        });
+        // Only tool-calling turns are refused without it; a plain answer
+        // needs no echo and gains nothing from an empty one.
+        let Some(id) = called else { continue };
+        let reasoning = recall(&id).unwrap_or_default();
+        message
+            .blocks
+            .insert(0, translate::CanonBlock::Thinking(reasoning));
+    }
+}
+
 /// Map Codex's effort vocabulary onto the K3 scale.
 fn kimi_effort(effort: &str) -> &'static str {
     match effort {
@@ -1146,11 +1190,14 @@ async fn write_translated_response<S>(
     client_dialect: Dialect,
     streaming: bool,
     context: &translate::TranslationContext,
+    ctx: &SessionRouting,
 ) -> Result<()>
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
     use futures::StreamExt;
+
+    let mut capture = ReasoningCapture::new(route.reasoning_echo);
 
     let status = response.status();
     if !status.is_success() {
@@ -1200,14 +1247,16 @@ where
             let body = translate::error_body(client_dialect, message).to_string();
             return write_simple(stream, 502, &body).await;
         }
-        let body = translate::encode_response_with_context(
-            client_dialect,
-            route.target_dialect,
-            &parsed,
-            &route.model,
-            context,
-        )
-        .to_string();
+        let events =
+            translate::decode_full_response_with_context(route.target_dialect, &parsed, context);
+        for event in &events {
+            capture.observe(event);
+        }
+        if let Some((ids, reasoning)) = capture.take() {
+            ctx.remember_reasoning(&ids, &reasoning);
+        }
+        let body =
+            translate::encode_full_response(client_dialect, &events, &route.model).to_string();
         return write_simple(stream, 200, &body).await;
     }
 
@@ -1257,6 +1306,7 @@ where
                 route.target_dialect,
                 data.trim(),
                 context,
+                &mut capture,
             )
             .await?
             {
@@ -1282,6 +1332,7 @@ where
                 route.target_dialect,
                 data.trim(),
                 context,
+                &mut capture,
             )
             .await?
             {
@@ -1307,6 +1358,11 @@ where
         failed = true;
     }
     if !failed {
+        // Only a turn that arrived whole is worth remembering: a truncated
+        // one is not the reasoning the target will expect back.
+        if let Some((ids, reasoning)) = capture.take() {
+            ctx.remember_reasoning(&ids, &reasoning);
+        }
         let tail = encoder.finish();
         write_chunk(stream, tail.as_bytes()).await?;
     }
@@ -1314,6 +1370,53 @@ where
     stream.flush().await?;
     stream.shutdown().await.ok();
     Ok(())
+}
+
+/// The reasoning and tool-call ids of one response, held until the turn
+/// completes and then recorded against the session (spec 0181).
+#[derive(Default)]
+struct ReasoningCapture {
+    armed: bool,
+    reasoning: String,
+    tool_call_ids: Vec<String>,
+}
+
+impl ReasoningCapture {
+    fn new(armed: bool) -> Self {
+        Self {
+            armed,
+            ..Self::default()
+        }
+    }
+
+    fn observe(&mut self, event: &translate::CanonEvent) {
+        if !self.armed {
+            return;
+        }
+        match event {
+            translate::CanonEvent::ThinkingDelta(delta) => self.reasoning.push_str(delta),
+            translate::CanonEvent::ToolStart { id, .. } if !id.is_empty() => {
+                if !self.tool_call_ids.iter().any(|known| known == id) {
+                    self.tool_call_ids.push(id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The completed turn, if it is one worth remembering. A turn with no
+    /// tool calls is never replayed as one, and a turn with no reasoning
+    /// has nothing to hand back that the empty default does not already
+    /// cover.
+    fn take(&mut self) -> Option<(Vec<String>, String)> {
+        if self.reasoning.is_empty() || self.tool_call_ids.is_empty() {
+            return None;
+        }
+        Some((
+            std::mem::take(&mut self.tool_call_ids),
+            std::mem::take(&mut self.reasoning),
+        ))
+    }
 }
 
 enum SseOutcome {
@@ -1328,6 +1431,7 @@ async fn process_target_sse_data<S>(
     dialect: Dialect,
     data: &str,
     context: &translate::TranslationContext,
+    capture: &mut ReasoningCapture,
 ) -> Result<SseOutcome>
 where
     S: tokio::io::AsyncWrite + Unpin,
@@ -1363,6 +1467,7 @@ where
                 && matches!(event, translate::CanonEvent::Usage { .. }))
     });
     for event in events {
+        capture.observe(&event);
         let out = encoder.push(&event);
         if !out.is_empty() {
             write_chunk(stream, out.as_bytes()).await?;
@@ -1568,6 +1673,120 @@ mod tests {
 
     /// The client's own credential must never ride along to a different
     /// vendor's endpoint.
+    /// A turn whose reasoning is still remembered gets it back verbatim;
+    /// one that aged out gets an empty reasoning rather than none, because
+    /// a thinking target refuses the turn outright when the field is
+    /// missing and nothing may be invented in its place (spec 0181).
+    #[test]
+    fn a_replayed_tool_turn_gets_its_reasoning_back() {
+        let mut canon = translate::CanonRequest {
+            messages: vec![
+                translate::CanonMessage {
+                    role: translate::CanonRole::Assistant,
+                    blocks: vec![translate::CanonBlock::ToolUse {
+                        id: "call_known".into(),
+                        name: "ls".into(),
+                        input: serde_json::json!({}),
+                    }],
+                },
+                translate::CanonMessage {
+                    role: translate::CanonRole::Assistant,
+                    blocks: vec![translate::CanonBlock::ToolUse {
+                        id: "call_forgotten".into(),
+                        name: "ls".into(),
+                        input: serde_json::json!({}),
+                    }],
+                },
+                translate::CanonMessage {
+                    role: translate::CanonRole::Assistant,
+                    blocks: vec![translate::CanonBlock::Text("done".into())],
+                },
+            ],
+            ..Default::default()
+        };
+        restore_reasoning(&mut canon, |id| {
+            (id == "call_known").then(|| "the root listing first".to_string())
+        });
+        assert_eq!(
+            canon.messages[0].blocks[0],
+            translate::CanonBlock::Thinking("the root listing first".into())
+        );
+        assert_eq!(
+            canon.messages[1].blocks[0],
+            translate::CanonBlock::Thinking(String::new())
+        );
+        assert!(
+            !canon.messages[2]
+                .blocks
+                .iter()
+                .any(|b| matches!(b, translate::CanonBlock::Thinking(_))),
+            "a turn that called no tool is not refused without reasoning"
+        );
+    }
+
+    /// A harness that carries reasoning itself is the authority on its own
+    /// turn — the proxy's memory must not overwrite it.
+    #[test]
+    fn a_turn_that_carries_its_own_reasoning_is_left_alone() {
+        let mut canon = translate::CanonRequest {
+            messages: vec![translate::CanonMessage {
+                role: translate::CanonRole::Assistant,
+                blocks: vec![
+                    translate::CanonBlock::Thinking("what the harness kept".into()),
+                    translate::CanonBlock::ToolUse {
+                        id: "call_known".into(),
+                        name: "ls".into(),
+                        input: serde_json::json!({}),
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+        restore_reasoning(&mut canon, |_| Some("what the proxy kept".to_string()));
+        assert_eq!(
+            canon.messages[0].blocks[0],
+            translate::CanonBlock::Thinking("what the harness kept".into())
+        );
+        assert_eq!(canon.messages[0].blocks.len(), 2);
+    }
+
+    #[test]
+    fn a_capture_keeps_only_a_reasoned_tool_turn() {
+        let mut capture = ReasoningCapture::new(true);
+        capture.observe(&translate::CanonEvent::ThinkingDelta("weigh".into()));
+        capture.observe(&translate::CanonEvent::ThinkingDelta("ing".into()));
+        capture.observe(&translate::CanonEvent::ToolStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "ls".into(),
+        });
+        capture.observe(&translate::CanonEvent::ToolStart {
+            index: 1,
+            id: "call_2".into(),
+            name: "grep".into(),
+        });
+        let (ids, reasoning) = capture.take().expect("a reasoned tool turn is kept");
+        assert_eq!(ids, vec!["call_1".to_string(), "call_2".to_string()]);
+        assert_eq!(reasoning, "weighing");
+        assert!(capture.take().is_none(), "a turn is recorded once");
+
+        // Text-only turns are never replayed as tool calls, and a target
+        // that reasoned nothing has nothing to hand back.
+        let mut text_only = ReasoningCapture::new(true);
+        text_only.observe(&translate::CanonEvent::ThinkingDelta("weighing".into()));
+        assert!(text_only.take().is_none());
+
+        // A target the flag was never raised for costs nothing to stream.
+        let mut disarmed = ReasoningCapture::new(false);
+        disarmed.observe(&translate::CanonEvent::ThinkingDelta("weighing".into()));
+        disarmed.observe(&translate::CanonEvent::ToolStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "ls".into(),
+        });
+        assert!(disarmed.take().is_none());
+    }
+
     /// Build a session whose routable host is loopback, so the drain path
     /// can be exercised without DNS.
     fn drainable_ctx(dir: &tempfile::TempDir) -> Arc<SessionRouting> {
@@ -1589,6 +1808,7 @@ mod tests {
             catalog_enabled: std::sync::atomic::AtomicBool::new(false),
             role_models: std::collections::HashSet::new(),
             route: std::sync::RwLock::new(None),
+            reasoning: std::sync::RwLock::new(Default::default()),
             route_epoch: std::sync::atomic::AtomicU64::new(0),
             observed: std::sync::atomic::AtomicBool::new(false),
             observed_tx: tx,
@@ -1795,6 +2015,7 @@ mod tests {
                 Dialect::GoogleGemini,
                 payload,
                 &translate::TranslationContext::default(),
+                &mut ReasoningCapture::default(),
             )
             .await
             .unwrap();

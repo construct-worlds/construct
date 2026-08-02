@@ -452,6 +452,7 @@ pub fn encode_full(events: &[CanonEvent], model: &str) -> Value {
     for event in events {
         match event {
             CanonEvent::TextDelta(t) => text.push_str(t),
+            CanonEvent::ThinkingDelta(_) => {}
             CanonEvent::ToolStart { id, name, .. } => {
                 tools.push((id.clone(), name.clone(), String::new()))
             }
@@ -564,6 +565,7 @@ impl StreamEncoder {
                     }),
                 ));
             }
+            CanonEvent::ThinkingDelta(_) => {}
             CanonEvent::ToolStart { index, id, name } => {
                 if !self.tools.contains(index) {
                     out.push_str(&self.close_open());
