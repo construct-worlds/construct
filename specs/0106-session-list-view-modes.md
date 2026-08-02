@@ -61,15 +61,15 @@ Rules both modes must preserve:
   explicit and remain connected through full mode's detail and spacing rows;
   the hierarchy never changes the user's depth-first session order. Parent
   titles render one emphasis step above leaf titles.
-- Every session row reserves the same single gutter cell between its rails and
-  its status glyph for the children disclosure, whether or not it has children.
-  Sibling rows therefore share one left edge, a session gaining its first child
-  never shifts its own title, and a child's status glyph lands under its
-  parent's title. Fork lineage spends no column of its own: a fork's mark
-  replaces the connector closing its branch corner, so lineage reads as
-  structure on the rail while the cell after the rails stays unambiguously the
-  disclosure. Any future row affordance must either ride the rail the same way
-  or be reserved on every row.
+- One marker cell sits between the rails and the row's content, and every row
+  hanging off the tree spends exactly that one cell: a session's children
+  disclosure, a fork's lineage mark, an archived-children row's own disclosure,
+  or a space when a session has none of them. The cell is reserved whether or
+  not it is used, so sibling rows share one left edge, a session gaining its
+  first child never shifts its own title, and a child's status glyph lands
+  under its parent's title. Where a session could claim the cell twice the
+  disclosure wins, because it is the affordance the operator can act on. Any
+  future row marker joins that column rather than reserving another.
 - The web UI's session list shows the same detail line with the same
   content and omission/fallback rules, but always on — it has no
   compact/full mode pair. Its gauge may render at finer resolution than

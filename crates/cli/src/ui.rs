@@ -835,24 +835,36 @@ fn session_list_marker(summary: &SessionSummary) -> &'static str {
     }
 }
 
-/// Cells every session row reserves between its tree prefix and its status
-/// glyph: the children disclosure. It is reserved unconditionally — a
-/// childless session paints a space there — so all rows at one depth share a
-/// left edge, and a child's status glyph lands under its parent's title. Fork
-/// lineage does not appear here; it rides the rail (see
-/// [`LIST_TREE_CONNECTOR`]).
+/// The one cell every session row reserves between its tree prefix and its
+/// status glyph. It is reserved unconditionally — a plain session paints a
+/// space there — so all rows at one depth share a left edge, and a child's
+/// status glyph lands under its parent's title. An archived-children row
+/// spends the same cell on its own disclosure, so everything hanging off the
+/// rails reads as one marker column.
 const SESSION_ROW_GUTTER_CELLS: usize = 1;
 
-/// That gutter's glyph. Exactly one cell wide in every state, so a session
-/// gaining its first child never nudges its own title — or its siblings' —
-/// sideways.
-fn session_row_disclosure(has_children: bool, children_expanded: bool) -> &'static str {
-    if !has_children {
-        " "
-    } else if children_expanded {
-        "▼"
+/// That cell's glyph: the children disclosure, else a fork's lineage mark,
+/// else a space. Exactly one cell wide in every state, so a session gaining
+/// its first child never nudges its own title — or its siblings' — sideways.
+///
+/// The disclosure wins the cell when a session is both, because it is the
+/// affordance the operator can act on. No current list row is both: the list
+/// gives forks no disclosure, always rendering their descendants expanded. If
+/// that changes, lineage needs somewhere else to live rather than a second
+/// reserved column.
+fn session_row_marker(
+    summary: &SessionSummary,
+    has_children: bool,
+    children_expanded: bool,
+) -> &'static str {
+    if has_children {
+        if children_expanded {
+            "▼"
+        } else {
+            "▶"
+        }
     } else {
-        "▶"
+        session_list_marker(summary)
     }
 }
 
@@ -2299,11 +2311,10 @@ fn list_tree_has_later_row_at_depth(
     false
 }
 
-/// The primary-row tree prefix up to and including this row's corner, but
-/// without the connector cell that closes it — see [`LIST_TREE_CONNECTOR`] and
-/// [`list_tree_branch_prefix`]. Splitting the last cell out lets a fork paint
-/// its lineage mark there in its own color while the rails stay muted.
-fn list_tree_branch_head(
+/// The primary-row tree prefix: ancestor continuation rails followed by this
+/// row's branch corner. Every depth consumes exactly two cells, preserving
+/// existing disclosure hit geometry and right-aligned harness labels.
+fn list_tree_branch_prefix(
     items: &[AppListItem],
     item_index: usize,
     nesting_depth: usize,
@@ -2312,33 +2323,10 @@ fn list_tree_branch_head(
     for depth in 1..=nesting_depth {
         let continues = list_tree_has_later_row_at_depth(items, item_index, depth);
         if depth == nesting_depth {
-            prefix.push(if continues { '├' } else { '└' });
+            prefix.push_str(if continues { "├─" } else { "└─" });
         } else {
             prefix.push_str(if continues { "│ " } else { "  " });
         }
-    }
-    prefix
-}
-
-/// The cell that closes a branch corner on an ordinary row. A fork replaces it
-/// with its lineage mark, so lineage rides the rail rather than spending a
-/// column of its own — and the cell after the rails stays unambiguously the
-/// disclosure column.
-const LIST_TREE_CONNECTOR: &str = "─";
-
-/// The whole primary-row tree prefix: ancestor continuation rails, this row's
-/// branch corner, and the connector closing it. Every depth consumes exactly
-/// two cells, preserving disclosure hit geometry and right-aligned harness
-/// labels. Rows that style the connector separately use
-/// [`list_tree_branch_head`] instead.
-fn list_tree_branch_prefix(
-    items: &[AppListItem],
-    item_index: usize,
-    nesting_depth: usize,
-) -> String {
-    let mut prefix = list_tree_branch_head(items, item_index, nesting_depth);
-    if nesting_depth > 0 {
-        prefix.push_str(LIST_TREE_CONNECTOR);
     }
     prefix
 }
@@ -3221,27 +3209,12 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     attention_rollup,
                     ..
                 } => {
-                    let expand_glyph = session_row_disclosure(*has_children, *children_expanded);
-                    // The rails close with the fork's lineage mark instead of a
-                    // plain connector, so lineage costs no column of its own.
-                    // Forks always nest under a parent, so the rail they need
-                    // is always there.
-                    let rail_head = list_tree_branch_head(&app_items, i, *nesting_depth);
-                    let rail_connector = if *nesting_depth == 0 {
-                        ""
-                    } else if s.forked_from.is_some() {
-                        session_list_marker(s)
-                    } else {
-                        LIST_TREE_CONNECTOR
-                    };
+                    let row_marker = session_row_marker(s, *has_children, *children_expanded);
+                    let tree_prefix = list_tree_branch_prefix(&app_items, i, *nesting_depth);
                     // Fixed-width left side: tree rails + the always-reserved
-                    // disclosure gutter + " glyph " (3) + one cell of right
-                    // inset, matching the service row's prefix budget.
-                    let prefix_w = rail_head.chars().count()
-                        + rail_connector.chars().count()
-                        + SESSION_ROW_GUTTER_CELLS
-                        + 3
-                        + 1;
+                    // marker gutter + " glyph " (3) + one cell of right inset,
+                    // matching the service row's prefix budget.
+                    let prefix_w = tree_prefix.chars().count() + SESSION_ROW_GUTTER_CELLS + 3 + 1;
                     let harness = harness_label(s);
                     let harness_w = harness.chars().count();
                     // Reserve room for the trailing unblock marker (" ●") so the
@@ -3291,19 +3264,16 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     } else {
                         Style::default().fg(app.theme.text)
                     };
-                    let connector_style = if s.forked_from.is_some() {
-                        // A fork's mark stays legible against the muted rail.
-                        Style::default().fg(app.theme.info)
+                    // A disclosure is an affordance and wears the group hue; a
+                    // lineage mark is identity and wears the info hue.
+                    let marker_style = if *has_children {
+                        Style::default().fg(app.theme.group)
                     } else {
-                        session_list_secondary_style(&app.theme)
+                        Style::default().fg(app.theme.info)
                     };
                     let mut spans = vec![
-                        Span::styled(rail_head, session_list_secondary_style(&app.theme)),
-                        Span::styled(rail_connector.to_string(), connector_style),
-                        Span::styled(
-                            expand_glyph.to_string(),
-                            Style::default().fg(app.theme.group),
-                        ),
+                        Span::styled(tree_prefix, session_list_secondary_style(&app.theme)),
+                        Span::styled(row_marker.to_string(), marker_style),
                     ];
                     spans.extend([
                         Span::styled(
@@ -24772,51 +24742,99 @@ mod tests {
     }
 
     /// Regression: a project member that grew a subagent or a fork used to
-    /// render its disclosure as an EXTRA cell, pushing its title one column
-    /// right of its childless siblings. The gutter is now reserved on every
-    /// row, so nesting state changes the glyph, never the geometry.
+    /// render its disclosure — and a fork its lineage mark — as EXTRA cells,
+    /// pushing its title one column right of its plainer siblings. One cell is
+    /// now reserved on every row and every marker shares it, so what a session
+    /// is changes the glyph, never the geometry.
     #[test]
-    fn session_row_disclosure_is_the_same_width_with_and_without_children() {
-        for (has_children, children_expanded) in
-            [(false, false), (true, false), (true, true), (false, true)]
-        {
-            assert_eq!(
-                UnicodeWidthStr::width(session_row_disclosure(has_children, children_expanded)),
-                SESSION_ROW_GUTTER_CELLS,
-                "gutter must stay {SESSION_ROW_GUTTER_CELLS} cell(s) for \
-                 has_children={has_children} expanded={children_expanded}"
-            );
+    fn every_session_row_marker_fits_the_one_reserved_cell() {
+        let plain = clip_test_session("plain", Some("plain"), "smith", SessionState::Done);
+        let mut fork = clip_test_session("fork", Some("fork"), "smith", SessionState::Done);
+        fork.forked_from = Some(construct_protocol::ForkedFrom {
+            session_id: "plain".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+            parent_tokens: Default::default(),
+            is_reset_snapshot: false,
+        });
+
+        for summary in [&plain, &fork] {
+            for (has_children, children_expanded) in
+                [(false, false), (true, false), (true, true), (false, true)]
+            {
+                assert_eq!(
+                    UnicodeWidthStr::width(session_row_marker(
+                        summary,
+                        has_children,
+                        children_expanded
+                    )),
+                    SESSION_ROW_GUTTER_CELLS,
+                    "marker must stay {SESSION_ROW_GUTTER_CELLS} cell(s) for \
+                     has_children={has_children} expanded={children_expanded} \
+                     fork={}",
+                    summary.forked_from.is_some()
+                );
+            }
         }
 
-        // The glyph still carries its meaning inside that fixed width.
-        assert_eq!(session_row_disclosure(false, false), " ");
-        assert_eq!(session_row_disclosure(true, false), "▶");
-        assert_eq!(session_row_disclosure(true, true), "▼");
+        // Each glyph still carries its meaning inside that fixed width.
+        assert_eq!(session_row_marker(&plain, false, false), " ");
+        assert_eq!(session_row_marker(&plain, true, false), "▶");
+        assert_eq!(session_row_marker(&plain, true, true), "▼");
+        assert_eq!(session_row_marker(&fork, false, false), "⑂");
+        // The affordance outranks the identity mark when a row is somehow
+        // both — the operator can act on a disclosure.
+        assert_eq!(session_row_marker(&fork, true, true), "▼");
     }
 
-    /// Lineage rides the rail: a fork's mark replaces the connector closing
-    /// its branch corner rather than taking a column of its own. That keeps
-    /// the cell after the rails unambiguously the disclosure column, and keeps
-    /// forks the same width as their non-fork siblings.
+    /// A fork's mark and an archived row's disclosure sit in the same column,
+    /// one cell past identical rails, so everything hanging off the tree reads
+    /// as one marker column rather than each row inventing its own offset.
     #[test]
-    fn a_forks_lineage_mark_replaces_its_rail_connector() {
-        let items = vec![tree_row("root", 0), tree_row("child", 1)];
+    fn fork_and_archived_rows_share_one_marker_column() {
+        let mut fork = clip_test_session("fork", Some("fork"), "smith", SessionState::Done);
+        fork.forked_from = Some(construct_protocol::ForkedFrom {
+            session_id: "root".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+            parent_tokens: Default::default(),
+            is_reset_snapshot: false,
+        });
+        let items = vec![
+            tree_row("root", 0),
+            AppListItem::Session {
+                summary: fork.clone(),
+                nesting_depth: 1,
+                has_children: false,
+                children_expanded: false,
+                attention_rollup: false,
+            },
+            AppListItem::ArchivedRow {
+                section: crate::app::ArchiveSection::Children("root".into()),
+                count: 2,
+                expanded: false,
+                nesting_depth: 1,
+            },
+        ];
 
-        let head = list_tree_branch_head(&items, 1, 1);
-        assert_eq!(head, "└");
+        // Same rails under the same parent…
+        let fork_rails = list_tree_branch_prefix(&items, 1, 1);
+        let archived_rails = list_tree_branch_prefix(&items, 2, 1);
+        assert_eq!(fork_rails, "├─");
+        assert_eq!(archived_rails, "└─");
         assert_eq!(
-            head.chars().count() + LIST_TREE_CONNECTOR.chars().count(),
-            list_tree_branch_prefix(&items, 1, 1).chars().count(),
-            "head plus connector is exactly the full branch prefix"
+            UnicodeWidthStr::width(fork_rails.as_str()),
+            UnicodeWidthStr::width(archived_rails.as_str()),
         );
+        // …then one marker cell each: `├─⑂ …` against `└─▸ …`.
         assert_eq!(
-            UnicodeWidthStr::width(LIST_TREE_CONNECTOR),
-            UnicodeWidthStr::width("⑂"),
-            "swapping the connector for a lineage mark must not resize the rail"
+            UnicodeWidthStr::width(session_row_marker(&fork, false, false)),
+            UnicodeWidthStr::width("▸"),
         );
-        // Depth 0 has no rail to ride, and no fork ever renders there: forks
-        // only enter the list nested beneath the parent they came from.
-        assert_eq!(list_tree_branch_prefix(&items, 0, 0), "");
     }
 
     #[test]
