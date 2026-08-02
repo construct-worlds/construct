@@ -44,9 +44,11 @@ with the pointer jumps directly to that ordinary session view; the row remains
 the navigation bridge between service configuration and the live conversation.
 
 The service view uses the same top-right title-actions affordance as a session
-view. Its menu is service-specific: edit the selected HTTP channel credential,
-pause or resume ingress, split or close the pane, and delete the service. The
-editor lists every catalog channel under `Channels`: an attached channel uses
+view. Its menu contains only pane actions—split or close the pane—and delete
+the service. Service definition fields are edited directly in the focused
+service view; channel-specific editing and credential rotation belong to the
+selected channel row, while pausing or resuming ingress is a service field.
+The editor lists every catalog channel under `Channels`: an attached channel uses
 the filled-square `▣` glyph, an available channel uses the empty-square `▢`
 glyph, and a channel owned by another service is dimmed with its owner shown.
 Space attaches or detaches the selected available/owned channel; Enter edits
