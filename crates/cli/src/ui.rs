@@ -3205,9 +3205,11 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         session_row_gutter(s, *has_children, *children_expanded);
                     let tree_prefix = list_tree_branch_prefix(&app_items, i, *nesting_depth);
                     // Fixed-width left side: tree rails + the always-reserved
-                    // disclosure/lineage gutter + " glyph " (3) + one cell of
+                    // disclosure/lineage gutter + "glyph " (2) + one cell of
                     // right inset, matching the service row's prefix budget.
-                    let prefix_w = tree_prefix.chars().count() + SESSION_ROW_GUTTER_CELLS + 3 + 1;
+                    // The gutter already separates the rails from the status
+                    // glyph, so the glyph carries no leading space of its own.
+                    let prefix_w = tree_prefix.chars().count() + SESSION_ROW_GUTTER_CELLS + 2 + 1;
                     let harness = harness_label(s);
                     let harness_w = harness.chars().count();
                     // Reserve room for the trailing unblock marker (" ●") so the
@@ -3271,7 +3273,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     ));
                     spans.extend([
                         Span::styled(
-                            format!(" {} ", session_status_glyph(app, s)),
+                            format!("{} ", session_status_glyph(app, s)),
                             state_style(&app.theme, s.state),
                         ),
                         Span::styled(name_display, name_style),

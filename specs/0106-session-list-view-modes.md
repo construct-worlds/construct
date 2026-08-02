@@ -66,8 +66,11 @@ Rules both modes must preserve:
   lineage mark — whether or not it has children and whether or not it is a
   fork. Sibling rows therefore share one left edge, a session gaining its
   first child never shifts its own title, and a child's status glyph lands
-  under its parent's title. Any future row affordance must either live inside
-  that reserved gutter or be reserved on every row for the same reason.
+  under its parent's title. That gutter is also the only separation before the
+  status glyph — the glyph carries no leading space of its own, so a row spends
+  no blank column it hasn't already committed to. Any future row affordance
+  must either live inside the reserved gutter or be reserved on every row for
+  the same reason.
 - The web UI's session list shows the same detail line with the same
   content and omission/fallback rules, but always on — it has no
   compact/full mode pair. Its gauge may render at finer resolution than
