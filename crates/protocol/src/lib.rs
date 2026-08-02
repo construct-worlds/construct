@@ -1227,6 +1227,7 @@ pub mod ipc_method {
     pub const SERVICE_LIST: &str = "service.list";
     pub const SERVICE_PUT: &str = "service.put";
     pub const SERVICE_DELETE: &str = "service.delete";
+    pub const SERVICE_REPLY: &str = "service.reply";
     pub const SERVICE_CHANNEL_LIST: &str = "service.channel.list";
     pub const SERVICE_CHANNEL_CATALOG_LIST: &str = "service.channel.catalog.list";
     pub const SERVICE_CHANNEL_PUT: &str = "service.channel.put";
@@ -3246,12 +3247,21 @@ pub struct ServiceSummary {
     pub harness: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Session surface used for newly routed conversations. `headless` emits
+    /// structured assistant events; `interactive` runs the harness's native
+    /// PTY and requires an explicit service-reply tool call.
+    #[serde(default = "default_service_session_mode")]
+    pub session_mode: String,
     pub cwd: String,
     pub routing: String,
     #[serde(default)]
     pub paused: bool,
     #[serde(default)]
     pub channels: Vec<ServiceChannelSummary>,
+}
+
+fn default_service_session_mode() -> String {
+    "headless".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3370,6 +3380,17 @@ pub struct ServicePutParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceReplyParams {
+    /// Construct session that owns the MCP server making this request.
+    pub session_id: String,
+    /// Opaque delivery capability included in the routed prompt.
+    pub delivery_id: String,
+    /// Caller-facing response. Destination and credentials are deliberately
+    /// absent: the daemon binds those from the registered delivery.
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServicePutResult {
     pub service: ServiceSummary,
     /// What the running daemon did with this edit.
@@ -3412,6 +3433,7 @@ pub enum ServiceField {
     Instruction,
     Harness,
     Model,
+    SessionMode,
     Cwd,
     Routing,
     Paused,
@@ -3428,6 +3450,7 @@ impl ServiceField {
         ServiceField::Instruction,
         ServiceField::Harness,
         ServiceField::Model,
+        ServiceField::SessionMode,
         ServiceField::Cwd,
         ServiceField::Routing,
         ServiceField::Paused,
@@ -3454,6 +3477,7 @@ impl ServiceField {
             ServiceField::Instruction
             | ServiceField::Harness
             | ServiceField::Model
+            | ServiceField::SessionMode
             | ServiceField::Cwd
             | ServiceField::Sandbox => PropagationClass::NextSession,
         }
@@ -4947,5 +4971,33 @@ mod cost_model_tests {
             }
             other => panic!("expected Cost, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod service_protocol_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_service_summary_defaults_to_headless() {
+        let summary: ServiceSummary = serde_json::from_value(serde_json::json!({
+            "name": "legacy",
+            "instruction": "",
+            "harness": "smith",
+            "cwd": ".",
+            "routing": "session-key",
+            "channels": []
+        }))
+        .expect("legacy service summary");
+
+        assert_eq!(summary.session_mode, "headless");
+    }
+
+    #[test]
+    fn session_mode_edits_apply_to_new_sessions() {
+        assert_eq!(
+            ServiceField::SessionMode.propagation(),
+            PropagationClass::NextSession
+        );
     }
 }

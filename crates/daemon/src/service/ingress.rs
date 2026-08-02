@@ -5,11 +5,11 @@
 //! deduplication, result reconstruction, and approval handling live here so a
 //! channel does not need to reimplement service semantics.
 
-use super::{ServiceConfig, ServiceRouting};
+use super::{ServiceConfig, ServiceRouting, ServiceSessionMode};
 use crate::session::SessionManager;
 use anyhow::{anyhow, Result};
 use construct_protocol::{
-    CreateSessionParams, MessageRole, SessionEvent, SessionKind, SessionState,
+    CreateSessionParams, MessageRole, PtySize, SessionEvent, SessionKind, SessionState,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -17,8 +17,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 const REQUEST_DEDUP_CAP: usize = 4096;
+const PENDING_DELIVERY_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+struct PendingDelivery {
+    session_id: String,
+    created_at: tokio::time::Instant,
+}
 
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct PersistedState {
@@ -49,6 +56,7 @@ pub(crate) struct ServiceIngressShared {
     state_path: PathBuf,
     pub(super) state: Mutex<PersistedState>,
     pub(super) seen_requests: Mutex<(VecDeque<String>, HashSet<String>)>,
+    pending_deliveries: Mutex<HashMap<String, PendingDelivery>>,
 }
 
 impl ServiceIngressShared {
@@ -71,6 +79,7 @@ impl ServiceIngressShared {
             state_path,
             state: Mutex::new(state),
             seen_requests: Mutex::new(Default::default()),
+            pending_deliveries: Mutex::new(Default::default()),
         })
     }
 
@@ -88,6 +97,47 @@ impl ServiceIngressShared {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *slot = Arc::new(config);
+    }
+
+    async fn register_delivery(&self, delivery_id: String, session_id: String) {
+        let now = tokio::time::Instant::now();
+        let mut pending = self.pending_deliveries.lock().await;
+        pending
+            .retain(|_, delivery| now.duration_since(delivery.created_at) < PENDING_DELIVERY_TTL);
+        pending.insert(
+            delivery_id,
+            PendingDelivery {
+                session_id,
+                created_at: now,
+            },
+        );
+    }
+
+    async fn cancel_delivery(&self, delivery_id: &str) {
+        self.pending_deliveries.lock().await.remove(delivery_id);
+    }
+
+    pub(crate) async fn restore_delivery(&self, delivery_id: String, session_id: String) {
+        self.register_delivery(delivery_id, session_id).await;
+    }
+
+    /// Claim an opaque delivery capability for the session-bound reply tool.
+    /// A successful claim is one-shot, so duplicate tool calls cannot post the
+    /// same delivery twice.
+    pub(crate) async fn claim_delivery(&self, session_id: &str, delivery_id: &str) -> bool {
+        let now = tokio::time::Instant::now();
+        let mut pending = self.pending_deliveries.lock().await;
+        pending
+            .retain(|_, delivery| now.duration_since(delivery.created_at) < PENDING_DELIVERY_TTL);
+        if pending
+            .get(delivery_id)
+            .is_some_and(|delivery| delivery.session_id == session_id)
+        {
+            pending.remove(delivery_id);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -140,6 +190,8 @@ impl ServiceIngress {
             }
         }
         let config = self.shared.config();
+        let new_delivery_id = (config.session_mode == ServiceSessionMode::Interactive)
+            .then(|| Uuid::new_v4().simple().to_string());
         let key = match config.routing {
             ServiceRouting::PerEvent => None,
             ServiceRouting::Single => Some("__single__".to_string()),
@@ -166,17 +218,29 @@ impl ServiceIngress {
             });
             if let Some(id) = existing {
                 drop(state);
-                let event_cursor = self
-                    .shared
-                    .manager
-                    .detail(&id)
-                    .await
-                    .map(|detail| detail.events.len())
-                    .unwrap_or(0);
-                self.shared.manager.send_input(&id, request.message).await?;
+                let detail = self.shared.manager.detail(&id).await?;
+                let event_cursor = detail.events.len();
+                let delivery_id = (detail.summary.mode.as_deref() == Some("interactive"))
+                    .then(|| Uuid::new_v4().simple().to_string());
+                let message = delivery_id
+                    .as_deref()
+                    .map(|delivery_id| interactive_delivery_prompt(&request.message, delivery_id))
+                    .unwrap_or(request.message);
+                if let Some(delivery_id) = delivery_id.as_ref() {
+                    self.shared
+                        .register_delivery(delivery_id.clone(), id.clone())
+                        .await;
+                }
+                if let Err(error) = self.shared.manager.send_input(&id, message).await {
+                    if let Some(delivery_id) = delivery_id.as_deref() {
+                        self.shared.cancel_delivery(delivery_id).await;
+                    }
+                    return Err(error);
+                }
                 return Ok(IngressReceipt {
                     session: id,
                     event_cursor,
+                    delivery_id,
                 });
             }
             let id = self
@@ -186,6 +250,7 @@ impl ServiceIngress {
                         "service:{}:{}:{key}",
                         self.shared.name, self.channel_id
                     )),
+                    new_delivery_id.as_deref(),
                 )
                 .await?;
             state.sessions.insert(lookup_key, id.clone());
@@ -194,12 +259,14 @@ impl ServiceIngress {
             Ok(IngressReceipt {
                 session: id,
                 event_cursor: 0,
+                delivery_id: new_delivery_id,
             })
         } else {
             let id = self
                 .create(
                     request.message,
                     Some(format!("service:{}:{}", self.shared.name, self.channel_id)),
+                    new_delivery_id.as_deref(),
                 )
                 .await?;
             let mut state = self.shared.state.lock().await;
@@ -208,6 +275,7 @@ impl ServiceIngress {
             Ok(IngressReceipt {
                 session: id,
                 event_cursor: 0,
+                delivery_id: new_delivery_id,
             })
         }
     }
@@ -219,6 +287,11 @@ impl ServiceIngress {
         receipt: &IngressReceipt,
         cancel: &CancellationToken,
     ) -> Result<String> {
+        if let Some(delivery_id) = receipt.delivery_id.as_deref() {
+            return self
+                .wait_for_explicit_reply(receipt, delivery_id, cancel)
+                .await;
+        }
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
         loop {
             tokio::select! {
@@ -253,6 +326,43 @@ impl ServiceIngress {
                 if detail.summary.state == SessionState::Errored {
                     return Err(anyhow!("service session errored without a final reply"));
                 }
+            }
+        }
+    }
+
+    async fn wait_for_explicit_reply(
+        &self,
+        receipt: &IngressReceipt,
+        delivery_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        let deadline = tokio::time::Instant::now() + PENDING_DELIVERY_TTL;
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    self.shared.cancel_delivery(delivery_id).await;
+                    return Err(anyhow!("channel stopped"));
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                self.shared.cancel_delivery(delivery_id).await;
+                return Err(anyhow!("service turn timed out"));
+            }
+            let Ok(detail) = self.shared.manager.detail(&receipt.session).await else {
+                continue;
+            };
+            let events = detail.events.get(receipt.event_cursor..).unwrap_or(&[]);
+            if let Some(reply) =
+                explicit_service_reply(events.iter().map(|event| &event.event), delivery_id)
+            {
+                return Ok(reply);
+            }
+            if detail.summary.state == SessionState::Errored {
+                self.shared.cancel_delivery(delivery_id).await;
+                return Err(anyhow!(
+                    "interactive service session errored before replying"
+                ));
             }
         }
     }
@@ -340,7 +450,12 @@ impl ServiceIngress {
         }))
     }
 
-    async fn create(&self, message: String, title: Option<String>) -> Result<String> {
+    async fn create(
+        &self,
+        message: String,
+        title: Option<String>,
+        delivery_id: Option<&str>,
+    ) -> Result<String> {
         // Use one definition snapshot for the whole creation so a reload
         // cannot combine fields from two versions of a service.
         let config = self.shared.config();
@@ -350,18 +465,24 @@ impl ServiceIngress {
             format!("{}\n\n{}", config.instruction.trim(), message)
         };
         let model = service_session_model(&config.harness, config.model.as_deref())?;
-        self.shared
+        let interactive = config.session_mode == ServiceSessionMode::Interactive;
+        let env = service_session_env(&config);
+        let id = self
+            .shared
             .manager
             .create(CreateSessionParams {
                 harness: config.harness.clone(),
                 cwd: config.cwd.clone(),
-                prompt: Some(prompt),
+                prompt: (!interactive).then_some(prompt.clone()),
                 model,
                 title,
-                mode: Some("headless".to_string()),
-                pty_size: None,
+                mode: Some(config.session_mode.as_str().to_string()),
+                pty_size: interactive.then_some(PtySize {
+                    cols: 120,
+                    rows: 40,
+                }),
                 worktree: false,
-                env: config.sandbox.session_env(),
+                env,
                 args: Vec::new(),
                 kind: SessionKind::User,
                 parent_session_id: None,
@@ -369,8 +490,46 @@ impl ServiceIngress {
                 position_after_session_id: None,
                 forked_from: None,
             })
-            .await
+            .await?;
+        if let Some(delivery_id) = delivery_id {
+            self.shared
+                .register_delivery(delivery_id.to_string(), id.clone())
+                .await;
+            let message = interactive_delivery_prompt(&prompt, delivery_id);
+            if let Err(error) = self.shared.manager.send_input(&id, message).await {
+                self.shared.cancel_delivery(delivery_id).await;
+                return Err(error);
+            }
+        }
+        Ok(id)
     }
+}
+
+fn service_session_env(config: &ServiceConfig) -> HashMap<String, String> {
+    let mut env = config.sandbox.session_env();
+    if config.session_mode == ServiceSessionMode::Interactive {
+        env.insert("CONSTRUCT_INJECT_MCP".to_string(), "1".to_string());
+        env.insert(
+            construct_protocol::adapter::SERVICE_REPLY_TOOL_ENV.to_string(),
+            "1".to_string(),
+        );
+        if !config.sandbox.mcp {
+            env.insert(
+                construct_protocol::adapter::SERVICE_REPLY_ONLY_MCP_ENV.to_string(),
+                "1".to_string(),
+            );
+        }
+    }
+    env
+}
+
+fn interactive_delivery_prompt(message: &str, delivery_id: &str) -> String {
+    format!(
+        "{message}\n\n[Construct service delivery {delivery_id}]\n\
+         Send the caller-facing final response with the `construct_service_reply` tool using \
+         delivery_id `{delivery_id}`. The tool is the only delivery path; do not choose a \
+         workspace, channel, recipient, or thread yourself."
+    )
 }
 
 /// Turn a durable service model selection into the id accepted by the
@@ -390,6 +549,7 @@ fn service_session_model(harness: &str, model: Option<&str>) -> Result<Option<St
 pub(super) struct IngressReceipt {
     pub(super) session: String,
     event_cursor: usize,
+    delivery_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -453,6 +613,30 @@ pub(super) fn latest_assistant_reply<'a>(
     Some(parts.concat())
 }
 
+fn explicit_service_reply<'a>(
+    events: impl Iterator<Item = &'a SessionEvent>,
+    delivery_id: &str,
+) -> Option<String> {
+    let mut matched_tool = false;
+    for event in events {
+        match event {
+            SessionEvent::ToolUse { tool, args, .. }
+                if tool == "construct_service_reply"
+                    && args.get("delivery_id").and_then(serde_json::Value::as_str)
+                        == Some(delivery_id) =>
+            {
+                matched_tool = true;
+            }
+            SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text,
+            } if matched_tool => return Some(text.clone()),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// A tool call this session is stopped at, waiting for the operator.
 pub(super) struct PendingApproval {
     pub(super) call_id: String,
@@ -497,6 +681,36 @@ pub(super) fn pending_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn shared_for_delivery_tests() -> Arc<ServiceIngressShared> {
+        let tmp = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let (manager, _remote_rx, _restart_rx) = crate::session::SessionManager::new(
+            storage,
+            Arc::new(crate::config::Config::default()),
+            tmp.path().join("run"),
+        )
+        .await
+        .expect("session manager");
+        ServiceIngressShared::load(
+            "svc".to_string(),
+            ServiceConfig {
+                instruction: String::new(),
+                harness: "codex".into(),
+                model: None,
+                session_mode: ServiceSessionMode::Interactive,
+                cwd: ".".into(),
+                routing: ServiceRouting::SessionKey,
+                paused: false,
+                approval_timeout_secs: 0,
+                sandbox: super::super::ServiceSandboxConfig::default(),
+                channels: Default::default(),
+            },
+            Arc::new(manager),
+            tmp.path().join("data"),
+        )
+    }
 
     #[test]
     fn result_serialization_preserves_the_http_v1_shape() {
@@ -574,6 +788,103 @@ mod tests {
         assert_eq!(
             service_session_model("codex", Some("gpt-5.6-sol")).unwrap(),
             Some("gpt-5.6-sol".into())
+        );
+    }
+
+    #[test]
+    fn interactive_prompt_binds_the_reply_tool_to_the_delivery() {
+        let prompt = interactive_delivery_prompt("hello", "delivery-123");
+        assert!(prompt.starts_with("hello\n\n"));
+        assert!(prompt.contains("construct_service_reply"));
+        assert_eq!(prompt.matches("delivery-123").count(), 2);
+        assert!(prompt.contains("do not choose a workspace, channel, recipient, or thread"));
+    }
+
+    #[test]
+    fn explicit_reply_requires_the_matching_delivery_tool_call() {
+        let events = [
+            SessionEvent::ToolUse {
+                tool: "construct_service_reply".into(),
+                args: serde_json::json!({ "delivery_id": "other" }),
+                call_id: Some("other".into()),
+            },
+            SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: "wrong".into(),
+            },
+            SessionEvent::ToolUse {
+                tool: "construct_service_reply".into(),
+                args: serde_json::json!({ "delivery_id": "wanted" }),
+                call_id: Some("wanted".into()),
+            },
+            SessionEvent::Message {
+                role: MessageRole::Assistant,
+                text: "right".into(),
+            },
+        ];
+
+        assert_eq!(
+            explicit_service_reply(events.iter(), "wanted").as_deref(),
+            Some("right")
+        );
+        assert_eq!(explicit_service_reply(events.iter(), "missing"), None);
+    }
+
+    #[tokio::test]
+    async fn delivery_claim_is_session_bound_and_one_shot() {
+        let shared = shared_for_delivery_tests().await;
+        shared
+            .register_delivery("delivery-123".into(), "session-a".into())
+            .await;
+
+        assert!(!shared.claim_delivery("session-b", "delivery-123").await);
+        assert!(shared.claim_delivery("session-a", "delivery-123").await);
+        assert!(!shared.claim_delivery("session-a", "delivery-123").await);
+    }
+
+    #[test]
+    fn interactive_service_mcp_profile_is_least_privilege_unless_granted() {
+        let mut config = ServiceConfig {
+            instruction: String::new(),
+            harness: "codex".into(),
+            model: None,
+            session_mode: ServiceSessionMode::Interactive,
+            cwd: ".".into(),
+            routing: ServiceRouting::SessionKey,
+            paused: false,
+            approval_timeout_secs: 0,
+            sandbox: super::super::ServiceSandboxConfig::default(),
+            channels: Default::default(),
+        };
+
+        let confined = service_session_env(&config);
+        assert_eq!(confined.get("CONSTRUCT_INJECT_MCP").map(String::as_str), Some("1"));
+        assert_eq!(
+            confined
+                .get(construct_protocol::adapter::SERVICE_REPLY_TOOL_ENV)
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            confined
+                .get(construct_protocol::adapter::SERVICE_REPLY_ONLY_MCP_ENV)
+                .map(String::as_str),
+            Some("1")
+        );
+
+        config.sandbox.mcp = true;
+        let granted = service_session_env(&config);
+        assert_eq!(granted.get("CONSTRUCT_INJECT_MCP").map(String::as_str), Some("1"));
+        assert_eq!(
+            granted
+                .get(construct_protocol::adapter::SERVICE_REPLY_TOOL_ENV)
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            granted.get(construct_protocol::adapter::SERVICE_REPLY_ONLY_MCP_ENV),
+            None,
+            "general MCP grants keep plugin tools, including an installed Slack MCP, available"
         );
     }
 }

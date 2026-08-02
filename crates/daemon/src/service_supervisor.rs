@@ -74,6 +74,12 @@ pub enum ServiceMsg {
     /// A listener's accept loop ended on its own; drop it so a later reload
     /// can start it again.
     ListenerDied(ListenerKey),
+    Reply {
+        session_id: String,
+        delivery_id: String,
+        text: String,
+        respond: oneshot::Sender<Result<()>>,
+    },
 }
 
 /// Handle held by `SessionManager` so any caller can request a reload without
@@ -101,6 +107,26 @@ impl ServiceHandle {
             reason,
             respond: None,
         });
+    }
+
+    pub async fn reply(&self, session_id: String, delivery_id: String, text: String) -> Result<()> {
+        if text.trim().is_empty() {
+            anyhow::bail!("service reply must not be empty");
+        }
+        if text.chars().count() > 40_000 {
+            anyhow::bail!("service reply exceeds 40000 characters");
+        }
+        let (tx, rx) = oneshot::channel();
+        self.0
+            .send(ServiceMsg::Reply {
+                session_id,
+                delivery_id,
+                text,
+                respond: tx,
+            })
+            .map_err(|_| anyhow::anyhow!("service supervisor is not running"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("service supervisor dropped the reply"))?
     }
 }
 
@@ -262,6 +288,17 @@ pub async fn run(
                             registry.slack.remove(&key);
                             reconcile_publications(&manager, &registry);
                         }
+                        ServiceMsg::Reply {
+                            session_id,
+                            delivery_id,
+                            text,
+                            respond,
+                        } => {
+                            let _ = respond.send(
+                                record_reply(&manager, &registry, session_id, delivery_id, text)
+                                    .await,
+                            );
+                        }
                     }
                 }
                 let outcome = reload(&manager, &paths, &handle, &mut registry, reason).await;
@@ -274,9 +311,64 @@ pub async fn run(
                 registry.slack.remove(&key);
                 reconcile_publications(&manager, &registry);
             }
+            ServiceMsg::Reply {
+                session_id,
+                delivery_id,
+                text,
+                respond,
+            } => {
+                let _ = respond
+                    .send(record_reply(&manager, &registry, session_id, delivery_id, text).await);
+            }
         }
     }
     tracing::debug!("service supervisor channel closed; exiting");
+}
+
+async fn record_reply(
+    manager: &SessionManager,
+    registry: &Registry,
+    session_id: String,
+    delivery_id: String,
+    text: String,
+) -> Result<()> {
+    let mut claimed_by = None;
+    for shared in registry.shared.values() {
+        if shared.claim_delivery(&session_id, &delivery_id).await {
+            claimed_by = Some(shared.clone());
+            break;
+        }
+    }
+    let Some(claimed_by) = claimed_by else {
+        anyhow::bail!("delivery is not pending for this service session");
+    };
+
+    let recorded = async {
+        manager
+            .emit_session_event(construct_protocol::SessionEmitEventParams {
+                session_id: session_id.clone(),
+                event: construct_protocol::SessionEvent::ToolUse {
+                    tool: "construct_service_reply".to_string(),
+                    args: serde_json::json!({ "delivery_id": &delivery_id }),
+                    call_id: Some(delivery_id.clone()),
+                },
+            })
+            .await?;
+        manager
+            .emit_session_event(construct_protocol::SessionEmitEventParams {
+                session_id: session_id.clone(),
+                event: construct_protocol::SessionEvent::Message {
+                    role: construct_protocol::MessageRole::Assistant,
+                    text,
+                },
+            })
+            .await
+    }
+    .await;
+    if recorded.is_err() {
+        claimed_by.restore_delivery(delivery_id, session_id).await;
+    }
+    recorded
 }
 
 async fn reload(
@@ -610,7 +702,9 @@ fn file_stamp(path: &std::path::Path) -> (String, u64, u128) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::{ServiceChannelConfig, ServiceRouting, ServiceSandboxConfig};
+    use crate::service::{
+        ServiceChannelConfig, ServiceRouting, ServiceSandboxConfig, ServiceSessionMode,
+    };
 
     struct FakePublicationBackend;
 
@@ -649,6 +743,7 @@ mod tests {
             instruction: String::new(),
             harness: "smith".into(),
             model: None,
+            session_mode: ServiceSessionMode::Headless,
             cwd: ".".into(),
             routing: ServiceRouting::SessionKey,
             paused,
@@ -702,6 +797,7 @@ mod tests {
             instruction: String::new(),
             harness: "smith".into(),
             model: None,
+            session_mode: ServiceSessionMode::Headless,
             cwd: ".".into(),
             routing: ServiceRouting::SessionKey,
             paused,
