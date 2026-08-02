@@ -598,9 +598,10 @@ impl SessionManager {
                 *entry.adapter.lock().await = Some(adapter);
                 let snapshot = {
                     let mut s = entry.summary.write().await;
+                    let resumed_state = reattached_state(s.state);
                     crate::session::set_state_tracked(
                         &mut s,
-                        SessionState::Running,
+                        resumed_state,
                         Utc::now().timestamp_millis(),
                     );
                     s.pending_input = false;
@@ -921,6 +922,30 @@ pub(super) fn resume_redraw_ready(
 
 pub(super) fn should_resume_on_startup(state: SessionState) -> bool {
     !matches!(state, SessionState::Done)
+}
+
+/// The lifecycle state a session takes when the daemon *reattaches* to an
+/// adapter that outlived it, rather than spawning a replacement.
+///
+/// Nothing about that adapter changed across the restart: a session parked at
+/// its harness's prompt is still parked there, and the adapter — already
+/// blocked waiting for input — has no reason to emit another status. Claiming
+/// `Running` there invents work that is not happening, and only the PTY
+/// quiescence sweep can take it back. That sweep needs PTY output to measure
+/// silence against, so a headless session (whose child emits none until a turn
+/// runs) stays falsely `Running` until a client opens it and the hydration
+/// resize forces a repaint. Meanwhile the false span inflates the session's
+/// compute accounting and paints a working spinner over an idle session.
+///
+/// So an idle session stays idle. Every other state resumes as `Running`,
+/// which is what a live adapter means for them: `Running` was mid-turn and
+/// still is, `Pending` never reported anything, and `Errored` must stop
+/// looking terminal now that its adapter answered (see the spawn path below).
+pub(super) fn reattached_state(persisted: SessionState) -> SessionState {
+    match persisted {
+        SessionState::AwaitingInput => SessionState::AwaitingInput,
+        _ => SessionState::Running,
+    }
 }
 
 // Decide whether to schedule the bump+restore SIGWINCH cycle after a

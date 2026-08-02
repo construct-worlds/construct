@@ -172,6 +172,86 @@ async fn restart_reloads_updated_binary() {
 }
 
 // ---------------------------------------------------------------------------
+// 1b. Session state across the restart
+// ---------------------------------------------------------------------------
+
+/// A restart must not invent work. An adapter that outlives the daemon is
+/// reattached — nothing about it changed, so a session parked at its harness's
+/// prompt is still parked there and must come back `AwaitingInput`.
+///
+/// Reporting `Running` instead is not a cosmetic slip: only the PTY quiescence
+/// sweep takes it back, and that sweep needs PTY output to measure silence
+/// against. A session whose child stays silent until its next turn (every
+/// headless one) therefore stays falsely `Running` until a client opens it and
+/// the hydration resize forces a repaint — spinning a working glyph and
+/// banking compute time for a session doing nothing.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_keeps_an_idle_session_idle() {
+    use construct_protocol::SessionState;
+
+    let d = Daemon::spawn().await.expect("spawn daemon");
+    let cwd = d.dir.path().to_string_lossy().to_string();
+    let id = d
+        .client
+        .create(CreateSessionParams {
+            harness: "shell".into(),
+            cwd,
+            prompt: None,
+            model: None,
+            title: Some("idle across restart".into()),
+            mode: None,
+            pty_size: None,
+            worktree: false,
+            env: std::collections::HashMap::new(),
+            args: Vec::new(),
+            kind: Default::default(),
+            parent_session_id: None,
+            group_id: None,
+            position_after_session_id: None,
+            forked_from: None,
+        })
+        .await
+        .expect("create shell session");
+
+    // Let the shell settle at its prompt: the adapter reports the idle via
+    // foreground-process-group detection, no client interaction needed.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let state = d.client.get(&id).await.expect("session detail").summary.state;
+        if state == SessionState::AwaitingInput {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "shell session never went idle before the restart (state {state:?})"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let _ = d.client.daemon_restart(None, false).await;
+    let client = d
+        .wait_until_back(Duration::from_secs(30))
+        .await
+        .expect("daemon did not come back");
+
+    // Sampled rather than checked once: the bug painted `Running` for the
+    // whole post-resume life of the session, so any sample catches it, and
+    // nothing here pokes the child into output that could legitimately move
+    // it off idle.
+    let watch_until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < watch_until {
+        let state = client.get(&id).await.expect("session detail").summary.state;
+        assert_eq!(
+            state,
+            SessionState::AwaitingInput,
+            "reattached idle session came back as {state:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 2. TUI auto-reconnect
 // ---------------------------------------------------------------------------
 
