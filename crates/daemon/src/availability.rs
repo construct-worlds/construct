@@ -202,6 +202,51 @@ pub async fn probe_smith(cache: &std::sync::Mutex<AvailabilityCache>) -> Availab
     Availability::missing("no API key or OAuth credential found")
 }
 
+/// Model-spec prefixes the title-gen one-shot cannot build a provider for.
+/// OAuth subscriptions drive full smith sessions fine; `--title-mode` only
+/// knows the direct-API-key providers and bails loudly on these (spec
+/// 0071). Kept in sync with title-mode's own provider selection.
+const TITLE_GEN_UNSUPPORTED_PREFIXES: [&str; 4] =
+    ["claude-oauth", "codex-oauth", "grok-oauth", "kimi-oauth"];
+
+/// Whether the cheap `smith --title-mode` one-shot could actually resolve a
+/// model: an explicit `CONSTRUCT_SMITH_MODEL` pin naming a provider it can
+/// build, or one of the direct API keys on its ladder.
+///
+/// Deliberately narrower than [`probe_smith`], which answers "could a
+/// session start via *some* explicit choice" and therefore counts OAuth
+/// subscriptions and a reachable Ollama — the asymmetry spec 0071 records
+/// as intentional. Auto-title needs the narrower question: asking the wider
+/// one sends an OAuth-only machine into a one-shot that can only fail,
+/// instead of the same-harness probe fallback written for exactly that
+/// machine (spec 0151).
+pub fn smith_title_gen_available() -> bool {
+    title_gen_available_with(crate::daemon_env::var)
+}
+
+/// Pure core of [`smith_title_gen_available`], parameterized over the
+/// environment lookup so tests don't have to mutate process env.
+fn title_gen_available_with(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    // A pin is an explicit user choice, so it wins over the key ladder the
+    // same way it does inside title-mode — but only when title-mode can
+    // actually honor it.
+    if let Some(pin) = lookup("CONSTRUCT_SMITH_MODEL") {
+        let prefix = pin.split(':').next().unwrap_or_default();
+        return !TITLE_GEN_UNSUPPORTED_PREFIXES.contains(&prefix);
+    }
+    [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "META_API_KEY",
+        "MODEL_API_KEY",
+        "DEEPSEEK_API_KEY",
+    ]
+    .iter()
+    .any(|k| lookup(k).is_some())
+}
+
 /// Existence-only mirror of `CredStore::locate` in
 /// `adapter-smith/src/provider/claude_oauth.rs`: explicit file override,
 /// then the default credentials file, then the macOS keychain item. No
@@ -503,6 +548,11 @@ pub async fn smith_auth_methods(
 pub struct FeatureInputs {
     /// smith's credential probe result ([`probe_smith`]).
     pub smith: Availability,
+    /// Whether the title-gen one-shot can resolve a model
+    /// ([`smith_title_gen_available`]). Narrower than `smith`: an
+    /// OAuth-only machine can run smith sessions but not `--title-mode`,
+    /// and the auto-title row must report what auto-title actually does.
+    pub title_gen: bool,
     /// `[suggest] enabled` from config.
     pub suggest_enabled: bool,
     /// The orchestrator's configured harness and that harness's
@@ -517,7 +567,11 @@ pub struct FeatureInputs {
 pub fn ambient_features(inputs: &FeatureInputs) -> Vec<construct_protocol::FeatureInfo> {
     use construct_protocol::{FeatureInfo, FeatureStatus};
     let smith_ok = inputs.smith.available;
-    let auto_title = if smith_ok {
+    // Auto-title keys off `title_gen`, not `smith_ok`: a machine with only
+    // an OAuth subscription runs smith sessions fine but cannot run the
+    // title one-shot, and reporting Ok there promises a generator that
+    // never runs.
+    let auto_title = if inputs.title_gen {
         FeatureInfo {
             id: "auto_title".to_string(),
             label: "Session auto-naming".to_string(),
@@ -529,9 +583,9 @@ pub fn ambient_features(inputs: &FeatureInputs) -> Vec<construct_protocol::Featu
             id: "auto_title".to_string(),
             label: "Session auto-naming".to_string(),
             status: FeatureStatus::Degraded,
-            detail: "no smith credential — sessions on model harnesses fall back to a \
-                     one-shot on their own harness; smith and shell sessions keep their \
-                     default (hash) names"
+            detail: "no title-capable smith credential — sessions on model harnesses fall \
+                     back to a one-shot on their own harness; smith and shell sessions keep \
+                     their default (hash) names"
                 .to_string(),
         }
     };
@@ -661,6 +715,7 @@ mod tests {
         use construct_protocol::FeatureStatus;
         let ok = ambient_features(&FeatureInputs {
             smith: Availability::ready("ready (Anthropic API key)"),
+            title_gen: true,
             suggest_enabled: true,
             orchestrator: Some((
                 "smith".to_string(),
@@ -671,6 +726,7 @@ mod tests {
 
         let missing = ambient_features(&FeatureInputs {
             smith: Availability::missing("no API key or OAuth credential found"),
+            title_gen: false,
             suggest_enabled: true,
             orchestrator: Some((
                 "smith".to_string(),
@@ -689,6 +745,7 @@ mod tests {
 
         let off = ambient_features(&FeatureInputs {
             smith: Availability::missing("no API key or OAuth credential found"),
+            title_gen: false,
             suggest_enabled: false,
             orchestrator: None,
         });
@@ -699,6 +756,7 @@ mod tests {
         // can't start at all — Off, not smith-style Degraded.
         let wrapper = ambient_features(&FeatureInputs {
             smith: Availability::missing("no API key or OAuth credential found"),
+            title_gen: false,
             suggest_enabled: true,
             orchestrator: Some((
                 "claude".to_string(),
@@ -706,6 +764,68 @@ mod tests {
             )),
         });
         assert_eq!(wrapper[2].status, FeatureStatus::Off, "{wrapper:#?}");
+    }
+
+    /// Title-gen's ladder is narrower than `probe_smith`'s. A machine whose
+    /// only credential is an OAuth subscription (or a Grok API key, or a
+    /// reachable Ollama) can start a smith session but cannot run
+    /// `--title-mode` (spec 0071) — counting those as title-capable spends
+    /// the session's single auto-title attempt on a process that can only
+    /// fail, instead of falling back to the same-harness probe.
+    #[test]
+    fn title_gen_availability_counts_only_what_title_mode_can_build() {
+        let lookup = |set: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                set.iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| (*v).to_string())
+            }
+        };
+
+        assert!(!title_gen_available_with(lookup(&[])));
+        assert!(title_gen_available_with(lookup(&[(
+            "DEEPSEEK_API_KEY",
+            "sk-test"
+        )])));
+        assert!(title_gen_available_with(lookup(&[(
+            "GOOGLE_API_KEY",
+            "test"
+        )])));
+        // On `probe_smith`'s ladder but not title-mode's: reachable only
+        // through an explicit pin.
+        assert!(!title_gen_available_with(lookup(&[("GROK_API_KEY", "xai")])));
+        // A pin is an explicit choice and wins over the key ladder…
+        assert!(title_gen_available_with(lookup(&[(
+            "CONSTRUCT_SMITH_MODEL",
+            "openai:gpt-5-mini"
+        )])));
+        // …but not when it names a provider title-mode refuses to build.
+        assert!(!title_gen_available_with(lookup(&[(
+            "CONSTRUCT_SMITH_MODEL",
+            "codex-oauth:gpt-5.5"
+        )])));
+    }
+
+    /// An OAuth-only machine runs smith sessions fine — so suggestions and
+    /// the operator stay Ok — while auto-naming falls back to the
+    /// same-harness probe. Reporting it as Ok would promise a generator
+    /// that never runs.
+    #[test]
+    fn ambient_features_report_auto_title_on_its_own_generator() {
+        use construct_protocol::FeatureStatus;
+        let rows = ambient_features(&FeatureInputs {
+            smith: Availability::ready("ready (Codex subscription)"),
+            title_gen: false,
+            suggest_enabled: true,
+            orchestrator: Some((
+                "smith".to_string(),
+                Availability::ready("ready (Codex subscription)"),
+            )),
+        });
+        assert_eq!(rows[0].id, "auto_title");
+        assert_eq!(rows[0].status, FeatureStatus::Degraded, "{rows:#?}");
+        assert_eq!(rows[1].status, FeatureStatus::Ok, "{rows:#?}");
+        assert_eq!(rows[2].status, FeatureStatus::Ok, "{rows:#?}");
     }
 
     #[test]

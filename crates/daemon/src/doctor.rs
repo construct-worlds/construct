@@ -1054,6 +1054,7 @@ async fn features_section(
             };
             let features = availability::ambient_features(&FeatureInputs {
                 smith,
+                title_gen: availability::smith_title_gen_available(),
                 suggest_enabled: cfg.suggest.enabled,
                 orchestrator,
             });
