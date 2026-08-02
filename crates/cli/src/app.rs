@@ -1962,6 +1962,12 @@ pub struct App {
     /// similar to editor overlay scrollbars. Keyed per window so scrolling one
     /// split does not flash the scrollbar over its (at-bottom) siblings.
     pub terminal_scrollbar_visible_until: HashMap<u64, Instant>,
+    /// First visible rendered row of the open service view's lower section
+    /// (channel catalog, routed sessions, note, footer). Counted from the top,
+    /// unlike terminal scrollback; clamped to the section's extent at render
+    /// time, which is where the wrapped height is known. Reset whenever the
+    /// editor opens on a different service.
+    pub service_view_scroll: usize,
     /// Set by an event handler when the just-handled event produced
     /// no local display change that needs an immediate repaint — the
     /// canonical case being a keystroke forwarded straight to a PTY,
@@ -3950,6 +3956,21 @@ impl ServiceSessionHit {
     }
 }
 
+/// One visible channel-catalog row in the service view. Carries the catalog
+/// index the frame painted, so a click acts on the channel the operator saw
+/// even after the section has been scrolled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceChannelRowHit {
+    pub channel_index: usize,
+    pub area: ratatui::layout::Rect,
+}
+
+impl ServiceChannelRowHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        App::rect_contains(self.area, col, row)
+    }
+}
+
 /// Last-frame geometry for hit-testing mouse clicks.
 #[derive(Debug, Clone, Default)]
 pub struct LayoutSnapshot {
@@ -4093,6 +4114,10 @@ pub struct LayoutSnapshot {
     pub lineage_box_hits: Vec<LineageBoxHit>,
     /// Clickable routed-session rows inside the focused service view.
     pub service_session_hits: Vec<ServiceSessionHit>,
+    /// Clickable channel-catalog rows inside the focused service view. The
+    /// section scrolls, so a row's screen position is only knowable from the
+    /// frame that painted it.
+    pub service_channel_row_hits: Vec<ServiceChannelRowHit>,
     /// Visible Publish/Withdraw/Open/Copy buttons for the selected channel.
     pub service_channel_action_hits: Vec<ServiceChannelActionHit>,
     /// The "▸/▾ N subagents" group-toggle rows — click toggles that
@@ -4415,6 +4440,7 @@ impl LayoutSnapshot {
             lineage_hscrollbar,
             lineage_box_hits,
             service_session_hits,
+            service_channel_row_hits,
             service_channel_action_hits,
             lineage_subagent_toggle_hits,
             playbook_title_run_hit,
@@ -4560,6 +4586,7 @@ impl LayoutSnapshot {
         shift.retain_rows(dynamic_ui_triggers, |hit| &mut hit.2);
         shift.retain_rects(lineage_box_hits, |hit| &mut hit.area);
         shift.retain_rects(service_session_hits, |hit| &mut hit.area);
+        shift.retain_rects(service_channel_row_hits, |hit| &mut hit.area);
         shift.retain_rects(service_channel_action_hits, |hit| &mut hit.area);
         shift.retain_rects(lineage_subagent_toggle_hits, |hit| &mut hit.area);
 
@@ -5331,6 +5358,7 @@ async fn run_with_socket_initial_selection(
         window_scrollback: HashMap::new(),
         window_views: HashMap::new(),
         terminal_scrollbar_visible_until: HashMap::new(),
+        service_view_scroll: 0,
         skip_redraw_after_event: false,
         notification_dirtied_view: true,
         hydrating_sessions: HashSet::new(),
@@ -10602,6 +10630,7 @@ impl App {
                     }
                 } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, -LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, -LIST_STEP)
+                    && !self.scroll_service_view_at(ev.column, ev.row, scrollback_step)
                 {
                     self.adjust_mouse_scrollback(ev.column, ev.row, scrollback_step);
                 }
@@ -10626,6 +10655,7 @@ impl App {
                     }
                 } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, LIST_STEP)
+                    && !self.scroll_service_view_at(ev.column, ev.row, -scrollback_step)
                 {
                     self.adjust_mouse_scrollback(ev.column, ev.row, -scrollback_step);
                 }
@@ -11365,26 +11395,27 @@ impl App {
                     self.select_session(hit.session_id);
                     return;
                 }
-                if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                if self.selection.service_name().is_some() {
                     // Clicking a service pane focuses it, and a focused
                     // service view is its editor (spec 0175).
                     self.collapse_orchestrator_panel_on_focus_change();
                     self.focus = PaneFocus::View;
                     self.sync_service_editor_with_selection();
-                    if self.service_dialog.is_some() {
-                        let channel_start = view.y.saturating_add(15);
-                        if row >= channel_start {
-                            let index = row.saturating_sub(channel_start) as usize;
-                            let channel_count = self
-                                .services
-                                .iter()
-                                .find(|service| service.name == name)
-                                .map(|service| service.channels.len())
-                                .unwrap_or(0);
-                            if index < channel_count && self.open_edit_service_channel(index) {
-                                return;
-                            }
+                    // Channel rows scroll, so their positions come from the
+                    // frame that painted them rather than a fixed offset.
+                    if let Some(hit) = self
+                        .layout
+                        .service_channel_row_hits
+                        .iter()
+                        .find(|hit| hit.contains(col, row))
+                        .cloned()
+                    {
+                        if let Some(dialog) = self.service_dialog.as_mut() {
+                            dialog.focus = ServiceDialogFocus::Channel(hit.channel_index);
                         }
+                        // A no-op for a channel this service does not own —
+                        // the click still selects the row.
+                        self.open_edit_service_channel(hit.channel_index);
                     }
                     return;
                 }
@@ -16072,6 +16103,7 @@ mod tests {
             lineage_hscrollbar: None,
             lineage_box_hits: Vec::new(),
             service_session_hits: Vec::new(),
+            service_channel_row_hits: Vec::new(),
             service_channel_action_hits: Vec::new(),
             lineage_subagent_toggle_hits: Vec::new(),
             lineage_segment_tooltip: None,
@@ -16301,6 +16333,7 @@ mod tests {
             window_scrollback: HashMap::new(),
             window_views: HashMap::new(),
             terminal_scrollbar_visible_until: HashMap::new(),
+            service_view_scroll: 0,
             skip_redraw_after_event: false,
             notification_dirtied_view: true,
             hydrating_sessions: HashSet::new(),
@@ -35584,6 +35617,12 @@ mod tests {
         text
     }
 
+    fn rendered_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+            .collect()
+    }
+
     #[test]
     fn selection_bounds_use_split_window_inner_area() {
         let mut layout = test_layout();
@@ -40557,6 +40596,260 @@ mod tests {
             app.service_dialog.is_none(),
             "leaving the service view closes its editor"
         );
+        server.abort();
+    }
+
+    /// A catalog long enough to overflow the service view's lower section.
+    fn long_channel_catalog(count: usize) -> Vec<construct_protocol::ServiceChannelSummary> {
+        (0..count)
+            .map(|index| construct_protocol::ServiceChannelSummary {
+                id: format!("chan-{index:02}"),
+                kind: "http".to_string(),
+                enabled: true,
+                port: Some(9000 + index as u16),
+                has_credential: true,
+                has_app_token: false,
+                has_bot_token: false,
+                allowed_workspace_count: 0,
+                allowed_channel_count: 0,
+                allowed_workspaces: Vec::new(),
+                allowed_channels: Vec::new(),
+                attached_to: None,
+                publication: None,
+            })
+            .collect()
+    }
+
+    /// Arrow toward `target` until the editor's cursor lands on it, redrawing
+    /// after each step so the render pass resolves the scroll offset the way
+    /// it does in the running TUI.
+    async fn walk_service_focus_to(
+        app: &mut App,
+        term: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+        key: KeyCode,
+        target: ServiceDialogFocus,
+    ) {
+        for _ in 0..256 {
+            if app.service_dialog.as_ref().map(|dialog| dialog.focus) == Some(target) {
+                return;
+            }
+            app.on_key(KeyEvent::new(key, KeyModifiers::NONE)).await;
+            term.draw(|f| crate::ui::render(f, app)).expect("draw");
+        }
+        panic!("never reached {target:?}");
+    }
+
+    async fn service_view_with_long_catalog(
+        channels: usize,
+    ) -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        let (mut app, dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.service_channel_catalog = long_channel_catalog(channels);
+        app.select_service("assistant".to_string());
+        app.session_transitions.clear();
+        (app, dir, server)
+    }
+
+    #[tokio::test]
+    async fn service_view_scrolls_the_focused_row_into_view() {
+        let (mut app, _dir, server) = service_view_with_long_catalog(60).await;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert_eq!(app.service_view_scroll, 0, "the section opens at the top");
+        assert!(
+            !rendered_text(term.backend().buffer()).contains("chan-59"),
+            "the tail of a long catalog starts below the fold"
+        );
+
+        // Walk from the definition fields all the way to the last channel row.
+        walk_service_focus_to(
+            &mut app,
+            &mut term,
+            KeyCode::Down,
+            ServiceDialogFocus::Channel(59),
+        )
+        .await;
+        let at_bottom = app.service_view_scroll;
+        assert!(at_bottom > 0, "arrowing past the fold scrolls the section");
+        assert!(
+            rendered_text(term.backend().buffer()).contains("chan-59"),
+            "the focused row is brought into view"
+        );
+
+        // Up is symmetric: the section scrolls back the other way.
+        walk_service_focus_to(
+            &mut app,
+            &mut term,
+            KeyCode::Up,
+            ServiceDialogFocus::Channel(0),
+        )
+        .await;
+        assert!(app.service_view_scroll < at_bottom);
+        assert!(rendered_text(term.backend().buffer()).contains("chan-00"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_scrollbar_appears_only_when_the_section_overflows() {
+        let (mut app, _dir, server) = service_view_with_long_catalog(24).await;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            app.layout.terminal_scrollbar.is_none(),
+            "parked at the top with no recent activity, the bar stays hidden"
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let hit = app
+            .layout
+            .terminal_scrollbar
+            .expect("navigating reveals the scrollbar");
+        let view = app.layout.view_area.expect("service view");
+        assert_eq!(hit.area.width, 2, "same two-column bar as the session view");
+        assert_eq!(
+            hit.area.x + hit.area.width,
+            view.right().saturating_sub(1),
+            "the bar hugs the pane's right edge, inside its border"
+        );
+        let buffer = term.backend().buffer();
+        assert!(
+            (hit.area.y..hit.area.bottom()).all(|y| {
+                (hit.area.x..hit.area.right())
+                    .all(|x| buffer.cell((x, y)).is_some_and(|cell| cell.bg != ratatui::style::Color::Reset))
+            }),
+            "the track is painted as a background tint over the section"
+        );
+        assert!(
+            (hit.area.x..hit.area.right()).all(|x| {
+                buffer
+                    .cell((x, hit.thumb.y))
+                    .zip(buffer.cell((x, hit.area.bottom().saturating_sub(1))))
+                    .is_some_and(|(thumb, track)| thumb.bg != track.bg)
+            }),
+            "the thumb is a distinct tint from the track"
+        );
+
+        // Nothing to scroll → no bar at all, however recent the activity.
+        let (mut app, _dir2, server2) = service_view_with_long_catalog(1).await;
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(app.layout.terminal_scrollbar.is_none());
+        server2.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_wheel_and_drag_scroll_the_section() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = service_view_with_long_catalog(24).await;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let view = app.layout.view_area.expect("service view");
+
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: view.x + 10,
+            row: view.y + view.height / 2,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.on_mouse(wheel(MouseEventKind::ScrollDown)).await;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let scrolled = app.service_view_scroll;
+        assert!(scrolled > 0, "the wheel scrolls the service view");
+        app.on_mouse(wheel(MouseEventKind::ScrollUp)).await;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            app.service_view_scroll < scrolled,
+            "and scrolls back the other way"
+        );
+
+        // Dragging the thumb to the bottom of its track scrolls to the end.
+        app.on_mouse(wheel(MouseEventKind::ScrollDown)).await;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let hit = app.layout.terminal_scrollbar.expect("scrollbar revealed");
+        let press = |kind, row| MouseEvent {
+            kind,
+            column: hit.area.x,
+            row,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.on_mouse(press(
+            MouseEventKind::Down(MouseButton::Left),
+            hit.area.bottom().saturating_sub(1),
+        ))
+        .await;
+        assert!(app.dragging_terminal_scrollbar.is_some());
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let at_end = app.service_view_scroll;
+        assert!(at_end > 0);
+        assert!(
+            rendered_text(term.backend().buffer()).contains("chan-23"),
+            "dragging to the end of the track shows the last row"
+        );
+        app.on_mouse(press(
+            MouseEventKind::Up(MouseButton::Left),
+            hit.area.bottom().saturating_sub(1),
+        ))
+        .await;
+        assert!(app.dragging_terminal_scrollbar.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_row_hits_follow_the_scroll() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = service_view_with_long_catalog(24).await;
+        let mut routed = summary_with_kind(construct_protocol::SessionKind::User);
+        routed.id = "service-session".into();
+        routed.title = Some("service:assistant:http:acme-support".into());
+        app.sessions.push(routed);
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert!(
+            app.layout.service_session_hits.is_empty(),
+            "a routed session below the fold has no clickable row"
+        );
+
+        // Walk to the routed session row: it scrolls in, and so does its hit.
+        walk_service_focus_to(
+            &mut app,
+            &mut term,
+            KeyCode::Down,
+            ServiceDialogFocus::Session(0),
+        )
+        .await;
+        let hit = app
+            .layout
+            .service_session_hits
+            .first()
+            .cloned()
+            .expect("the scrolled-in session row is clickable");
+        let row_text = rendered_row(term.backend().buffer(), hit.area.y);
+        assert!(
+            row_text.contains("acme-support"),
+            "the hit sits on the row that was painted: {row_text:?}"
+        );
+
+        let click = |kind| MouseEvent {
+            kind,
+            column: hit.area.x + 1,
+            row: hit.area.y,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.on_mouse(click(MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(click(MouseEventKind::Up(MouseButton::Left)))
+            .await;
+        assert_eq!(app.selection, Selection::Session("service-session".into()));
         server.abort();
     }
 
