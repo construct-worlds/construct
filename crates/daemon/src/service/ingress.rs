@@ -208,14 +208,7 @@ impl ServiceIngress {
             // two concurrent first deliveries for the same key would each
             // create a conversation and one would become orphaned.
             let mut state = self.shared.state.lock().await;
-            let existing = state.sessions.get(&lookup_key).cloned().or_else(|| {
-                // State written by the original single-channel v1 runtime used
-                // the bare session key. Preserve those conversations when the
-                // legacy channel id is still `http`.
-                (self.channel_id == "http")
-                    .then(|| state.sessions.get(&key).cloned())
-                    .flatten()
-            });
+            let existing = self.live_session_for_key(&mut state, &lookup_key, &key).await;
             if let Some(id) = existing {
                 drop(state);
                 let detail = self.shared.manager.detail(&id).await?;
@@ -278,6 +271,47 @@ impl ServiceIngress {
                 delivery_id: new_delivery_id,
             })
         }
+    }
+
+    /// Resolve the session currently serving a routing key, if one is alive.
+    ///
+    /// A routing entry outlives the session it points at: an operator can
+    /// delete a routed session at any time, from any client. A dangling entry
+    /// is dropped here so the next delivery opens a fresh conversation —
+    /// otherwise that key stays stuck, failing every delivery it ever receives
+    /// again. Membership is probed rather than the whole session read, so a
+    /// transient transcript read error is never mistaken for a deletion.
+    ///
+    /// The caller holds the state lock, so pruning and the replacement
+    /// insert stay atomic with respect to a concurrent delivery on this key.
+    async fn live_session_for_key(
+        &self,
+        state: &mut PersistedState,
+        lookup_key: &str,
+        key: &str,
+    ) -> Option<String> {
+        let existing = state.sessions.get(lookup_key).cloned().or_else(|| {
+            // State written by the original single-channel v1 runtime used
+            // the bare session key. Preserve those conversations when the
+            // legacy channel id is still `http`.
+            (self.channel_id == "http")
+                .then(|| state.sessions.get(key).cloned())
+                .flatten()
+        })?;
+        if self.shared.manager.get_entry(&existing).await.is_some() {
+            return Some(existing);
+        }
+        tracing::info!(
+            service = %self.shared.name,
+            channel = %self.channel_id,
+            session = %existing,
+            "routed session no longer exists; the routing key will open a new session"
+        );
+        // Both the canonical and any legacy bare-key entry point at this
+        // session, so clear the id rather than one key.
+        state.sessions.retain(|_, session| session != &existing);
+        state.owned_sessions.remove(&existing);
+        None
     }
 
     /// Wait for the final assistant answer belonging to one submitted turn.
@@ -828,6 +862,114 @@ mod tests {
             Some("right")
         );
         assert_eq!(explicit_service_reply(events.iter(), "missing"), None);
+    }
+
+    /// Deleting a routed session must not brick its routing key.
+    ///
+    /// Nothing prunes the routing map when a session is deleted — the operator
+    /// can do that from any client, and the service never hears about it — so
+    /// the delivery path has to tolerate an entry pointing at a session that is
+    /// gone. Left unhandled, every later delivery on that key failed on the
+    /// missing session instead of starting a new conversation.
+    #[tokio::test]
+    async fn a_deleted_routed_session_frees_its_routing_key() {
+        let shared = shared_for_delivery_tests().await;
+        let ingress = ServiceIngress::new("http".to_string(), shared);
+        let mut state = PersistedState::default();
+        state
+            .sessions
+            .insert("http:caller-a".into(), "deleted-session".into());
+        state
+            .sessions
+            .insert("http:caller-b".into(), "other-session".into());
+        state.owned_sessions.insert("deleted-session".into());
+        state.owned_sessions.insert("other-session".into());
+
+        let resolved = ingress
+            .live_session_for_key(&mut state, "http:caller-a", "caller-a")
+            .await;
+
+        assert_eq!(
+            resolved, None,
+            "a routing entry whose session no longer exists must not be reused"
+        );
+        assert!(
+            !state.sessions.contains_key("http:caller-a"),
+            "the dangling entry must be dropped so the key can be routed again"
+        );
+        assert!(!state.owned_sessions.contains("deleted-session"));
+        assert_eq!(
+            state.sessions.get("http:caller-b").map(String::as_str),
+            Some("other-session"),
+            "pruning one key must leave every other conversation routed"
+        );
+        assert!(state.owned_sessions.contains("other-session"));
+    }
+
+    /// `single` routing shares this resolution path under a fixed key, so the
+    /// deleted-session recovery has to hold for it too.
+    #[tokio::test]
+    async fn a_deleted_single_routing_session_frees_the_shared_key() {
+        let shared = shared_for_delivery_tests().await;
+        let ingress = ServiceIngress::new("slack1".to_string(), shared);
+        let mut state = PersistedState::default();
+        state
+            .sessions
+            .insert("slack1:__single__".into(), "deleted-session".into());
+        state.owned_sessions.insert("deleted-session".into());
+
+        let resolved = ingress
+            .live_session_for_key(&mut state, "slack1:__single__", "__single__")
+            .await;
+
+        assert_eq!(resolved, None);
+        assert!(state.sessions.is_empty());
+        assert!(state.owned_sessions.is_empty());
+    }
+
+    /// The v1 http state keyed conversations by the bare session key. Those
+    /// entries are still honored, so they must be prunable on the same terms.
+    #[tokio::test]
+    async fn a_deleted_legacy_http_session_frees_its_bare_routing_key() {
+        let shared = shared_for_delivery_tests().await;
+        let ingress = ServiceIngress::new("http".to_string(), shared);
+        let mut state = PersistedState::default();
+        state
+            .sessions
+            .insert("caller-a".into(), "deleted-session".into());
+        state.owned_sessions.insert("deleted-session".into());
+
+        let resolved = ingress
+            .live_session_for_key(&mut state, "http:caller-a", "caller-a")
+            .await;
+
+        assert_eq!(resolved, None);
+        assert!(
+            state.sessions.is_empty(),
+            "the legacy bare-key entry must be dropped, not just the canonical one"
+        );
+        assert!(state.owned_sessions.is_empty());
+    }
+
+    /// An unrouted key is not a deletion: nothing to prune, nothing to reuse.
+    #[tokio::test]
+    async fn an_unknown_routing_key_resolves_to_no_session() {
+        let shared = shared_for_delivery_tests().await;
+        let ingress = ServiceIngress::new("http".to_string(), shared);
+        let mut state = PersistedState::default();
+        state
+            .sessions
+            .insert("http:caller-b".into(), "other-session".into());
+
+        let resolved = ingress
+            .live_session_for_key(&mut state, "http:caller-a", "caller-a")
+            .await;
+
+        assert_eq!(resolved, None);
+        assert_eq!(
+            state.sessions.get("http:caller-b").map(String::as_str),
+            Some("other-session")
+        );
     }
 
     #[tokio::test]
