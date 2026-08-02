@@ -3491,15 +3491,20 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     let mut visible_end = visible_start;
     let mut used_rows = 0usize;
     app.layout.list_visible_rows.clear();
-    for (i, item) in app_items.iter().enumerate().skip(visible_start) {
-        let h = app.list_item_display_height(item);
+    for i in visible_start..app_items.len() {
+        let h = app.list_item_display_height(&app_items, i);
         if visible_end > visible_start && used_rows + h > list_items_area.height as usize {
             break;
         }
+        // A project's leading margin belongs to the project it sets apart, so
+        // clicking that air selects it. The gutter affordances still live on
+        // the header's own first line, which is `margin` rows down — not on
+        // the first row of the gap.
+        let margin = app.list_project_margin_rows(&app_items, i);
         for line_no in 0..h {
             app.layout.list_visible_rows.push(crate::app::ListRowHit {
                 item_index: i,
-                first_line: line_no == 0,
+                first_line: line_no == margin,
             });
         }
         used_rows += h;
@@ -3508,22 +3513,29 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout
         .list_visible_rows
         .truncate(list_items_area.height as usize);
-    let selected_visible_idx = selected_idx.and_then(|idx| {
-        if idx >= visible_start && idx < visible_end {
-            Some(idx - visible_start)
-        } else {
-            None
+    // A project's leading margin is rendered as its own widget item rather
+    // than as extra lines on the header, so the selection highlight stops at
+    // the header's own rows instead of painting the gap above it as a block.
+    // The rows are still counted with the header by
+    // `list_item_display_height`, so this splits only what the widget draws,
+    // never the geometry the hit map and scrolling agree on.
+    let mut items: Vec<ListItem> = Vec::with_capacity(visible_end - visible_start);
+    let mut selected_widget_idx: Option<usize> = None;
+    for i in visible_start..visible_end {
+        let margin = app.list_project_margin_rows(&app_items, i);
+        if margin > 0 {
+            items.push(ListItem::new(vec![Line::raw(""); margin]));
         }
-    });
-    let items: Vec<ListItem> = item_lines[visible_start..visible_end]
-        .iter()
-        .map(|lines| ListItem::new(lines.clone()))
-        .collect();
+        if selected_idx == Some(i) {
+            selected_widget_idx = Some(items.len());
+        }
+        items.push(ListItem::new(item_lines[i].clone()));
+    }
     let mut state = ListState::default();
     state.select(if matches!(app.selection, Selection::None) {
         None
     } else {
-        selected_visible_idx
+        selected_widget_idx
     });
     f.render_widget(block, area);
     let list = List::new(items).highlight_style(highlight_style);
@@ -3556,9 +3568,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     if show_list_scrollbar && max_scroll > 0 && list_items_area.width > 0 {
         let track_h = list_items_area.height as usize;
         if track_h > 0 {
-            let total_rows: usize = app_items
-                .iter()
-                .map(|item| app.list_item_display_height(item))
+            let total_rows: usize = (0..app_items.len())
+                .map(|i| app.list_item_display_height(&app_items, i))
                 .sum();
             let thumb_h = (track_h * track_h / total_rows.max(1)).clamp(1, track_h);
             let max_top = track_h - thumb_h;
@@ -3605,8 +3616,12 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     // the harness width already computed there, mirroring the same tradeoff
     // `hovered_diamond` already makes for its own hit zone.
     let mut hit_y = list_items_area.y;
-    for item in app_items[visible_start..visible_end].iter() {
-        if let AppListItem::Session { summary, .. } = item {
+    for i in visible_start..visible_end {
+        // The label sits on the item's own first line, which a leading margin
+        // pushes down. Sessions never carry one, but the offset is applied
+        // here rather than assumed away.
+        let margin = app.list_project_margin_rows(&app_items, i) as u16;
+        if let AppListItem::Session { summary, .. } = &app_items[i] {
             let harness_w = harness_label(summary).chars().count() as u16;
             let x_end = list_items_area.x + list_items_area.width;
             app.layout
@@ -3615,10 +3630,10 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     session_id: summary.id.clone(),
                     x_start: x_end.saturating_sub(harness_w),
                     x_end,
-                    y: hit_y,
+                    y: hit_y.saturating_add(margin),
                 });
         }
-        hit_y = hit_y.saturating_add(app.list_item_display_height(item) as u16);
+        hit_y = hit_y.saturating_add(app.list_item_display_height(&app_items, i) as u16);
     }
     clear_pane_side_borders(f, area, app);
     if let (Some(rect), Some((id, mut rows))) = (lineage_rect, lineage) {

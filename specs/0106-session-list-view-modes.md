@@ -63,6 +63,23 @@ Rules both modes must preserve:
   blank, still separating it from what follows. Archived-disclosure rows head
   nothing and stay one line in both modes; no header gains a detail line, in
   either mode.
+- In full mode a project header also opens on a fixed margin of blank rows,
+  wider than the single row separating two sibling cards: at one row a project
+  reads as another item in the stream, and what it has to say is "a new
+  section starts here". The margin is NORMALIZED, not additive — it counts
+  whatever blank row the item above already leaves behind (a card and a header
+  leave one; an archived-disclosure row leaves none) and supplies only the
+  difference, so every project in the list opens on the same amount of air
+  regardless of its neighbor. A project at the top of the list has nothing to
+  be set apart from and carries no margin. Compact mode packs its rows with
+  nothing between them and gains no margin, and services — which head a
+  subtree but not a section — do not take one.
+- That margin belongs to the project it sets apart: it counts toward the
+  header's measured height, so clicking the gap selects the project and
+  scrolling accounts for it, but it renders as its own row rather than as
+  part of the header, so selecting a project never highlights the air above
+  it, and the header's first line — where its gutter affordances live —
+  remains its title row.
 - Session nesting uses the same two-cell indentation step in both modes. Each
   generation gets its own depth, including fork-of-fork, subagent-of-subagent,
   and mixed trees; the hierarchy never changes the user's depth-first session
@@ -108,8 +125,12 @@ lineage section set for a full/compact pair.
   (hover zones, drag targets, new gutter affordances) must go through the
   row-to-item mapping and declare which line of a card it lives on.
 - Scroll limits and scrollbar geometry are measured in display rows, so
-  mixed-height items (one-line disclosure rows and two-line headers among
-  three-row cards) stay correct.
+  mixed-height items (one-line disclosure rows and headers whose height
+  depends on the item above them, among three-row cards) stay correct.
+- An item's height can depend on its neighbor, so nothing may assume a kind
+  of item has a fixed height, and any new spacing rule has to be expressed in
+  the same measurement the hit map and scroll geometry read — spacing painted
+  only at render time would desynchronize them.
 - Adding new per-session data to the detail line means placing it in the
   existing drop-priority order, not appending unconditionally.
 
