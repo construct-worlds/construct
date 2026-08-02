@@ -111,6 +111,9 @@ pub fn smith_method_guidance(id: &str) -> &'static str {
             "export GROK_API_KEY (or XAI_API_KEY) in the shell that starts the daemon, then \
              restart the daemon"
         }
+        "deepseek_api_key" => {
+            "export DEEPSEEK_API_KEY in the shell that starts the daemon, then restart the daemon"
+        }
         "claude_subscription" => {
             "run `claude` and log in with your Claude subscription first (creates \
              ~/.claude/.credentials.json), as the user the daemon runs as, then restart the daemon"

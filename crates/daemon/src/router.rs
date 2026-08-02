@@ -90,9 +90,9 @@ pub fn provider_dialect(provider: &str) -> Option<Dialect> {
     match provider.to_ascii_lowercase().as_str() {
         "anthropic" => Some(Dialect::AnthropicMessages),
         "gemini" | "google" => Some(Dialect::GoogleGemini),
-        // Grok is served by smith's OpenAI client and speaks the same wire
-        // format.
-        "openai" | "grok" => Some(Dialect::OpenAiChat),
+        // Grok and DeepSeek are served by smith's OpenAI client and speak the
+        // same wire format.
+        "openai" | "grok" | "deepseek" => Some(Dialect::OpenAiChat),
         // Azure's current v1 API uses Responses on the wire; its adapter
         // difference is the `api-key` header, not a separate JSON dialect.
         "openai-responses" | "azure" | "azure-openai" => {
@@ -1991,6 +1991,54 @@ mod tests {
         assert!(
             armed.translates(),
             "an openai target from an anthropic harness must translate"
+        );
+    }
+
+    /// The built-in DeepSeek target (spec 0179) reaches the router as an
+    /// ordinary profile, so it must be selectable from an Anthropic harness
+    /// and carry every model the shared catalog lists for the provider —
+    /// not just the one the built-in names as its default.
+    #[tokio::test]
+    async fn deepseek_target_is_selectable_and_offers_the_catalog_models() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CONSTRUCT_TEST_DEEPSEEK_KEY", "sk-deepseek");
+        let r = started_with(
+            &dir,
+            cfg_with(true),
+            profiles(vec![(
+                "deepseek",
+                ModelProfile {
+                    provider: "deepseek".to_string(),
+                    base_url: None,
+                    api_key_env: Some("CONSTRUCT_TEST_DEEPSEEK_KEY".to_string()),
+                    api_key: None,
+                    model: Some("deepseek-v4-pro".to_string()),
+                },
+            )]),
+        )
+        .await;
+        r.attach_session("s1", "claude", None).unwrap();
+
+        let listed = r.list_routes("claude", true, None, false);
+        let deepseek = route_named(&listed, "deepseek");
+        assert_eq!(deepseek.unavailable_reason, None);
+        assert_eq!(deepseek.dialect, "openai-chat");
+        assert_eq!(deepseek.base_url, "https://api.deepseek.com/v1");
+        assert!(
+            deepseek.models.iter().any(|m| m == "deepseek-v4-flash"),
+            "the shared catalog's models must reach the picker: {:?}",
+            deepseek.models
+        );
+
+        let armed = r
+            .set_route("s1", "claude", Some("deepseek"), None, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(armed.model, "deepseek-v4-pro");
+        let ctx = r.sessions.read().unwrap()["s1"].clone();
+        assert!(
+            ctx.armed_route().unwrap().translates(),
+            "a chat-completions target from an anthropic harness must translate"
         );
     }
 

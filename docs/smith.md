@@ -16,6 +16,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # or  export GEMINI_API_KEY=...        # (or GOOGLE_API_KEY)
 # or  export META_API_KEY=...          # (or MODEL_API_KEY)
 # or  export GROK_API_KEY=...          # (or XAI_API_KEY)
+# or  export DEEPSEEK_API_KEY=...
 # or  codex login, then use --model codex-oauth:gpt-5.4-mini
 # or  claude login, then use --model claude-oauth:sonnet
 # or  grok login, then use --model grok-oauth:grok-4.3
@@ -37,15 +38,17 @@ The spec is one of:
 - `meta:<name>` — e.g. `meta:muse-spark-1.1` using `META_API_KEY` or
   `MODEL_API_KEY`
 - `grok:<name>` — e.g. `grok:grok-4.3` using `GROK_API_KEY` or `XAI_API_KEY`
+- `deepseek:<name>` — e.g. `deepseek:deepseek-v4-pro` using `DEEPSEEK_API_KEY`
 - `grok-oauth:<name>` — e.g. `grok-oauth:grok-4.3` using the Grok CLI auth file
 - `kimi-oauth:<name>` — e.g. `kimi-oauth:k3` using the Kimi Code CLI login
 - `ollama:<name>` — e.g. `ollama:llama3.1`
 - `codex-oauth:<name>` — e.g. `codex-oauth:gpt-5.4-mini`
 - `@<name>` — a named endpoint profile (see [Model profiles](#model-profiles)),
-  e.g. `@deepseek` or `@deepseek:deepseek-reasoner` to override its model
+  e.g. `@work-gateway` or `@work-gateway:deepseek-v4-flash` to override its model
 
 Bare names auto-detect: `gpt-*` / `o[1-5]*` → OpenAI, `claude-*` →
-Anthropic, `gemini-*` → Gemini, `grok*` → Grok, anything else → Ollama.
+Anthropic, `gemini-*` → Gemini, `grok*` → Grok, `deepseek*` → DeepSeek,
+anything else → Ollama.
 Use the explicit `meta:` prefix for Muse Spark; a bare `muse-spark-1.1`
 continues to mean an Ollama model. When in doubt, use the explicit prefix.
 
@@ -80,7 +83,8 @@ If you don't pass a model and `CONSTRUCT_SMITH_MODEL` isn't set, smith
 picks: `ANTHROPIC_API_KEY` → `claude-opus-4-8`, else `OPENAI_API_KEY`
 → `gpt-5`, else `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) →
 `gemini-2.5-pro`, else `META_API_KEY` (or `MODEL_API_KEY`) →
-`muse-spark-1.1`, else **smith fails to start** with an error explaining
+`muse-spark-1.1`, else `DEEPSEEK_API_KEY` → `deepseek-v4-pro`,
+else **smith fails to start** with an error explaining
 what's missing. The initial Status event records the chosen `provider:model`
 so you can verify.
 
@@ -104,20 +108,24 @@ OpenAI plus two OpenAI-compatible vendors — declare named profiles in
 Each `[smith.models.<name>]` entry sets:
 
 - `provider` — wire protocol to speak: `openai`, `anthropic`, `gemini`,
-  `meta`, `grok`, or `ollama`. (OAuth providers can't be profiled — use their
-  prefixes directly.)
+  `meta`, `grok`, `deepseek`, or `ollama`. (OAuth providers can't be profiled
+  — use their prefixes directly.)
 - `base_url` — endpoint URL (defaults to the protocol's public endpoint).
 - `api_key_env` — name of the env var holding the key (preferred). Or
   `api_key = "..."` inline (discouraged). If neither is set, the protocol's
   standard key env var is used (`OPENAI_API_KEY`, etc.).
 - `model` — default model name; override per call with `@<name>:<model>`.
 
+DeepSeek needs no profile — `DEEPSEEK_API_KEY` plus the `deepseek:` prefix
+already reaches its public endpoint. Declare one only for an endpoint
+Construct can't know: a private gateway, a reseller, a second account.
+
 ```toml
-[smith.models.deepseek]
-provider    = "openai"
-base_url    = "https://api.deepseek.com/v1"
-api_key_env = "DEEPSEEK_API_KEY"
-model       = "deepseek-chat"
+[smith.models.work-gateway]
+provider    = "deepseek"
+base_url    = "https://deepseek.internal/v1"
+api_key_env = "WORK_DEEPSEEK_KEY"
+model       = "deepseek-v4-pro"
 
 [smith.models.groq-llama]
 provider    = "openai"
@@ -137,9 +145,10 @@ model       = "muse-spark-1.1"
 ```
 
 ```text
-construct new --model @deepseek --prompt "..." smith   # start on a profile
+construct new --model @work-gateway --prompt "..." smith  # start on a profile
 /model openai:gpt-5                            # first-party OpenAI
-/model @deepseek                               # DeepSeek
+/model deepseek:deepseek-v4-pro                # DeepSeek's public endpoint
+/model @work-gateway                           # DeepSeek via a private gateway
 /model @groq-llama:llama-3.1-8b-instant        # Groq, one-off model override
 /model                                         # shows current + lists @profiles
 ```
@@ -234,6 +243,8 @@ notice in the status bar that opens `/configure`.
   accepted).
 - `GROK_API_KEY` / `XAI_API_KEY` — xAI Grok API credentials (either is
   accepted).
+- `DEEPSEEK_API_KEY` — DeepSeek platform credentials. Also makes DeepSeek a
+  route target for other harnesses with no further config (spec 0179).
 - `GROK_HOME` — override the base directory used by `grok-oauth:` token lookup;
   Smith reads `$GROK_HOME/.grok/auth.json` instead of `~/.grok/auth.json`.
 - `KIMI_CODE_HOME` — override the base directory used by `kimi-oauth:`

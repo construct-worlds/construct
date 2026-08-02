@@ -182,6 +182,9 @@ pub async fn probe_smith(cache: &std::sync::Mutex<AvailabilityCache>) -> Availab
     if env_present("GROK_API_KEY") || env_present("XAI_API_KEY") {
         return Availability::ready("ready (Grok API key)");
     }
+    if env_present("DEEPSEEK_API_KEY") {
+        return Availability::ready("ready (DeepSeek API key)");
+    }
     if claude_oauth_credentials_present(cache).await {
         return Availability::ready("ready (Claude subscription)");
     }
@@ -386,6 +389,13 @@ pub async fn smith_auth_methods(
         "grok-2-latest",
         &["GROK_API_KEY", "XAI_API_KEY"],
     );
+    let deepseek_key = env_key_method(
+        "deepseek_api_key",
+        "DeepSeek API key",
+        "deepseek",
+        "deepseek-v4-pro",
+        &["DEEPSEEK_API_KEY"],
+    );
     let claude_sub_present = claude_oauth_credentials_present(cache).await;
     let claude_sub = SmithAuthMethod {
         id: "claude_subscription",
@@ -460,8 +470,11 @@ pub async fn smith_auth_methods(
     // is ready" while a session started without a pin still errors with
     // "no auto-detected smith credential" — the exact promise/behavior
     // mismatch this dialog exists to prevent.
-    let auto_available =
-        anthropic.available || openai.available || gemini.available || meta.available;
+    let auto_available = anthropic.available
+        || openai.available
+        || gemini.available
+        || meta.available
+        || deepseek_key.available;
     let auto = SmithAuthMethod {
         id: "auto",
         label: "Auto-detect",
@@ -469,14 +482,16 @@ pub async fn smith_auth_methods(
         default_model: "",
         available: auto_available,
         detail: if auto_available {
-            "auto-detects the first set API key: Anthropic → OpenAI → Gemini → Meta".to_string()
+            "auto-detects the first set API key: Anthropic → OpenAI → Gemini → Meta → DeepSeek"
+                .to_string()
         } else {
             "no auto-detected API key set (subscriptions and Ollama must be picked explicitly)"
                 .to_string()
         },
     };
     vec![
-        anthropic, openai, gemini, meta, grok_key, claude_sub, codex_sub, grok_sub, kimi_sub,
+        anthropic, openai, gemini, meta, grok_key, deepseek_key, claude_sub, codex_sub, grok_sub,
+        kimi_sub,
         ollama, auto,
     ]
 }
@@ -726,11 +741,17 @@ mod tests {
         // `CODEX_HOME` could still interleave with this one's read. Take the
         // crate-wide guard every env-mutating test uses.
         let _lock = crate::router::oauth::test_env_guard();
+        // Every direct-API-key var the auto rung counts. A var missing from
+        // this list makes the test pass or fail on the developer's own
+        // exported keys rather than on the fixture.
         let key_vars = [
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
             "GEMINI_API_KEY",
             "GOOGLE_API_KEY",
+            "META_API_KEY",
+            "MODEL_API_KEY",
+            "DEEPSEEK_API_KEY",
         ];
         let saved_keys: Vec<Option<String>> =
             key_vars.iter().map(|v| std::env::var(v).ok()).collect();

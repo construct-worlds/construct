@@ -39,6 +39,11 @@ pub fn context_window_tokens(provider: &str, model: &str) -> usize {
         // cloud endpoint (order-of-magnitude in the same class as recent
         // OpenAI models); this is a safe conservative starting value.
         ("grok", _) => 100_000,
+        // DeepSeek's V4 line (pro and flash) both advertise a 1M-token
+        // context window. Without an entry here the `_` arm would cap the
+        // session at 8K and compact almost immediately on a model that can
+        // hold the whole conversation.
+        ("deepseek", _) => 1_000_000,
         // ChatGPT-subscription Codex backend. Same gpt-5* family,
         // same advertised context window as the platform API — the
         // billing pipe is what differs, not the model. Starting
@@ -379,6 +384,22 @@ mod tests {
             role: Role::Assistant,
             content: Content::Text { text: s.into() },
         }
+    }
+
+    /// A provider with no entry falls to the 8K default, which would compact
+    /// a 1M-context model almost immediately. Regression guard for the
+    /// DeepSeek arm specifically, since the fallthrough is silent.
+    #[test]
+    fn deepseek_gets_its_real_context_window_not_the_default() {
+        assert_eq!(context_window_tokens("deepseek", "deepseek-v4-pro"), 1_000_000);
+        assert_eq!(
+            context_window_tokens("deepseek", "deepseek-v4-flash"),
+            1_000_000
+        );
+        assert!(
+            context_window_tokens("deepseek", "some-future-model") > 8_000,
+            "an unrecognized DeepSeek model must not fall to the generic default"
+        );
     }
 
     #[test]

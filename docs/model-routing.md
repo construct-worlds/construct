@@ -27,6 +27,11 @@ A target is somewhere the router can send a model request:
   Grok, Kimi) are offered automatically — nothing to declare. The router
   reads those credentials from the owning CLI's store and never refreshes
   them; an expired login is reported with the command to renew it.
+- **Built-in API-key providers** are offered as soon as their key is in the
+  daemon's environment, with nothing to declare. `DEEPSEEK_API_KEY` alone
+  makes DeepSeek a route target (spec 0179). Declaring a profile under the
+  same name replaces the built-in, so a private gateway or second account
+  still overrides it.
 - **Declared endpoints** are the `[smith.models.*]` profiles in
   `config.toml` — declare an endpoint once and it is reachable from both
   smith and a routed session:
@@ -47,8 +52,8 @@ with the reason they can't be selected.
 
 A target appears only when it is actually usable — a credential the router
 can read, or a configured endpoint with its key present. A fresh machine
-with no logins and no profiles has nothing to offer, so pickers stay
-native-only until a login or profile exists.
+with no logins, no built-in provider keys, and no profiles has nothing to
+offer, so pickers stay native-only until one of those exists.
 
 ### Summary of route targets
 
@@ -58,7 +63,8 @@ native-only until a login or profile exists.
 | `codex-oauth` | Subscription Login | OpenAI Responses | `https://chatgpt.com/backend-api/codex/responses` | Auto-discovered from Codex CLI store (read-only token) |
 | `grok-oauth` | Subscription Login | OpenAI Chat Completions | `https://api.x.ai/v1/chat/completions` | Auto-discovered from Grok CLI store (read-only token) |
 | `kimi-oauth` | Subscription Login | Anthropic Messages | `https://api.kimi.com/coding/v1/messages` | Auto-discovered from Kimi CLI store (read-only token) |
-| `[smith.models.<name>]` | Declared Endpoint | Configured (`openai`, `anthropic`, `responses`, `gemini`, `azure`) | Configured `base_url` | Declared in `config.toml` (`api_key_env` / `api_key`) |
+| `deepseek` | Built-in API Key | OpenAI Chat Completions | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY` in the daemon's environment |
+| `[smith.models.<name>]` | Declared Endpoint | Configured (`openai`, `anthropic`, `responses`, `gemini`, `azure`, `deepseek`) | Configured `base_url` | Declared in `config.toml` (`api_key_env` / `api_key`) |
 
 *Note: Antigravity OAuth logins are not offered as route targets because their backend uses a Gemini-shaped protocol with no proxy translator.*
 
@@ -221,7 +227,8 @@ grok-oauth   = "grok-4.5"
 
 ## Design records
 
-Specs [0113](../specs/0113-model-routing-is-proxy-transported.md),
+Specs [0179](../specs/0179-builtin-api-key-route-targets.md),
+[0113](../specs/0113-model-routing-is-proxy-transported.md),
 [0114](../specs/0114-session-route-is-durable-session-state.md),
 [0115](../specs/0115-routing-injection-is-probe-verified.md),
 [0157](../specs/0157-native-model-catalog-routing.md), and

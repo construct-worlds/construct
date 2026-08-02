@@ -58,11 +58,11 @@ a profile is used only when explicitly named.
 `config.toml`:
 
 ```toml
-[smith.models.deepseek]
-provider    = "openai"
-base_url    = "https://api.deepseek.com/v1"
-api_key_env = "DEEPSEEK_API_KEY"
-model       = "deepseek-chat"
+[smith.models.deepseek-internal]
+provider    = "deepseek"
+base_url    = "https://deepseek.internal/v1"
+api_key_env = "WORK_DEEPSEEK_KEY"
+model       = "deepseek-v4-pro"
 
 [smith.models.groq-llama]
 provider    = "openai"
@@ -72,5 +72,12 @@ model       = "llama-3.3-70b-versatile"
 ```
 
 In one session: `/model openai:gpt-5` reaches first-party OpenAI, then
-`/model @deepseek` reaches DeepSeek, then `/model @groq-llama:llama-3.1-8b-instant`
-reaches Groq with a one-off model override — no restart, no env changes.
+`/model @deepseek-internal` reaches the private gateway, then
+`/model @groq-llama:llama-3.1-8b-instant` reaches Groq with a one-off model
+override — no restart, no env changes.
+
+A profile is not the only way to reach a vendor. A provider with its own
+prefix (`deepseek:`, `grok:`, …) is reachable directly at its public endpoint;
+profiles exist for the endpoints Construct cannot know — private gateways,
+resellers, a second account. See
+[[0179-builtin-api-key-route-targets]] for the routing-side equivalent.

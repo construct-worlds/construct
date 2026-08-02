@@ -1,11 +1,13 @@
 //! Translate a model spec string into a (provider, bare model name).
 //!
 //! Explicit prefixes (`openai:`, `anthropic:`, `gemini:`, `meta:`, `ollama:`,
-//! `grok:`, `grok-oauth:`, `codex-oauth:`, `claude-oauth:`, `claude-code-oauth:`) always win.
+//! `grok:`, `deepseek:`, `grok-oauth:`, `codex-oauth:`, `claude-oauth:`,
+//! `claude-code-oauth:`) always win.
 //! Otherwise we sniff the bare name:
 //!   - starts with `gpt-` or `o[1-5]` → OpenAI
 //!   - starts with `claude-` → Anthropic
 //!   - starts with `gemini-` → Gemini
+//!   - starts with `deepseek` → DeepSeek
 //!   - anything else → Ollama (local fallback)
 //!
 //! Returning an enum keeps the dispatch table small and testable.
@@ -31,6 +33,9 @@ pub enum Provider {
     Ollama,
     /// xAI Grok API surface.
     Grok,
+    /// DeepSeek platform API surface. OpenAI-compatible chat completions at
+    /// `api.deepseek.com`, billed against a DeepSeek API key.
+    DeepSeek,
     /// OAuth-backed Grok access path.
     GrokOauth,
     /// OAuth-backed Codex backend; reads `~/.codex/auth.json`, bills
@@ -91,6 +96,12 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
             model: rest.to_string(),
         });
     }
+    if let Some(rest) = s.strip_prefix("deepseek:") {
+        return Ok(ModelSpec {
+            provider: Provider::DeepSeek,
+            model: rest.to_string(),
+        });
+    }
     if let Some(rest) = s.strip_prefix("grok-oauth:") {
         return Ok(ModelSpec {
             provider: Provider::GrokOauth,
@@ -129,6 +140,7 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
                     | "meta"
                     | "ollama"
                     | "grok"
+                    | "deepseek"
                     | "grok-oauth"
                     | "codex-oauth"
                     | "claude-oauth"
@@ -138,7 +150,7 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
         {
             return Err(format!(
                 "unknown provider prefix `{prefix}:` (expected one of \
-                 openai:, anthropic:, gemini:, meta:, ollama:, grok:, grok-oauth:, codex-oauth:, claude-oauth:, kimi-oauth:)"
+                 openai:, anthropic:, gemini:, meta:, ollama:, grok:, deepseek:, grok-oauth:, codex-oauth:, claude-oauth:, kimi-oauth:)"
             ));
         }
     }
@@ -150,6 +162,8 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
         Provider::Gemini
     } else if s.starts_with("grok") {
         Provider::Grok
+    } else if s.starts_with("deepseek") {
+        Provider::DeepSeek
     } else {
         Provider::Ollama
     };
@@ -308,6 +322,35 @@ mod tests {
         let s = parse("grok-2-1212");
         assert_eq!(s.provider, Provider::Grok);
         assert_eq!(s.model, "grok-2-1212");
+    }
+
+    #[test]
+    fn deepseek_prefix_is_recognized() {
+        let s = parse("deepseek:deepseek-v4-pro");
+        assert_eq!(s.provider, Provider::DeepSeek);
+        assert_eq!(s.model, "deepseek-v4-pro");
+    }
+
+    /// Every model DeepSeek serves is named `deepseek-*`, so the bare name is
+    /// unambiguous — unlike `claude-*`/`gpt-*`, no other vendor claims it.
+    #[test]
+    fn bare_deepseek_model_routes_to_deepseek() {
+        assert_eq!(parse("deepseek-v4-pro").provider, Provider::DeepSeek);
+        assert_eq!(parse("deepseek-v4-flash").provider, Provider::DeepSeek);
+        // The retired `deepseek-chat` / `deepseek-reasoner` ids are still
+        // accepted by the API (it maps them onto a current model), so they
+        // must keep reaching DeepSeek rather than falling through to Ollama.
+        assert_eq!(parse("deepseek-chat").provider, Provider::DeepSeek);
+        assert_eq!(parse("deepseek-reasoner").provider, Provider::DeepSeek);
+    }
+
+    /// A DeepSeek model served by some other endpoint (an OpenAI-compatible
+    /// reseller, a local copy) is still reachable — the bare-name sniff is a
+    /// default, and an explicit prefix or `@profile` overrides it.
+    #[test]
+    fn explicit_prefix_beats_deepseek_sniff() {
+        assert_eq!(parse("ollama:deepseek-v4-flash").provider, Provider::Ollama);
+        assert_eq!(parse("openai:deepseek-v4-pro").provider, Provider::OpenAI);
     }
 
     #[test]
