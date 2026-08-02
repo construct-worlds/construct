@@ -602,6 +602,12 @@ pub(crate) fn list_archive_indent_cells(nesting_depth: usize) -> u16 {
     list_session_indent_cells(nesting_depth)
 }
 
+/// Blank rows that stand above a project header in full mode. Deliberately
+/// more than the single row separating two sibling session cards: at one row
+/// a project reads as another item in the stream, and the thing it needs to
+/// say is "a new section starts here".
+pub(crate) const PROJECT_MARGIN_ROWS: usize = 2;
+
 impl ListItem {
     pub fn matches(&self, sel: &Selection) -> bool {
         match (self, sel) {
@@ -11667,14 +11673,53 @@ impl App {
     }
 
     /// A list item's display height under the current view mode: full-mode
-    /// session cards take three rows, everything else (group headers, archived
-    /// disclosure rows, every compact-mode row) takes one.
-    pub(crate) fn list_item_display_height(&self, item: &ListItem) -> usize {
-        match item {
-            ListItem::Service { .. } => 1,
-            ListItem::Session { .. } if self.list_mode == SessionListViewMode::Full => 3,
-            _ => 1,
+    /// session cards take three rows, full-mode rows that head a subtree
+    /// (project headers, services) take two, and everything else (archived
+    /// disclosure rows, every compact-mode row) takes one. A project header
+    /// also carries its leading margin (see
+    /// [`Self::list_project_margin_rows`]), so the rows above it belong to
+    /// the item they set apart.
+    pub(crate) fn list_item_display_height(&self, items: &[ListItem], idx: usize) -> usize {
+        if self.list_mode != SessionListViewMode::Full {
+            return 1;
         }
+        match &items[idx] {
+            ListItem::Session { .. } => 3,
+            // A project header or a service heads a subtree, so full mode
+            // gives it the same closing rail/breathing row a session card
+            // gets. Archived-disclosure rows head nothing and stay flat.
+            ListItem::GroupHeader { .. } => 2 + self.list_project_margin_rows(items, idx),
+            ListItem::Service { .. } => 2,
+            ListItem::ArchivedRow { .. } => 1,
+        }
+    }
+
+    /// Blank rows full mode inserts above a project header so it reads as a
+    /// section break rather than one more row in the stream.
+    ///
+    /// The gap is NORMALIZED, not additive: rows already trailing the item
+    /// above count toward it, so every project sits under the same amount of
+    /// air no matter what precedes it. A session card, a project header and a
+    /// service each end in one blank/rail row and so need one more; an
+    /// archived-disclosure row ends in nothing and needs the full gap. A
+    /// project opening the list needs none — there is nothing above to be set
+    /// apart from.
+    pub(crate) fn list_project_margin_rows(&self, items: &[ListItem], idx: usize) -> usize {
+        if self.list_mode != SessionListViewMode::Full
+            || !matches!(items[idx], ListItem::GroupHeader { .. })
+        {
+            return 0;
+        }
+        let Some(prev) = idx.checked_sub(1).map(|p| &items[p]) else {
+            return 0;
+        };
+        let trailing_blank = match prev {
+            ListItem::Session { .. }
+            | ListItem::GroupHeader { .. }
+            | ListItem::Service { .. } => 1,
+            ListItem::ArchivedRow { .. } => 0,
+        };
+        PROJECT_MARGIN_ROWS.saturating_sub(trailing_blank)
     }
 
     /// Largest useful `list_scroll_offset`: the smallest offset that still
@@ -11683,8 +11728,8 @@ impl App {
     /// this reduces to `len − visible_rows`.
     pub(crate) fn list_max_scroll(&self, items: &[ListItem], visible_rows: usize) -> usize {
         let mut rows = 0usize;
-        for (idx, item) in items.iter().enumerate().rev() {
-            rows += self.list_item_display_height(item);
+        for idx in (0..items.len()).rev() {
+            rows += self.list_item_display_height(items, idx);
             if rows > visible_rows {
                 return idx + 1;
             }
@@ -11718,8 +11763,8 @@ impl App {
         // viewport pins to itself rather than scrolling past.
         let mut rows = 0usize;
         let mut offset = target_idx;
-        for (idx, item) in items[..=target_idx].iter().enumerate().rev() {
-            rows += self.list_item_display_height(item);
+        for idx in (0..=target_idx).rev() {
+            rows += self.list_item_display_height(items, idx);
             if rows > visible_rows {
                 break;
             }
@@ -44423,6 +44468,234 @@ mod tests {
 
         app.run_action(KeyAction::NextSession).await;
         assert_eq!(app.selection, Selection::Group("project".into()));
+    }
+
+    /// Full mode gives a project header the rail/breathing row a session card
+    /// gets, so the header reads as the root its members hang from instead of
+    /// sitting flush against the first one. Compact mode keeps every row flat.
+    #[tokio::test]
+    async fn full_mode_project_header_caps_its_member_rails() {
+        let (mut app, _dir, _server) = empty_app().await;
+        let mut member = summary_with_kind(construct_protocol::SessionKind::User);
+        member.id = "member".into();
+        member.title = Some("member one".into());
+        member.group_id = Some("p1".into());
+        app.sessions = vec![member];
+        app.groups = vec![GroupSummary {
+            id: "p1".into(),
+            name: "Project One".into(),
+            created_at: chrono::Utc::now(),
+            position: 0,
+            collapsed: false,
+        }];
+        app.matrix_rain_hidden = true;
+
+        let items = app.list_items();
+        let header = &items[0];
+        assert!(matches!(header, ListItem::GroupHeader { .. }));
+
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        let row_text = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, y: u16| {
+            (0..term.backend().buffer().area.width)
+                .map(|x| {
+                    term.backend()
+                        .buffer()
+                        .cell((x, y))
+                        .map(|cell| cell.symbol())
+                        .unwrap_or(" ")
+                })
+                .collect::<String>()
+        };
+
+        app.list_mode = SessionListViewMode::Compact;
+        assert_eq!(app.list_item_display_height(&items, 0), 1);
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("render compact");
+        let top = app.layout.list_items_area.expect("list rows").y;
+        assert!(row_text(&term, top).contains("Project One"));
+        // Compact packs rows: the member follows the header immediately.
+        assert!(row_text(&term, top + 1).contains("member one"));
+
+        app.list_mode = SessionListViewMode::Full;
+        // Opening the list, this project has nothing above it to be set apart
+        // from, so it carries no margin and stands at its bare two rows.
+        assert_eq!(app.list_project_margin_rows(&items, 0), 0);
+        assert_eq!(app.list_item_display_height(&items, 0), 2);
+        // Services head a depth-1 subtree the same way and earn the same row.
+        let service_only = vec![ListItem::Service {
+            summary: service_summary_for_test("svc"),
+            session_count: 1,
+            sessions_expanded: true,
+        }];
+        assert_eq!(app.list_item_display_height(&service_only, 0), 2);
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("render full");
+        let top = app.layout.list_items_area.expect("list rows").y;
+        assert!(row_text(&term, top).contains("Project One"));
+        // The header's own row carries the stem down to the first member,
+        // which now starts one row later than it did in compact mode.
+        let rail = row_text(&term, top + 1);
+        assert!(
+            rail.contains('│') && !rail.contains("member one"),
+            "expected a rail-only row under the header, got {rail:?}"
+        );
+        assert!(row_text(&term, top + 2).contains("member one"));
+    }
+
+    /// The gap above a project is NORMALIZED, not additive: whatever the item
+    /// above it happens to leave behind, a project always opens on two rows of
+    /// air. An archived disclosure leaves none and a session card leaves one,
+    /// so the same visual break costs a different number of rows depending on
+    /// the neighbor — which is the whole point of measuring it here instead of
+    /// stapling a constant onto every header.
+    #[tokio::test]
+    async fn project_margin_normalizes_the_gap_above_a_header() {
+        let (mut app, _dir, _server) = empty_app().await;
+        let header = |id: &str| ListItem::GroupHeader {
+            group: GroupSummary {
+                id: id.into(),
+                name: format!("Project {id}"),
+                created_at: chrono::Utc::now(),
+                position: 0,
+                collapsed: false,
+            },
+            member_count: 1,
+            attention_rollup: false,
+        };
+        let session = || ListItem::Session {
+            summary: summary_with_kind(construct_protocol::SessionKind::User),
+            nesting_depth: 0,
+            has_children: false,
+            children_expanded: false,
+            attention_rollup: false,
+        };
+        let archived = || ListItem::ArchivedRow {
+            section: ArchiveSection::Ungrouped,
+            count: 2,
+            expanded: false,
+            nesting_depth: 1,
+        };
+        let service = || ListItem::Service {
+            summary: service_summary_for_test("svc"),
+            session_count: 1,
+            sessions_expanded: true,
+        };
+
+        let items = vec![
+            header("a"),  // 0: opens the list
+            session(),    // 1
+            header("b"),  // 2: after a session card
+            archived(),   // 3
+            header("c"),  // 4: after an archived disclosure
+            service(),    // 5
+            header("d"),  // 6: after a service header
+            header("e"),  // 7: after another project
+        ];
+
+        app.list_mode = SessionListViewMode::Full;
+        // A project that opens the list has nothing to be set apart from.
+        assert_eq!(app.list_project_margin_rows(&items, 0), 0);
+        assert_eq!(app.list_item_display_height(&items, 0), 2);
+        // Cards, service headers, and project headers all end in one blank
+        // row, so one more row tops the gap up to two.
+        for idx in [2usize, 6, 7] {
+            assert_eq!(
+                app.list_project_margin_rows(&items, idx),
+                1,
+                "item {idx} follows a row that already breathes once"
+            );
+            assert_eq!(app.list_item_display_height(&items, idx), 3);
+        }
+        // An archived disclosure ends flush against what follows, so the
+        // project below it has to supply both rows itself.
+        assert_eq!(app.list_project_margin_rows(&items, 4), 2);
+        assert_eq!(app.list_item_display_height(&items, 4), 4);
+        // Nothing but a project earns the margin.
+        for idx in [1usize, 3, 5] {
+            assert_eq!(app.list_project_margin_rows(&items, idx), 0);
+        }
+
+        // Compact mode is packed by design: every item is one row, margin
+        // included.
+        app.list_mode = SessionListViewMode::Compact;
+        for idx in 0..items.len() {
+            assert_eq!(app.list_project_margin_rows(&items, idx), 0);
+            assert_eq!(app.list_item_display_height(&items, idx), 1);
+        }
+    }
+
+    /// The margin is measured as part of the header's height but rendered as
+    /// its own widget row. Two things have to hold at once: the blank rows
+    /// really appear above the title, and the header's gutter affordances stay
+    /// pinned to its title row rather than sliding up into the air above it.
+    #[tokio::test]
+    async fn project_margin_renders_above_the_header_without_moving_its_first_line() {
+        let (mut app, _dir, _server) = empty_app().await;
+        let mut loose = summary_with_kind(construct_protocol::SessionKind::User);
+        loose.id = "loose".into();
+        loose.title = Some("loose session".into());
+        let mut member = summary_with_kind(construct_protocol::SessionKind::User);
+        member.id = "member".into();
+        member.title = Some("member one".into());
+        member.group_id = Some("p1".into());
+        app.sessions = vec![loose, member];
+        app.groups = vec![GroupSummary {
+            id: "p1".into(),
+            name: "Project One".into(),
+            created_at: chrono::Utc::now(),
+            position: 0,
+            collapsed: false,
+        }];
+        app.matrix_rain_hidden = true;
+        app.list_mode = SessionListViewMode::Full;
+
+        let items = app.list_items();
+        let header_idx = items
+            .iter()
+            .position(|i| matches!(i, ListItem::GroupHeader { .. }))
+            .expect("a project header");
+        assert_eq!(header_idx, 1, "the ungrouped session renders above it");
+        assert_eq!(app.list_project_margin_rows(&items, header_idx), 1);
+
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("render full");
+        // Read only the list's own columns — the pane beside it is busy.
+        let area = app.layout.list_items_area.expect("list rows");
+        let row_text = |y: u16| {
+            (area.x..area.x + area.width)
+                .map(|x| {
+                    term.backend()
+                        .buffer()
+                        .cell((x, y))
+                        .map(|cell| cell.symbol())
+                        .unwrap_or(" ")
+                })
+                .collect::<String>()
+        };
+        let top = area.y;
+
+        assert!(row_text(top).contains("loose session"));
+        // Rows 2 and 3 are the card's own trailing row plus the project's
+        // margin: two rows of air, however they were paid for.
+        assert!(
+            row_text(top + 2).trim().is_empty() && row_text(top + 3).trim().is_empty(),
+            "expected two blank rows above the project, got {:?} / {:?}",
+            row_text(top + 2),
+            row_text(top + 3)
+        );
+        assert!(row_text(top + 4).contains("Project One"));
+        assert!(row_text(top + 6).contains("member one"));
+
+        // The margin belongs to the project — clicking that air selects it —
+        // but only its title row answers as the header's first line.
+        let hits = &app.layout.list_visible_rows;
+        assert_eq!(hits[3].item_index, header_idx);
+        assert!(!hits[3].first_line, "the gap is not the header's first line");
+        assert_eq!(hits[4].item_index, header_idx);
+        assert!(hits[4].first_line, "the title row is");
     }
 
     #[tokio::test]
