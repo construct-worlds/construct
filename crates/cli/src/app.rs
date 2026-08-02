@@ -52,8 +52,8 @@ pub use configure::{
 };
 pub use service_dialog::{
     ServiceChannelAction, ServiceChannelActionAddress, ServiceChannelActions, ServiceChannelDialog,
-    ServiceChannelDialogMode, ServiceDialog, ServiceDialogMode, ServiceDialogPickerKind,
-    SERVICE_PICKER_VISIBLE_ROWS,
+    ServiceChannelDialogMode, ServiceDialog, ServiceDialogFocus, ServiceDialogMode,
+    ServiceDialogPickerKind, SERVICE_FIELD_COUNT, SERVICE_PICKER_VISIBLE_ROWS,
 };
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
@@ -7196,6 +7196,9 @@ impl App {
         self.transcript_session = None;
         self.set_scrollback_for_window(Some(self.active_window_id), 0);
         self.sync_active_window_selection();
+        // Focusing a service view is edit mode — there is no separate
+        // read-only state to step out of (spec 0175).
+        self.sync_service_editor_with_selection();
     }
 
     /// Select a session immediately after creation. The create RPC can finish
@@ -8787,6 +8790,9 @@ impl App {
             // the outgoing one, reveal the incoming). A no-op when the
             // selection didn't actually change.
             self.sync_playbook_popup_with_selection();
+            // Same for the service editor: whichever pane holds focus, a
+            // service in it is being edited and a session in it is not.
+            self.sync_service_editor_with_selection();
             self.report_focused_sessions();
         }
     }
@@ -11148,12 +11154,12 @@ impl App {
                 return;
             } else {
                 if let Some(dialog) = self.service_dialog.as_mut() {
-                    // The dialog's eight editable rows start immediately
-                    // inside the one-cell border. Clicking a row selects it;
-                    // keyboard typing/cycling then edits that field.
+                    // The definition rows start immediately inside the
+                    // one-cell border. Clicking a row selects it; keyboard
+                    // typing/cycling then edits that field.
                     let field = row.saturating_sub(modal.y.saturating_add(1)) as usize;
-                    if field < 8 {
-                        dialog.selected_field = field;
+                    if field < SERVICE_FIELD_COUNT {
+                        dialog.focus = ServiceDialogFocus::Field(field);
                         dialog.confirm_delete = false;
                     }
                     return;
@@ -11359,13 +11365,12 @@ impl App {
                     self.select_session(hit.session_id);
                     return;
                 }
-                if self.service_dialog.is_none() {
-                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
-                        self.open_edit_service_view(&name);
-                        return;
-                    }
-                }
                 if let Some(name) = self.selection.service_name().map(str::to_owned) {
+                    // Clicking a service pane focuses it, and a focused
+                    // service view is its editor (spec 0175).
+                    self.collapse_orchestrator_panel_on_focus_change();
+                    self.focus = PaneFocus::View;
+                    self.sync_service_editor_with_selection();
                     if self.service_dialog.is_some() {
                         let channel_start = view.y.saturating_add(15);
                         if row >= channel_start {
@@ -11381,6 +11386,7 @@ impl App {
                             }
                         }
                     }
+                    return;
                 }
                 if self.handle_dynamic_ui_overlay_click(col, row).await {
                     return;
@@ -11414,9 +11420,9 @@ impl App {
     }
 
     fn dismiss_modal(&mut self) {
-        if self.service_dialog.take().is_some() {
-            return;
-        }
+        // The service editor is deliberately absent here: it is the service
+        // view itself, not a modal over it, and Esc inside it reverts edits
+        // rather than closing anything (spec 0175).
         if self.configure_popup.take().is_some() {
             return;
         }
@@ -11965,11 +11971,6 @@ impl App {
             self.handle_session_picker_key(key);
             return;
         }
-        // The service view's inline editor owns text/navigation until saved
-        // or dismissed. C-x remains escapable so global chords keep working.
-        if self.service_dialog.is_some() && self.handle_service_dialog_key(key).await {
-            return;
-        }
         // The `/configure` dialog (spec 0069) owns the keys it uses for its
         // own navigation. Anything else closes it and falls through to
         // ordinary routing below — same keystroke, re-dispatched exactly
@@ -12063,10 +12064,16 @@ impl App {
         // must run only after every transient keyboard surface above has had
         // first claim. Otherwise a service's default `return` path consumes
         // keys from an already-open remote-control dialog or minibuffer.
-        if self.focus == PaneFocus::View
-            && self.selection.service_name().is_some()
-            && self.service_dialog.is_none()
-        {
+        if self.focus == PaneFocus::View && self.selection.service_name().is_some() {
+            // A focused service view is its editor (spec 0175), so the editor
+            // owns text and navigation here. It stands aside for `C-x` chords,
+            // and Esc can hand focus back to the list without closing it —
+            // from there these keys drive the list instead.
+            if self.service_dialog.is_some() && self.handle_service_dialog_key(key).await {
+                return;
+            }
+            // Reached only when the selected service has no definition to edit
+            // (deleted underneath the pane, or not yet loaded).
             match key.code {
                 KeyCode::Char('e') | KeyCode::Enter => {
                     if let Some(name) = self.selection.service_name().map(str::to_owned) {
@@ -40343,17 +40350,19 @@ mod tests {
         let row = app.layout.list_items_area.expect("session list");
         app.click_list(app.layout.list_area.expect("list"), row.x + 1, row.y)
             .await;
-        assert!(app.service_dialog.is_none());
-        assert_eq!(app.selection, Selection::Service("assistant".into()));
-        assert_eq!(app.focus, PaneFocus::View);
-
-        app.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
-            .await;
+        // Selecting a service is edit mode: there is no separate view-only
+        // state the operator has to step out of first (spec 0175).
         assert!(matches!(
             app.service_dialog.as_ref().map(|dialog| dialog.mode),
             Some(ServiceDialogMode::Edit)
         ));
-        app.service_dialog = None;
+        assert_eq!(app.selection, Selection::Service("assistant".into()));
+        assert_eq!(app.focus, PaneFocus::View);
+        assert_eq!(
+            app.service_dialog.as_ref().map(|dialog| dialog.focus),
+            Some(ServiceDialogFocus::Field(1))
+        );
+
         app.open_new_service_view("service");
         assert!(matches!(
             app.service_dialog.as_ref().map(|dialog| dialog.mode),
@@ -40365,10 +40374,198 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serve_leaves_the_new_service_view_focused_and_editing() {
+        let (mut app, _dir, server) = captured_app().await;
+        // `/serve` is normally typed into the orchestrator panel, which used
+        // to stay open and swallow every keystroke aimed at the new view.
+        app.minibuffer = Some(Minibuffer {
+            prompt: String::new(),
+            input: String::new(),
+            cursor: 0,
+            intent: MinibufferIntent::Orchestrator,
+            error: None,
+        });
+
+        app.run_slash_command("serve demo").await;
+
+        assert!(
+            app.minibuffer.is_none(),
+            "the orchestrator panel must not keep keyboard focus over the new service view"
+        );
+        assert_eq!(app.selection, Selection::Service("demo".into()));
+        assert_eq!(app.focus, PaneFocus::View);
+        assert!(matches!(
+            app.service_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(ServiceDialogMode::Create)
+        ));
+
+        // Typing lands in the editor's Name field, not anywhere else, and the
+        // pane keeps following the name it is being given.
+        app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .map(|dialog| dialog.service.name.as_str()),
+            Some("demo2")
+        );
+        assert_eq!(app.selection, Selection::Service("demo2".into()));
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        app.session_transitions.clear();
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let text = rendered_text(term.backend().buffer());
+        assert!(text.contains("service: demo2*"), "{text}");
+        assert!(
+            !text.contains("no longer available"),
+            "renaming a draft must not orphan its pane: {text}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_view_title_marks_unsaved_edits() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".to_string());
+        app.session_transitions.clear();
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        fn draw(
+            app: &mut App,
+            term: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+        ) -> String {
+            term.draw(|f| crate::ui::render(f, app)).expect("draw");
+            rendered_text(term.backend().buffer())
+        }
+
+        let text = draw(&mut app, &mut term);
+        assert!(text.contains("service: assistant "), "{text}");
+        assert!(!text.contains("assistant*"), "a saved service is unmarked");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
+            .await;
+        let text = draw(&mut app, &mut term);
+        assert!(
+            text.contains("service: assistant*"),
+            "an edited definition is marked unsaved: {text}"
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .map(|dialog| dialog.service.instruction.as_str()),
+            Some("Answer briefly."),
+            "Esc reverts to the saved definition"
+        );
+        let text = draw(&mut app, &mut term);
+        assert!(!text.contains("assistant*"), "reverting clears the marker");
+
+        // A clean editor has nothing left to back out of, so Esc hands the
+        // keyboard back to the session list without closing the view.
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.focus, PaneFocus::List);
+        assert!(app.service_dialog.is_some());
+
+        // A service that has never been saved is unsaved by definition.
+        app.open_new_service_view("fresh");
+        let text = draw(&mut app, &mut term);
+        assert!(text.contains("service: fresh*"), "{text}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_editor_down_walks_state_then_channels_then_sessions() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut routed = summary_with_kind(construct_protocol::SessionKind::User);
+        routed.id = "service-session".into();
+        routed.title = Some("service:assistant:http:demo".into());
+        app.sessions.push(routed);
+        app.services.push(service_summary_for_test("assistant"));
+        app.service_channel_catalog = app.services[0].channels.clone();
+        app.select_service("assistant".to_string());
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(0);
+
+        let focus = |app: &App| app.service_dialog.as_ref().unwrap().focus;
+        // Channels is no longer one of the definition rows; the last one is State.
+        assert_eq!(SERVICE_FIELD_COUNT, 7);
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().field_value(6),
+            "serving"
+        );
+
+        for field in 1..SERVICE_FIELD_COUNT {
+            app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                .await;
+            assert_eq!(focus(&app), ServiceDialogFocus::Field(field));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            focus(&app),
+            ServiceDialogFocus::Channel(0),
+            "Down from State descends into the channel catalog"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            focus(&app),
+            ServiceDialogFocus::Session(0),
+            "Down past the last channel descends into the routed sessions"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        assert_eq!(focus(&app), ServiceDialogFocus::Field(0), "and then wraps");
+
+        // Up mirrors the same order.
+        for expected in [
+            ServiceDialogFocus::Session(0),
+            ServiceDialogFocus::Channel(0),
+            ServiceDialogFocus::Field(SERVICE_FIELD_COUNT - 1),
+        ] {
+            app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+                .await;
+            assert_eq!(focus(&app), expected);
+        }
+        // C-n follows the same order rather than cycling fields on their own.
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(focus(&app), ServiceDialogFocus::Channel(0));
+
+        // Channel-row actions still apply to the selected row.
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.channel_editor.as_ref())
+                .map(|editor| editor.channel.id.as_str()),
+            Some("http")
+        );
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+
+        // Enter on a routed session row jumps to that session, like clicking it.
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Session(0);
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.selection, Selection::Session("service-session".into()));
+        assert!(
+            app.service_dialog.is_none(),
+            "leaving the service view closes its editor"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn service_view_renders_definition_help_channels_and_sessions() {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
         app.select_service("assistant".to_string());
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(0);
         app.session_transitions.clear();
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -40417,7 +40614,7 @@ mod tests {
             }),
         });
         app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().selected_field = 6;
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
         app.session_transitions.clear();
 
         let actions = app
@@ -40501,7 +40698,7 @@ mod tests {
         app.services.push(service);
         app.select_service("assistant".into());
         app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().selected_field = 6;
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
         app.session_transitions.clear();
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
@@ -40546,7 +40743,7 @@ mod tests {
         app.services.push(service);
         app.select_service("assistant".into());
         app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().selected_field = 6;
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
 
         let actions = app
             .selected_service_channel_actions("assistant")
@@ -40559,7 +40756,7 @@ mod tests {
         );
         assert!(!actions.address.as_ref().unwrap().can_open());
 
-        app.service_dialog.as_mut().unwrap().selected_channel = 1;
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(1);
         assert!(app.selected_service_channel_actions("assistant").is_none());
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
@@ -40767,13 +40964,22 @@ mod tests {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
         app.open_edit_service_view("assistant");
-        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 1);
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().focus,
+            ServiceDialogFocus::Field(1)
+        );
 
         let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
         app.on_key(ctrl('n')).await;
-        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 2);
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().focus,
+            ServiceDialogFocus::Field(2)
+        );
         app.on_key(ctrl('p')).await;
-        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 1);
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().focus,
+            ServiceDialogFocus::Field(1)
+        );
         server.abort();
     }
 
@@ -40835,7 +41041,7 @@ mod tests {
         );
 
         if let Some(dialog) = app.service_dialog.as_mut() {
-            dialog.selected_field = 3;
+            dialog.focus = ServiceDialogFocus::Field(3);
             dialog.service.model = None;
         }
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -40866,7 +41072,7 @@ mod tests {
         app.open_edit_service_view("assistant");
 
         if let Some(dialog) = app.service_dialog.as_mut() {
-            dialog.selected_field = 2;
+            dialog.focus = ServiceDialogFocus::Field(2);
         }
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .await;
@@ -40879,7 +41085,7 @@ mod tests {
         );
 
         if let Some(dialog) = app.service_dialog.as_mut() {
-            dialog.selected_field = 3;
+            dialog.focus = ServiceDialogFocus::Field(3);
             dialog.service.model = Some("gpt-5".to_string());
         }
         assert!(app.insert_service_dialog_text("-typed"));
@@ -40904,7 +41110,7 @@ mod tests {
         app.services.push(service_summary_for_test("assistant"));
         app.service_channel_catalog = app.services[0].channels.clone();
         app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().selected_field = 6;
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         let editor = app
@@ -41083,11 +41289,7 @@ mod tests {
         app.open_edit_service_view("assistant");
 
         // An available catalog row arms the delete confirmation.
-        {
-            let dialog = app.service_dialog.as_mut().unwrap();
-            dialog.selected_field = 6;
-            dialog.selected_channel = 1;
-        }
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(1);
         app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
             .await;
         let editor = app
@@ -41105,8 +41307,7 @@ mod tests {
         {
             let dialog = app.service_dialog.as_mut().unwrap();
             dialog.channel_editor = None;
-            dialog.selected_field = 6;
-            dialog.selected_channel = 2;
+            dialog.focus = ServiceDialogFocus::Channel(2);
         }
         app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
             .await;
@@ -41149,14 +41350,17 @@ mod tests {
             },
         ];
         app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().selected_field = 3;
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(3);
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
             app.service_dialog.as_ref().unwrap().picker,
             Some(ServiceDialogPickerKind::Model)
         );
-        assert_eq!(app.service_dialog.as_ref().unwrap().selected_field, 3);
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().focus,
+            ServiceDialogFocus::Field(3)
+        );
 
         let dialog = app.service_dialog.as_ref().unwrap();
         let options = dialog.picker_options(&app);
@@ -41305,7 +41509,7 @@ mod tests {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
         app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().selected_field = 6;
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
         app.session_transitions.clear();
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -41372,7 +41576,7 @@ mod tests {
             "service editor footer has a spacer above it"
         );
 
-        app.service_dialog.as_mut().unwrap().selected_field = 5;
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(5);
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let view_text = term
             .backend()

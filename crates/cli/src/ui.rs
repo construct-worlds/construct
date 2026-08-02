@@ -497,10 +497,27 @@ fn finish_frame(f: &mut Frame, app: &mut App) {
     paint_default_backgrounds(f, app.theme.background);
 }
 
+/// Contextual help for whatever the service editor's cursor is on. Definition
+/// fields are indexed the same way `ServiceDialog::field_value` indexes them;
+/// the channel and session sections have one description each.
 fn service_dialog_field_help(
     dialog: &crate::app::ServiceDialog,
 ) -> (&'static str, &'static str, &'static str) {
-    match dialog.selected_field {
+    let Some(field) = dialog.focus.field() else {
+        return match dialog.focus {
+            crate::app::ServiceDialogFocus::Channel(_) => (
+                "Channels",
+                "The daemon-wide channel catalog. A filled square is attached here; an empty square is available to attach. Channels owned by another service are unavailable.",
+                "Space attaches/detaches · p publishes/withdraws · o opens · y copies · Enter edits · a creates.",
+            ),
+            _ => (
+                "Sessions",
+                "Sessions this service has routed requests into. Each row shows the channel that accepted the request and the session key it reused.",
+                "Enter opens the session · ↑/↓ moves.",
+            ),
+        };
+    };
+    match field {
         0 => (
             "Service name",
             "Stable identifier used in the webhook URL and TOML filename. Use 1–32 lowercase letters, digits, or interior hyphens.",
@@ -549,11 +566,6 @@ fn service_dialog_field_help(
             )
         }
         6 => (
-            "Channels",
-            "The daemon-wide channel catalog. A filled square is attached here; an empty square is available to attach. Channels owned by another service are unavailable.",
-            "Space attaches/detaches · p publishes/withdraws · o opens · y copies · Enter edits · a creates.",
-        ),
-        7 => (
             "State",
             "Serving starts the listener. Pausing stops it and releases its port; callers get 503 until it resumes.",
             "Space or ←/→ toggles · applies immediately.",
@@ -7999,30 +8011,32 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         return;
     };
 
-    let fallback = crate::app::ServiceDialog {
-        mode: crate::app::ServiceDialogMode::Edit,
-        service: summary.clone(),
-        selected_field: 0,
-        note: None,
-        confirm_delete: false,
-        picker: None,
-        picker_selected: 0,
-        picker_scroll: 0,
-        selected_channel: 0,
-        channel_editor: None,
-    };
+    let editing = app
+        .service_dialog
+        .as_ref()
+        .is_some_and(|current| current.service.name == name);
     let dialog = app
         .service_dialog
         .as_ref()
         .filter(|dialog| dialog.service.name == name)
         .cloned()
-        .unwrap_or(fallback);
+        .unwrap_or_else(|| {
+            // Another pane's service (or one whose editor hasn't been opened
+            // yet) renders its definition with no editor state of its own.
+            let mut fallback = crate::app::ServiceDialog::editing(summary.clone());
+            fallback.focus = crate::app::ServiceDialogFocus::Field(0);
+            fallback.note = None;
+            fallback
+        });
+    // A trailing `*` is the whole unsaved-state indicator: the definition on
+    // screen differs from the one the daemon has (spec 0175).
+    let unsaved = if editing && dialog.is_dirty() { "*" } else { "" };
     let border_style = pane_border_style(&app.theme, focused);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
         .padding(ratatui::widgets::Padding::new(2, 2, 1, 1))
-        .title(format!(" service: {} ", summary.name));
+        .title(format!(" service: {}{unsaved} ", summary.name));
     let block = apply_pane_title_right_cluster(
         app,
         area,
@@ -8045,6 +8059,8 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         return;
     }
 
+    // Channels are not a field: the Channels section below owns them, and
+    // Down from State walks straight into it (spec 0175).
     let labels = [
         "Name",
         "Instruction",
@@ -8052,15 +8068,12 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         "Model",
         "Working dir",
         "Routing",
-        "Channels",
         "State",
     ];
+    debug_assert_eq!(labels.len(), crate::app::SERVICE_FIELD_COUNT);
     let mut field_lines = Vec::with_capacity(labels.len());
     for (index, label) in labels.iter().enumerate() {
-        let selected = app
-            .service_dialog
-            .as_ref()
-            .is_some_and(|current| current.service.name == name && current.selected_field == index);
+        let selected = editing && dialog.focus.is_field(index);
         let locked = index == 0 && dialog.mode == crate::app::ServiceDialogMode::Edit;
         let value = dialog.field_value(index);
         let marker = if selected { "›" } else { " " };
@@ -8123,15 +8136,9 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         columns[2],
     );
 
-    let service_prefix = format!("service:{}", name);
     let routed: Vec<_> = app
-        .sessions
-        .iter()
-        .filter(|session| {
-            session.title.as_deref().is_some_and(|title| {
-                title == service_prefix || title.starts_with(&format!("{service_prefix}:"))
-            })
-        })
+        .routed_service_sessions(name)
+        .into_iter()
         .cloned()
         .collect();
     let selected_channel_actions = app.selected_service_channel_actions(name);
@@ -8153,13 +8160,22 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         ),
     ])];
     if catalog.is_empty() {
+        // The empty-catalog line is still a navigable row so the keyboard can
+        // reach channel creation with nothing in the catalog yet.
+        let selected = editing && dialog.focus.channel() == Some(0);
         activity.push(Line::from(Span::styled(
-            "  No channels in the catalog. Press a after entering edit mode to create HTTP.",
-            Style::default().fg(app.theme.dim),
+            "  No channels in the catalog. Press a or Enter to create an HTTP channel.",
+            if selected {
+                Style::default()
+                    .fg(app.theme.highlight_fg)
+                    .bg(app.theme.highlight_bg)
+            } else {
+                Style::default().fg(app.theme.dim)
+            },
         )));
     } else {
         for (index, channel) in catalog.iter().enumerate() {
-            let selected = dialog.selected_field == 6 && dialog.selected_channel == index;
+            let selected = editing && dialog.focus.channel() == Some(index);
             let marker = if selected { "›" } else { " " };
             let attached = channel.attached_to.as_deref() == Some(summary.name.as_str());
             let owned_by_other = channel.attached_to.is_some() && !attached;
@@ -8245,26 +8261,47 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         )));
     } else {
         let mut session_hits = Vec::new();
-        for session in routed
+        for (index, session) in routed
             .iter()
+            .enumerate()
             .take(chunks[2].height.saturating_sub(3) as usize)
         {
             let (channel, label) =
                 service_session_route_label(session, &summary.name, &catalog, &summary.channels);
             let row = chunks[2].y + activity.len() as u16;
+            let selected = editing && dialog.focus.session() == Some(index);
+            let text_style = if selected {
+                Style::default()
+                    .fg(app.theme.highlight_fg)
+                    .bg(app.theme.highlight_bg)
+            } else {
+                Style::default().fg(app.theme.text)
+            };
             activity.push(Line::from(vec![
                 Span::styled(
-                    format!("  {} ", session_status_glyph(app, session)),
-                    state_style(&app.theme, session.state),
+                    format!("{} {} ", if selected { "›" } else { " " }, session_status_glyph(app, session)),
+                    if selected {
+                        text_style
+                    } else {
+                        state_style(&app.theme, session.state)
+                    },
                 ),
                 Span::styled(
                     format!("channel: {channel:<10} "),
-                    Style::default().fg(app.theme.accent),
+                    if selected {
+                        text_style
+                    } else {
+                        Style::default().fg(app.theme.accent)
+                    },
                 ),
-                Span::styled(label, Style::default().fg(app.theme.text)),
+                Span::styled(label, text_style),
                 Span::styled(
                     format!("  {}", session.state.label()),
-                    Style::default().fg(app.theme.dim),
+                    if selected {
+                        text_style
+                    } else {
+                        Style::default().fg(app.theme.dim)
+                    },
                 ),
             ]));
             if row < chunks[2].bottom() {
@@ -8287,16 +8324,17 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
             }),
         )));
     }
-    let editing = app
-        .service_dialog
-        .as_ref()
-        .is_some_and(|current| current.service.name == name);
+    // Esc no longer "closes to a view-only state" — there isn't one. It backs
+    // out of unsaved edits, and once there's nothing to back out of it hands
+    // keyboard focus to the session list (spec 0175).
     let footer = if !editing {
         "Enter/e edit · C-x keeps global commands"
     } else if dialog.mode == crate::app::ServiceDialogMode::Create {
-        "Enter/C-s save · Space attach · a create channel · Esc close · C-x keeps global commands"
+        "Enter/C-s save · Space attach · a create channel · Esc discards this draft"
+    } else if unsaved.is_empty() {
+        "Enter/C-s save · Space attach · d delete channel · p publish/withdraw · o open · y copy · Esc to session list"
     } else {
-        "Enter/C-s save · Space attach · d delete channel · p publish/withdraw · o open · y copy · Esc close"
+        "Enter/C-s save · Space attach · d delete channel · p publish/withdraw · o open · y copy · Esc reverts edits"
     };
     activity.push(Line::from(""));
     activity.push(Line::from(Span::styled(
