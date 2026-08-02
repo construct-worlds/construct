@@ -3158,7 +3158,7 @@
       <button type="button" id="viewModeChat" data-view-mode="chat"
               aria-pressed="false">Chat</button>
       <button type="button" id="viewModePlaybook" data-view-mode="playbook"
-              aria-pressed="false">Playbook</button>
+              aria-pressed="false">◫ Playbook</button>
     </div>
     <!--
       The matrix-rain badge doubles as the settings button: click (or
@@ -5976,7 +5976,7 @@ function sessionRowDescriptor(item) {
       inner:
         `<div class="title-row">` +
         `<span class="disclosure"></span>` +
-        `<span class="service-glyph" title="service" aria-label="service">◈</span>` +
+        `<span class="service-glyph" title="service" aria-label="service">⛓︎</span>` +
         `<div class="name">${escape(service.name)}</div>` +
         (service.paused ? `<span class="service-state" title="paused">⏸</span>` : "") +
         harness +
@@ -6430,14 +6430,14 @@ function renderViewModeToggle(s) {
   viewModeToggleEl.hidden = false;
   const collapsed = isNarrowLayout() && !viewModeExpanded;
   viewModeToggleEl.classList.toggle("collapsed", collapsed);
-  for (const [btn, label] of [
-    [viewModeTerminalBtn, "Terminal"],
-    [viewModeChatBtn, "Chat"],
-    [viewModePlaybookBtn, "Playbook"],
+  for (const [btn, label, title] of [
+    [viewModeTerminalBtn, "Terminal", "Terminal"],
+    [viewModeChatBtn, "Chat", "Chat"],
+    [viewModePlaybookBtn, "◫ Playbook", "Playbook"],
   ]) {
     const text = collapsed ? label[0] : label;
     if (btn.textContent !== text) btn.textContent = text;
-    btn.title = label;
+    btn.title = title;
   }
   // Reflect the per-session preference (which now includes "playbook") rather
   // than the global `state.mode`: during a session switch `state.mode` still
