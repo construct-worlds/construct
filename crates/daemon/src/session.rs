@@ -1693,7 +1693,7 @@ impl SessionManager {
             storage.data_dir().to_path_buf(),
             runtime_dir.clone(),
             &config.router,
-            config.smith.models.clone(),
+            config.smith.route_profiles(),
         );
         let summaries = storage.list_summaries()?;
         let mut sessions = HashMap::new();

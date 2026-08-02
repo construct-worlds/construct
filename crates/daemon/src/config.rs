@@ -220,13 +220,24 @@ enabled = true
 # selectable from a `claude` session (the first two via translation);
 # `meta` / `ollama` are shown with the reason they are not.
 
-# OpenAI-compatible example (DeepSeek):
+# DeepSeek is built in: export DEEPSEEK_API_KEY and it is already a route
+# target and a `deepseek:<model>` prefix for smith — no profile needed.
+# Declare one only to override the endpoint, key, or default model; a profile
+# named `deepseek` replaces the built-in entirely.
 # [smith.models.deepseek]
-# provider    = "openai"
+# provider    = "deepseek"
 # base_url    = "https://api.deepseek.com/v1"
 # api_key_env = "DEEPSEEK_API_KEY"   # name of the env var holding the key (preferred)
 # # api_key   = "sk-..."             # inline key (discouraged; use api_key_env)
-# model       = "deepseek-chat"      # default model; overridable with @deepseek:<model>
+# model       = "deepseek-v4-pro"    # default model; overridable with @deepseek:<model>
+
+# DeepSeek over its Anthropic-compatible surface instead of the OpenAI one.
+# Useful for a `claude` session, which then needs no dialect translation:
+# [smith.models.deepseek-anthropic]
+# provider    = "anthropic"
+# base_url    = "https://api.deepseek.com/anthropic"
+# api_key_env = "DEEPSEEK_API_KEY"
+# model       = "deepseek-v4-pro"
 
 # OpenAI-compatible example (Groq):
 # [smith.models.groq]
@@ -593,6 +604,16 @@ impl Default for RouterConfig {
     }
 }
 
+/// DeepSeek's OpenAI-compatible endpoint, and the env var holding its key.
+/// Named constants because the built-in route target below and the profile
+/// defaults above must agree on both.
+pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
+pub const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
+/// Route name the built-in DeepSeek target claims. A user-declared
+/// `[smith.models.deepseek]` profile takes this name back (see
+/// [`SmithConfig::route_profiles`]).
+pub const DEEPSEEK_ROUTE_NAME: &str = "deepseek";
+
 /// `[smith]` — only the `models` table is read by the daemon. Smith parses
 /// this same section itself for its own `/model @<name>` switching; the
 /// daemon reads it so the router can offer the same endpoints as route
@@ -601,6 +622,41 @@ impl Default for RouterConfig {
 pub struct SmithConfig {
     #[serde(default)]
     pub models: BTreeMap<String, ModelProfile>,
+}
+
+impl SmithConfig {
+    /// The profiles the router offers as route targets: everything the user
+    /// declared, plus any built-in endpoint whose credential is present in
+    /// the daemon's environment (spec 0179).
+    ///
+    /// A built-in exists so a provider with one well-known endpoint costs the
+    /// user an env var rather than a config block. It is *only* a default: a
+    /// declared profile of the same name always wins, so pinning a different
+    /// base URL, key, or model for `deepseek` still works.
+    pub fn route_profiles(&self) -> BTreeMap<String, ModelProfile> {
+        let mut profiles = self.models.clone();
+        if !profiles.contains_key(DEEPSEEK_ROUTE_NAME) && env_var_present(DEEPSEEK_API_KEY_ENV) {
+            profiles.insert(
+                DEEPSEEK_ROUTE_NAME.to_string(),
+                ModelProfile {
+                    provider: DEEPSEEK_ROUTE_NAME.to_string(),
+                    base_url: Some(DEEPSEEK_BASE_URL.to_string()),
+                    api_key_env: Some(DEEPSEEK_API_KEY_ENV.to_string()),
+                    api_key: None,
+                    // The picker's remaining models come from the shared
+                    // catalog via `models_for_provider`; this is the default.
+                    model: Some("deepseek-v4-pro".to_string()),
+                },
+            );
+        }
+        profiles
+    }
+}
+
+fn env_var_present(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
 }
 
 /// One `[smith.models.<name>]` entry (spec 0030).
@@ -631,6 +687,7 @@ impl ModelProfile {
             "openai" | "openai-responses" => "https://api.openai.com/v1",
             "anthropic" => "https://api.anthropic.com/v1",
             "grok" => "https://api.x.ai/v1",
+            "deepseek" => DEEPSEEK_BASE_URL,
             "gemini" | "google" => "https://generativelanguage.googleapis.com/v1beta",
             "meta" => "https://api.meta.ai/v1",
             "ollama" => "http://localhost:11434",
@@ -649,6 +706,7 @@ impl ModelProfile {
             "gemini" | "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             "meta" => &["META_API_KEY", "MODEL_API_KEY"],
             "grok" => &["GROK_API_KEY", "XAI_API_KEY"],
+            "deepseek" => &[DEEPSEEK_API_KEY_ENV],
             _ => &[],
         }
     }
@@ -1278,5 +1336,106 @@ mod tests {
             cfg.effective_usage_probe("codex"),
             Some("/status --verbose")
         );
+    }
+
+    /// Run `f` with `DEEPSEEK_API_KEY` set to `value` (or unset for `None`),
+    /// restoring whatever the environment had before.
+    ///
+    /// Takes the crate-wide env guard, not a lock private to this module: the
+    /// variable is process-global, and `smith_auth_methods` in `availability`
+    /// reads it too. A private lock would let this test's `set_var` window
+    /// overlap that test's read.
+    fn with_deepseek_key<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _lock = crate::router::oauth::test_env_guard();
+        let saved = std::env::var(DEEPSEEK_API_KEY_ENV).ok();
+        match value {
+            Some(v) => std::env::set_var(DEEPSEEK_API_KEY_ENV, v),
+            None => std::env::remove_var(DEEPSEEK_API_KEY_ENV),
+        }
+        let out = f();
+        match saved {
+            Some(v) => std::env::set_var(DEEPSEEK_API_KEY_ENV, v),
+            None => std::env::remove_var(DEEPSEEK_API_KEY_ENV),
+        }
+        out
+    }
+
+    /// A `deepseek` provider resolves to the same endpoint and credential
+    /// whether it reaches the router as a built-in or as a declared profile.
+    #[test]
+    fn deepseek_profile_defaults_to_its_public_endpoint_and_key() {
+        let profile: ModelProfile = toml::from_str(r#"provider = "deepseek""#).expect("parse");
+        assert_eq!(
+            profile.resolved_base_url().as_deref(),
+            Some(DEEPSEEK_BASE_URL)
+        );
+        assert_eq!(profile.default_key_envs(), &[DEEPSEEK_API_KEY_ENV]);
+    }
+
+    /// The key alone makes DeepSeek a route target — no config block (spec 0179).
+    #[test]
+    fn deepseek_is_a_builtin_route_target_when_its_key_is_set() {
+        let cfg: Config = toml::from_str("").expect("parse");
+        let profiles = with_deepseek_key(Some("sk-test"), || cfg.smith.route_profiles());
+        let deepseek = profiles.get(DEEPSEEK_ROUTE_NAME).expect("built-in target");
+        assert_eq!(deepseek.provider, "deepseek");
+        assert_eq!(deepseek.resolved_base_url().as_deref(), Some(DEEPSEEK_BASE_URL));
+        assert_eq!(deepseek.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(
+            crate::router::provider_dialect(&deepseek.provider),
+            Some(crate::router::Dialect::OpenAiChat),
+            "a built-in target that no dialect can serve would be listed but unusable"
+        );
+    }
+
+    /// No key, no target: the picker must not advertise an endpoint that
+    /// would fail on first use.
+    #[test]
+    fn deepseek_is_absent_without_its_key() {
+        let cfg: Config = toml::from_str("").expect("parse");
+        let profiles = with_deepseek_key(None, || cfg.smith.route_profiles());
+        assert!(!profiles.contains_key(DEEPSEEK_ROUTE_NAME));
+        // An empty/whitespace value is not a credential either.
+        let profiles = with_deepseek_key(Some("   "), || cfg.smith.route_profiles());
+        assert!(!profiles.contains_key(DEEPSEEK_ROUTE_NAME));
+    }
+
+    /// User config always wins: a declared `deepseek` profile is never
+    /// overwritten by the built-in, even with the key set.
+    #[test]
+    fn declared_deepseek_profile_beats_the_builtin() {
+        let toml = r#"
+            [smith.models.deepseek]
+            provider = "openai"
+            base_url = "https://deepseek.internal/v1"
+            api_key_env = "WORK_DEEPSEEK_KEY"
+            model = "deepseek-v4-flash"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        let profiles = with_deepseek_key(Some("sk-test"), || cfg.smith.route_profiles());
+        let deepseek = profiles.get(DEEPSEEK_ROUTE_NAME).expect("declared profile");
+        assert_eq!(
+            deepseek.resolved_base_url().as_deref(),
+            Some("https://deepseek.internal/v1")
+        );
+        assert_eq!(deepseek.api_key_env.as_deref(), Some("WORK_DEEPSEEK_KEY"));
+        assert_eq!(deepseek.model.as_deref(), Some("deepseek-v4-flash"));
+    }
+
+    /// Declared profiles survive the built-in merge untouched.
+    #[test]
+    fn route_profiles_keeps_unrelated_declared_profiles() {
+        let toml = r#"
+            [smith.models.groq]
+            provider = "openai"
+            base_url = "https://api.groq.com/openai/v1"
+            model = "llama-3.3-70b-versatile"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        let profiles = with_deepseek_key(Some("sk-test"), || cfg.smith.route_profiles());
+        assert!(profiles.contains_key("groq"));
+        assert!(profiles.contains_key(DEEPSEEK_ROUTE_NAME));
+        let profiles = with_deepseek_key(None, || cfg.smith.route_profiles());
+        assert_eq!(profiles.len(), 1, "only the declared profile remains");
     }
 }

@@ -414,6 +414,9 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     "gemini:gemini-2.5-flash",
     // Meta Model API path.
     "meta:muse-spark-1.1",
+    // DeepSeek platform API path.
+    "deepseek:deepseek-v4-pro",
+    "deepseek:deepseek-v4-flash",
     // Local Ollama examples.
     "ollama:llama3.1",
     "ollama:qwen3-coder",

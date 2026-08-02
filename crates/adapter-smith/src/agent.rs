@@ -69,6 +69,9 @@ const APPROVAL_HISTORY_LIMIT: usize = 20;
 /// Purely a function of observed progress — model- and provider-agnostic.
 const NONPRODUCTIVE_STREAK_LIMIT: usize = 4;
 const GROK_BASE_URL: &str = "https://api.x.ai/v1";
+/// DeepSeek's OpenAI-compatible surface. Served by the same
+/// `provider::openai` client as Grok — the wire format is chat completions.
+const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
 
 fn record_approval_history(
     history: &mut VecDeque<ApprovalHistoryEntry>,
@@ -1577,6 +1580,7 @@ impl ResolvedModel {
             provider::routing::Provider::Meta => "meta",
             provider::routing::Provider::Ollama => "ollama",
             provider::routing::Provider::Grok => "grok",
+            provider::routing::Provider::DeepSeek => "deepseek",
             provider::routing::Provider::GrokOauth => "grok-oauth",
             provider::routing::Provider::CodexOauth => "codex-oauth",
             provider::routing::Provider::ClaudeOauth => "claude-oauth",
@@ -1611,7 +1615,8 @@ impl ResolvedModel {
 ///   4. OPENAI_API_KEY set → `gpt-5`.
 ///   5. GEMINI_API_KEY (or GOOGLE_API_KEY) set → `gemini-2.5-pro`.
 ///   6. META_API_KEY (or MODEL_API_KEY) set → `muse-spark-1.1`.
-///   7. none of the above → an error (spec 0069). Earlier versions fell
+///   7. DEEPSEEK_API_KEY set → `deepseek-v4-pro`.
+///   8. none of the above → an error (spec 0069). Earlier versions fell
 ///      through to `ollama:llama3.1` here unconditionally, so a zero-config
 ///      machine with no Ollama server running got a session that looked
 ///      healthy and then died mid-turn with a raw transport error instead
@@ -1637,7 +1642,7 @@ pub fn resolve_model(params: &SessionStartParams) -> Result<ResolvedModel> {
     resolve_model_from_spec(&spec_str)
 }
 
-/// The auto-detect ladder's direct-API-key rungs (steps 3-5 above), used
+/// The auto-detect ladder's direct-API-key rungs (steps 3-7 above), used
 /// when neither `--model` nor `CONSTRUCT_SMITH_MODEL` is set. Returns an
 /// error rather than silently picking a provider that isn't configured.
 fn default_auto_detect_spec() -> Result<String> {
@@ -1653,10 +1658,16 @@ fn default_auto_detect_spec() -> Result<String> {
     if std::env::var("META_API_KEY").is_ok() || std::env::var("MODEL_API_KEY").is_ok() {
         return Ok("meta:muse-spark-1.1".to_string());
     }
+    // Last rung: a machine whose only credential is DeepSeek's still gets a
+    // working session instead of the curated error. Ordered after the others
+    // so no machine that already resolved changes provider (spec 0071).
+    if std::env::var("DEEPSEEK_API_KEY").is_ok() {
+        return Ok("deepseek:deepseek-v4-pro".to_string());
+    }
     anyhow::bail!(
         "no auto-detected smith credential (ANTHROPIC_API_KEY, OPENAI_API_KEY, or \
-         GEMINI_API_KEY/GOOGLE_API_KEY, or META_API_KEY/MODEL_API_KEY) and no \
-         CONSTRUCT_SMITH_MODEL pin set"
+         GEMINI_API_KEY/GOOGLE_API_KEY, or META_API_KEY/MODEL_API_KEY, or \
+         DEEPSEEK_API_KEY) and no CONSTRUCT_SMITH_MODEL pin set"
     )
 }
 
@@ -1686,6 +1697,10 @@ pub fn resolve_model_from_spec(spec_str: &str) -> Result<ResolvedModel> {
         provider::routing::Provider::Grok => Box::new(provider::openai::OpenAi::with_config(
             Some(GROK_BASE_URL.to_string()),
             grok_api_key()?,
+        )?),
+        provider::routing::Provider::DeepSeek => Box::new(provider::openai::OpenAi::with_config(
+            Some(DEEPSEEK_BASE_URL.to_string()),
+            deepseek_api_key()?,
         )?),
         provider::routing::Provider::GrokOauth => Box::new(provider::openai::OpenAi::with_config(
             Some(GROK_BASE_URL.to_string()),
@@ -1745,6 +1760,7 @@ fn build_profile_model(
         "meta" => provider::routing::Provider::Meta,
         "ollama" => provider::routing::Provider::Ollama,
         "grok" => provider::routing::Provider::Grok,
+        "deepseek" => provider::routing::Provider::DeepSeek,
         "codex-oauth" | "claude-oauth" | "claude-code-oauth" | "grok-oauth" | "kimi-oauth" => anyhow::bail!(
             "profile `{name}`: provider `{}` is OAuth-backed and has no \
              configurable endpoint — use the `{}:` model prefix directly",
@@ -1753,7 +1769,7 @@ fn build_profile_model(
         ),
         other => anyhow::bail!(
             "profile `{name}`: unknown provider `{other}` \
-             (expected openai | anthropic | gemini | meta | ollama | grok)"
+             (expected openai | anthropic | gemini | meta | ollama | grok | deepseek)"
         ),
     };
 
@@ -1792,6 +1808,10 @@ fn build_profile_model(
         provider::routing::Provider::Grok => Box::new(provider::openai::OpenAi::with_config(
             base_url.or_else(|| Some(GROK_BASE_URL.to_string())),
             profile_api_key(profile, name, &["GROK_API_KEY", "XAI_API_KEY"])?,
+        )?),
+        provider::routing::Provider::DeepSeek => Box::new(provider::openai::OpenAi::with_config(
+            base_url.or_else(|| Some(DEEPSEEK_BASE_URL.to_string())),
+            profile_api_key(profile, name, &["DEEPSEEK_API_KEY"])?,
         )?),
         // codex-oauth / claude-oauth / grok-oauth rejected above.
         _ => unreachable!("oauth providers rejected above"),
@@ -1837,6 +1857,11 @@ fn grok_api_key() -> Result<String> {
     std::env::var("GROK_API_KEY")
         .or_else(|_| std::env::var("XAI_API_KEY"))
         .map_err(|_| anyhow::anyhow!("grok provider requires GROK_API_KEY or XAI_API_KEY"))
+}
+
+fn deepseek_api_key() -> Result<String> {
+    std::env::var("DEEPSEEK_API_KEY")
+        .map_err(|_| anyhow::anyhow!("deepseek provider requires DEEPSEEK_API_KEY"))
 }
 
 fn grok_auth_path() -> Result<PathBuf> {
@@ -2298,6 +2323,7 @@ mod tests {
             "GOOGLE_API_KEY",
             "META_API_KEY",
             "MODEL_API_KEY",
+            "DEEPSEEK_API_KEY",
         ];
         let saved: Vec<Option<String>> = vars.iter().map(|v| env::var(v).ok()).collect();
         for v in vars {
@@ -2317,7 +2343,7 @@ mod tests {
     }
 
     #[test]
-    fn default_auto_detect_spec_precedence_anthropic_openai_gemini_then_meta() {
+    fn default_auto_detect_spec_precedence_anthropic_openai_gemini_meta_then_deepseek() {
         let _lock = MODEL_ENV_LOCK.lock().unwrap();
         let vars = [
             "ANTHROPIC_API_KEY",
@@ -2326,12 +2352,17 @@ mod tests {
             "GOOGLE_API_KEY",
             "META_API_KEY",
             "MODEL_API_KEY",
+            "DEEPSEEK_API_KEY",
         ];
         let saved: Vec<Option<String>> = vars.iter().map(|v| env::var(v).ok()).collect();
         for v in vars {
             env::remove_var(v);
         }
 
+        // DeepSeek is the last rung: it resolves when it is the only key, and
+        // yields to every other direct-API credential.
+        env::set_var("DEEPSEEK_API_KEY", "x");
+        let deepseek_only = default_auto_detect_spec().expect("deepseek");
         env::set_var("MODEL_API_KEY", "x");
         let meta_only = default_auto_detect_spec().expect("meta");
         env::set_var("GEMINI_API_KEY", "x");
@@ -2347,6 +2378,7 @@ mod tests {
                 None => env::remove_var(v),
             }
         }
+        assert_eq!(deepseek_only, "deepseek:deepseek-v4-pro");
         assert_eq!(meta_only, "meta:muse-spark-1.1");
         assert_eq!(gemini_over_meta, "gemini:gemini-2.5-pro");
         assert_eq!(openai_over_gemini, "openai:gpt-5");

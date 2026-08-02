@@ -55,6 +55,10 @@ pub(crate) fn pick_default_spec_str() -> Result<String> {
     if std::env::var("META_API_KEY").is_ok() || std::env::var("MODEL_API_KEY").is_ok() {
         return Ok("meta:muse-spark-1.1".to_string());
     }
+    if std::env::var("DEEPSEEK_API_KEY").is_ok() {
+        // Flash is the cheap tier — titles never need the pro model.
+        return Ok("deepseek:deepseek-v4-flash".to_string());
+    }
     Err(anyhow!(
         "no auto-detected smith credential and no CONSTRUCT_SMITH_MODEL pin set; skipping auto-title"
     ))
@@ -72,6 +76,11 @@ pub(crate) fn provider_for(p: Provider) -> Result<Box<dyn LlmProvider>> {
             std::env::var("GROK_API_KEY")
                 .or_else(|_| std::env::var("XAI_API_KEY"))
                 .map_err(|_| anyhow!("grok requires GROK_API_KEY or XAI_API_KEY"))?,
+        )?),
+        Provider::DeepSeek => Box::new(provider::openai::OpenAi::with_config(
+            Some("https://api.deepseek.com/v1".to_string()),
+            std::env::var("DEEPSEEK_API_KEY")
+                .map_err(|_| anyhow!("deepseek requires DEEPSEEK_API_KEY"))?,
         )?),
         // Title generation always uses one of the key providers above; the
         // user never picks OAuth providers for title-gen since the
