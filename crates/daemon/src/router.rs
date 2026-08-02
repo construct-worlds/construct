@@ -11,8 +11,13 @@
 //! session, and reclaiming it is mandatory: harness processes outlive
 //! the daemon and keep dialing the port they were given at spawn. The
 //! bound port is persisted under `runtime_dir/router.port` so the same
-//! home comes back on the same port; a second home auto-picks a free
-//! one when the preferred port is busy.
+//! home comes back on the same port.
+//!
+//! A busy port is therefore waited for, and a stand-in bound only after
+//! that — never recorded as the home's own, and given up as soon as the
+//! real port frees (spec 0183). A home with no port yet has nothing
+//! dialing it and simply adopts whatever it can get, which is how a
+//! second home on one machine gets an identity of its own.
 //!
 //! With `[router] enabled = false` (the default) nothing here runs: no
 //! listener is bound, no CA is generated, and no session's environment is
@@ -42,6 +47,25 @@ use oauth::OauthProvider;
 /// channel Construct injects for transport; the harness's own endpoint
 /// configuration is never displaced (spec 0113).
 pub const PROXY_ENV: &str = "HTTPS_PROXY";
+
+/// How long to keep asking for the preferred port before accepting a
+/// stand-in. Sized for a restart racing its own predecessor's socket, which
+/// clears in milliseconds, not for waiting out another daemon.
+const PORT_CLAIM_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+const PORT_CLAIM_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How often to try taking the preferred port back once a stand-in is in use.
+const PORT_RECLAIM_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Whether the port just bound should be recorded as this home's own.
+///
+/// The port file exists so a home comes back where its sessions expect it.
+/// That makes a stand-in port the one thing that must never be written to it
+/// by a home that already has sessions: doing so converts one busy moment into
+/// a permanent move and gives up on every session still dialing the old port.
+fn records_port(pinned: bool, bound: u16, claimed_preferred: bool, established: bool) -> bool {
+    !pinned && bound != 0 && (claimed_preferred || !established)
+}
 /// Lowercase spelling, honored by some clients in preference to the
 /// uppercase one. Both are set to the same value.
 pub const PROXY_ENV_LOWER: &str = "https_proxy";
@@ -682,7 +706,11 @@ impl Router {
         if !self.enabled || self.listening.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
-        let listener = match self.bind_listener().await {
+        // Whether this home already has a port of its own. A home that does
+        // has live sessions dialing it; a first boot has none, so a fallback
+        // costs nothing and becomes this home's port instead.
+        let established = self.router_port_file().exists();
+        let listener = match self.claim_listener().await {
             Ok(l) => l,
             Err(e) => {
                 self.listening.store(false, Ordering::SeqCst);
@@ -690,12 +718,18 @@ impl Router {
             }
         };
         let bound = listener.local_addr()?.port();
+        let claimed_preferred = self.preferred_port == 0 || bound == self.preferred_port;
         self.bound_port.store(bound, Ordering::SeqCst);
         // Persist only when the port was auto-selected for this home. A
         // pinned `[router] port = N` is operator intent and must not be
         // overwritten by whatever happened to bind; `port = 0` is the
         // test "ask the OS" path and has no reclaim story.
-        if !self.port_pinned && bound != 0 {
+        //
+        // A fallback is explicitly NOT recorded for a home that already has a
+        // port. Recording it would turn one busy moment into a permanent move
+        // and give up on every session still dialing the old one — the exact
+        // opposite of why the port is persisted at all.
+        if records_port(self.port_pinned, bound, claimed_preferred, established) {
             if let Err(e) =
                 construct_protocol::paths::write_persisted_port(&self.router_port_file(), bound)
             {
@@ -709,12 +743,26 @@ impl Router {
         // Generate the CA up front: a harness reads its trust env once, at
         // spawn, so the file has to exist before the first session starts.
         self.ca()?;
-        let router = self.clone();
+        self.clone().serve_on(listener);
+        tracing::info!(port = self.port(), "router listening");
+        if !claimed_preferred {
+            self.report_fallback(bound, established);
+        }
+        Ok(())
+    }
+
+    /// Accept and serve router connections on `listener` until it fails.
+    ///
+    /// Separate from [`Self::start`] because the router may end up serving on
+    /// more than one port: a reclaimed preferred port is served alongside the
+    /// fallback that stood in for it, so neither generation of sessions is cut
+    /// off.
+    fn serve_on(self: Arc<Self>, listener: TcpListener) {
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        let router = router.clone();
+                        let router = self.clone();
                         tokio::spawn(async move {
                             if let Err(e) = proxy::serve(stream, router).await {
                                 tracing::debug!(
@@ -731,36 +779,115 @@ impl Router {
                 }
             }
         });
-        tracing::info!(port = self.port(), "router listening");
-        Ok(())
+    }
+
+    /// Say what a fallback actually costs, and start trying to undo it.
+    fn report_fallback(self: &Arc<Self>, bound: u16, established: bool) {
+        if !established {
+            tracing::warn!(
+                preferred = self.preferred_port,
+                bound,
+                "another home holds the default router port; this home has taken its own"
+            );
+            return;
+        }
+        // Not a warning. Every session this home spawned before now is dialing
+        // a port nothing is listening on, and will fail its next model call
+        // with a connection error that says nothing about why.
+        tracing::error!(
+            preferred = self.preferred_port,
+            bound,
+            "router could not take this home's port; sessions spawned by a previous daemon \
+             can only reach the router on the preferred port and cannot route until it is \
+             reclaimed. Retrying in the background"
+        );
+        let router = self.clone();
+        tokio::spawn(async move {
+            router.reclaim_preferred().await;
+        });
+    }
+
+    /// Keep trying to take the preferred port back, and serve on it when it
+    /// comes free.
+    ///
+    /// Whatever holds the port usually lets go — a second daemon exits, a
+    /// racing predecessor finishes shutting down. Until then every session
+    /// from a previous daemon of this home is unroutable, so this does not
+    /// give up: one bind attempt per interval is nothing next to leaving them
+    /// stranded for the life of the daemon.
+    async fn reclaim_preferred(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(PORT_RECLAIM_INTERVAL).await;
+            match self.bind_preferred().await {
+                Ok(listener) => {
+                    // Serve on both: this port rescues the sessions already
+                    // dialing it, and the fallback stays up for the ones
+                    // spawned while it was all this home had.
+                    self.clone().serve_on(listener);
+                    // New sessions get the stable port from here on, so the
+                    // home converges back to one port instead of accumulating.
+                    self.bound_port.store(self.preferred_port, Ordering::SeqCst);
+                    tracing::info!(
+                        port = self.preferred_port,
+                        "router reclaimed this home's port; sessions from a previous daemon \
+                         can reach it again"
+                    );
+                    return;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(e) => {
+                    tracing::warn!(
+                        preferred = self.preferred_port,
+                        error = %e,
+                        "router cannot reclaim this home's port; giving up"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn bind_preferred(&self) -> std::io::Result<TcpListener> {
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, self.preferred_port));
+        TcpListener::bind(addr).await
     }
 
     /// Prefer the configured / persisted port; on `EADDRINUSE` with no pin,
     /// fall back to an OS-assigned free port so a second home still boots.
-    async fn bind_listener(&self) -> Result<TcpListener> {
+    ///
+    /// The preferred port is not given up on the first refusal. The likeliest
+    /// reason it is busy during a restart is the daemon that just exec'd away
+    /// still holding it, which clears in milliseconds — and the cost of not
+    /// waiting is every live session of this home losing its route.
+    async fn claim_listener(&self) -> Result<TcpListener> {
         let preferred = self.preferred_port;
-        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, preferred));
-        match TcpListener::bind(addr).await {
-            Ok(l) => Ok(l),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && !self.port_pinned => {
-                tracing::warn!(
-                    preferred,
-                    "router port busy; binding an ephemeral free port for this home"
-                );
-                let fallback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
-                TcpListener::bind(fallback).await.with_context(|| {
-                    format!(
-                        "bind router listener on 127.0.0.1:0 after 127.0.0.1:{preferred} was busy"
-                    )
-                })
+        let deadline = tokio::time::Instant::now() + PORT_CLAIM_WINDOW;
+        let last = loop {
+            match self.bind_preferred().await {
+                Ok(l) => return Ok(l),
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    if tokio::time::Instant::now() >= deadline {
+                        break e;
+                    }
+                    tokio::time::sleep(PORT_CLAIM_RETRY).await;
+                }
+                Err(e) => break e,
             }
-            Err(e) => Err(e).with_context(|| {
+        };
+        if last.kind() != std::io::ErrorKind::AddrInUse || self.port_pinned {
+            return Err(last).with_context(|| {
                 format!(
                     "bind router listener on 127.0.0.1:{preferred}; sessions spawned by a \
                      previous daemon can only reach the router on that port"
                 )
-            }),
+            });
         }
+        let fallback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        TcpListener::bind(fallback)
+            .await
+            .with_context(|| {
+                format!("bind router listener on 127.0.0.1:0 after 127.0.0.1:{preferred} was busy")
+            })
     }
 
     /// Take the stream of sessions whose route has just been proven to be
@@ -1447,12 +1574,12 @@ mod tests {
         started_with(dir, cfg, BTreeMap::new()).await
     }
 
-    /// Auto path: preferred port busy → bind free port and persist it for
-    /// the next start of this home. Reclaim-on-restart is covered by the
-    /// `preferred_router_port` unit test (the live listener task outlives
-    /// the `Router` handle, so same-process restart isn't observable).
+    /// Auto path, home that already has a port: bind a stand-in so the daemon
+    /// still boots, but keep preferring the port this home's live sessions are
+    /// dialing. Recording the stand-in instead would make one busy moment
+    /// permanent and strand every one of them for good.
     #[tokio::test]
-    async fn auto_port_falls_back_and_persists_when_preferred_is_busy() {
+    async fn a_stand_in_port_does_not_replace_this_homes_own() {
         let holder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let busy = holder.local_addr().unwrap().port();
 
@@ -1472,9 +1599,72 @@ mod tests {
         assert_ne!(bound, busy, "must not steal the held port");
         assert_ne!(bound, 0);
         let persisted = std::fs::read_to_string(dir.path().join("router.port")).unwrap();
-        assert_eq!(persisted.trim().parse::<u16>().unwrap(), bound);
+        assert_eq!(
+            persisted.trim().parse::<u16>().unwrap(),
+            busy,
+            "the home keeps preferring the port its sessions were given"
+        );
         // Keep `r` and `holder` alive so nothing else steals the ports mid-assert.
         let _keep = (r, holder);
+    }
+
+    /// The rule deciding whether a bound port becomes this home's own. Stated
+    /// directly because the interesting case — a first boot whose default port
+    /// is already taken — cannot be staged against a real socket without
+    /// binding the machine's actual default port.
+    #[test]
+    fn only_a_port_this_home_can_keep_becomes_its_own() {
+        // Got what it asked for: record it, whatever the history.
+        assert!(records_port(false, 5000, true, true));
+        assert!(records_port(false, 5000, true, false));
+
+        // Fell back, and this home already has a port: keep preferring the
+        // old one. Sessions from a previous daemon are still dialing it, and
+        // recording the stand-in would abandon them permanently.
+        assert!(!records_port(false, 5000, false, true));
+
+        // Fell back on a first boot: nothing is dialing anything yet, so this
+        // becomes the home's port. A second home on one machine lands here.
+        assert!(records_port(false, 5000, false, false));
+
+        // A pinned port is operator intent; the file is never rewritten.
+        assert!(!records_port(true, 5000, true, true));
+        assert!(!records_port(true, 5000, false, false));
+
+        // `port = 0` is the tests' ask-the-OS path and has no reclaim story.
+        assert!(!records_port(false, 0, true, false));
+    }
+
+    /// A predecessor that has not let go yet must not cost this home its port.
+    /// This is the restart race: the daemon exec's, the new image binds before
+    /// the old socket is released, and giving up immediately would move the
+    /// whole home off the port every live session is dialing.
+    #[tokio::test]
+    async fn the_preferred_port_is_waited_for_not_abandoned_on_first_refusal() {
+        let holder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let busy = holder.local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("router.port"), format!("{busy}\n")).unwrap();
+
+        // Let go while the router is still inside its claim window.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            drop(holder);
+        });
+
+        let cfg = RouterConfig {
+            enabled: true,
+            publish_models: false,
+            featured_models: Vec::new(),
+            port: None,
+            oauth: BTreeMap::new(),
+        };
+        let r = started(&dir, cfg).await;
+        assert_eq!(
+            r.port(),
+            busy,
+            "the port came free during the window and was taken"
+        );
     }
 
     /// A pinned `[router] port = N` must not auto-fallback or rewrite the
