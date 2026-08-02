@@ -40496,6 +40496,9 @@ mod tests {
                 allowed_channel_count: 0,
                 allowed_workspaces: Vec::new(),
                 allowed_channels: Vec::new(),
+                progress: None,
+                follow_up: None,
+                thread_context: None,
                 attached_to: Some(name.to_string()),
                 publication: None,
             }],
@@ -40862,6 +40865,9 @@ mod tests {
                 allowed_channel_count: 0,
                 allowed_workspaces: Vec::new(),
                 allowed_channels: Vec::new(),
+                progress: None,
+                follow_up: None,
+                thread_context: None,
                 attached_to: None,
                 publication: None,
             })
@@ -41839,6 +41845,262 @@ mod tests {
         server.abort();
     }
 
+    /// Open the editor on a fresh Slack channel, which is where the behavior
+    /// options come seeded with the defaults a definition would get.
+    async fn slack_channel_editor() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
+        let (mut app, dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.service_channel_catalog = app.services[0].channels.clone();
+        app.open_edit_service_view("assistant");
+        app.open_new_service_channel();
+        app.service_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .selected_field = 1;
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        (app, dir, server)
+    }
+
+    fn channel_editor(app: &App) -> &crate::app::ServiceChannelDialog {
+        app.service_dialog
+            .as_ref()
+            .unwrap()
+            .channel_editor
+            .as_ref()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn slack_channel_editor_cycles_the_behavior_options() {
+        use crate::app::service_dialog::{
+            SLACK_FIELD_FOLLOW_UP, SLACK_FIELD_PROGRESS, SLACK_FIELD_STATE,
+        };
+
+        let (mut app, _dir, server) = slack_channel_editor().await;
+        // Switching a new channel to Slack seeds what its definition would get,
+        // so the editor never offers three blanks to save.
+        assert_eq!(
+            channel_editor(&app).channel.progress.as_deref(),
+            Some(construct_protocol::SLACK_PROGRESS_DEFAULT)
+        );
+        assert_eq!(
+            channel_editor(&app).channel.follow_up.as_deref(),
+            Some(construct_protocol::SLACK_FOLLOW_UP_DEFAULT)
+        );
+        assert_eq!(
+            channel_editor(&app).channel.thread_context,
+            Some(construct_protocol::SLACK_THREAD_CONTEXT_DEFAULT)
+        );
+
+        // The options sit below the allowlists and above State, so a Slack
+        // channel has ten fields and Ctrl+N wraps from the last back to the ID.
+        app.service_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .selected_field = SLACK_FIELD_STATE;
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(channel_editor(&app).selected_field, 0);
+
+        // Space walks the published order and wraps; ← steps the other way.
+        app.service_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .selected_field = SLACK_FIELD_PROGRESS;
+        let mut seen = vec![channel_editor(&app)
+            .channel
+            .progress
+            .clone()
+            .expect("seeded")];
+        for _ in 1..construct_protocol::SLACK_PROGRESS_VALUES.len() {
+            app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+                .await;
+            seen.push(channel_editor(&app).channel.progress.clone().unwrap());
+        }
+        let mut expected = construct_protocol::SLACK_PROGRESS_VALUES.to_vec();
+        expected.sort_unstable();
+        let mut walked = seen.clone();
+        walked.sort_unstable();
+        assert_eq!(
+            walked, expected,
+            "cycling visits every published value exactly once: {seen:?}"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            channel_editor(&app).channel.progress.as_deref(),
+            Some(construct_protocol::SLACK_PROGRESS_DEFAULT),
+            "one full turn returns to where it started"
+        );
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .await;
+        let values = construct_protocol::SLACK_PROGRESS_VALUES;
+        let default_index = values
+            .iter()
+            .position(|value| *value == construct_protocol::SLACK_PROGRESS_DEFAULT)
+            .expect("the default is one of the published values");
+        assert_eq!(
+            channel_editor(&app).channel.progress.as_deref(),
+            Some(values[(default_index + values.len() - 1) % values.len()]),
+            "← steps back one, wrapping at the start"
+        );
+
+        app.service_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .selected_field = SLACK_FIELD_FOLLOW_UP;
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .await;
+        let after_right = channel_editor(&app).channel.follow_up.clone().unwrap();
+        assert_ne!(after_right, construct_protocol::SLACK_FOLLOW_UP_DEFAULT);
+        assert!(construct_protocol::SLACK_FOLLOW_UP_VALUES.contains(&after_right.as_str()));
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            channel_editor(&app).channel.follow_up.as_deref(),
+            Some(construct_protocol::SLACK_FOLLOW_UP_DEFAULT),
+            "← undoes →"
+        );
+
+        // Cycling never reaches the state toggle, and the toggle never reaches
+        // the options.
+        app.service_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .selected_field = SLACK_FIELD_STATE;
+        let before = channel_editor(&app).channel.follow_up.clone();
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        assert!(!channel_editor(&app).channel.enabled);
+        assert_eq!(channel_editor(&app).channel.follow_up, before);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn slack_channel_editor_takes_a_typed_thread_context() {
+        use crate::app::service_dialog::SLACK_FIELD_THREAD_CONTEXT;
+
+        let (mut app, _dir, server) = slack_channel_editor().await;
+        app.service_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .selected_field = SLACK_FIELD_THREAD_CONTEXT;
+
+        // Backspacing the seeded default all the way out reads as none rather
+        // than as "leave it alone" — 0 is a setting an operator chooses.
+        for _ in 0..8 {
+            app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+                .await;
+        }
+        assert_eq!(channel_editor(&app).channel.thread_context, Some(0));
+
+        for ch in "120".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+        assert_eq!(channel_editor(&app).channel.thread_context, Some(120));
+
+        // Past Slack's own page limit the field holds at the cap instead of
+        // letting the operator save a number the daemon would refuse.
+        for ch in "000".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+        assert_eq!(
+            channel_editor(&app).channel.thread_context,
+            Some(construct_protocol::SLACK_THREAD_CONTEXT_MAX)
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn slack_channel_editor_renders_the_behavior_options() {
+        use crate::app::service_dialog::SLACK_FIELD_THREAD_CONTEXT;
+
+        let (mut app, _dir, server) = slack_channel_editor().await;
+        let backend = ratatui::backend::TestBackend::new(160, 24);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        // Drawn on its own rather than through the whole frame: the pane the
+        // editor shares with the animated panel repaints rows every frame, and
+        // this test is about the editor.
+        let mut draw = |app: &mut App| {
+            let editor = channel_editor(app).clone();
+            term.draw(|f| {
+                crate::ui::render_service_channel_editor(f, f.area(), app, &editor);
+            })
+            .expect("draw");
+            rendered_text(term.backend().buffer())
+        };
+
+        let text = draw(&mut app);
+        for label in ["Progress", "Follow-up", "Thread context"] {
+            assert!(text.contains(label), "{label} is missing: {text}");
+        }
+        assert!(
+            text.contains(construct_protocol::SLACK_PROGRESS_DEFAULT),
+            "the seeded progress value is shown: {text}"
+        );
+        assert!(
+            text.contains(construct_protocol::SLACK_FOLLOW_UP_DEFAULT),
+            "{text}"
+        );
+        assert!(text.contains("50 messages"), "{text}");
+
+        // Selecting the field explains what it needs from the Slack app, and
+        // what admitting other people's text into a session costs.
+        app.service_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .selected_field = SLACK_FIELD_THREAD_CONTEXT;
+        let text = draw(&mut app);
+        assert!(text.contains("channels:history"), "{text}");
+
+        // Zero is a setting, not an empty field, and says so.
+        app.service_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .channel
+            .thread_context = Some(0);
+        let text = draw(&mut app);
+        assert!(text.contains("0 · none"), "{text}");
+
+        // An HTTP channel has no such options and is not asked about them.
+        app.open_new_service_channel();
+        let text = draw(&mut app);
+        assert_eq!(channel_editor(&app).channel.kind, "http");
+        assert!(!text.contains("Follow-up"), "{text}");
+        assert_eq!(channel_editor(&app).channel.progress, None);
+
+        server.abort();
+    }
+
     #[tokio::test]
     async fn service_view_lists_available_and_owned_catalog_channels() {
         let (mut app, _dir, server) = captured_app().await;
@@ -41857,6 +42119,9 @@ mod tests {
                 allowed_channel_count: 0,
                 allowed_workspaces: Vec::new(),
                 allowed_channels: Vec::new(),
+                progress: None,
+                follow_up: None,
+                thread_context: None,
                 attached_to: None,
                 publication: None,
             },
@@ -41872,6 +42137,9 @@ mod tests {
                 allowed_channel_count: 0,
                 allowed_workspaces: Vec::new(),
                 allowed_channels: Vec::new(),
+                progress: None,
+                follow_up: None,
+                thread_context: None,
                 attached_to: Some("other-service".to_string()),
                 publication: None,
             },

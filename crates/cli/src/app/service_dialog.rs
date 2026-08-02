@@ -233,12 +233,35 @@ pub enum ServiceChannelAction {
     CopyAddress,
 }
 
+/// Field indexes shared by the Slack channel editor's navigation, rendering,
+/// and key handling. State stays last so it sits where an HTTP channel's does.
+pub(crate) const SLACK_FIELD_PROGRESS: usize = 6;
+pub(crate) const SLACK_FIELD_FOLLOW_UP: usize = 7;
+pub(crate) const SLACK_FIELD_THREAD_CONTEXT: usize = 8;
+pub(crate) const SLACK_FIELD_STATE: usize = 9;
+const HTTP_FIELD_STATE: usize = 3;
+
 fn channel_field_count(editor: &ServiceChannelDialog) -> usize {
     if editor.channel.kind == "slack" {
-        7
+        SLACK_FIELD_STATE + 1
     } else {
-        4
+        HTTP_FIELD_STATE + 1
     }
+}
+
+/// Step through a fixed list of option values, wrapping in both directions.
+/// The list is the protocol's, so the editor can only offer what the daemon
+/// will accept.
+fn cycle_option(values: &[&str], current: Option<&str>, forward: bool) -> String {
+    let index = current
+        .and_then(|current| values.iter().position(|value| *value == current))
+        .unwrap_or(0);
+    let next = if forward {
+        (index + 1) % values.len()
+    } else {
+        index.checked_sub(1).unwrap_or(values.len() - 1)
+    };
+    values[next].to_string()
 }
 
 fn canonical_service_model(model: &str) -> String {
@@ -681,6 +704,11 @@ impl App {
                 allowed_channel_count: 0,
                 allowed_workspaces: Vec::new(),
                 allowed_channels: Vec::new(),
+                // Filled in when the kind is switched to Slack; an HTTP channel
+                // has no behavior options to show.
+                progress: None,
+                follow_up: None,
+                thread_context: None,
                 attached_to: Some(dialog.service.name.clone()),
                 publication: None,
             },
@@ -1063,6 +1091,25 @@ impl App {
                 channel.channel.allowed_channels = split_allowlist(&value);
                 channel.channel.allowed_channel_count = channel.channel.allowed_channels.len();
             }
+            SLACK_FIELD_THREAD_CONTEXT if channel.channel.kind == "slack" => {
+                let mut value = channel
+                    .channel
+                    .thread_context
+                    .map(|count| count.to_string())
+                    .unwrap_or_default();
+                edit(&mut value);
+                // An emptied field reads as none rather than as "unchanged":
+                // the operator is typing a number, and 0 is a real setting.
+                channel.channel.thread_context = if value.is_empty() {
+                    Some(0)
+                } else {
+                    value
+                        .parse::<usize>()
+                        .ok()
+                        .map(|count| count.min(construct_protocol::SLACK_THREAD_CONTEXT_MAX))
+                        .or(channel.channel.thread_context)
+                };
+            }
             _ => return,
         }
         channel.note = None;
@@ -1078,6 +1125,7 @@ impl App {
             return;
         };
         let editor_snapshot = editor.clone();
+        let slack = editor_snapshot.channel.kind == "slack";
         let valid_id = valid_service_name(&editor_snapshot.channel.id);
         let validation_error = if !valid_id {
             Some("Channel ID must be 1–32 lowercase letters, digits, or interior hyphens.")
@@ -1119,6 +1167,13 @@ impl App {
                         .then_some(editor_snapshot.bot_token),
                     allowed_workspaces: editor_snapshot.channel.allowed_workspaces,
                     allowed_channels: editor_snapshot.channel.allowed_channels,
+                    // Slack-only: sending these for an HTTP channel is refused,
+                    // and the editor never shows them there.
+                    progress: slack.then_some(editor_snapshot.channel.progress).flatten(),
+                    follow_up: slack.then_some(editor_snapshot.channel.follow_up).flatten(),
+                    thread_context: slack
+                        .then_some(editor_snapshot.channel.thread_context)
+                        .flatten(),
                 },
                 rotate_secret,
             })
@@ -1869,19 +1924,58 @@ impl App {
                             "http"
                         }
                         .to_string();
-                        editor.channel.port = (editor.channel.kind == "http").then_some(8787);
+                        let slack = editor.channel.kind == "slack";
+                        editor.channel.port = (!slack).then_some(8787);
+                        // Show a new Slack channel the values it will be saved
+                        // with rather than three blanks.
+                        editor.channel.progress = slack
+                            .then(|| construct_protocol::SLACK_PROGRESS_DEFAULT.to_string());
+                        editor.channel.follow_up = slack
+                            .then(|| construct_protocol::SLACK_FOLLOW_UP_DEFAULT.to_string());
+                        editor.channel.thread_context =
+                            slack.then_some(construct_protocol::SLACK_THREAD_CONTEXT_DEFAULT);
                         editor.selected_field = 1;
                         editor.note = None;
                     }
                 }
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if (snapshot.channel.kind == "http" && snapshot.selected_field == 3)
-                    || (snapshot.channel.kind == "slack" && snapshot.selected_field == 6) =>
+                if (snapshot.channel.kind == "http"
+                    && snapshot.selected_field == HTTP_FIELD_STATE)
+                    || (snapshot.channel.kind == "slack"
+                        && snapshot.selected_field == SLACK_FIELD_STATE) =>
             {
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
                         editor.channel.enabled = !editor.channel.enabled;
+                    }
+                }
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if snapshot.channel.kind == "slack"
+                    && matches!(
+                        snapshot.selected_field,
+                        SLACK_FIELD_PROGRESS | SLACK_FIELD_FOLLOW_UP
+                    ) =>
+            {
+                // More than two values, so Left has to mean the other way.
+                let forward = key.code != KeyCode::Left;
+                if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(editor) = dialog.channel_editor.as_mut() {
+                        if editor.selected_field == SLACK_FIELD_PROGRESS {
+                            editor.channel.progress = Some(cycle_option(
+                                construct_protocol::SLACK_PROGRESS_VALUES,
+                                editor.channel.progress.as_deref(),
+                                forward,
+                            ));
+                        } else {
+                            editor.channel.follow_up = Some(cycle_option(
+                                construct_protocol::SLACK_FOLLOW_UP_VALUES,
+                                editor.channel.follow_up.as_deref(),
+                                forward,
+                            ));
+                        }
+                        editor.note = None;
                     }
                 }
             }

@@ -8638,7 +8638,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
     }
 }
 
-fn render_service_channel_editor(
+pub(crate) fn render_service_channel_editor(
     f: &mut Frame,
     area: Rect,
     app: &mut App,
@@ -8664,6 +8664,28 @@ fn render_service_channel_editor(
             ),
             ("Workspaces", editor.channel.allowed_workspaces.join(",")),
             ("Channels", editor.channel.allowed_channels.join(",")),
+            (
+                "Progress",
+                editor.channel.progress.clone().unwrap_or_default(),
+            ),
+            (
+                "Follow-up",
+                editor.channel.follow_up.clone().unwrap_or_default(),
+            ),
+            (
+                "Thread context",
+                editor
+                    .channel
+                    .thread_context
+                    .map(|count| {
+                        if count == 0 {
+                            "0 · none".to_string()
+                        } else {
+                            format!("{count} messages")
+                        }
+                    })
+                    .unwrap_or_default(),
+            ),
             ("State", state),
         ]
     } else {
@@ -8705,7 +8727,7 @@ fn render_service_channel_editor(
             Style::default().fg(app.theme.text)
         };
         fields.push(Line::from(Span::styled(
-            format!("{marker} {label:<12} {value}"),
+            format!("{marker} {label:<14} {value}"),
             style,
         )));
     }
@@ -8731,7 +8753,10 @@ fn render_service_channel_editor(
             3 => ("Bot token", "Slack bot token used only to post final replies into the originating thread.", "Paste an xoxb- token; blank preserves the current token."),
             4 => ("Workspace allowlist", "Optional comma-separated Slack team IDs. Empty accepts configured events from any workspace.", "Type workspace IDs separated by commas."),
             5 => ("Channel allowlist", "Optional comma-separated Slack channel or DM IDs. Empty accepts every channel delivered to the app.", "Type channel IDs separated by commas."),
-            6 => ("State", "Disabled Slack channels close their Socket Mode connection while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
+            6 => ("Progress", "What the thread shows while a turn is still running: off says nothing, placeholder posts a message that becomes the answer, reaction marks the triggering message, both does each. Reactions need the reactions:write scope.", "Space or → next · ← previous · reconnects on save."),
+            7 => ("Follow-up", "Where the bot keeps answering once addressed: off is mentions and DMs only, thread answers later messages in a thread it was mentioned in, channel answers everything in a channel it has been mentioned in. Anything past off needs the message.channels subscription.", "Space or → next · ← previous · reconnects on save."),
+            8 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. Needs channels:history. This is text written by everyone in the thread, put in front of a session that holds tools — keep it at 0 where the participants are not people you would let instruct the agent.", "Type a number up to 1000 · reconnects on save."),
+            9 => ("State", "Disabled Slack channels close their Socket Mode connection while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
             _ => ("Channel", "", ""),
         }
     } else {

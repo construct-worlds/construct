@@ -9,6 +9,13 @@ mod ingress;
 mod slack;
 
 use anyhow::{anyhow, Context, Result};
+// The accepted values for a channel's behavior options are published by the
+// protocol so that what a client offers and what the daemon accepts cannot
+// drift apart.
+use construct_protocol::{
+    SLACK_FOLLOW_UP_VALUES as FOLLOW_UP_VALUES, SLACK_PROGRESS_VALUES as PROGRESS_VALUES,
+    SLACK_THREAD_CONTEXT_DEFAULT, SLACK_THREAD_CONTEXT_MAX as THREAD_CONTEXT_MAX,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -159,6 +166,25 @@ impl SlackProgress {
     pub(crate) fn reacts(self) -> bool {
         matches!(self, Self::Reaction | Self::Both)
     }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Placeholder => "placeholder",
+            Self::Reaction => "reaction",
+            Self::Both => "both",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "off" => Ok(Self::Off),
+            "placeholder" => Ok(Self::Placeholder),
+            "reaction" => Ok(Self::Reaction),
+            "both" => Ok(Self::Both),
+            other => Err(unknown_option("progress", other, PROGRESS_VALUES)),
+        }
+    }
 }
 
 /// Where a Slack channel keeps listening after it has been addressed.
@@ -184,8 +210,34 @@ pub enum SlackFollowUp {
     Channel,
 }
 
+impl SlackFollowUp {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Thread => "thread",
+            Self::Channel => "channel",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "off" => Ok(Self::Off),
+            "thread" => Ok(Self::Thread),
+            "channel" => Ok(Self::Channel),
+            other => Err(unknown_option("follow_up", other, FOLLOW_UP_VALUES)),
+        }
+    }
+}
+
+fn unknown_option(field: &str, value: &str, accepted: &[&str]) -> anyhow::Error {
+    anyhow::anyhow!(
+        "unknown {field} value {value:?}; expected one of {}",
+        accepted.join(", ")
+    )
+}
+
 fn default_thread_context() -> usize {
-    50
+    SLACK_THREAD_CONTEXT_DEFAULT
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -526,7 +578,44 @@ pub fn put_channel(
     if params.channel.kind == "slack" {
         validate_slack_token("app", app_token.as_deref(), "xapp-")?;
         validate_slack_token("bot", bot_token.as_deref(), "xoxb-")?;
+    } else if params.channel.progress.is_some()
+        || params.channel.follow_up.is_some()
+        || params.channel.thread_context.is_some()
+    {
+        // Accepting these on an HTTP channel would store an option nothing
+        // reads, and report it back as though it were in effect.
+        return Err(anyhow!(
+            "progress, follow_up, and thread_context apply to Slack channels only"
+        ));
     }
+    // An omitted option keeps what is stored: a client that does not offer
+    // these fields must not reset them by saving an unrelated one.
+    let progress = match params.channel.progress.as_deref() {
+        Some(value) => SlackProgress::parse(value)?,
+        None => existing
+            .as_ref()
+            .map(|channel| channel.progress)
+            .unwrap_or_default(),
+    };
+    let follow_up = match params.channel.follow_up.as_deref() {
+        Some(value) => SlackFollowUp::parse(value)?,
+        None => existing
+            .as_ref()
+            .map(|channel| channel.follow_up)
+            .unwrap_or_default(),
+    };
+    let thread_context = match params.channel.thread_context {
+        Some(value) if value > THREAD_CONTEXT_MAX => {
+            return Err(anyhow!(
+                "thread_context must be at most {THREAD_CONTEXT_MAX}; Slack returns no more in one page"
+            ));
+        }
+        Some(value) => value,
+        None => existing
+            .as_ref()
+            .map(|channel| channel.thread_context)
+            .unwrap_or_else(default_thread_context),
+    };
     let config = ServiceChannelConfig {
         kind: Some(params.channel.kind),
         enabled: params.channel.enabled,
@@ -536,21 +625,9 @@ pub fn put_channel(
         bot_token,
         allowed_workspaces: normalize_allowlist(params.channel.allowed_workspaces),
         allowed_channels: normalize_allowlist(params.channel.allowed_channels),
-        // Not editable through this path yet, so carry the operator's choice
-        // forward. Defaulting here would silently reset a definition every
-        // time an unrelated field (a rotated token, an allowlist) was saved.
-        progress: existing
-            .as_ref()
-            .map(|channel| channel.progress)
-            .unwrap_or_default(),
-        follow_up: existing
-            .as_ref()
-            .map(|channel| channel.follow_up)
-            .unwrap_or_default(),
-        thread_context: existing
-            .as_ref()
-            .map(|channel| channel.thread_context)
-            .unwrap_or_else(default_thread_context),
+        progress,
+        follow_up,
+        thread_context,
     };
     service
         .channels
@@ -797,6 +874,9 @@ fn channel_summary(
     config: &ServiceChannelConfig,
     attached_to: Option<String>,
 ) -> construct_protocol::ServiceChannelSummary {
+    // Behavior options belong to Slack, and a client that cannot see the stored
+    // value cannot show what an omitted field is preserving.
+    let slack = channel_kind(&id, config) == "slack";
     construct_protocol::ServiceChannelSummary {
         id: id.clone(),
         kind: channel_kind(&id, config),
@@ -827,6 +907,9 @@ fn channel_summary(
         allowed_channel_count: config.allowed_channels.len(),
         allowed_workspaces: config.allowed_workspaces.clone(),
         allowed_channels: config.allowed_channels.clone(),
+        progress: slack.then(|| config.progress.as_str().to_string()),
+        follow_up: slack.then(|| config.follow_up.as_str().to_string()),
+        thread_context: slack.then_some(config.thread_context),
         attached_to,
         publication: None,
     }
@@ -1575,6 +1658,9 @@ mod tests {
                     bot_token: None,
                     allowed_workspaces: Vec::new(),
                     allowed_channels: Vec::new(),
+                    progress: None,
+                    follow_up: None,
+                    thread_context: None,
                 },
                 rotate_secret: false,
             },
@@ -1655,6 +1741,9 @@ mod tests {
                     bot_token: None,
                     allowed_workspaces: Vec::new(),
                     allowed_channels: Vec::new(),
+                    progress: None,
+                    follow_up: None,
+                    thread_context: None,
                 },
                 rotate_secret: false,
             },
@@ -1673,6 +1762,9 @@ mod tests {
                     bot_token: None,
                     allowed_workspaces: Vec::new(),
                     allowed_channels: Vec::new(),
+                    progress: None,
+                    follow_up: None,
+                    thread_context: None,
                 },
                 rotate_secret: false,
             },
@@ -1789,6 +1881,9 @@ mod tests {
                     bot_token: None,
                     allowed_workspaces: Vec::new(),
                     allowed_channels: Vec::new(),
+                    progress: None,
+                    follow_up: None,
+                    thread_context: None,
                 },
                 rotate_secret: false,
             },
@@ -1873,6 +1968,9 @@ mod tests {
                     bot_token: None,
                     allowed_workspaces: Vec::new(),
                     allowed_channels: Vec::new(),
+                    progress: None,
+                    follow_up: None,
+                    thread_context: None,
                 },
                 rotate_secret: false,
             },
@@ -1892,11 +1990,10 @@ mod tests {
     }
 
     #[test]
-    fn editing_a_channel_keeps_the_progress_affordance_it_was_given() {
-        // The channel put path cannot express `progress` yet, so a save that
-        // touched anything else — rotating a token, editing an allowlist —
-        // would reset an operator's choice back to the default without ever
-        // saying so.
+    fn an_omitted_option_keeps_the_value_the_channel_was_given() {
+        // Absent means unchanged, never default: a client that does not offer
+        // these fields must be able to save an allowlist without resetting an
+        // operator's choice behind their back.
         let config = tempfile::tempdir().unwrap();
         let services = config.path().join("services");
         std::fs::create_dir_all(&services).unwrap();
@@ -1922,6 +2019,9 @@ mod tests {
                     bot_token: None,
                     allowed_workspaces: vec!["T9".into()],
                     allowed_channels: Vec::new(),
+                    progress: None,
+                    follow_up: None,
+                    thread_context: None,
                 },
                 rotate_secret: false,
             },
@@ -1933,6 +2033,163 @@ mod tests {
         assert_eq!(stored.follow_up, SlackFollowUp::Channel);
         assert_eq!(stored.thread_context, 7);
         assert_eq!(stored.allowed_workspaces, vec!["T9".to_string()]);
+    }
+
+    /// A Slack channel with every behavior option left at its default.
+    fn slack_channel_fixture() -> (tempfile::TempDir, PathBuf) {
+        let config = tempfile::tempdir().unwrap();
+        let services = config.path().join("services");
+        std::fs::create_dir_all(&services).unwrap();
+        std::fs::write(
+            services.join("chat.toml"),
+            "harness = \"codex\"\n\
+             [channels.bot]\nkind = \"slack\"\n\
+             app_token = \"xapp-1\"\nbot_token = \"xoxb-1\"\n",
+        )
+        .unwrap();
+        (config, services)
+    }
+
+    fn slack_option_put(
+        progress: Option<&str>,
+        follow_up: Option<&str>,
+        thread_context: Option<usize>,
+    ) -> construct_protocol::ServiceChannelPutParams {
+        construct_protocol::ServiceChannelPutParams {
+            service_name: "chat".into(),
+            channel: construct_protocol::ServiceChannelPut {
+                id: "bot".into(),
+                kind: "slack".into(),
+                enabled: true,
+                port: None,
+                app_token: None,
+                bot_token: None,
+                allowed_workspaces: Vec::new(),
+                allowed_channels: Vec::new(),
+                progress: progress.map(ToString::to_string),
+                follow_up: follow_up.map(ToString::to_string),
+                thread_context,
+            },
+            rotate_secret: false,
+        }
+    }
+
+    #[test]
+    fn a_channel_put_sets_the_slack_options_and_reports_them_back() {
+        let (_config, services) = slack_channel_fixture();
+
+        let result = put_channel(
+            &services,
+            slack_option_put(Some("both"), Some("channel"), Some(12)),
+        )
+        .unwrap();
+
+        // Reported back, so a client can show what it is preserving.
+        assert_eq!(result.channel.progress.as_deref(), Some("both"));
+        assert_eq!(result.channel.follow_up.as_deref(), Some("channel"));
+        assert_eq!(result.channel.thread_context, Some(12));
+
+        let stored = &load_definitions(&services).unwrap()["chat"].channels["bot"];
+        assert_eq!(stored.progress, SlackProgress::Both);
+        assert_eq!(stored.follow_up, SlackFollowUp::Channel);
+        assert_eq!(stored.thread_context, 12);
+    }
+
+    #[test]
+    fn an_unknown_option_value_is_refused_rather_than_defaulted() {
+        let (_config, services) = slack_channel_fixture();
+
+        for params in [
+            slack_option_put(Some("loud"), None, None),
+            slack_option_put(None, Some("everywhere"), None),
+        ] {
+            let error = put_channel(&services, params).unwrap_err().to_string();
+            assert!(error.contains("expected one of"), "unexpected: {error}");
+        }
+        // A refused edit leaves the stored definition untouched.
+        let stored = &load_definitions(&services).unwrap()["chat"].channels["bot"];
+        assert_eq!(stored.progress, SlackProgress::default());
+        assert_eq!(stored.follow_up, SlackFollowUp::default());
+    }
+
+    #[test]
+    fn a_thread_context_past_slacks_own_page_limit_is_refused() {
+        let (_config, services) = slack_channel_fixture();
+
+        let error = put_channel(
+            &services,
+            slack_option_put(None, None, Some(THREAD_CONTEXT_MAX + 1)),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("at most"), "unexpected: {error}");
+        assert_eq!(
+            put_channel(&services, slack_option_put(None, None, Some(0)))
+                .unwrap()
+                .channel
+                .thread_context,
+            Some(0),
+            "0 is a real setting, not an absent one"
+        );
+    }
+
+    #[test]
+    fn slack_options_are_refused_on_a_channel_that_cannot_read_them() {
+        let config = tempfile::tempdir().unwrap();
+        let services = config.path().join("services");
+        std::fs::create_dir_all(&services).unwrap();
+        std::fs::write(services.join("alerts.toml"), "harness = \"codex\"\n").unwrap();
+
+        let error = put_channel(
+            &services,
+            construct_protocol::ServiceChannelPutParams {
+                service_name: "alerts".into(),
+                channel: construct_protocol::ServiceChannelPut {
+                    id: "http".into(),
+                    kind: "http".into(),
+                    enabled: true,
+                    port: Some(8787),
+                    app_token: None,
+                    bot_token: None,
+                    allowed_workspaces: Vec::new(),
+                    allowed_channels: Vec::new(),
+                    follow_up: Some("channel".into()),
+                    progress: None,
+                    thread_context: None,
+                },
+                rotate_secret: false,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("Slack channels only"), "unexpected: {error}");
+        // An HTTP channel reports no options rather than defaults it ignores.
+        let summary = &list_channel_catalog(&services).unwrap();
+        assert!(summary.is_empty(), "the refused put must not have stored");
+    }
+
+    #[test]
+    fn the_published_option_defaults_match_the_ones_a_definition_gets() {
+        // Clients seed a new channel from the published defaults, so a drift
+        // here would show the operator a value the daemon would not store.
+        assert_eq!(
+            SlackProgress::default().as_str(),
+            construct_protocol::SLACK_PROGRESS_DEFAULT
+        );
+        assert_eq!(
+            SlackFollowUp::default().as_str(),
+            construct_protocol::SLACK_FOLLOW_UP_DEFAULT
+        );
+        assert_eq!(default_thread_context(), SLACK_THREAD_CONTEXT_DEFAULT);
+        // Every value a client can offer is one the daemon accepts.
+        for value in PROGRESS_VALUES {
+            assert!(SlackProgress::parse(value).is_ok(), "{value}");
+        }
+        for value in FOLLOW_UP_VALUES {
+            assert!(SlackFollowUp::parse(value).is_ok(), "{value}");
+        }
     }
 
     #[test]
@@ -1970,6 +2227,9 @@ mod tests {
                     bot_token: Some("xoxb-secret".into()),
                     allowed_workspaces: vec![" T2 ".into(), "T1".into(), "T1".into()],
                     allowed_channels: vec!["C1".into()],
+                    progress: None,
+                    follow_up: None,
+                    thread_context: None,
                 },
                 rotate_secret: false,
             },

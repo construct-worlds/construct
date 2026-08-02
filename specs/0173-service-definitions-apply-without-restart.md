@@ -16,7 +16,7 @@ property of where the daemon reads that field:
 
 | Change | Applies |
 |---|---|
-| Channel attachment, port, enabled state, credential | immediately |
+| Channel attachment, port, enabled state, credential, behavior options | immediately |
 | Routing rule, paused, approval timeout | on the next request |
 | Instruction, harness, model, working directory, sandbox | on new sessions |
 
@@ -42,6 +42,12 @@ is picked up once it is complete.
 used, so a rotated credential, a changed routing rule, or a paused service take
 effect without disturbing the listener. When sockets must move, every stop
 completes before any start, so two channels can exchange ports.
+
+An outbound channel is the mirror image: it holds its configuration in the
+connection rather than reading it per request, so any change to that
+configuration replaces the connection. That is why a channel's behavior options
+sit in the immediate class — not because they touch a port, but because saving
+one is what makes the running connection adopt it.
 
 **Requests in flight are never interrupted.** Stopping a listener stops it
 accepting; a request already being served runs to completion, because a service
