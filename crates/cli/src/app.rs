@@ -2388,6 +2388,22 @@ fn valid_collapsed_session_ids(
     ids
 }
 
+/// Keep only collapse preferences for services that still exist, preventing
+/// removed service names from accumulating indefinitely in local UI state.
+fn valid_collapsed_service_names(
+    services: &[ServiceSummary],
+    candidates: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let live_names: HashSet<&str> = services.iter().map(|service| service.name.as_str()).collect();
+    let mut names: Vec<String> = candidates
+        .into_iter()
+        .filter(|name| live_names.contains(name.as_str()))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 struct ReconnectState {
     next_attempt: Instant,
     backoff: Duration,
@@ -5202,10 +5218,18 @@ async fn run_with_socket_initial_selection(
     let playbook_projection_tx = mpsc::unbounded_channel().0;
     let upgrade_status_tx = mpsc::unbounded_channel().0;
     let session_mutation_tx = mpsc::unbounded_channel().0;
-    let initial_children_collapsed =
+    let mut initial_children_collapsed: HashSet<String> =
         valid_collapsed_session_ids(&sessions, persisted.collapsed_session_ids.iter().cloned())
             .into_iter()
             .collect();
+    initial_children_collapsed.extend(
+        valid_collapsed_service_names(
+            &services,
+            persisted.collapsed_service_names.iter().cloned(),
+        )
+        .into_iter()
+        .map(|name| service_children_key(&name)),
+    );
     let mut app = App {
         client: client.clone(),
         last_reported_view: None,
@@ -5596,6 +5620,13 @@ async fn run_with_socket_initial_selection(
         collapsed_session_ids: valid_collapsed_session_ids(
             &app.sessions,
             app.children_collapsed.iter().cloned(),
+        ),
+        collapsed_service_names: valid_collapsed_service_names(
+            &app.services,
+            app.children_collapsed.iter().filter_map(|key| {
+                key.strip_prefix("service:")
+                    .map(std::string::ToString::to_string)
+            }),
         ),
         widgets,
         tutorial_step: app
@@ -7194,6 +7225,14 @@ impl App {
         // Focusing a service view is edit mode — there is no separate
         // read-only state to step out of (spec 0175).
         self.sync_service_editor_with_selection();
+    }
+
+    /// Show a service in the active pane while navigation remains owned by
+    /// the sidebar. The editor is prepared for an explicit drill-in, but list
+    /// traversal must not redirect the next Up/Down or C-p/C-n into its fields.
+    fn select_service_from_list(&mut self, name: String) {
+        self.select_service(name);
+        self.focus = PaneFocus::List;
     }
 
     /// Select a session immediately after creation. The create RPC can finish
@@ -9026,7 +9065,9 @@ impl App {
             }
         }
         match &items[next] {
-            ListItem::Service { summary, .. } => self.select_service(summary.name.clone()),
+            ListItem::Service { summary, .. } => {
+                self.select_service_from_list(summary.name.clone())
+            }
             ListItem::Session { summary, .. } => self.select_session(summary.id.clone()),
             ListItem::GroupHeader { group, .. } => self.select_group(group.id.clone()),
             ListItem::ArchivedRow { section, .. } => self.select_archive_row(section.clone()),
@@ -17228,6 +17269,23 @@ mod tests {
         );
 
         assert_eq!(restored, vec!["fork-parent", "parent"]);
+    }
+
+    #[test]
+    fn persisted_service_collapse_names_are_pruned_to_live_services() {
+        let services = vec![
+            service_summary_for_test("assistant"),
+            service_summary_for_test("reviewer"),
+        ];
+
+        let restored = valid_collapsed_service_names(
+            &services,
+            ["assistant", "stale", "reviewer", "assistant"]
+                .into_iter()
+                .map(str::to_string),
+        );
+
+        assert_eq!(restored, vec!["assistant", "reviewer"]);
     }
 
     fn playbook_popup_for_test(session_id: &str, markdown: &str, cursor: usize) -> PlaybookPopup {
@@ -42000,6 +42058,36 @@ mod tests {
                 ..
             }
         ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn list_navigation_through_service_keeps_list_focus() {
+        let (mut app, _dir, server) = test_app_with_lineage().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_session("s1".into());
+        app.focus = PaneFocus::List;
+
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.selection, Selection::Service("assistant".into()));
+        assert_eq!(app.focus, PaneFocus::List);
+        assert!(app.service_dialog.is_some(), "the service view is ready");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.selection, Selection::Session("s1".into()));
+        assert_eq!(app.focus, PaneFocus::List);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.selection, Selection::Service("assistant".into()));
+        assert_eq!(app.focus, PaneFocus::List);
+
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        assert_eq!(app.selection, Selection::Session("s1".into()));
+        assert_eq!(app.focus, PaneFocus::List);
         server.abort();
     }
 

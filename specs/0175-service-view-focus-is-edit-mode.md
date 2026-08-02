@@ -8,11 +8,17 @@ Scope: Focusing a service view puts it in edit mode, and unsaved changes are mar
 ## Decision
 
 A service view has exactly one interactive state: editing. Every path that
-focuses or selects a service — creating one, opening one by name, clicking its
-pane, moving pane focus onto it, or selecting its row in the session list —
-leaves the editor open on that service. There is no read-only service view the
-operator must step out of before typing, and no "press a key to start editing"
-step. Moving focus to something that is not a service closes the editor.
+focuses a service — creating one, opening one by name, clicking its pane, or
+moving pane focus onto it — leaves the editor open on that service. There is no
+read-only service view the operator must step out of before typing, and no
+"press a key to start editing" step. Moving focus to something that is not a
+service closes the editor.
+
+Sidebar selection and pane focus remain distinct. Keyboard navigation that
+moves the session-list selection onto a service updates the active pane and
+prepares its editor, but keeps focus in the list so Up/Down, C-p/C-n, and
+equivalent profile bindings continue traversing rows. An explicit drill-in
+action moves focus to the already-prepared service editor.
 
 A command that hands the operator a focused service view must also dismiss the
 transient input surfaces that would otherwise keep swallowing keystrokes — in
@@ -61,8 +67,9 @@ be modelled as a sub-mode of a field.
 
 ## Consequences
 
-- Any new way of focusing a service must open its editor. Selection changes are
-  the hook, not individual call sites.
+- Any new way of focusing a service must open its editor. Keyboard traversal
+  in the list may prepare that editor without transferring focus out of the
+  list.
 - Selection state must distinguish definition fields from channel rows and
   session rows explicitly. Indexing rows off a field number reintroduces the
   sub-mode this decision removes.
