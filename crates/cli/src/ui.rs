@@ -8098,10 +8098,23 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         if selected {
             style = style.fg(app.theme.highlight_fg).bg(app.theme.highlight_bg);
         }
-        field_lines.push(Line::from(Span::styled(
-            format!("{marker} {label:<12} {value}"),
-            style,
-        )));
+        let value_style = if selected {
+            style
+        } else if index == crate::app::SERVICE_FIELD_COUNT - 1 {
+            Style::default()
+                .fg(if dialog.service.paused {
+                    app.theme.warning
+                } else {
+                    app.theme.success
+                })
+                .add_modifier(Modifier::BOLD)
+        } else {
+            style
+        };
+        field_lines.push(Line::from(vec![
+            Span::styled(format!("{marker} {label:<12} "), style),
+            Span::styled(value, value_style),
+        ]));
     }
 
     let top_h = 10.min(inner.height.saturating_sub(4));
