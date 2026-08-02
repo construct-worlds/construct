@@ -516,10 +516,42 @@ fn macos_clipboard_png() -> Option<Vec<u8>> {
     parse_osascript_data(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// True when the pasteboard actually carries a file-URL flavor.
+///
+/// This gate is load-bearing, not an optimization. Coercing the pasteboard
+/// with `as «class furl»` *succeeds on plain text*: AppleScript reinterprets
+/// the text as an HFS filename at the startup disk root, so a clipboard
+/// holding `3k tokens` coerces to the path `/3k tokens`. Probing by coercion
+/// alone therefore claims every text paste as a (nonexistent) file. Ask what
+/// flavors are on the pasteboard instead — `clipboard info` reports
+/// `«class furl», 24` for a real Finder copy and only text flavors otherwise.
+#[cfg(target_os = "macos")]
+fn macos_clipboard_has_file_url() -> bool {
+    let out = Command::new("osascript")
+        .args(["-e", "clipboard info"])
+        .stderr(Stdio::null())
+        .output();
+    match out {
+        Ok(out) if out.status.success() => {
+            clipboard_info_has_file_url(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `clipboard info` output lists the file-URL flavor.
+#[cfg(target_os = "macos")]
+fn clipboard_info_has_file_url(info: &str) -> bool {
+    info.contains("\u{ab}class furl\u{bb}")
+}
+
 /// A file copied in Finder, read off disk. Falls back to None when the
 /// pasteboard holds no file URL.
 #[cfg(target_os = "macos")]
 fn macos_clipboard_file() -> Result<Option<PasteItem>> {
+    if !macos_clipboard_has_file_url() {
+        return Ok(None);
+    }
     let out = Command::new("osascript")
         .args([
             "-e",
@@ -536,8 +568,12 @@ fn macos_clipboard_file() -> Result<Option<PasteItem>> {
         return Ok(None);
     }
     let path = PathBuf::from(path);
-    let meta =
-        std::fs::metadata(&path).with_context(|| format!("stat copied file {}", path.display()))?;
+    // A probe that cannot stat its candidate means "the pasteboard is not a
+    // readable file", not "the paste failed" — fall through to the text path
+    // rather than propagating and denying the user any paste at all.
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Ok(None);
+    };
     if !meta.is_file() {
         return Ok(None);
     }
@@ -717,6 +753,27 @@ fn build_ssh_argv(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// The pasteboard flavor gate is what keeps a plain-text clipboard from
+    /// being misread as a copied file: `as «class furl»` coerces *any* text
+    /// into a root-relative path, so only the flavor list can tell the two
+    /// apart. Both fixtures are verbatim `clipboard info` output from macOS.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clipboard_info_distinguishes_copied_file_from_plain_text() {
+        let text =
+            "\u{ab}class utf8\u{bb}, 9, \u{ab}class ut16\u{bb}, 20, string, 9, Unicode text, 18";
+        assert!(
+            !clipboard_info_has_file_url(text),
+            "plain text must not be claimed as a copied file"
+        );
+
+        let file = "\u{ab}class furl\u{bb}, 24";
+        assert!(
+            clipboard_info_has_file_url(file),
+            "a Finder file copy must be detected"
+        );
+    }
 
     #[test]
     fn ssh_argv_wraps_user_args_and_appends_remote_cmd() {

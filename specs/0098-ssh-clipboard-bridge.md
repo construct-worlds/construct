@@ -78,6 +78,16 @@ keeps setup at zero: one command, both ends are the same installed binary.
   `construct` ignores the environment variable (OSC 52 fallback applies),
   and a dead or missing bridge must fall back to the pre-bridge behavior
   rather than fail the copy or paste.
+- Paste reads the pasteboard richest-type-first (image, then file, then
+  text), and each richer probe is speculative: failing to interpret the
+  clipboard as that type means "not that type", never "the paste failed".
+  A probe must fall through to the next type rather than propagate an
+  error, or a failure to read one flavor denies the user any paste at all.
+  Type detection must ask the pasteboard which flavors it actually holds;
+  it must not infer the type from a successful conversion, because
+  platform clipboard APIs will happily coerce plain text into a
+  nonsensical value of the richer type (on macOS, converting text to a
+  file URL yields a path built from the text itself).
 - The wrapper appends its own remote command, so users must not pass one
   positionally; overriding what runs remotely is an explicit flag.
 
