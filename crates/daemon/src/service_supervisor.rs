@@ -764,6 +764,8 @@ mod tests {
                             allowed_workspaces: Vec::new(),
                             allowed_channels: Vec::new(),
                             progress: Default::default(),
+                            follow_up: Default::default(),
+                            thread_context: 50,
                         },
                     )
                 })
@@ -816,6 +818,8 @@ mod tests {
                     allowed_workspaces: vec!["T1".into()],
                     allowed_channels: vec!["C1".into()],
                     progress: Default::default(),
+                    follow_up: Default::default(),
+                    thread_context: 50,
                 },
             )]),
         };

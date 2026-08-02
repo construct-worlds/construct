@@ -39,7 +39,48 @@ enabled = true
 app_token = "xapp-…"       # Socket Mode
 bot_token = "xoxb-…"       # posting
 progress = "placeholder"   # off | placeholder | reaction | both
+follow_up = "thread"       # off | thread | channel
+thread_context = 50        # earlier thread messages to read on joining; 0 = none
 ```
+
+### Answering without being mentioned
+
+A bot you must `@`-mention for every message cannot hold a conversation. DMs
+have always worked untagged; `follow_up` extends that to channels.
+
+| value | behavior |
+| --- | --- |
+| `thread` (default) | After being mentioned in a thread, answers later messages in that thread. |
+| `channel` | After being mentioned anywhere in a channel, answers everything posted there. |
+| `off` | Only direct mentions and DMs. |
+
+"Already engaged" means Construct already routes a session for that thread —
+there is no separate participation state to get out of sync. Each thread stays
+its own session in every mode, so unrelated topics never share context.
+
+This needs the **`message.channels`** event subscription (plus
+**`message.groups`** for private channels). Without it Slack never sends
+untagged messages and every mode behaves like `off`. Note that subscribing to
+both `app_mention` and `message.channels` makes Slack deliver a message that
+mentions the bot twice; Construct deduplicates on the message itself, so this
+is safe.
+
+### Reading the thread it was pulled into
+
+`thread_context` is how many earlier messages of a thread the bot reads when it
+is first mentioned in one, so "@bot what do you think?" can be answered from
+the conversation rather than from those five words. It reads only on joining —
+after that the session has been present for the thread itself. Set `0` to
+disable.
+
+Needs **`channels:history`** (`groups:history` for private channels). Without
+the scope Construct logs the refusal and answers from the message alone.
+
+> **Trust boundary.** Thread history is written by other people and the session
+> has tools. Construct fences fetched history in a block marked as material to
+> read, never instructions to follow. That is a mitigation, not a guarantee —
+> if a channel's participants are not people you would let instruct the agent
+> directly, keep `thread_context = 0`.
 
 ### Showing that a turn is still running
 

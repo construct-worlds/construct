@@ -161,6 +161,33 @@ impl SlackProgress {
     }
 }
 
+/// Where a Slack channel keeps listening after it has been addressed.
+///
+/// A bot that must be `@`-mentioned for every turn cannot hold a conversation:
+/// the person asking has to keep re-addressing an participant that is visibly
+/// already in the room. Once engaged, the bot behaves like a participant —
+/// within a boundary the operator sets, because "answers everything in this
+/// channel" is right for a dedicated channel and wrong for a busy shared one.
+///
+/// Anything past `Off` needs the `message.channels` event subscription (plus
+/// `message.groups` for private channels). Without it Slack never sends the
+/// untagged messages, and every mode behaves like `Off`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SlackFollowUp {
+    /// Only direct mentions and DMs.
+    Off,
+    /// Keep answering inside a thread the bot was mentioned in.
+    #[default]
+    Thread,
+    /// Keep answering anywhere in a channel the bot has been mentioned in.
+    Channel,
+}
+
+fn default_thread_context() -> usize {
+    50
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceChannelConfig {
     #[serde(default)]
@@ -180,6 +207,13 @@ pub struct ServiceChannelConfig {
     /// Slack only. Omitted definitions keep the default affordance.
     #[serde(default)]
     pub progress: SlackProgress,
+    /// Slack only. Where the bot keeps answering once it has been addressed.
+    #[serde(default)]
+    pub follow_up: SlackFollowUp,
+    /// Slack only. How many earlier messages of a thread to read when first
+    /// pulled into one. `0` reads none. Needs `channels:history`.
+    #[serde(default = "default_thread_context")]
+    pub thread_context: usize,
 }
 
 fn default_channel_enabled() -> bool {
@@ -509,6 +543,14 @@ pub fn put_channel(
             .as_ref()
             .map(|channel| channel.progress)
             .unwrap_or_default(),
+        follow_up: existing
+            .as_ref()
+            .map(|channel| channel.follow_up)
+            .unwrap_or_default(),
+        thread_context: existing
+            .as_ref()
+            .map(|channel| channel.thread_context)
+            .unwrap_or_else(default_thread_context),
     };
     service
         .channels
@@ -922,6 +964,8 @@ pub(crate) fn slack_config(
         allowed_workspaces: channel.allowed_workspaces.clone(),
         allowed_channels: channel.allowed_channels.clone(),
         progress: channel.progress,
+        follow_up: channel.follow_up,
+        thread_context: channel.thread_context,
     })
 }
 
@@ -986,6 +1030,8 @@ mod tests {
                     allowed_workspaces: Vec::new(),
                     allowed_channels: Vec::new(),
                     progress: Default::default(),
+                    follow_up: Default::default(),
+                    thread_context: default_thread_context(),
                 },
             )]),
         }
@@ -1471,6 +1517,28 @@ mod tests {
     }
 
     #[test]
+    fn a_slack_channel_chooses_where_it_keeps_listening() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("bot.toml"),
+            "harness = \"codex\"\n\
+             [channels.a]\nkind = \"slack\"\nfollow_up = \"channel\"\nthread_context = 10\n\
+             [channels.b]\nkind = \"slack\"\nfollow_up = \"off\"\nthread_context = 0\n\
+             [channels.c]\nkind = \"slack\"\n",
+        )
+        .unwrap();
+
+        let channels = &load_definitions(dir.path()).unwrap()["bot"].channels;
+        assert_eq!(channels["a"].follow_up, SlackFollowUp::Channel);
+        assert_eq!(channels["a"].thread_context, 10);
+        assert_eq!(channels["b"].follow_up, SlackFollowUp::Off);
+        assert_eq!(channels["b"].thread_context, 0);
+        // A definition written before these options existed keeps working.
+        assert_eq!(channels["c"].follow_up, SlackFollowUp::Thread);
+        assert_eq!(channels["c"].thread_context, default_thread_context());
+    }
+
+    #[test]
     fn service_put_preserves_channels_and_channel_crud_rotates_credentials() {
         let config = tempfile::tempdir().unwrap();
         let services = config.path().join("services");
@@ -1836,6 +1904,7 @@ mod tests {
             services.join("chat.toml"),
             "harness = \"codex\"\n\
              [channels.bot]\nkind = \"slack\"\nprogress = \"reaction\"\n\
+             follow_up = \"channel\"\nthread_context = 7\n\
              app_token = \"xapp-1\"\nbot_token = \"xoxb-1\"\n",
         )
         .unwrap();
@@ -1861,6 +1930,8 @@ mod tests {
 
         let stored = &load_definitions(&services).unwrap()["chat"].channels["bot"];
         assert_eq!(stored.progress, SlackProgress::Reaction);
+        assert_eq!(stored.follow_up, SlackFollowUp::Channel);
+        assert_eq!(stored.thread_context, 7);
         assert_eq!(stored.allowed_workspaces, vec!["T9".to_string()]);
     }
 
