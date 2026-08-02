@@ -8019,7 +8019,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(pane_border_style(&app.theme, focused))
-            .title(format!(" service: {name} "));
+            .title(format!(" ◈ service: {name} "));
         f.render_widget(
             Paragraph::new("service definition is no longer available")
                 .block(block)
@@ -8054,7 +8054,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         .borders(Borders::ALL)
         .border_style(border_style)
         .padding(ratatui::widgets::Padding::new(2, 2, 1, 1))
-        .title(format!(" service: {}{unsaved} ", summary.name));
+        .title(format!(" ◈ service: {}{unsaved} ", summary.name));
     let block = apply_pane_title_right_cluster(
         app,
         area,
