@@ -835,8 +835,37 @@ fn session_list_marker(summary: &SessionSummary) -> &'static str {
     }
 }
 
-fn session_list_marker_width(summary: &SessionSummary) -> usize {
-    1 + usize::from(summary.forked_from.is_some())
+/// The one cell every session row reserves between its tree prefix and its
+/// status glyph. It is reserved unconditionally — a plain session paints a
+/// space there — so all rows at one depth share a left edge, and a child's
+/// status glyph lands under its parent's title. An archived-children row
+/// spends the same cell on its own disclosure, so everything hanging off the
+/// rails reads as one marker column.
+const SESSION_ROW_GUTTER_CELLS: usize = 1;
+
+/// That cell's glyph: the children disclosure, else a fork's lineage mark,
+/// else a space. Exactly one cell wide in every state, so a session gaining
+/// its first child never nudges its own title — or its siblings' — sideways.
+///
+/// The disclosure wins the cell when a session is both, because it is the
+/// affordance the operator can act on. No current list row is both: the list
+/// gives forks no disclosure, always rendering their descendants expanded. If
+/// that changes, lineage needs somewhere else to live rather than a second
+/// reserved column.
+fn session_row_marker(
+    summary: &SessionSummary,
+    has_children: bool,
+    children_expanded: bool,
+) -> &'static str {
+    if has_children {
+        if children_expanded {
+            "▼"
+        } else {
+            "▶"
+        }
+    } else {
+        session_list_marker(summary)
+    }
 }
 
 /// Hit zone for the `+` button on the session-list pane's title
@@ -3180,21 +3209,12 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     attention_rollup,
                     ..
                 } => {
-                    let expand_glyph = if *has_children {
-                        Some(if *children_expanded { "▼" } else { "▶" })
-                    } else {
-                        None
-                    };
-                    let lineage_glyph = session_list_marker(s);
+                    let row_marker = session_row_marker(s, *has_children, *children_expanded);
                     let tree_prefix = list_tree_branch_prefix(&app_items, i, *nesting_depth);
-                    // Fixed-width left side: indent + optional disclosure (1)
-                    // + optional lineage (1) + " glyph " (3).
-                    // Only forks reserve the lineage cell, keeping ordinary
-                    // project members at their established position.
-                    let prefix_w = tree_prefix.chars().count()
-                        + usize::from(expand_glyph.is_some())
-                        + session_list_marker_width(s)
-                        + 3;
+                    // Fixed-width left side: tree rails + the always-reserved
+                    // marker gutter + " glyph " (3) + one cell of right inset,
+                    // matching the service row's prefix budget.
+                    let prefix_w = tree_prefix.chars().count() + SESSION_ROW_GUTTER_CELLS + 3 + 1;
                     let harness = harness_label(s);
                     let harness_w = harness.chars().count();
                     // Reserve room for the trailing unblock marker (" ●") so the
@@ -3244,22 +3264,17 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     } else {
                         Style::default().fg(app.theme.text)
                     };
-                    let mut spans = vec![Span::styled(
-                        tree_prefix,
-                        session_list_secondary_style(&app.theme),
-                    )];
-                    if let Some(expand_glyph) = expand_glyph {
-                        spans.push(Span::styled(
-                            expand_glyph.to_string(),
-                            Style::default().fg(app.theme.group),
-                        ));
-                    }
-                    if s.forked_from.is_some() {
-                        spans.push(Span::styled(
-                            lineage_glyph.to_string(),
-                            Style::default().fg(app.theme.info),
-                        ));
-                    }
+                    // A disclosure is an affordance and wears the group hue; a
+                    // lineage mark is identity and wears the info hue.
+                    let marker_style = if *has_children {
+                        Style::default().fg(app.theme.group)
+                    } else {
+                        Style::default().fg(app.theme.info)
+                    };
+                    let mut spans = vec![
+                        Span::styled(tree_prefix, session_list_secondary_style(&app.theme)),
+                        Span::styled(row_marker.to_string(), marker_style),
+                    ];
                     spans.extend([
                         Span::styled(
                             format!(" {} ", session_status_glyph(app, s)),
@@ -24726,6 +24741,102 @@ mod tests {
         assert_eq!(list_tree_branch_prefix(&items, 4, 0), "");
     }
 
+    /// Regression: a project member that grew a subagent or a fork used to
+    /// render its disclosure — and a fork its lineage mark — as EXTRA cells,
+    /// pushing its title one column right of its plainer siblings. One cell is
+    /// now reserved on every row and every marker shares it, so what a session
+    /// is changes the glyph, never the geometry.
+    #[test]
+    fn every_session_row_marker_fits_the_one_reserved_cell() {
+        let plain = clip_test_session("plain", Some("plain"), "smith", SessionState::Done);
+        let mut fork = clip_test_session("fork", Some("fork"), "smith", SessionState::Done);
+        fork.forked_from = Some(construct_protocol::ForkedFrom {
+            session_id: "plain".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+            parent_tokens: Default::default(),
+            is_reset_snapshot: false,
+        });
+
+        for summary in [&plain, &fork] {
+            for (has_children, children_expanded) in
+                [(false, false), (true, false), (true, true), (false, true)]
+            {
+                assert_eq!(
+                    UnicodeWidthStr::width(session_row_marker(
+                        summary,
+                        has_children,
+                        children_expanded
+                    )),
+                    SESSION_ROW_GUTTER_CELLS,
+                    "marker must stay {SESSION_ROW_GUTTER_CELLS} cell(s) for \
+                     has_children={has_children} expanded={children_expanded} \
+                     fork={}",
+                    summary.forked_from.is_some()
+                );
+            }
+        }
+
+        // Each glyph still carries its meaning inside that fixed width.
+        assert_eq!(session_row_marker(&plain, false, false), " ");
+        assert_eq!(session_row_marker(&plain, true, false), "▶");
+        assert_eq!(session_row_marker(&plain, true, true), "▼");
+        assert_eq!(session_row_marker(&fork, false, false), "⑂");
+        // The affordance outranks the identity mark when a row is somehow
+        // both — the operator can act on a disclosure.
+        assert_eq!(session_row_marker(&fork, true, true), "▼");
+    }
+
+    /// A fork's mark and an archived row's disclosure sit in the same column,
+    /// one cell past identical rails, so everything hanging off the tree reads
+    /// as one marker column rather than each row inventing its own offset.
+    #[test]
+    fn fork_and_archived_rows_share_one_marker_column() {
+        let mut fork = clip_test_session("fork", Some("fork"), "smith", SessionState::Done);
+        fork.forked_from = Some(construct_protocol::ForkedFrom {
+            session_id: "root".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+            parent_tokens: Default::default(),
+            is_reset_snapshot: false,
+        });
+        let items = vec![
+            tree_row("root", 0),
+            AppListItem::Session {
+                summary: fork.clone(),
+                nesting_depth: 1,
+                has_children: false,
+                children_expanded: false,
+                attention_rollup: false,
+            },
+            AppListItem::ArchivedRow {
+                section: crate::app::ArchiveSection::Children("root".into()),
+                count: 2,
+                expanded: false,
+                nesting_depth: 1,
+            },
+        ];
+
+        // Same rails under the same parent…
+        let fork_rails = list_tree_branch_prefix(&items, 1, 1);
+        let archived_rails = list_tree_branch_prefix(&items, 2, 1);
+        assert_eq!(fork_rails, "├─");
+        assert_eq!(archived_rails, "└─");
+        assert_eq!(
+            UnicodeWidthStr::width(fork_rails.as_str()),
+            UnicodeWidthStr::width(archived_rails.as_str()),
+        );
+        // …then one marker cell each: `├─⑂ …` against `└─▸ …`.
+        assert_eq!(
+            UnicodeWidthStr::width(session_row_marker(&fork, false, false)),
+            UnicodeWidthStr::width("▸"),
+        );
+    }
+
     #[test]
     fn full_mode_tree_rails_continue_through_detail_and_spacing_rows() {
         let items = vec![
@@ -25073,7 +25184,6 @@ mod tests {
         });
 
         assert_eq!(session_list_marker(&fork), "⑂");
-        assert_eq!(session_list_marker_width(&fork), 2);
 
         let project_member = clip_test_session(
             "project-member",
@@ -25081,7 +25191,11 @@ mod tests {
             "codex",
             SessionState::Running,
         );
-        assert_eq!(session_list_marker_width(&project_member), 1);
+        // A non-fork still paints the lineage cell — as a space — so the
+        // fork's mark never shifts its neighbours' titles.
+        assert_eq!(session_list_marker(&project_member), " ");
+        assert_eq!(session_list_marker(&fork).chars().count(), 1);
+        assert_eq!(session_list_marker(&project_member).chars().count(), 1);
     }
 
     #[test]
