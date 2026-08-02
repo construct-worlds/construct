@@ -113,11 +113,13 @@ impl SessionManager {
         self.storage.save_summary(&summary)?;
 
         let (msg_tx, msg_rx) = mpsc::channel::<AdapterMessage>(ADAPTER_DRAIN_CAP);
-        let combined_args = {
-            let mut a = adapter_cfg.args.clone();
-            a.extend(params.args.clone());
-            a
-        };
+        // Dispatch args only. The session's own `args` are the *harness's*
+        // argv and reach the adapter in the start params below — appending
+        // them here instead puts them on the adapter process's command line,
+        // which every built-in adapter rejects (`__adapter <name>` takes no
+        // arguments), so the adapter dies before it can bind its socket and
+        // the create fails as an opaque "spawn adapter for <harness>".
+        let dispatch_args = adapter_cfg.args.clone();
 
         // Build the full env (adapter-config + user-provided + daemon
         // meta) BEFORE spawn so the adapter process inherits
@@ -225,7 +227,7 @@ impl SessionManager {
         let (adapter, info) = Adapter::spawn_reconnectable(
             harness.to_string(),
             binary,
-            combined_args,
+            dispatch_args,
             env_with_meta.clone(),
             self.adapter_socket_path(&id),
             msg_tx.clone(),
@@ -662,11 +664,10 @@ impl SessionManager {
             .unwrap_or_else(|| harness.clone());
         let binary = locate_binary(&binary_spec)
             .ok_or_else(|| anyhow!("adapter binary not found: {binary_spec}"))?;
-        let combined_args = {
-            let mut a = adapter_cfg.args.clone();
-            a.extend(start_params.args.clone());
-            a
-        };
+        // Dispatch args only, for the same reason as at create: the harness's
+        // argv rides in `start_params`, which is handed to the adapter over
+        // the socket, not on its command line.
+        let dispatch_args = adapter_cfg.args.clone();
 
         // Merge `[adapters.<name>].env` underneath the persisted
         // start-params env so config.toml-driven defaults apply on
@@ -686,7 +687,7 @@ impl SessionManager {
         let (adapter, info) = Adapter::spawn_reconnectable(
             harness.clone(),
             binary,
-            combined_args,
+            dispatch_args,
             respawn_env,
             self.adapter_socket_path(id),
             msg_tx.clone(),
