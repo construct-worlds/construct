@@ -12,23 +12,7 @@
 
 ### Quick start
 
-On macOS, install the latest Homebrew package once the formula is available in
-Homebrew Core:
-
-```sh
-brew install construct
-```
-
-If the formula has not reached Homebrew Core yet, install the project's tap
-once and then use the same formula:
-
-```sh
-brew tap construct-worlds/construct https://github.com/construct-worlds/construct.git
-brew install construct
-```
-
-On other supported platforms, or if you prefer the project's release
-installer, use:
+Install the latest release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/construct-worlds/construct/main/install.sh | sh
@@ -174,10 +158,6 @@ Interactive client commands also ask whether to upgrade when a newer release is
 available; saying yes upgrades in place, restarts a running daemon, and resumes
 the original command under the new binary. The TUI still surfaces a one-line
 notice from the cached check. Disable both with `CONSTRUCT_NO_UPDATE_CHECK=1`.
-
-Homebrew owns binaries installed by `brew install construct`. For those
-installations, `construct upgrade` and the in-app update prompt defer to
-Homebrew; use `brew upgrade construct` instead.
 
 ## ACP (Agent Client Protocol) server
 
