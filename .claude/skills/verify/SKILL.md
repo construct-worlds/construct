@@ -22,9 +22,15 @@ Kill the daemon and `rm -rf $DEMO` when done.
 
 ## Sessions without a TUI
 
-`construct new shell "" --no-tui` prints the session id and exits.
+`construct new --no-tui shell` prints the session id and exits.
 Plain `construct new` tries to attach the TUI and dies with
 "enable raw mode: Device not configured" in a non-tty shell.
+
+**Construct's own flags go BEFORE the harness name.** Everything after the
+harness is passed verbatim to that harness's CLI, so `construct new shell
+--no-tui` hands `--no-tui` to the shell, which then dies — surfacing ~5s
+later as the unrelated-looking `spawn adapter for shell`. Same trap for
+`--cwd`, `--prompt`, `--model`, `--title`, `--mode`, `--worktree`.
 
 ## Raw IPC (the daemon's real surface)
 

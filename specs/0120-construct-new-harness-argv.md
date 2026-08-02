@@ -39,6 +39,15 @@ resume, tools, or prompt delivery. Users should not assume post-harness argv is
 the final suffix of the effective command; they should assume only that construct
 will forward it without parsing.
 
+Forwarded argv belongs to the session, and reaches the adapter as part of the
+session's start parameters — the same channel that carries the prompt, cwd and
+env, on session creation and again on respawn. It is **not** part of how the
+adapter process itself is launched: an adapter's own command line is dispatch
+only, fixed by configuration, and independent of any session. Mixing the two
+puts user-chosen tokens on a command line that was never meant to parse them, so
+the adapter dies before it can serve the session and the failure surfaces as an
+unrelated-looking spawn error rather than as anything about argv.
+
 ## Non-Goals
 
 This decision does not require legacy positional prompts after the harness to be
