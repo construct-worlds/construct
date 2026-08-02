@@ -2,8 +2,127 @@
 
 use super::*;
 
-const FIELD_COUNT: usize = 8;
+/// Definition rows in the service view: Name, Instruction, Harness, Model,
+/// Working dir, Routing, State. Channels and routed sessions are not fields —
+/// they are their own navigable sections below the definition (spec 0175).
+pub const FIELD_COUNT: usize = 7;
+/// Re-exported name for consumers outside this module (renderers, hit tests).
+pub const SERVICE_FIELD_COUNT: usize = FIELD_COUNT;
 pub const SERVICE_PICKER_VISIBLE_ROWS: usize = 5;
+
+/// Where the service editor's cursor sits. The view is one continuous list —
+/// definition fields, then the channel catalog, then the routed sessions — so
+/// the selection is modelled explicitly instead of overloading a field index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceDialogFocus {
+    Field(usize),
+    Channel(usize),
+    Session(usize),
+}
+
+impl ServiceDialogFocus {
+    pub fn field(self) -> Option<usize> {
+        match self {
+            Self::Field(index) => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn channel(self) -> Option<usize> {
+        match self {
+            Self::Channel(index) => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn session(self) -> Option<usize> {
+        match self {
+            Self::Session(index) => Some(index),
+            _ => None,
+        }
+    }
+
+    pub fn is_field(self, index: usize) -> bool {
+        self.field() == Some(index)
+    }
+
+    /// Pull a stale row selection back in range after the catalog or the
+    /// routed-session list changed underneath it.
+    fn clamp(self, channels: usize, sessions: usize) -> Self {
+        match self {
+            Self::Field(index) if index >= FIELD_COUNT => Self::Field(FIELD_COUNT - 1),
+            Self::Channel(index) if index >= channels => {
+                if channels == 0 {
+                    Self::Field(FIELD_COUNT - 1)
+                } else {
+                    Self::Channel(channels - 1)
+                }
+            }
+            Self::Session(index) if index >= sessions => {
+                if sessions == 0 {
+                    Self::Field(FIELD_COUNT - 1)
+                } else {
+                    Self::Session(sessions - 1)
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Down/Tab/`C-n`: definition fields → channel rows → session rows → wrap.
+    pub fn next(self, channels: usize, sessions: usize) -> Self {
+        match self.clamp(channels, sessions) {
+            Self::Field(index) if index + 1 < FIELD_COUNT => Self::Field(index + 1),
+            Self::Field(_) => Self::first_channel(channels, sessions),
+            Self::Channel(index) if index + 1 < channels => Self::Channel(index + 1),
+            Self::Channel(_) => Self::first_session(sessions),
+            Self::Session(index) if index + 1 < sessions => Self::Session(index + 1),
+            Self::Session(_) => Self::Field(0),
+        }
+    }
+
+    /// Up/BackTab/`C-p`: the exact mirror of [`Self::next`].
+    pub fn prev(self, channels: usize, sessions: usize) -> Self {
+        match self.clamp(channels, sessions) {
+            Self::Field(0) => {
+                if sessions > 0 {
+                    Self::Session(sessions - 1)
+                } else if channels > 0 {
+                    Self::Channel(channels - 1)
+                } else {
+                    Self::Field(FIELD_COUNT - 1)
+                }
+            }
+            Self::Field(index) => Self::Field(index - 1),
+            Self::Channel(0) => Self::Field(FIELD_COUNT - 1),
+            Self::Channel(index) => Self::Channel(index - 1),
+            Self::Session(0) => {
+                if channels > 0 {
+                    Self::Channel(channels - 1)
+                } else {
+                    Self::Field(FIELD_COUNT - 1)
+                }
+            }
+            Self::Session(index) => Self::Session(index - 1),
+        }
+    }
+
+    fn first_channel(channels: usize, sessions: usize) -> Self {
+        if channels > 0 {
+            Self::Channel(0)
+        } else {
+            Self::first_session(sessions)
+        }
+    }
+
+    fn first_session(sessions: usize) -> Self {
+        if sessions > 0 {
+            Self::Session(0)
+        } else {
+            Self::Field(0)
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceDialogMode {
@@ -35,13 +154,16 @@ pub struct ServiceDialogPickerOption {
 pub struct ServiceDialog {
     pub mode: ServiceDialogMode,
     pub service: ServiceSummary,
-    pub selected_field: usize,
+    /// The definition as the daemon last confirmed it. Compared against
+    /// `service` to decide whether the pane title carries the unsaved marker
+    /// and whether Esc has edits to revert.
+    pub saved: ServiceSummary,
+    pub focus: ServiceDialogFocus,
     pub note: Option<String>,
     pub confirm_delete: bool,
     pub picker: Option<ServiceDialogPickerKind>,
     pub picker_selected: usize,
     pub picker_scroll: usize,
-    pub selected_channel: usize,
     pub channel_editor: Option<ServiceChannelDialog>,
 }
 
@@ -128,7 +250,50 @@ fn canonical_service_model(model: &str) -> String {
         .unwrap_or_else(|| model.to_string())
 }
 
+/// Compare the operator-editable half of two definitions. Channels are
+/// attached and detached straight against the daemon, so they are deliberately
+/// excluded: toggling one must never leave the editor looking dirty.
+fn same_editable_definition(left: &ServiceSummary, right: &ServiceSummary) -> bool {
+    left.name == right.name
+        && left.instruction == right.instruction
+        && left.harness == right.harness
+        && left.model == right.model
+        && left.cwd == right.cwd
+        && left.routing == right.routing
+        && left.paused == right.paused
+}
+
 impl ServiceDialog {
+    /// Open the editor for a definition the daemon already knows about.
+    pub fn editing(service: ServiceSummary) -> Self {
+        Self {
+            mode: ServiceDialogMode::Edit,
+            saved: service.clone(),
+            service,
+            focus: ServiceDialogFocus::Field(1),
+            note: Some("Saved edits apply live — see each field for when.".to_string()),
+            confirm_delete: false,
+            picker: None,
+            picker_selected: 0,
+            picker_scroll: 0,
+            channel_editor: None,
+        }
+    }
+
+    /// A service the operator has changed since it was last saved. A service
+    /// being created has never been saved, so it is unsaved by definition.
+    pub fn is_dirty(&self) -> bool {
+        self.mode == ServiceDialogMode::Create
+            || !same_editable_definition(&self.service, &self.saved)
+    }
+
+    /// Adopt a definition the daemon just confirmed: it is now both what the
+    /// editor shows and the baseline that "unsaved" is measured against.
+    pub fn adopt_saved(&mut self, service: ServiceSummary) {
+        self.saved = service.clone();
+        self.service = service;
+    }
+
     pub fn field_value(&self, field: usize) -> String {
         match field {
             0 => self.service.name.clone(),
@@ -148,8 +313,7 @@ impl ServiceDialog {
                 .unwrap_or_default(),
             4 => self.service.cwd.clone(),
             5 => self.service.routing.clone(),
-            6 => format!("{} attached", self.service.channels.len()),
-            7 => {
+            6 => {
                 if self.service.paused {
                     "paused".to_string()
                 } else {
@@ -302,61 +466,125 @@ impl App {
             Ok(mut channels) => {
                 channels.sort_by(|a, b| a.id.cmp(&b.id));
                 self.service_channel_catalog = channels;
-                if let Some(dialog) = self.service_dialog.as_mut() {
-                    dialog.selected_channel = dialog
-                        .selected_channel
-                        .min(self.service_channel_catalog.len().saturating_sub(1));
-                }
+                self.clamp_service_dialog_focus();
             }
             Err(error) => self.set_status(format!("channel catalog refresh failed: {error}")),
         }
     }
 
+    /// Sessions this service has routed a request into, in list order.
+    pub fn routed_service_sessions(&self, name: &str) -> Vec<&SessionSummary> {
+        let prefix = format!("service:{name}");
+        let nested = format!("{prefix}:");
+        self.sessions
+            .iter()
+            .filter(|session| {
+                session
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title == prefix || title.starts_with(&nested))
+            })
+            .collect()
+    }
+
+    /// Navigable row counts below the definition fields. The channel section
+    /// always offers one row: with an empty catalog it is the "create one"
+    /// affordance, which is the only way to reach channel creation by keyboard.
+    fn service_dialog_row_counts(&self) -> (usize, usize) {
+        let channels = self.service_channel_catalog.len().max(1);
+        let sessions = self
+            .service_dialog
+            .as_ref()
+            .map(|dialog| self.routed_service_sessions(&dialog.service.name).len())
+            .unwrap_or(0);
+        (channels, sessions)
+    }
+
+    fn clamp_service_dialog_focus(&mut self) {
+        let (channels, sessions) = self.service_dialog_row_counts();
+        if let Some(dialog) = self.service_dialog.as_mut() {
+            dialog.focus = dialog.focus.clamp(channels, sessions);
+        }
+    }
+
+    fn move_service_dialog_focus(&mut self, forward: bool) {
+        let (channels, sessions) = self.service_dialog_row_counts();
+        if let Some(dialog) = self.service_dialog.as_mut() {
+            dialog.focus = if forward {
+                dialog.focus.next(channels, sessions)
+            } else {
+                dialog.focus.prev(channels, sessions)
+            };
+        }
+    }
+
     pub fn open_new_service_view(&mut self, suggested: impl Into<String>) {
         let suggested = suggested.into();
-        self.configure_popup = None;
-        self.session_picker = None;
+        self.dismiss_surfaces_over_service_view();
         self.select_service(suggested.clone());
+        let service = default_service(self, suggested);
         self.service_dialog = Some(ServiceDialog {
             mode: ServiceDialogMode::Create,
-            service: default_service(self, suggested),
-            selected_field: 0,
+            saved: service.clone(),
+            service,
+            focus: ServiceDialogFocus::Field(0),
             note: Some("Enter saves this service as its own TOML file.".to_string()),
             confirm_delete: false,
             picker: None,
             picker_selected: 0,
             picker_scroll: 0,
-            selected_channel: 0,
             channel_editor: None,
         });
     }
 
     pub fn open_edit_service_view(&mut self, name: &str) -> bool {
-        let Some(service) = self
+        if !self.services.iter().any(|service| service.name == name) {
+            self.set_status(format!("service {name} not found"));
+            return false;
+        }
+        self.dismiss_surfaces_over_service_view();
+        // Selecting the service is what opens its editor — focusing a service
+        // view is edit mode (spec 0175).
+        self.select_service(name.to_string());
+        true
+    }
+
+    /// Transient surfaces that would otherwise keep swallowing keystrokes
+    /// after a command hands the operator a freshly focused service view. The
+    /// minibuffer matters most: `/serve` is typically typed into the
+    /// orchestrator panel, which stays open unless it is dismissed here.
+    fn dismiss_surfaces_over_service_view(&mut self) {
+        self.configure_popup = None;
+        self.session_picker = None;
+        self.minibuffer = None;
+    }
+
+    /// Keep the inline editor attached to whatever the active pane shows:
+    /// every path that focuses a service leaves its editor open, and moving
+    /// off a service closes it. Called from selection and pane-focus changes.
+    pub(super) fn sync_service_editor_with_selection(&mut self) {
+        let Some(name) = self.selection.service_name().map(str::to_owned) else {
+            self.service_dialog = None;
+            return;
+        };
+        if self
+            .service_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.service.name == name)
+        {
+            return;
+        }
+        match self
             .services
             .iter()
             .find(|service| service.name == name)
             .cloned()
-        else {
-            self.set_status(format!("service {name} not found"));
-            return false;
-        };
-        self.configure_popup = None;
-        self.session_picker = None;
-        self.select_service(name.to_string());
-        self.service_dialog = Some(ServiceDialog {
-            mode: ServiceDialogMode::Edit,
-            service,
-            selected_field: 1,
-            note: Some("Saved edits apply live — see each field for when.".to_string()),
-            confirm_delete: false,
-            picker: None,
-            picker_selected: 0,
-            picker_scroll: 0,
-            selected_channel: 0,
-            channel_editor: None,
-        });
-        true
+        {
+            // A service still being created has no daemon-side definition to
+            // reopen; `open_new_service_view` installs that editor itself.
+            None => self.service_dialog = None,
+            Some(service) => self.service_dialog = Some(ServiceDialog::editing(service)),
+        }
     }
 
     fn suggested_channel_id(&self, _service: &ServiceSummary) -> String {
@@ -407,7 +635,7 @@ impl App {
         let Some(dialog) = self.service_dialog.as_mut() else {
             return false;
         };
-        dialog.selected_field = 6;
+        dialog.focus = ServiceDialogFocus::Channel(dialog.focus.channel().unwrap_or(0));
         dialog.channel_editor = Some(ServiceChannelDialog {
             mode: ServiceChannelDialogMode::Create,
             service_name: dialog.service.name.clone(),
@@ -446,8 +674,7 @@ impl App {
         if channel.attached_to.as_deref() != Some(dialog.service.name.as_str()) {
             return false;
         }
-        dialog.selected_field = 6;
-        dialog.selected_channel = index;
+        dialog.focus = ServiceDialogFocus::Channel(index);
         dialog.channel_editor = Some(ServiceChannelDialog {
             mode: ServiceChannelDialogMode::Edit,
             service_name: dialog.service.name.clone(),
@@ -505,7 +732,7 @@ impl App {
                         .find(|service| service.name == service_name)
                         .cloned()
                     {
-                        dialog.service = service;
+                        dialog.adopt_saved(service);
                     }
                     dialog.note = Some(format!(
                         "Channel `{channel_id}` {}: {}.",
@@ -669,11 +896,12 @@ impl App {
         &self,
         service_name: &str,
     ) -> Option<ServiceChannelActions> {
-        let dialog = self
+        let index = self
             .service_dialog
             .as_ref()
-            .filter(|dialog| dialog.service.name == service_name && dialog.selected_field == 6)?;
-        self.service_channel_actions(service_name, dialog.selected_channel)
+            .filter(|dialog| dialog.service.name == service_name)
+            .and_then(|dialog| dialog.focus.channel())?;
+        self.service_channel_actions(service_name, index)
     }
 
     pub(super) async fn run_service_channel_action(
@@ -822,7 +1050,7 @@ impl App {
                 let new_secret = result.new_secret;
                 if let Some(parent) = self.service_dialog.as_mut() {
                     if let Some(service) = refreshed_service {
-                        parent.service = service;
+                        parent.adopt_saved(service);
                     }
                     if let Some(editor) = parent.channel_editor.as_mut() {
                         editor.mode = ServiceChannelDialogMode::Edit;
@@ -873,7 +1101,7 @@ impl App {
                         .find(|service| service.name == service_name)
                         .cloned()
                     {
-                        parent.service = service;
+                        parent.adopt_saved(service);
                     }
                     parent.channel_editor = None;
                     parent.note = Some(format!("Channel `{channel_id}` deleted and withdrawn."));
@@ -914,7 +1142,7 @@ impl App {
                         .find(|service| service.name == service_name)
                         .cloned()
                     {
-                        parent.service = service;
+                        parent.adopt_saved(service);
                     }
                     if let Some(editor) = parent.channel_editor.as_mut() {
                         editor.channel = result.channel;
@@ -1022,11 +1250,16 @@ impl App {
         let Some(dialog) = self.service_dialog.as_mut() else {
             return;
         };
-        if dialog.mode == ServiceDialogMode::Edit && dialog.selected_field == 0 {
+        // Channel and session rows are not text: they act on daemon-side
+        // objects, so their keys never reach the definition fields.
+        let Some(field) = dialog.focus.field() else {
+            return;
+        };
+        if dialog.mode == ServiceDialogMode::Edit && field == 0 {
             dialog.note = Some("Service names cannot be changed after creation.".to_string());
             return;
         }
-        match dialog.selected_field {
+        match field {
             0 => edit(&mut dialog.service.name),
             1 => edit(&mut dialog.service.instruction),
             // Harness and model are catalog-backed fields. They deliberately
@@ -1034,7 +1267,6 @@ impl App {
             // the picker is the only way to change either value.
             2 | 3 => return,
             4 => edit(&mut dialog.service.cwd),
-            6 => return,
             _ => {}
         }
         dialog.note = None;
@@ -1062,8 +1294,8 @@ impl App {
         let Some(dialog) = self.service_dialog.as_mut() else {
             return;
         };
-        match dialog.selected_field {
-            5 => {
+        match dialog.focus.field() {
+            Some(5) => {
                 const ROUTING: [&str; 3] = ["session-key", "per-event", "single"];
                 let current = ROUTING
                     .iter()
@@ -1076,7 +1308,7 @@ impl App {
                 };
                 dialog.service.routing = ROUTING[next].to_string();
             }
-            7 => dialog.service.paused = !dialog.service.paused,
+            Some(6) => dialog.service.paused = !dialog.service.paused,
             _ => {}
         }
         dialog.note = None;
@@ -1119,7 +1351,7 @@ impl App {
                 let applied = result.applied.summary();
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     dialog.mode = ServiceDialogMode::Edit;
-                    dialog.service = result.service;
+                    dialog.adopt_saved(result.service);
                     dialog.confirm_delete = false;
                     dialog.note = Some(applied);
                 }
@@ -1164,7 +1396,56 @@ impl App {
         }
     }
 
+    /// Esc in a service view. The editor is the view, so there is no
+    /// view-only state to fall back to: Esc first throws away unsaved edits,
+    /// and once there is nothing to discard it hands keyboard focus back to
+    /// the session list (spec 0175).
+    fn escape_service_dialog(&mut self) {
+        let Some(dialog) = self.service_dialog.as_mut() else {
+            return;
+        };
+        if dialog.mode == ServiceDialogMode::Create {
+            // Nothing has been written to disk yet, so the draft is all there
+            // is — dropping it leaves no service to keep showing.
+            let name = dialog.service.name.clone();
+            self.service_dialog = None;
+            if self.selection.service_name() == Some(name.as_str())
+                && !self.services.iter().any(|service| service.name == name)
+            {
+                self.selection = Selection::None;
+                self.ensure_selection_valid();
+                self.sync_active_window_selection();
+            }
+            self.focus = PaneFocus::List;
+            self.set_status(format!("{name} discarded"));
+            return;
+        }
+        if dialog.is_dirty() {
+            let saved = dialog.saved.clone();
+            // Channels move independently of the definition, so keep the live
+            // attachment list and revert only what the operator typed.
+            dialog.service = ServiceSummary {
+                channels: dialog.service.channels.clone(),
+                ..saved
+            };
+            dialog.picker = None;
+            dialog.picker_selected = 0;
+            dialog.picker_scroll = 0;
+            dialog.confirm_delete = false;
+            dialog.note = Some("Unsaved edits reverted.".to_string());
+            return;
+        }
+        self.focus = PaneFocus::List;
+    }
+
     pub(super) async fn handle_service_dialog_key(&mut self, key: KeyEvent) -> bool {
+        // A `C-x` chord already in flight belongs to the global keymap. The
+        // editor no longer closes itself to make room for one, so it has to
+        // stand aside for the continuation key explicitly.
+        if !self.chord_state.is_empty() {
+            return false;
+        }
+        self.clamp_service_dialog_focus();
         let Some(snapshot) = self.service_dialog.clone() else {
             return false;
         };
@@ -1227,59 +1508,45 @@ impl App {
                     return true;
                 }
                 KeyCode::Char('x') => {
-                    // Preserve global C-x chords by closing and falling back.
-                    self.service_dialog = None;
+                    // Global C-x chords keep working over an open editor: the
+                    // editor stays put and the chord continuation is let
+                    // through by the guard at the top of this handler.
                     return false;
                 }
                 KeyCode::Char('p') => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
-                        if dialog.selected_field == 6 && !self.service_channel_catalog.is_empty() {
-                            dialog.selected_channel = dialog
-                                .selected_channel
-                                .checked_sub(1)
-                                .unwrap_or(self.service_channel_catalog.len() - 1);
-                        } else {
-                            dialog.selected_field = dialog
-                                .selected_field
-                                .checked_sub(1)
-                                .unwrap_or(FIELD_COUNT - 1);
-                        }
-                    }
+                    self.move_service_dialog_focus(false);
                     return true;
                 }
                 KeyCode::Char('n') => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
-                        if dialog.selected_field == 6 && !self.service_channel_catalog.is_empty() {
-                            dialog.selected_channel =
-                                (dialog.selected_channel + 1) % self.service_channel_catalog.len();
-                        } else {
-                            dialog.selected_field = (dialog.selected_field + 1) % FIELD_COUNT;
-                        }
-                    }
+                    self.move_service_dialog_focus(true);
                     return true;
                 }
                 _ => {}
             }
         }
+        let channel_row = snapshot.focus.channel();
         match key.code {
-            KeyCode::Esc => self.service_dialog = None,
-            KeyCode::Enter => match snapshot.selected_field {
-                2 => self.open_service_picker(ServiceDialogPickerKind::Harness),
-                3 => self.open_service_picker(ServiceDialogPickerKind::Model),
-                6 => {
+            KeyCode::Esc => self.escape_service_dialog(),
+            KeyCode::Enter => match snapshot.focus {
+                ServiceDialogFocus::Field(2) => {
+                    self.open_service_picker(ServiceDialogPickerKind::Harness)
+                }
+                ServiceDialogFocus::Field(3) => {
+                    self.open_service_picker(ServiceDialogPickerKind::Model)
+                }
+                ServiceDialogFocus::Field(_) => self.save_service_dialog().await,
+                ServiceDialogFocus::Channel(index) => {
                     if self.service_channel_catalog.is_empty() {
                         self.open_new_service_channel();
                     } else if self
                         .service_channel_catalog
-                        .get(snapshot.selected_channel)
+                        .get(index)
                         .is_some_and(|channel| {
                             channel.attached_to.as_deref() == Some(snapshot.service.name.as_str())
                         })
                     {
-                        self.open_edit_service_channel(snapshot.selected_channel);
-                    } else if let Some(channel) =
-                        self.service_channel_catalog.get(snapshot.selected_channel)
-                    {
+                        self.open_edit_service_channel(index);
+                    } else if let Some(channel) = self.service_channel_catalog.get(index) {
                         let message = match channel.attached_to.as_deref() {
                             Some(owner) => format!(
                                 "Channel `{}` is attached to `{owner}`; press Space on an available channel.",
@@ -1295,19 +1562,30 @@ impl App {
                         }
                     }
                 }
-                _ => self.save_service_dialog().await,
+                // A routed session row is a jump target, exactly like clicking
+                // it: Enter leaves the service view for that session.
+                ServiceDialogFocus::Session(index) => {
+                    if let Some(id) = self
+                        .routed_service_sessions(&snapshot.service.name)
+                        .get(index)
+                        .map(|session| session.id.clone())
+                    {
+                        self.select_session(id);
+                    }
+                }
             },
-            KeyCode::Char(' ') if snapshot.selected_field == 6 => {
-                self.toggle_service_channel(snapshot.selected_channel).await;
+            KeyCode::Char(' ') if channel_row.is_some() => {
+                self.toggle_service_channel(channel_row.unwrap_or_default())
+                    .await;
             }
-            KeyCode::Char('a') if snapshot.selected_field == 6 => {
+            KeyCode::Char('a') if channel_row.is_some() => {
                 self.open_new_service_channel();
             }
-            KeyCode::Char('e') if snapshot.selected_field == 6 => {
-                self.open_edit_service_channel(snapshot.selected_channel);
+            KeyCode::Char('e') if channel_row.is_some() => {
+                self.open_edit_service_channel(channel_row.unwrap_or_default());
             }
-            KeyCode::Char('d') if snapshot.selected_field == 6 => {
-                if self.open_edit_service_channel(snapshot.selected_channel) {
+            KeyCode::Char('d') if channel_row.is_some() => {
+                if self.open_edit_service_channel(channel_row.unwrap_or_default()) {
                     if let Some(dialog) = self.service_dialog.as_mut() {
                         if let Some(editor) = dialog.channel_editor.as_mut() {
                             editor.confirm_delete = true;
@@ -1318,50 +1596,41 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('r') if snapshot.selected_field == 6 => {
-                if self.open_edit_service_channel(snapshot.selected_channel) {
+            KeyCode::Char('r') if channel_row.is_some() => {
+                if self.open_edit_service_channel(channel_row.unwrap_or_default()) {
                     self.rotate_service_channel_secret().await;
                 }
             }
-            KeyCode::Char('p') if snapshot.selected_field == 6 => {
+            KeyCode::Char('p') if channel_row.is_some() => {
                 self.run_service_channel_action(
                     &snapshot.service.name,
-                    snapshot.selected_channel,
+                    channel_row.unwrap_or_default(),
                     ServiceChannelAction::TogglePublication,
                 )
                 .await;
             }
-            KeyCode::Char('o') if snapshot.selected_field == 6 => {
+            KeyCode::Char('o') if channel_row.is_some() => {
                 self.run_service_channel_action(
                     &snapshot.service.name,
-                    snapshot.selected_channel,
+                    channel_row.unwrap_or_default(),
                     ServiceChannelAction::OpenAddress,
                 )
                 .await;
             }
-            KeyCode::Char('y') if snapshot.selected_field == 6 => {
+            KeyCode::Char('y') if channel_row.is_some() => {
                 self.run_service_channel_action(
                     &snapshot.service.name,
-                    snapshot.selected_channel,
+                    channel_row.unwrap_or_default(),
                     ServiceChannelAction::CopyAddress,
                 )
                 .await;
             }
-            KeyCode::Tab | KeyCode::Down => {
-                if let Some(dialog) = self.service_dialog.as_mut() {
-                    dialog.selected_field = (dialog.selected_field + 1) % FIELD_COUNT;
-                }
-            }
-            KeyCode::BackTab | KeyCode::Up => {
-                if let Some(dialog) = self.service_dialog.as_mut() {
-                    dialog.selected_field = dialog
-                        .selected_field
-                        .checked_sub(1)
-                        .unwrap_or(FIELD_COUNT - 1);
-                }
-            }
+            KeyCode::Tab | KeyCode::Down => self.move_service_dialog_focus(true),
+            KeyCode::BackTab | KeyCode::Up => self.move_service_dialog_focus(false),
             KeyCode::Left => self.cycle_service_dialog_value(true),
-            KeyCode::Right | KeyCode::Char(' ') if matches!(snapshot.selected_field, 5 | 7) => {
+            KeyCode::Right | KeyCode::Char(' ')
+                if matches!(snapshot.focus, ServiceDialogFocus::Field(5 | 6)) =>
+            {
                 self.cycle_service_dialog_value(false)
             }
             KeyCode::Backspace => self.edit_service_dialog_text(|value| {
