@@ -6018,11 +6018,11 @@ fn focused_session_pane(app: &App) -> Option<WindowPaneHit> {
 /// Persistent suggestion-deck affordance (specs 0109/0155). One chip per
 /// eligible session pane — not a single global control. Right-aligned flush
 /// against that pane's right edge, one row above its bottom border. Visual
-/// state (idle ◇ / pending spinner / dealt ✦N) is looked up by that pane's
+/// state (idle ✦ / pending spinner / dealt ✦N) is looked up by that pane's
 /// `session_id` so generating for session A never paints on session B.
 ///
 /// Layout (one row, left → right):
-///   `[transparent][ bg " " ][ bg "◇ C-x ." ][ bg " " ][transparent]`
+///   `[transparent][ bg " " ][ bg "✦ C-x ." ][ bg " " ][transparent]`
 ///
 /// - **Interior spaces** (with filled bg) give the chip breathing room before
 ///   the glyph and after the trailing `.` so the tint is visibly a pad, not
@@ -6078,7 +6078,7 @@ fn render_suggest_affordances(f: &mut Frame, app: &mut App) {
         } else if app.suggest_pending_active(&session_id) {
             format!("{spinner} C-x . suggesting…")
         } else {
-            "◇ C-x .".to_string()
+            "✦ C-x .".to_string()
         };
         let label = format!(" {core} ");
         let width = UnicodeWidthStr::width(label.as_str())

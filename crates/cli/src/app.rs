@@ -34591,9 +34591,9 @@ mod tests {
             );
             // Chip text includes one filled space before the glyph and after
             // the trailing '.'; exterior cells stay transparent.
-            let chip = " ◇ C-x . ";
+            let chip = " ✦ C-x . ";
             assert!(
-                rendered_text(terminal.backend().buffer()).contains("◇ C-x ."),
+                rendered_text(terminal.backend().buffer()).contains("✦ C-x ."),
                 "full-screen PTY repaint must not cover suggestion chrome"
             );
             let buffer = terminal.backend().buffer();
@@ -35233,11 +35233,11 @@ mod tests {
             .expect("draw s2");
         let text = rendered_text(terminal.backend().buffer());
         assert!(
-            text.contains("◇ C-x ."),
+            text.contains("✦ C-x ."),
             "s2's affordance is idle (no hand/pending): {text}"
         );
         assert!(
-            !text.contains("✦"),
+            !text.contains("✦1 C-x ."),
             "s1's dealt hand must not appear while s2 is selected: {text}"
         );
         assert!(
