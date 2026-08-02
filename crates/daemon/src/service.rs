@@ -1122,6 +1122,58 @@ mod tests {
     }
 
     #[test]
+    fn reply_survives_a_tool_result_recorded_after_the_answer() {
+        // Transcript shape observed from a live interactive codex service
+        // turn: codex flushed the reply tool's result *after* the assistant
+        // text it produced. Treating that trailing result as a turn boundary
+        // hid the answer entirely — the poll endpoint reported `ready` with a
+        // null reply, and a waiting caller blocked to its timeout.
+        let events = vec![
+            msg(MessageRole::User, "say CHARLIE"),
+            SessionEvent::ToolUse {
+                tool: "construct_service_reply".into(),
+                args: serde_json::Value::Null,
+                call_id: Some("call-1".into()),
+            },
+            msg(MessageRole::Assistant, "CHARLIE"),
+            SessionEvent::ToolResult {
+                tool: "construct_service_reply".into(),
+                ok: true,
+                output: String::new(),
+                call_id: Some("call-1".into()),
+            },
+            status(SessionState::AwaitingInput),
+        ];
+        assert_eq!(
+            latest_assistant_reply(events.iter()),
+            Some("CHARLIE".to_string())
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ends_inside_a_tool_call_reports_no_reply() {
+        // The trailing-result skip must not reach back past the tool call
+        // itself and serve pre-tool narration as the final answer.
+        let events = vec![
+            msg(MessageRole::User, "check the disk"),
+            msg(MessageRole::Assistant, "Let me look."),
+            SessionEvent::ToolUse {
+                tool: "bash".into(),
+                args: serde_json::Value::Null,
+                call_id: None,
+            },
+            SessionEvent::ToolResult {
+                tool: "bash".into(),
+                ok: true,
+                output: "42%".into(),
+                call_id: None,
+            },
+            status(SessionState::AwaitingInput),
+        ];
+        assert_eq!(latest_assistant_reply(events.iter()), None);
+    }
+
+    #[test]
     fn reply_is_absent_before_the_assistant_speaks() {
         let events = vec![
             msg(MessageRole::User, "hello"),

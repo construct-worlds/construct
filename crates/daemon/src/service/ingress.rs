@@ -646,6 +646,16 @@ pub(super) struct IngressApproval {
 /// first boundary that ends the turn's final answer — the user's own message,
 /// or a tool call whose narration precedes it — so a tool-using turn reports
 /// the answer rather than the commentary leading up to it.
+///
+/// A tool *result* that trails the answer is not such a boundary. Harnesses do
+/// not guarantee that a tool's result is recorded before the assistant text it
+/// produced: a result flushed afterwards lands past the final answer and, read
+/// as a boundary, hides it completely. The turn then looks answerless — a
+/// polling caller sees `ready` with no reply, and a waiting one blocks until
+/// its timeout even though the answer is sitting in the transcript. Trailing
+/// results are therefore skipped until collection has actually begun; once
+/// some answer text is in hand, any tool event is again the boundary that ends
+/// it.
 pub(super) fn latest_assistant_reply<'a>(
     events: impl DoubleEndedIterator<Item = &'a SessionEvent>,
 ) -> Option<String> {
@@ -656,6 +666,7 @@ pub(super) fn latest_assistant_reply<'a>(
                 role: MessageRole::Assistant,
                 text,
             } => parts.push(text.as_str()),
+            SessionEvent::ToolResult { .. } if parts.is_empty() => {}
             SessionEvent::Message { .. }
             | SessionEvent::ToolUse { .. }
             | SessionEvent::ToolResult { .. } => break,
