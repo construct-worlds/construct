@@ -74,6 +74,11 @@ pub struct TuiState {
     /// the state is restored and saved.
     #[serde(default)]
     pub collapsed_session_ids: Vec<String>,
+    /// Service rows whose routed-session children were collapsed when the TUI
+    /// last quit. Stored separately from session ids because service names and
+    /// session ids have different lifecycles and validation rules.
+    #[serde(default)]
+    pub collapsed_service_names: Vec<String>,
     #[serde(default)]
     pub widgets: HashMap<String, WidgetState>,
     /// Step (1..=8) of an interactive tutorial (spec 0077) in progress when
@@ -121,6 +126,7 @@ impl Default for TuiState {
             active_window_id: None,
             open_playbook_session_ids: Vec::new(),
             collapsed_session_ids: Vec::new(),
+            collapsed_service_names: Vec::new(),
             widgets: HashMap::new(),
             tutorial_step: None,
             lineage_collapsed: false,
@@ -214,6 +220,7 @@ mod tests {
 
         assert!(state.open_playbook_session_ids.is_empty());
         assert!(state.collapsed_session_ids.is_empty());
+        assert!(state.collapsed_service_names.is_empty());
     }
 
     #[test]
@@ -240,6 +247,22 @@ mod tests {
         let restored: TuiState = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(restored.collapsed_session_ids, vec!["parent-1", "parent-2"]);
+    }
+
+    #[test]
+    fn state_round_trips_collapsed_service_names() {
+        let state = TuiState {
+            collapsed_service_names: vec!["assistant".into(), "reviewer".into()],
+            ..TuiState::default()
+        };
+
+        let json = serde_json::to_string(&state).expect("serialize");
+        let restored: TuiState = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(
+            restored.collapsed_service_names,
+            vec!["assistant", "reviewer"]
+        );
     }
 
     #[test]

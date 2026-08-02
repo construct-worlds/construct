@@ -32,9 +32,12 @@ The TUI renders services as top-level rows in the ordinary session list rather
 than in a separate sidebar section. A service row uses the distinct `◈` type
 glyph, participates in the same scrolling, keyboard navigation, and pointer
 selection as a session, and opens a first-class service view in the active
-split rather than a modal. The view presents fields and focused-field guidance
-side by side with a padded interior, stacking the guidance below the fields
-only when the terminal is too narrow for two readable columns. The same view
+split rather than a modal. Expanding or collapsing a service's routed-session
+children is a per-user TUI preference that survives client restarts; stale
+preferences are discarded when their service no longer exists. The view presents
+fields and focused-field guidance side by side with a padded interior, stacking
+the guidance below the fields only when the terminal is too narrow for two
+readable columns. The same view
 exposes two related sections—`Channels` and `Sessions`—and keeps
 create/edit/delete actions in the view's normal focus lifecycle. `Activity` is
 not a third section: its aggregate count is represented by the `Sessions`
@@ -120,6 +123,8 @@ visible and recoverable in the fleet.
   publication action; none is implied by enabling or attaching a service.
 - Service views participate in shared split layout state across TUI and
   WebTUI, while keyboard/pointer focus remains client-local.
+- TUI service-row disclosure state is client-local and persists across
+  launches rather than becoming shared daemon state.
 - V1 does not promise channel plugins or response streaming.
   Runtime definition reload was subsequently added; see the spec on applying
   service definitions without a restart, which supersedes this consequence.
