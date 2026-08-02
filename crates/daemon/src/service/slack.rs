@@ -4,11 +4,13 @@
 //! token for a short-lived WebSocket URL, acknowledges each envelope before
 //! doing work, then posts the completed answer with the bot token.
 
-use super::ingress::{IngressRequest, ServiceIngress};
+use super::ingress::{IngressProgress, IngressRequest, ServiceIngress};
+use super::SlackProgress;
 use anyhow::{anyhow, Context, Result};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +22,7 @@ pub(crate) struct SlackConfig {
     pub(super) bot_token: String,
     pub(super) allowed_workspaces: Vec<String>,
     pub(super) allowed_channels: Vec<String>,
+    pub(super) progress: SlackProgress,
 }
 
 #[derive(Clone)]
@@ -45,6 +48,8 @@ struct SlackResponse {
     ok: bool,
     #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    ts: Option<String>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -76,40 +81,84 @@ impl SlackApi {
             .ok_or_else(|| anyhow!("Slack response omitted WebSocket URL"))
     }
 
+    /// One Slack Web API call, returning the `ts` of whatever it addressed.
+    async fn call(&self, token: &str, method: &str, body: serde_json::Value) -> Result<Option<String>> {
+        let response = self
+            .client
+            .post(format!("{}/{method}", self.base_url))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("call Slack {method}"))?
+            .error_for_status()
+            .with_context(|| format!("Slack {method} HTTP response"))?
+            .json::<SlackResponse>()
+            .await
+            .with_context(|| format!("decode Slack {method} response"))?;
+        if response.ok {
+            Ok(response.ts)
+        } else {
+            Err(anyhow!(
+                "Slack rejected {method}: {}",
+                response
+                    .error
+                    .unwrap_or_else(|| "unknown error".to_string())
+            ))
+        }
+    }
+
     async fn post_message(
         &self,
         token: &str,
         channel: &str,
         thread_ts: &str,
         text: &str,
-    ) -> Result<()> {
-        let response = self
-            .client
-            .post(format!("{}/chat.postMessage", self.base_url))
-            .bearer_auth(token)
-            .json(&serde_json::json!({
+    ) -> Result<Option<String>> {
+        self.call(
+            token,
+            "chat.postMessage",
+            serde_json::json!({
                 "channel": channel,
                 "thread_ts": thread_ts,
                 "text": text,
-            }))
-            .send()
-            .await
-            .context("post Slack reply")?
-            .error_for_status()
-            .context("Slack reply HTTP response")?
-            .json::<SlackResponse>()
-            .await
-            .context("decode Slack reply response")?;
-        if response.ok {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "Slack rejected reply: {}",
-                response
-                    .error
-                    .unwrap_or_else(|| "unknown error".to_string())
-            ))
-        }
+            }),
+        )
+        .await
+    }
+
+    async fn update_message(
+        &self,
+        token: &str,
+        channel: &str,
+        ts: &str,
+        text: &str,
+    ) -> Result<Option<String>> {
+        self.call(
+            token,
+            "chat.update",
+            serde_json::json!({ "channel": channel, "ts": ts, "text": text }),
+        )
+        .await
+    }
+
+    /// Reactions need the `reactions:write` scope. An app that was installed
+    /// before the operator selected the progress affordance will not have it,
+    /// so callers treat a failure here as cosmetic and answer anyway.
+    async fn set_reaction(
+        &self,
+        token: &str,
+        method: &str,
+        channel: &str,
+        ts: &str,
+        name: &str,
+    ) -> Result<Option<String>> {
+        self.call(
+            token,
+            method,
+            serde_json::json!({ "channel": channel, "timestamp": ts, "name": name }),
+        )
+        .await
     }
 }
 
@@ -238,6 +287,112 @@ where
     .context("acknowledge Slack envelope")
 }
 
+/// How long a turn may run before the channel admits it is still working.
+///
+/// Most turns answer well inside this, and announcing those would put a
+/// placeholder on every message for no benefit. The affordance is for the wait
+/// that has already become long enough to look like a dropped request.
+const PROGRESS_AFTER: std::time::Duration = std::time::Duration::from_secs(8);
+
+const WORKING_EMOJI: &str = "eyes";
+const ANSWERED_EMOJI: &str = "white_check_mark";
+const FAILED_EMOJI: &str = "warning";
+
+fn progress_text(progress: &IngressProgress) -> String {
+    match progress {
+        IngressProgress::Working => "_Working on it…_".to_string(),
+        // Say who has to act. A turn stopped here will not move on its own,
+        // and the person waiting in Slack cannot see the approval prompt.
+        IngressProgress::AwaitingApproval { tool, summary } if summary.is_empty() => {
+            format!("_Waiting for an operator to approve `{tool}`._")
+        }
+        IngressProgress::AwaitingApproval { tool, summary } => {
+            format!("_Waiting for an operator to approve `{tool}`: {summary}_")
+        }
+    }
+}
+
+/// What the affordance left behind in Slack, so the answer can replace it.
+#[derive(Default)]
+struct Affordance {
+    placeholder_ts: Option<String>,
+    reacted: bool,
+}
+
+/// Show, and keep current, the "still working" affordance for one delivery.
+///
+/// Returns once cancelled — which the caller does as soon as the turn
+/// resolves — handing back whatever it put in the channel.
+async fn run_affordance(
+    api: SlackApi,
+    config: SlackConfig,
+    channel: String,
+    thread_ts: String,
+    message_ts: String,
+    after: std::time::Duration,
+    mut progress: watch::Receiver<IngressProgress>,
+    cancel: CancellationToken,
+) -> Affordance {
+    let mut state = Affordance::default();
+    if config.progress == SlackProgress::Off {
+        return state;
+    }
+    tokio::select! {
+        _ = cancel.cancelled() => return state,
+        _ = tokio::time::sleep(after) => {}
+    }
+    if config.progress.reacts() {
+        match api
+            .set_reaction(
+                &config.bot_token,
+                "reactions.add",
+                &channel,
+                &message_ts,
+                WORKING_EMOJI,
+            )
+            .await
+        {
+            Ok(_) => state.reacted = true,
+            Err(error) => tracing::warn!(
+                %error,
+                "Slack progress reaction failed; the answer is unaffected \
+                 (does the app have the reactions:write scope?)"
+            ),
+        }
+    }
+    if config.progress.posts_placeholder() {
+        let text = progress_text(&progress.borrow_and_update().clone());
+        match api
+            .post_message(&config.bot_token, &channel, &thread_ts, &text)
+            .await
+        {
+            Ok(ts) => state.placeholder_ts = ts,
+            Err(error) => tracing::warn!(%error, "Slack progress placeholder failed"),
+        }
+    }
+    // Keep the placeholder honest: a turn that stops at an approval must stop
+    // claiming it is working.
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return state,
+            changed = progress.changed() => {
+                if changed.is_err() {
+                    return state;
+                }
+                let text = progress_text(&progress.borrow_and_update().clone());
+                let Some(ts) = state.placeholder_ts.as_deref() else {
+                    continue;
+                };
+                if let Err(error) =
+                    api.update_message(&config.bot_token, &channel, ts, &text).await
+                {
+                    tracing::warn!(%error, "Slack progress update failed");
+                }
+            }
+        }
+    }
+}
+
 async fn process_delivery(
     ingress: &ServiceIngress,
     config: &SlackConfig,
@@ -247,23 +402,94 @@ async fn process_delivery(
 ) -> Result<()> {
     let receipt = ingress
         .submit_tracked(IngressRequest {
-            message: delivery.text,
+            message: delivery.text.clone(),
             session_key: Some(format!(
                 "{}:{}:{}",
                 delivery.team_id, delivery.channel, delivery.thread_ts
             )),
-            request_id: Some(delivery.event_id),
+            request_id: Some(delivery.event_id.clone()),
         })
         .await?;
-    let reply = ingress.wait_for_final(&receipt, cancel).await?;
-    tokio::select! {
-        _ = cancel.cancelled() => Err(anyhow!("channel stopped")),
-        result = api.post_message(
+    let (progress_tx, progress_rx) = watch::channel(IngressProgress::default());
+    let affordance_cancel = CancellationToken::new();
+    let affordance = tokio::spawn(run_affordance(
+        api.clone(),
+        config.clone(),
+        delivery.channel.clone(),
+        delivery.thread_ts.clone(),
+        delivery.message_ts.clone(),
+        PROGRESS_AFTER,
+        progress_rx,
+        affordance_cancel.clone(),
+    ));
+
+    let reply = ingress.wait_for_final(&receipt, cancel, &progress_tx).await;
+    affordance_cancel.cancel();
+    let affordance = affordance.await.unwrap_or_default();
+
+    // A turn that failed used to leave the thread silent forever. Now that
+    // something in the channel says "working", it must not keep saying that.
+    let text = match &reply {
+        Ok(reply) => reply.clone(),
+        Err(error) => format!("_The turn ended without an answer: {error}_"),
+    };
+    if cancel.is_cancelled() {
+        return Err(anyhow!("channel stopped"));
+    }
+    match affordance.placeholder_ts.as_deref() {
+        Some(ts) => {
+            api.update_message(&config.bot_token, &delivery.channel, ts, &text)
+                .await?;
+        }
+        None => {
+            api.post_message(
+                &config.bot_token,
+                &delivery.channel,
+                &delivery.thread_ts,
+                &text,
+            )
+            .await?;
+        }
+    }
+    if affordance.reacted {
+        settle_reaction(api, config, &delivery, reply.is_ok()).await;
+    }
+    reply.map(|_| ())
+}
+
+/// Swap the working reaction for the outcome. Cosmetic: a workspace that
+/// denies the scope mid-turn should not turn a delivered answer into a failure.
+async fn settle_reaction(
+    api: &SlackApi,
+    config: &SlackConfig,
+    delivery: &SlackDelivery,
+    answered: bool,
+) {
+    let _ = api
+        .set_reaction(
             &config.bot_token,
+            "reactions.remove",
             &delivery.channel,
-            &delivery.thread_ts,
-            &reply,
-        ) => result,
+            &delivery.message_ts,
+            WORKING_EMOJI,
+        )
+        .await;
+    let settled = if answered {
+        ANSWERED_EMOJI
+    } else {
+        FAILED_EMOJI
+    };
+    if let Err(error) = api
+        .set_reaction(
+            &config.bot_token,
+            "reactions.add",
+            &delivery.channel,
+            &delivery.message_ts,
+            settled,
+        )
+        .await
+    {
+        tracing::warn!(%error, "Slack outcome reaction failed");
     }
 }
 
@@ -313,6 +539,9 @@ struct SlackDelivery {
     team_id: String,
     channel: String,
     thread_ts: String,
+    /// The message that triggered this turn. Distinct from `thread_ts` for a
+    /// reply inside a thread, and it is this one a reaction belongs on.
+    message_ts: String,
     text: String,
 }
 
@@ -345,7 +574,8 @@ fn delivery_from_envelope(envelope: SocketEnvelope, config: &SlackConfig) -> Opt
         event_id: payload.event_id?,
         team_id,
         channel,
-        thread_ts: event.thread_ts.unwrap_or(ts),
+        thread_ts: event.thread_ts.unwrap_or_else(|| ts.clone()),
+        message_ts: ts,
         text,
     })
 }
@@ -372,6 +602,7 @@ mod tests {
             bot_token: "xoxb-test".into(),
             allowed_workspaces: vec!["T1".into()],
             allowed_channels: vec!["C1".into()],
+            progress: SlackProgress::default(),
         }
     }
 
@@ -399,8 +630,283 @@ mod tests {
                 team_id: "T1".into(),
                 channel: "C1".into(),
                 thread_ts: "123.45".into(),
+                message_ts: "123.45".into(),
                 text: "deploy status".into(),
             })
+        );
+    }
+
+    #[test]
+    fn a_thread_reply_reacts_on_itself_not_on_the_thread_root() {
+        // thread_ts routes the conversation; message_ts is the message a
+        // reaction belongs on. Conflating them would stack every reaction of a
+        // long thread onto its first message.
+        let envelope = serde_json::from_value::<SocketEnvelope>(serde_json::json!({
+            "payload": {
+                "team_id": "T1", "event_id": "Ev2",
+                "event": {
+                    "type": "app_mention", "channel": "C1", "user": "U1",
+                    "text": "<@UBOT> and now?", "ts": "222.22", "thread_ts": "111.11"
+                }
+            }
+        }))
+        .unwrap();
+        let delivery = delivery_from_envelope(envelope, &config()).unwrap();
+        assert_eq!(delivery.thread_ts, "111.11");
+        assert_eq!(delivery.message_ts, "222.22");
+    }
+
+    #[test]
+    fn progress_says_who_has_to_act_when_a_turn_stops_at_an_approval() {
+        // "Working on it" is a lie once the turn is parked on an approval:
+        // nothing moves until a human at the TUI acts, and the person waiting
+        // in Slack cannot see that prompt.
+        assert_eq!(
+            progress_text(&IngressProgress::Working),
+            "_Working on it…_"
+        );
+        assert_eq!(
+            progress_text(&IngressProgress::AwaitingApproval {
+                tool: "bash".into(),
+                summary: "cargo test".into(),
+            }),
+            "_Waiting for an operator to approve `bash`: cargo test_"
+        );
+        assert_eq!(
+            progress_text(&IngressProgress::AwaitingApproval {
+                tool: "bash".into(),
+                summary: String::new(),
+            }),
+            "_Waiting for an operator to approve `bash`._"
+        );
+    }
+
+    #[test]
+    fn progress_modes_select_their_affordances() {
+        assert!(!SlackProgress::Off.posts_placeholder() && !SlackProgress::Off.reacts());
+        assert!(SlackProgress::Placeholder.posts_placeholder());
+        assert!(!SlackProgress::Placeholder.reacts());
+        assert!(SlackProgress::Reaction.reacts());
+        assert!(!SlackProgress::Reaction.posts_placeholder());
+        assert!(SlackProgress::Both.posts_placeholder() && SlackProgress::Both.reacts());
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_answers_quickly_leaves_no_progress_message() {
+        // The affordance is for a wait long enough to look dropped. Cancelling
+        // before the delay elapses — which is what a fast turn does — must
+        // leave the thread untouched, with no Slack call attempted at all.
+        let api = SlackApi {
+            client: reqwest::Client::new(),
+            // Any call would try to reach this and fail the test by erroring.
+            base_url: "http://127.0.0.1:1".to_string(),
+        };
+        let (_tx, rx) = watch::channel(IngressProgress::default());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let state = run_affordance(
+            api,
+            config(),
+            "C1".into(),
+            "1.1".into(),
+            "1.1".into(),
+            PROGRESS_AFTER,
+            rx,
+            cancel,
+        )
+        .await;
+
+        assert!(state.placeholder_ts.is_none());
+        assert!(!state.reacted);
+    }
+
+    #[tokio::test]
+    async fn the_off_mode_never_touches_the_channel() {
+        let api = SlackApi {
+            client: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:1".to_string(),
+        };
+        let mut config = config();
+        config.progress = SlackProgress::Off;
+        let (_tx, rx) = watch::channel(IngressProgress::default());
+
+        // Not cancelled: Off must return immediately on its own, without even
+        // waiting out the delay.
+        let state = run_affordance(
+            api,
+            config,
+            "C1".into(),
+            "1.1".into(),
+            "1.1".into(),
+            PROGRESS_AFTER,
+            rx,
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert!(state.placeholder_ts.is_none());
+        assert!(!state.reacted);
+    }
+
+    /// Stub Slack Web API: answers every method `ok` and records the calls.
+    async fn stub_slack() -> (SlackApi, Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = calls.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let recorder = recorder.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 4096];
+                    loop {
+                        let Ok(read) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                        let Some(end) = request
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .map(|index| index + 4)
+                        else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&request[..end]).to_string();
+                        let length = head
+                            .lines()
+                            .find_map(|line| {
+                                line.split_once(':')
+                                    .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request.len() < end + length {
+                            continue;
+                        }
+                        let method = head
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or("/")
+                            .trim_start_matches('/')
+                            .to_string();
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&request[end..end + length])
+                                .unwrap_or(serde_json::Value::Null);
+                        recorder.lock().unwrap().push((method, body));
+                        let payload = br#"{"ok":true,"ts":"P1"}"#;
+                        let _ = stream
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                                    payload.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await;
+                        let _ = stream.write_all(payload).await;
+                        return;
+                    }
+                });
+            }
+        });
+        (
+            SlackApi {
+                client: reqwest::Client::new(),
+                base_url: format!("http://{address}"),
+            },
+            calls,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_slow_turn_announces_itself_then_says_what_it_is_blocked_on() {
+        let (api, calls) = stub_slack().await;
+        let mut config = config();
+        config.progress = SlackProgress::Both;
+        let (tx, rx) = watch::channel(IngressProgress::default());
+        let cancel = CancellationToken::new();
+
+        let affordance = tokio::spawn(run_affordance(
+            api,
+            config,
+            "C1".into(),
+            "111.11".into(),
+            "222.22".into(),
+            std::time::Duration::from_millis(10),
+            rx,
+            cancel.clone(),
+        ));
+
+        // Wait for the placeholder, then park the turn on an approval.
+        let posted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(method, _)| method == "chat.postMessage")
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(posted.is_ok(), "the placeholder was never posted");
+
+        tx.send(IngressProgress::AwaitingApproval {
+            tool: "bash".into(),
+            summary: "rm -rf build".into(),
+        })
+        .unwrap();
+        let updated = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(method, _)| method == "chat.update")
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(updated.is_ok(), "the approval was never surfaced");
+
+        cancel.cancel();
+        let state = affordance.await.unwrap();
+        assert_eq!(state.placeholder_ts.as_deref(), Some("P1"));
+        assert!(state.reacted);
+
+        let calls = calls.lock().unwrap();
+        let by = |name: &str| {
+            calls
+                .iter()
+                .find(|(method, _)| method == name)
+                .map(|(_, body)| body.clone())
+                .unwrap_or(serde_json::Value::Null)
+        };
+        // The reaction goes on the triggering message, the placeholder into
+        // the thread — two different timestamps.
+        assert_eq!(by("reactions.add")["timestamp"], "222.22");
+        assert_eq!(by("reactions.add")["name"], WORKING_EMOJI);
+        assert_eq!(by("chat.postMessage")["thread_ts"], "111.11");
+        assert_eq!(by("chat.postMessage")["text"], "_Working on it…_");
+        // And the placeholder stops claiming to be working once it isn't.
+        assert_eq!(by("chat.update")["ts"], "P1");
+        assert_eq!(
+            by("chat.update")["text"],
+            "_Waiting for an operator to approve `bash`: rm -rf build_"
         );
     }
 

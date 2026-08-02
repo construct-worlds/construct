@@ -131,6 +131,36 @@ pub enum ServiceRouting {
     Single,
 }
 
+/// What a Slack channel shows while a turn it accepted is still running.
+///
+/// A long turn is indistinguishable from a dropped one when the channel stays
+/// silent, so the operator picks how visible the wait should be. `Reaction`
+/// and `Both` call `reactions.add`, which needs the `reactions:write` scope —
+/// an app the operator has not reinstalled since granting it will log the
+/// refusal and keep answering normally.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SlackProgress {
+    /// Say nothing until the answer is ready.
+    Off,
+    /// A thread message that later becomes the answer itself.
+    #[default]
+    Placeholder,
+    /// An emoji reaction on the message that triggered the turn.
+    Reaction,
+    Both,
+}
+
+impl SlackProgress {
+    pub(crate) fn posts_placeholder(self) -> bool {
+        matches!(self, Self::Placeholder | Self::Both)
+    }
+
+    pub(crate) fn reacts(self) -> bool {
+        matches!(self, Self::Reaction | Self::Both)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceChannelConfig {
     #[serde(default)]
@@ -147,6 +177,9 @@ pub struct ServiceChannelConfig {
     pub allowed_workspaces: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_channels: Vec<String>,
+    /// Slack only. Omitted definitions keep the default affordance.
+    #[serde(default)]
+    pub progress: SlackProgress,
 }
 
 fn default_channel_enabled() -> bool {
@@ -469,6 +502,13 @@ pub fn put_channel(
         bot_token,
         allowed_workspaces: normalize_allowlist(params.channel.allowed_workspaces),
         allowed_channels: normalize_allowlist(params.channel.allowed_channels),
+        // Not editable through this path yet, so carry the operator's choice
+        // forward. Defaulting here would silently reset a definition every
+        // time an unrelated field (a rotated token, an allowlist) was saved.
+        progress: existing
+            .as_ref()
+            .map(|channel| channel.progress)
+            .unwrap_or_default(),
     };
     service
         .channels
@@ -881,6 +921,7 @@ pub(crate) fn slack_config(
         bot_token,
         allowed_workspaces: channel.allowed_workspaces.clone(),
         allowed_channels: channel.allowed_channels.clone(),
+        progress: channel.progress,
     })
 }
 
@@ -944,6 +985,7 @@ mod tests {
                     bot_token: None,
                     allowed_workspaces: Vec::new(),
                     allowed_channels: Vec::new(),
+                    progress: Default::default(),
                 },
             )]),
         }
@@ -1409,6 +1451,26 @@ mod tests {
     }
 
     #[test]
+    fn a_slack_channel_chooses_its_progress_affordance() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("bot.toml"),
+            "harness = \"codex\"\n\
+             [channels.a]\nkind = \"slack\"\nprogress = \"reaction\"\n\
+             [channels.b]\nkind = \"slack\"\nprogress = \"off\"\n\
+             [channels.c]\nkind = \"slack\"\n",
+        )
+        .unwrap();
+
+        let channels = &load_definitions(dir.path()).unwrap()["bot"].channels;
+        assert_eq!(channels["a"].progress, SlackProgress::Reaction);
+        assert_eq!(channels["b"].progress, SlackProgress::Off);
+        // A definition written before this option existed keeps working and
+        // gets the default rather than an unset/failed parse.
+        assert_eq!(channels["c"].progress, SlackProgress::Placeholder);
+    }
+
+    #[test]
     fn service_put_preserves_channels_and_channel_crud_rotates_credentials() {
         let config = tempfile::tempdir().unwrap();
         let services = config.path().join("services");
@@ -1759,6 +1821,47 @@ mod tests {
         .unwrap();
         assert_ne!(rotated.new_secret.as_deref(), Some(original.as_str()));
         assert!(list_channel_catalog(&services).unwrap()[0].has_credential);
+    }
+
+    #[test]
+    fn editing_a_channel_keeps_the_progress_affordance_it_was_given() {
+        // The channel put path cannot express `progress` yet, so a save that
+        // touched anything else — rotating a token, editing an allowlist —
+        // would reset an operator's choice back to the default without ever
+        // saying so.
+        let config = tempfile::tempdir().unwrap();
+        let services = config.path().join("services");
+        std::fs::create_dir_all(&services).unwrap();
+        std::fs::write(
+            services.join("chat.toml"),
+            "harness = \"codex\"\n\
+             [channels.bot]\nkind = \"slack\"\nprogress = \"reaction\"\n\
+             app_token = \"xapp-1\"\nbot_token = \"xoxb-1\"\n",
+        )
+        .unwrap();
+
+        put_channel(
+            &services,
+            construct_protocol::ServiceChannelPutParams {
+                service_name: "chat".into(),
+                channel: construct_protocol::ServiceChannelPut {
+                    id: "bot".into(),
+                    kind: "slack".into(),
+                    enabled: true,
+                    port: None,
+                    app_token: None,
+                    bot_token: None,
+                    allowed_workspaces: vec!["T9".into()],
+                    allowed_channels: Vec::new(),
+                },
+                rotate_secret: false,
+            },
+        )
+        .unwrap();
+
+        let stored = &load_definitions(&services).unwrap()["chat"].channels["bot"];
+        assert_eq!(stored.progress, SlackProgress::Reaction);
+        assert_eq!(stored.allowed_workspaces, vec!["T9".to_string()]);
     }
 
     #[test]

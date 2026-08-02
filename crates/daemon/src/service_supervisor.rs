@@ -763,6 +763,7 @@ mod tests {
                             bot_token: None,
                             allowed_workspaces: Vec::new(),
                             allowed_channels: Vec::new(),
+                            progress: Default::default(),
                         },
                     )
                 })
@@ -814,6 +815,7 @@ mod tests {
                     bot_token: Some("xoxb-secret".into()),
                     allowed_workspaces: vec!["T1".into()],
                     allowed_channels: vec!["C1".into()],
+                    progress: Default::default(),
                 },
             )]),
         };
