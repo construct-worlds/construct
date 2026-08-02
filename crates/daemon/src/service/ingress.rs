@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -320,14 +320,20 @@ impl ServiceIngress {
 
     /// Wait for the final assistant answer belonging to one submitted turn.
     /// The transport is cancelled on configuration reload or daemon shutdown.
+    ///
+    /// `progress` carries what the turn is doing while it runs, so a channel
+    /// can tell its user rather than going silent for the whole turn. It is
+    /// advisory: nothing here waits on a reader, and a channel that does not
+    /// render progress simply ignores it.
     pub(super) async fn wait_for_final(
         &self,
         receipt: &IngressReceipt,
         cancel: &CancellationToken,
+        progress: &watch::Sender<IngressProgress>,
     ) -> Result<String> {
         if let Some(delivery_id) = receipt.delivery_id.as_deref() {
             return self
-                .wait_for_explicit_reply(receipt, delivery_id, cancel)
+                .wait_for_explicit_reply(receipt, delivery_id, cancel, progress)
                 .await;
         }
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
@@ -342,6 +348,7 @@ impl ServiceIngress {
             let Ok(detail) = self.shared.manager.detail(&receipt.session).await else {
                 continue;
             };
+            publish_progress(progress, &detail.events);
             let events = detail.events.get(receipt.event_cursor..).unwrap_or(&[]);
             let saw_user = events.iter().any(|event| {
                 matches!(
@@ -373,6 +380,7 @@ impl ServiceIngress {
         receipt: &IngressReceipt,
         delivery_id: &str,
         cancel: &CancellationToken,
+        progress: &watch::Sender<IngressProgress>,
     ) -> Result<String> {
         let deadline = tokio::time::Instant::now() + PENDING_DELIVERY_TTL;
         loop {
@@ -390,6 +398,7 @@ impl ServiceIngress {
             let Ok(detail) = self.shared.manager.detail(&receipt.session).await else {
                 continue;
             };
+            publish_progress(progress, &detail.events);
             let events = detail.events.get(receipt.event_cursor..).unwrap_or(&[]);
             if let Some(reply) =
                 explicit_service_reply(events.iter().map(|event| &event.event), delivery_id)
@@ -704,6 +713,40 @@ fn explicit_service_reply<'a>(
     None
 }
 
+/// What a turn that has not answered yet is currently doing.
+///
+/// This is deliberately coarse. It exists so a channel can distinguish "still
+/// thinking" from "stopped, and only a human at the TUI can unstick it" — a
+/// difference the person who is waiting cares about a great deal, and which is
+/// invisible from outside otherwise.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum IngressProgress {
+    #[default]
+    Working,
+    AwaitingApproval {
+        tool: String,
+        summary: String,
+    },
+}
+
+/// Publish the turn's current phase, if it changed. Only the waiting task
+/// writes here, so a plain compare-then-send cannot race itself.
+fn publish_progress(
+    progress: &watch::Sender<IngressProgress>,
+    events: &[construct_protocol::TimestampedEvent],
+) {
+    let phase = match pending_approval(events) {
+        Some(pending) => IngressProgress::AwaitingApproval {
+            tool: pending.tool,
+            summary: pending.summary,
+        },
+        None => IngressProgress::Working,
+    };
+    if *progress.borrow() != phase {
+        let _ = progress.send(phase);
+    }
+}
+
 /// A tool call this session is stopped at, waiting for the operator.
 pub(super) struct PendingApproval {
     pub(super) call_id: String,
@@ -891,6 +934,72 @@ mod tests {
             service_seed_prompt("Be brief.", "ship it".to_string(), None),
             "Be brief.\n\nship it"
         );
+    }
+
+    #[test]
+    fn progress_reports_the_approval_a_turn_is_stopped_at() {
+        let at = chrono::Utc::now();
+        let stamped = |event| construct_protocol::TimestampedEvent {
+            at,
+            seq: 0,
+            event,
+        };
+        let (progress, mut rx) = watch::channel(IngressProgress::default());
+
+        // A turn mid-tool is still just working — the tool call was answered.
+        publish_progress(
+            &progress,
+            &[
+                stamped(SessionEvent::ToolApprovalRequest {
+                    call_id: "c1".into(),
+                    tool: "bash".into(),
+                    args_summary: "cargo test".into(),
+                    risk: construct_protocol::ToolRisk::Risky,
+                    allow_auto_review: true,
+                }),
+                stamped(SessionEvent::ToolUse {
+                    tool: "bash".into(),
+                    args: serde_json::Value::Null,
+                    call_id: Some("c1".into()),
+                }),
+            ],
+        );
+        assert_eq!(*rx.borrow_and_update(), IngressProgress::Working);
+        assert!(!rx.has_changed().unwrap());
+
+        // A trailing request means nobody has answered it yet.
+        publish_progress(
+            &progress,
+            &[stamped(SessionEvent::ToolApprovalRequest {
+                call_id: "c2".into(),
+                tool: "bash".into(),
+                args_summary: "rm -rf build".into(),
+                risk: construct_protocol::ToolRisk::Risky,
+                allow_auto_review: true,
+            })],
+        );
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(
+            *rx.borrow_and_update(),
+            IngressProgress::AwaitingApproval {
+                tool: "bash".into(),
+                summary: "rm -rf build".into(),
+            }
+        );
+
+        // Unchanged phase must not wake a reader; a channel re-renders on
+        // every notification, and this loop polls four times a second.
+        publish_progress(
+            &progress,
+            &[stamped(SessionEvent::ToolApprovalRequest {
+                call_id: "c2".into(),
+                tool: "bash".into(),
+                args_summary: "rm -rf build".into(),
+                risk: construct_protocol::ToolRisk::Risky,
+                allow_auto_review: true,
+            })],
+        );
+        assert!(!rx.has_changed().unwrap());
     }
 
     #[test]

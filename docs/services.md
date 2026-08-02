@@ -26,6 +26,44 @@ curl http://127.0.0.1:8787/svc/alerts/sessions/<session-id> \
 HTTP channels start loopback-only. Enabling or attaching one never exposes it
 to the network.
 
+## Slack channels
+
+A Slack channel connects over Socket Mode and needs no inbound port. It routes
+each thread to its own session, so a conversation in Slack is a conversation in
+Construct.
+
+```toml
+[channels.my-bot]
+kind = "slack"
+enabled = true
+app_token = "xapp-…"       # Socket Mode
+bot_token = "xoxb-…"       # posting
+progress = "placeholder"   # off | placeholder | reaction | both
+```
+
+### Showing that a turn is still running
+
+A turn that takes a while would otherwise leave the thread silent, which is
+indistinguishable from a delivery that was dropped. `progress` chooses what the
+channel shows while it works. Nothing appears for a turn that answers promptly
+— the affordance is only for a wait long enough to look like a failure.
+
+| value | behavior |
+| --- | --- |
+| `placeholder` (default) | Posts a message in the thread that later becomes the answer itself. |
+| `reaction` | Reacts 👀 to the message that triggered the turn, then ✅ when it answers (⚠️ if it fails). |
+| `both` | Both of the above. |
+| `off` | Says nothing until the answer is ready. |
+
+If the turn stops at a tool approval, the affordance says so and names the
+tool — that turn will not resume until an operator acts in the TUI, and the
+person waiting in Slack cannot see that prompt. A turn that ends without an
+answer now reports that in the thread instead of only in the daemon log.
+
+`reaction` and `both` call `reactions.add`, which needs the **`reactions:write`**
+scope. If the app was installed without it, Construct logs the refusal and still
+delivers the answer — reinstall the app to your workspace to enable it.
+
 ## Publishing a channel
 
 Select an attached ingress channel. Its TUI action bar shows **Publish**; press
