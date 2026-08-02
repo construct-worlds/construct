@@ -11667,13 +11667,20 @@ impl App {
     }
 
     /// A list item's display height under the current view mode: full-mode
-    /// session cards take three rows, everything else (group headers, archived
+    /// session cards take three rows, full-mode rows that head a subtree
+    /// (project headers, services) take two, and everything else (archived
     /// disclosure rows, every compact-mode row) takes one.
     pub(crate) fn list_item_display_height(&self, item: &ListItem) -> usize {
+        if self.list_mode != SessionListViewMode::Full {
+            return 1;
+        }
         match item {
-            ListItem::Service { .. } => 1,
-            ListItem::Session { .. } if self.list_mode == SessionListViewMode::Full => 3,
-            _ => 1,
+            ListItem::Session { .. } => 3,
+            // A project header or a service heads a subtree, so full mode
+            // gives it the same closing rail/breathing row a session card
+            // gets. Archived-disclosure rows head nothing and stay flat.
+            ListItem::GroupHeader { .. } | ListItem::Service { .. } => 2,
+            ListItem::ArchivedRow { .. } => 1,
         }
     }
 
@@ -44423,6 +44430,78 @@ mod tests {
 
         app.run_action(KeyAction::NextSession).await;
         assert_eq!(app.selection, Selection::Group("project".into()));
+    }
+
+    /// Full mode gives a project header the rail/breathing row a session card
+    /// gets, so the header reads as the root its members hang from instead of
+    /// sitting flush against the first one. Compact mode keeps every row flat.
+    #[tokio::test]
+    async fn full_mode_project_header_caps_its_member_rails() {
+        let (mut app, _dir, _server) = empty_app().await;
+        let mut member = summary_with_kind(construct_protocol::SessionKind::User);
+        member.id = "member".into();
+        member.title = Some("member one".into());
+        member.group_id = Some("p1".into());
+        app.sessions = vec![member];
+        app.groups = vec![GroupSummary {
+            id: "p1".into(),
+            name: "Project One".into(),
+            created_at: chrono::Utc::now(),
+            position: 0,
+            collapsed: false,
+        }];
+        app.matrix_rain_hidden = true;
+
+        let items = app.list_items();
+        let header = &items[0];
+        assert!(matches!(header, ListItem::GroupHeader { .. }));
+
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        let row_text = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, y: u16| {
+            (0..term.backend().buffer().area.width)
+                .map(|x| {
+                    term.backend()
+                        .buffer()
+                        .cell((x, y))
+                        .map(|cell| cell.symbol())
+                        .unwrap_or(" ")
+                })
+                .collect::<String>()
+        };
+
+        app.list_mode = SessionListViewMode::Compact;
+        assert_eq!(app.list_item_display_height(header), 1);
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("render compact");
+        let top = app.layout.list_items_area.expect("list rows").y;
+        assert!(row_text(&term, top).contains("Project One"));
+        // Compact packs rows: the member follows the header immediately.
+        assert!(row_text(&term, top + 1).contains("member one"));
+
+        app.list_mode = SessionListViewMode::Full;
+        assert_eq!(app.list_item_display_height(header), 2);
+        // Services head a depth-1 subtree the same way and earn the same row.
+        assert_eq!(
+            app.list_item_display_height(&ListItem::Service {
+                summary: service_summary_for_test("svc"),
+                session_count: 1,
+                sessions_expanded: true,
+            }),
+            2
+        );
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("render full");
+        let top = app.layout.list_items_area.expect("list rows").y;
+        assert!(row_text(&term, top).contains("Project One"));
+        // The header's own row carries the stem down to the first member,
+        // which now starts one row later than it did in compact mode.
+        let rail = row_text(&term, top + 1);
+        assert!(
+            rail.contains('│') && !rail.contains("member one"),
+            "expected a rail-only row under the header, got {rail:?}"
+        );
+        assert!(row_text(&term, top + 2).contains("member one"));
     }
 
     #[tokio::test]

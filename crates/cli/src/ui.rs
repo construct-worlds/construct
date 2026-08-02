@@ -2368,6 +2368,31 @@ fn list_tree_continuation_prefix(
     prefix
 }
 
+/// Full mode's closing row for a subtree-heading row (a project header or
+/// a service). Sessions end their card with a breathing row that keeps the
+/// rails continuous; a header owns a depth-1 subtree the same way a parent
+/// session does, so it earns the same row — otherwise it sits flush against
+/// its first member while every card around it floats, and its members'
+/// rails begin in mid-air with nothing above them to hang from.
+///
+/// Only one rail level can matter: headers always sit at depth 0 and their
+/// members at depth 1. When the header is collapsed or empty the next row
+/// isn't a descendant, so this is a plain breathing row.
+fn list_header_continuation_line(
+    theme: &Theme,
+    items: &[AppListItem],
+    item_index: usize,
+) -> Line<'static> {
+    Line::from(Span::styled(
+        list_tree_continuation_prefix(items, item_index, 0, LIST_HEADER_RAIL_W),
+        session_list_secondary_style(theme),
+    ))
+}
+
+/// Cells the header's continuation row spends: exactly the one depth step a
+/// depth-0 row can own.
+const LIST_HEADER_RAIL_W: usize = 2;
+
 /// Ceiling on the detail line's model column, so one verbose model id
 /// (`codex-oauth:gpt-5.6-sol`) can't push every other column off a
 /// narrow sidebar.
@@ -3205,13 +3230,17 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     } else {
                         Style::default().fg(app.theme.text)
                     };
-                    vec![Line::from(vec![
+                    let mut lines = vec![Line::from(vec![
                         Span::styled(disclosure, Style::default().fg(app.theme.group)),
                         Span::styled("⛓︎ ", Style::default().fg(app.theme.accent)),
                         Span::styled(name, name_style),
                         Span::raw(" ".repeat(gap)),
                         Span::styled(suffix, session_list_secondary_style(&app.theme)),
-                    ])]
+                    ])];
+                    if full_mode {
+                        lines.push(list_header_continuation_line(&app.theme, &app_items, i));
+                    }
+                    lines
                 }
                 AppListItem::Session {
                     summary: s,
@@ -3346,7 +3375,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     attention_rollup,
                 } => {
                     let glyph = if group.collapsed { "▶" } else { "▼" };
-                    vec![Line::from(vec![
+                    let mut lines = vec![Line::from(vec![
                         Span::styled(format!("{glyph} "), Style::default().fg(app.theme.group)),
                         Span::styled(group.name.clone(), group_name_style(&app.theme)),
                         Span::styled(
@@ -3358,7 +3387,11 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                             format!("({member_count})"),
                             session_list_secondary_style(&app.theme),
                         ),
-                    ])]
+                    ])];
+                    if full_mode {
+                        lines.push(list_header_continuation_line(&app.theme, &app_items, i));
+                    }
+                    lines
                 }
                 AppListItem::ArchivedRow {
                     section,
