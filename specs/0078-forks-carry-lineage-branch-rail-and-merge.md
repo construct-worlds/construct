@@ -48,8 +48,8 @@ transcript seeding, but it no longer requires separate keybindings or flows.
   in clients that choose to render lineage. A fork's lineage marker and its
   independent pinned state occupy separate list affordances, so pinning a fork
   never hides or replaces its fork identity. Each successive fork generation
-  receives another indentation step, preserving the lineage hierarchy without
-  changing user-defined session order.
+  receives another indentation step with tree connector rails, preserving the
+  lineage hierarchy without changing user-defined session order.
 - Same-harness adapters may use native fork state for full context fidelity;
   cross-harness forks retain the portable transcript-seed behavior (spec
   0031). Both are lineage-tracked identically.

@@ -57,9 +57,10 @@ Rules both modes must preserve:
 - Group headers and archived-disclosure rows stay one line in both modes.
 - Session nesting uses the same two-cell indentation step in both modes. Each
   generation gets its own depth, including fork-of-fork, subagent-of-subagent,
-  and mixed trees; indentation never flattens descendants or changes the
-  user's depth-first session order. Parent titles render one emphasis step
-  above leaf titles.
+  and mixed trees. Muted branch and continuation rails make those levels
+  explicit and remain connected through full mode's detail and spacing rows;
+  the hierarchy never changes the user's depth-first session order. Parent
+  titles render one emphasis step above leaf titles.
 - The web UI's session list shows the same detail line with the same
   content and omission/fallback rules, but always on — it has no
   compact/full mode pair. Its gauge may render at finer resolution than

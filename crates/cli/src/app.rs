@@ -247,10 +247,10 @@ pub enum ArchiveSection {
     /// A parent session's archived children — subagents and forks alike
     /// (merged/discarded) — bundled into ONE row regardless of kind or
     /// nesting depth (a fork of a fork sits at the same flat indent as a
-    /// direct fork, mirroring the active-forks list; see
-    /// `push_session_tree`). Subagents and forks are different lineage
-    /// relationships but both are "this parent's archived children" from
-    /// the list's point of view, so they share one disclosure — matching
+    /// direct fork when the archive is expanded, unlike the depth-accurate
+    /// active tree; see `push_session_tree`). Subagents and forks are
+    /// different lineage relationships but both are "this parent's archived
+    /// children" from the list's point of view, so they share one disclosure — matching
     /// the original single-final-child-row design (spec 0031) rather than
     /// splitting into a row per kind.
     Children(String),
@@ -7973,11 +7973,10 @@ impl App {
                     );
                 }
             }
-            // Forks nest indented under their parent — recursively, so a
-            // fork of a fork still appears (depth-first, all at one indent
-            // level, matching the flat subagent convention). The depth cap
-            // is a cycle guard for malformed lineage, not an expected
-            // limit.
+            // Forks nest indented under their parent — recursively, so every
+            // fork generation receives its own depth in the same depth-first
+            // order. The depth cap is a cycle guard for malformed lineage,
+            // not an expected limit.
             let mut stack: Vec<(&SessionSummary, usize)> = forks_by_parent
                 .get(s.id.as_str())
                 .map(|forks| {

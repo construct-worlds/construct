@@ -2246,6 +2246,89 @@ fn session_list_secondary_style(theme: &Theme) -> Style {
     Style::default().fg(theme.muted)
 }
 
+/// Structural depth used by the session-list tree rails. Top-level archive
+/// disclosure is merely indented within the ungrouped section, so it is a
+/// boundary rather than a child of the session immediately above it.
+fn list_tree_depth(item: &AppListItem) -> Option<usize> {
+    match item {
+        AppListItem::Session { nesting_depth, .. } => Some(*nesting_depth),
+        AppListItem::ArchivedRow {
+            section: crate::app::ArchiveSection::Ungrouped,
+            ..
+        } => None,
+        AppListItem::ArchivedRow { nesting_depth, .. } => Some(*nesting_depth),
+        AppListItem::Service { .. } | AppListItem::GroupHeader { .. } => None,
+    }
+}
+
+/// Whether the current branch has another row at `depth` before its ancestor
+/// closes. Headers and services begin a new tree and therefore stop the scan.
+fn list_tree_has_later_row_at_depth(
+    items: &[AppListItem],
+    item_index: usize,
+    depth: usize,
+) -> bool {
+    for item in items.iter().skip(item_index + 1) {
+        let Some(next_depth) = list_tree_depth(item) else {
+            return false;
+        };
+        if next_depth < depth {
+            return false;
+        }
+        if next_depth == depth {
+            return true;
+        }
+    }
+    false
+}
+
+/// The primary-row tree prefix: ancestor continuation rails followed by this
+/// row's branch corner. Every depth consumes exactly two cells, preserving
+/// existing disclosure hit geometry and right-aligned harness labels.
+fn list_tree_branch_prefix(
+    items: &[AppListItem],
+    item_index: usize,
+    nesting_depth: usize,
+) -> String {
+    let mut prefix = String::with_capacity(nesting_depth.saturating_mul(2));
+    for depth in 1..=nesting_depth {
+        let continues = list_tree_has_later_row_at_depth(items, item_index, depth);
+        if depth == nesting_depth {
+            prefix.push_str(if continues { "├─" } else { "└─" });
+        } else {
+            prefix.push_str(if continues { "│ " } else { "  " });
+        }
+    }
+    prefix
+}
+
+/// Rails painted through a full-mode card's detail and breathing rows. They
+/// keep ancestor/sibling rails continuous and add one stem when the next row
+/// is a direct descendant, without drawing future grandchildren prematurely.
+fn list_tree_continuation_prefix(
+    items: &[AppListItem],
+    item_index: usize,
+    nesting_depth: usize,
+    width: usize,
+) -> String {
+    let max_levels = width / 2;
+    let next_is_descendant = items
+        .get(item_index + 1)
+        .and_then(list_tree_depth)
+        .is_some_and(|next_depth| next_depth > nesting_depth);
+    let mut prefix = String::with_capacity(width);
+    for depth in 1..=max_levels {
+        let continues = if depth <= nesting_depth {
+            list_tree_has_later_row_at_depth(items, item_index, depth)
+        } else {
+            depth == nesting_depth + 1 && next_is_descendant
+        };
+        prefix.push_str(if continues { "│ " } else { "  " });
+    }
+    prefix.push_str(&" ".repeat(width.saturating_sub(prefix.chars().count())));
+    prefix
+}
+
 /// Ceiling on the detail line's model column, so one verbose model id
 /// (`codex-oauth:gpt-5.6-sol`) can't push every other column off a
 /// narrow sidebar.
@@ -2410,9 +2493,10 @@ fn session_detail_line(
     s: &SessionSummary,
     cols: &DetailColumns,
     now_ms: i64,
-    prefix_w: usize,
+    prefix: String,
     row_w: usize,
 ) -> Line<'static> {
+    let prefix_w = UnicodeWidthStr::width(prefix.as_str());
     let cells = session_detail_cells(s, now_ms);
     let avail = row_w.saturating_sub(prefix_w);
     // The identity cell takes whatever the fixed columns leave, but never
@@ -2454,7 +2538,7 @@ fn session_detail_line(
         Style::default().fg(theme.success)
     };
 
-    let mut spans = vec![Span::raw(" ".repeat(prefix_w))];
+    let mut spans = vec![Span::styled(prefix, session_list_secondary_style(theme))];
     let mut used_w = 0usize;
     match &cells.ctx {
         DetailCtx::Gauge(filled, pct) => {
@@ -3102,14 +3186,12 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         None
                     };
                     let lineage_glyph = session_list_marker(s);
-                    let indent_prefix = " ".repeat(
-                        crate::app::list_session_indent_cells(*nesting_depth) as usize,
-                    );
+                    let tree_prefix = list_tree_branch_prefix(&app_items, i, *nesting_depth);
                     // Fixed-width left side: indent + optional disclosure (1)
                     // + optional lineage (1) + " glyph " (3).
                     // Only forks reserve the lineage cell, keeping ordinary
                     // project members at their established position.
-                    let prefix_w = indent_prefix.chars().count()
+                    let prefix_w = tree_prefix.chars().count()
                         + usize::from(expand_glyph.is_some())
                         + session_list_marker_width(s)
                         + 3;
@@ -3162,7 +3244,10 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     } else {
                         Style::default().fg(app.theme.text)
                     };
-                    let mut spans = vec![Span::raw(indent_prefix.to_string())];
+                    let mut spans = vec![Span::styled(
+                        tree_prefix,
+                        session_list_secondary_style(&app.theme),
+                    )];
                     if let Some(expand_glyph) = expand_glyph {
                         spans.push(Span::styled(
                             expand_glyph.to_string(),
@@ -3198,17 +3283,26 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     ]);
                     let mut lines = vec![Line::from(spans)];
                     if app.list_mode == crate::app::SessionListViewMode::Full {
+                        let continuation_prefix = list_tree_continuation_prefix(
+                            &app_items,
+                            i,
+                            *nesting_depth,
+                            prefix_w,
+                        );
                         lines.push(session_detail_line(
                             &app.theme,
                             s,
                             detail_cols.as_ref().expect("columns exist in full mode"),
                             detail_now_ms,
-                            prefix_w,
+                            continuation_prefix.clone(),
                             row_w,
                         ));
                         // Full mode trades viewport density for breathing
-                        // room while keeping the exact same information.
-                        lines.push(Line::default());
+                        // room while keeping tree rails visually connected.
+                        lines.push(Line::from(Span::styled(
+                            continuation_prefix,
+                            session_list_secondary_style(&app.theme),
+                        )));
                     }
                     lines
                 }
@@ -3233,18 +3327,20 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     ])]
                 }
                 AppListItem::ArchivedRow {
+                    section,
                     count,
                     expanded,
                     nesting_depth,
-                    ..
                 } => {
                     // Expandable footer: "▸ N archived" (collapsed) /
                     // "▾ N archived" (open). Indented to sit under a project's
                     // members or at the next depth beneath a parent session.
                     let disclosure = if *expanded { "▾" } else { "▸" };
-                    let indent = " ".repeat(
-                        crate::app::list_archive_indent_cells(*nesting_depth) as usize,
-                    );
+                    let indent = if matches!(section, crate::app::ArchiveSection::Ungrouped) {
+                        " ".repeat(crate::app::list_archive_indent_cells(*nesting_depth) as usize)
+                    } else {
+                        list_tree_branch_prefix(&app_items, i, *nesting_depth)
+                    };
                     vec![Line::from(Span::styled(
                         format!("{indent}{disclosure} {count} archived"),
                         session_list_secondary_style(&app.theme),
@@ -22821,8 +22917,8 @@ mod tests {
         let cols = compute_detail_columns(&items, now);
 
         let theme = Theme::default();
-        let line_a = session_detail_line(&theme, &a, &cols, now, 0, 60);
-        let line_b = session_detail_line(&theme, &b, &cols, now, 0, 60);
+        let line_a = session_detail_line(&theme, &a, &cols, now, String::new(), 60);
+        let line_b = session_detail_line(&theme, &b, &cols, now, String::new(), 60);
         let text =
             |line: &Line| -> String { line.spans.iter().map(|sp| sp.content.as_ref()).collect() };
         let (ta, tb) = (text(&line_a), text(&line_b));
@@ -24601,6 +24697,58 @@ mod tests {
             children_expanded: false,
             attention_rollup: false,
         }
+    }
+
+    fn tree_row(id: &str, nesting_depth: usize) -> AppListItem {
+        AppListItem::Session {
+            summary: clip_test_session(id, Some(id), "smith", SessionState::Done),
+            nesting_depth,
+            has_children: false,
+            children_expanded: false,
+            attention_rollup: false,
+        }
+    }
+
+    #[test]
+    fn session_tree_prefixes_show_recursive_branches_and_ancestor_rails() {
+        let items = vec![
+            tree_row("root", 0),
+            tree_row("child-a", 1),
+            tree_row("grandchild", 2),
+            tree_row("child-b", 1),
+            tree_row("next-root", 0),
+        ];
+
+        assert_eq!(list_tree_branch_prefix(&items, 0, 0), "");
+        assert_eq!(list_tree_branch_prefix(&items, 1, 1), "├─");
+        assert_eq!(list_tree_branch_prefix(&items, 2, 2), "│ └─");
+        assert_eq!(list_tree_branch_prefix(&items, 3, 1), "└─");
+        assert_eq!(list_tree_branch_prefix(&items, 4, 0), "");
+    }
+
+    #[test]
+    fn full_mode_tree_rails_continue_through_detail_and_spacing_rows() {
+        let items = vec![
+            tree_row("root", 0),
+            tree_row("child-a", 1),
+            tree_row("grandchild", 2),
+            tree_row("child-b", 1),
+            tree_row("next-root", 0),
+        ];
+
+        assert_eq!(list_tree_continuation_prefix(&items, 0, 0, 3), "│  ");
+        assert_eq!(
+            list_tree_continuation_prefix(&items, 1, 1, 5),
+            "│ │  "
+        );
+        assert_eq!(
+            list_tree_continuation_prefix(&items, 2, 2, 7),
+            "│      "
+        );
+        assert_eq!(
+            list_tree_continuation_prefix(&items, 3, 1, 5),
+            "     "
+        );
     }
 
     /// The title tallies summarize the rows the operator can actually see,
