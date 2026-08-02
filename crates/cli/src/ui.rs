@@ -3219,7 +3219,13 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     let harness_w = harness.chars().count();
                     // Reserve room for the trailing unblock marker (" ●") so the
                     // right-aligned harness label doesn't shift when it shows.
-                    let show_attention = !s.archived && (s.needs_attention || *attention_rollup);
+                    // Native mirrors never wear the dot (spec 0054): the
+                    // daemon no longer raises it for them, and this guard
+                    // also retires markers persisted by earlier builds.
+                    // Mirrors have no children of their own to roll up.
+                    let show_attention = !s.archived
+                        && s.native_subagent.is_none()
+                        && (s.needs_attention || *attention_rollup);
                     let marker_w = if show_attention { 2 } else { 0 };
                     // Always leave at least one cell of gap between the name
                     // and the right-aligned harness.

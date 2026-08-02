@@ -7954,7 +7954,14 @@ impl App {
                     if descendant.archived || !visited.insert(descendant.id.as_str()) {
                         continue;
                     }
-                    if descendant.needs_attention {
+                    // A harness-native mirror carries no marker of its own
+                    // (spec 0054/0079), so it must not light an ancestor's
+                    // rolled-up dot either — that would reintroduce, through
+                    // the collapsed parent, exactly the native-child noise the
+                    // fleet tally deliberately drops. Its own descendants are
+                    // still walked: a Construct session never hangs off a
+                    // mirror, but the traversal stays uniform.
+                    if descendant.needs_attention && descendant.native_subagent.is_none() {
                         return true;
                     }
                     stack.push(descendant.id.as_str());
@@ -43852,6 +43859,86 @@ mod tests {
         term.draw(|frame| crate::ui::render(frame, &mut app))
             .expect("render expanded parent with its own attention");
         assert!(row_text(&term, rows_y + 1).contains('●'));
+        server.abort();
+    }
+
+    /// A harness-native mirror wears no dot of its own (spec 0054/0079), so it
+    /// must not light a collapsed ancestor's rolled-up dot either — otherwise a
+    /// busy native child tree reaches the fleet through the parent row, which is
+    /// exactly the noise the fleet tally already refuses to count.
+    #[tokio::test]
+    async fn collapsed_parent_does_not_roll_up_native_mirror_attention() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut parent = summary_with_kind(construct_protocol::SessionKind::User);
+        parent.id = "parent".into();
+        let mut mirror = summary_with_kind(construct_protocol::SessionKind::Subagent);
+        mirror.id = "mirror".into();
+        mirror.parent_session_id = Some(parent.id.clone());
+        mirror.needs_attention = true;
+        mirror.native_subagent = Some(construct_protocol::NativeSubagentRef {
+            owner_session_id: parent.id.clone(),
+            native_id: "child-1".into(),
+            projected_seq: 0,
+        });
+        // Paused so the state glyph is not itself a `●` — any dot on these
+        // rows is then unambiguously the attention marker.
+        parent.state = construct_protocol::SessionState::Paused;
+        mirror.state = construct_protocol::SessionState::Paused;
+        app.sessions = vec![parent, mirror];
+
+        // Expanded: the mirror's own row paints no dot either, so a marker
+        // stored by an earlier build can't surface after an upgrade.
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("render expanded parent with flagged mirror");
+        let row_text = |term: &ratatui::Terminal<ratatui::backend::TestBackend>, y: u16| {
+            (0..term.backend().buffer().area.width)
+                .map(|x| {
+                    term.backend()
+                        .buffer()
+                        .cell((x, y))
+                        .map(|cell| cell.symbol())
+                        .unwrap_or(" ")
+                })
+                .collect::<String>()
+        };
+        let rows_y = app.layout.list_items_area.expect("list rows").y;
+        assert!(
+            !row_text(&term, rows_y + 1).contains('●'),
+            "a native mirror wears no dot on its own row"
+        );
+        assert!(
+            !row_text(&term, rows_y).contains('●'),
+            "and none reaches the expanded parent"
+        );
+
+        app.children_collapsed.insert("parent".into());
+
+        assert!(matches!(
+            &app.list_items()[0],
+            ListItem::Session {
+                summary,
+                children_expanded: false,
+                attention_rollup: false,
+                ..
+            } if summary.id == "parent"
+        ));
+
+        // A Construct-owned sibling still rolls up: the exclusion is about
+        // mirrors specifically, not about collapsed subtrees in general.
+        let mut sub = summary_with_kind(construct_protocol::SessionKind::Subagent);
+        sub.id = "sub".into();
+        sub.parent_session_id = Some("parent".into());
+        sub.needs_attention = true;
+        app.sessions.push(sub);
+        assert!(matches!(
+            &app.list_items()[0],
+            ListItem::Session {
+                attention_rollup: true,
+                ..
+            }
+        ));
         server.abort();
     }
 

@@ -561,7 +561,16 @@ impl SessionManager {
                         // Only flag if something happened while the operator
                         // wasn't looking — not their own input echo in a focused
                         // session they then switched away from. See spec 0054.
-                        if !is_focused && entry.unseen_activity.load(Ordering::Relaxed) {
+                        //
+                        // A harness-native mirror never flags: it is a
+                        // read-only projection (spec 0079) the operator
+                        // cannot drive, so "waiting on you" would promise an
+                        // action that does not exist — the owning harness is
+                        // what drives the child. See spec 0054.
+                        if !is_focused
+                            && s.native_subagent.is_none()
+                            && entry.unseen_activity.load(Ordering::Relaxed)
+                        {
                             s.needs_attention = true;
                         }
                     }
@@ -827,6 +836,11 @@ impl SessionManager {
                 summary.last_event_at = Some(now);
             }
             summary.archived = false;
+            // Mirrors never carry the marker (spec 0054). Clearing it here
+            // also retires markers persisted by earlier builds, which would
+            // otherwise resurface the moment a mirror unarchives on new
+            // native activity.
+            summary.needs_attention = false;
             if title.as_ref().is_some_and(|title| !title.trim().is_empty()) {
                 summary.title = title;
             }
