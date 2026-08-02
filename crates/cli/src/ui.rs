@@ -2314,11 +2314,21 @@ fn list_tree_has_later_row_at_depth(
 /// The primary-row tree prefix: ancestor continuation rails followed by this
 /// row's branch corner. Every depth consumes exactly two cells, preserving
 /// existing disclosure hit geometry and right-aligned harness labels.
+///
+/// Compact mode draws the same two cells per depth as plain indentation.
+/// Nothing separates its rows, so depth alone already reads as hierarchy and
+/// the rails would be ink the densest view can't afford. Full mode keeps
+/// them: its cards are split by detail and spacing rows, and without a
+/// continuous rail a child stops looking attached to its parent.
 fn list_tree_branch_prefix(
     items: &[AppListItem],
     item_index: usize,
     nesting_depth: usize,
+    rails: bool,
 ) -> String {
+    if !rails {
+        return " ".repeat(nesting_depth.saturating_mul(2));
+    }
     let mut prefix = String::with_capacity(nesting_depth.saturating_mul(2));
     for depth in 1..=nesting_depth {
         let continues = list_tree_has_later_row_at_depth(items, item_index, depth);
@@ -3146,8 +3156,10 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     // Full-mode detail lines share one set of column widths across the
     // whole list, so fields align vertically row-to-row.
     let detail_now_ms = chrono::Utc::now().timestamp_millis();
-    let detail_cols = (app.list_mode == crate::app::SessionListViewMode::Full)
-        .then(|| compute_detail_columns(&app_items, detail_now_ms));
+    let full_mode = app.list_mode == crate::app::SessionListViewMode::Full;
+    let detail_cols = full_mode.then(|| compute_detail_columns(&app_items, detail_now_ms));
+    // Tree rails are a full-mode affordance: see `list_tree_branch_prefix`.
+    let tree_rails = full_mode;
     let mut selected_idx: Option<usize> = None;
     let item_lines: Vec<Vec<Line>> = app_items
         .iter()
@@ -3210,7 +3222,8 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     ..
                 } => {
                     let row_marker = session_row_marker(s, *has_children, *children_expanded);
-                    let tree_prefix = list_tree_branch_prefix(&app_items, i, *nesting_depth);
+                    let tree_prefix =
+                        list_tree_branch_prefix(&app_items, i, *nesting_depth, tree_rails);
                     // Fixed-width left side: tree rails + the always-reserved
                     // marker gutter + " glyph " (3) + one cell of right inset,
                     // matching the service row's prefix budget.
@@ -3354,7 +3367,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     let indent = if matches!(section, crate::app::ArchiveSection::Ungrouped) {
                         " ".repeat(crate::app::list_archive_indent_cells(*nesting_depth) as usize)
                     } else {
-                        list_tree_branch_prefix(&app_items, i, *nesting_depth)
+                        list_tree_branch_prefix(&app_items, i, *nesting_depth, tree_rails)
                     };
                     vec![Line::from(Span::styled(
                         format!("{indent}{disclosure} {count} archived"),
@@ -24734,11 +24747,42 @@ mod tests {
             tree_row("next-root", 0),
         ];
 
-        assert_eq!(list_tree_branch_prefix(&items, 0, 0), "");
-        assert_eq!(list_tree_branch_prefix(&items, 1, 1), "├─");
-        assert_eq!(list_tree_branch_prefix(&items, 2, 2), "│ └─");
-        assert_eq!(list_tree_branch_prefix(&items, 3, 1), "└─");
-        assert_eq!(list_tree_branch_prefix(&items, 4, 0), "");
+        assert_eq!(list_tree_branch_prefix(&items, 0, 0, true), "");
+        assert_eq!(list_tree_branch_prefix(&items, 1, 1, true), "├─");
+        assert_eq!(list_tree_branch_prefix(&items, 2, 2, true), "│ └─");
+        assert_eq!(list_tree_branch_prefix(&items, 3, 1, true), "└─");
+        assert_eq!(list_tree_branch_prefix(&items, 4, 0, true), "");
+    }
+
+    /// Compact mode spends the same cells on plain indentation. Depth still
+    /// reads, every column downstream of the prefix stays put, and the densest
+    /// view sheds ink it can't afford — rails only earn their keep in full
+    /// mode, where detail and spacing rows would otherwise detach a child from
+    /// its parent.
+    #[test]
+    fn compact_mode_indents_without_drawing_rails() {
+        let items = vec![
+            tree_row("root", 0),
+            tree_row("child-a", 1),
+            tree_row("grandchild", 2),
+            tree_row("child-b", 1),
+            tree_row("next-root", 0),
+        ];
+
+        for (index, depth) in [(0, 0), (1, 1), (2, 2), (3, 1), (4, 0)] {
+            let compact = list_tree_branch_prefix(&items, index, depth, false);
+            let full = list_tree_branch_prefix(&items, index, depth, true);
+            assert!(
+                compact.chars().all(|c| c == ' '),
+                "compact prefix must be blank, got {compact:?}"
+            );
+            assert_eq!(
+                UnicodeWidthStr::width(compact.as_str()),
+                UnicodeWidthStr::width(full.as_str()),
+                "dropping the rails must not move anything: depth {depth}"
+            );
+            assert_eq!(UnicodeWidthStr::width(compact.as_str()), depth * 2);
+        }
     }
 
     /// Regression: a project member that grew a subagent or a fork used to
@@ -24822,8 +24866,8 @@ mod tests {
         ];
 
         // Same rails under the same parent…
-        let fork_rails = list_tree_branch_prefix(&items, 1, 1);
-        let archived_rails = list_tree_branch_prefix(&items, 2, 1);
+        let fork_rails = list_tree_branch_prefix(&items, 1, 1, true);
+        let archived_rails = list_tree_branch_prefix(&items, 2, 1, true);
         assert_eq!(fork_rails, "├─");
         assert_eq!(archived_rails, "└─");
         assert_eq!(

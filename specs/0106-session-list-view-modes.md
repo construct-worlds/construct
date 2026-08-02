@@ -57,10 +57,14 @@ Rules both modes must preserve:
 - Group headers and archived-disclosure rows stay one line in both modes.
 - Session nesting uses the same two-cell indentation step in both modes. Each
   generation gets its own depth, including fork-of-fork, subagent-of-subagent,
-  and mixed trees. Muted branch and continuation rails make those levels
-  explicit and remain connected through full mode's detail and spacing rows;
-  the hierarchy never changes the user's depth-first session order. Parent
-  titles render one emphasis step above leaf titles.
+  and mixed trees; the hierarchy never changes the user's depth-first session
+  order. Parent titles render one emphasis step above leaf titles.
+- Only full mode draws branch and continuation rails into that indentation.
+  Its cards are broken apart by detail and spacing rows, so a child needs a
+  continuous rail to still read as attached to its parent. Compact mode packs
+  its rows with nothing between them, so depth alone carries the hierarchy and
+  the rails would only add ink to the view whose whole purpose is density.
+  Both modes indent identically, so switching modes moves no column.
 - One marker cell sits between the rails and the row's content, and every row
   hanging off the tree spends exactly that one cell: a session's children
   disclosure, a fork's lineage mark, an archived-children row's own disclosure,
