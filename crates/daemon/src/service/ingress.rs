@@ -20,7 +20,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const REQUEST_DEDUP_CAP: usize = 4096;
-const PENDING_DELIVERY_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+pub(super) const PENDING_DELIVERY_TTL: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
 
 /// How long a session must sit idle and quiet, with no approval pending,
 /// before a turn that produced no answer is called finished-and-failed.
@@ -41,6 +42,32 @@ struct PendingDelivery {
     created_at: tokio::time::Instant,
 }
 
+/// A delivery this service accepted and has not answered yet.
+///
+/// The task waiting on a turn lives exactly as long as the daemon process. A
+/// restart mid-turn therefore takes the waiter with it, and everything the
+/// channel put in front of the person waiting — a placeholder, a reaction —
+/// is left standing with nothing left alive to replace it. Recording the
+/// delivery is what lets the next daemon pick the wait back up.
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct OutstandingDelivery {
+    /// Which channel of this service accepted it. A service may run several.
+    pub(super) channel_id: String,
+    pub(super) session: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) delivery_id: Option<String>,
+    /// Transcript position the turn began at, so a resumed wait does not
+    /// mistake the previous answer in a long-lived session for this one.
+    pub(super) event_cursor: usize,
+    pub(super) submitted_at: chrono::DateTime<chrono::Utc>,
+    /// Whatever the channel needs to find what it already put on screen.
+    /// Opaque here on purpose: the ingress does not render anything, and a
+    /// second kind of channel must not require a schema change in state
+    /// shared by all of them.
+    #[serde(default)]
+    pub(super) context: serde_json::Value,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct PersistedState {
     #[serde(default)]
@@ -50,6 +77,11 @@ pub(super) struct PersistedState {
     /// but still need to remain queryable by the channel that created them.
     #[serde(default)]
     pub(super) owned_sessions: HashSet<String>,
+    /// Accepted-but-unanswered deliveries, keyed by whatever the channel uses
+    /// to identify a request. Empty in the steady state — a record lives only
+    /// between accepting a delivery and resolving it.
+    #[serde(default)]
+    pub(super) outstanding: HashMap<String, OutstandingDelivery>,
 }
 
 impl PersistedState {
@@ -209,6 +241,111 @@ impl ServiceIngress {
             .any(|key| key.starts_with(&lookup_prefix))
     }
 
+    /// Record a delivery as accepted-but-unanswered, so a daemon that restarts
+    /// mid-turn can pick the wait back up instead of abandoning it.
+    pub(super) async fn record_outstanding(
+        &self,
+        key: &str,
+        receipt: &IngressReceipt,
+        context: serde_json::Value,
+    ) {
+        let record = OutstandingDelivery {
+            channel_id: self.channel_id.clone(),
+            session: receipt.session.clone(),
+            delivery_id: receipt.delivery_id.clone(),
+            event_cursor: receipt.event_cursor,
+            submitted_at: chrono::Utc::now(),
+            context,
+        };
+        let mut state = self.shared.state.lock().await;
+        state.outstanding.insert(self.outstanding_key(key), record);
+        if let Err(error) = self.persist_state(&state).await {
+            tracing::warn!(
+                service = %self.shared.name,
+                %error,
+                "could not record an outstanding delivery; a restart would abandon it"
+            );
+        }
+    }
+
+    /// Amend what the channel has left on screen for an outstanding delivery.
+    ///
+    /// A channel does not know everything it will need to clean up at the
+    /// moment it accepts a delivery — a progress placeholder, for one, only
+    /// exists once a turn has run long enough to deserve it.
+    pub(super) async fn amend_outstanding(&self, key: &str, context: serde_json::Value) {
+        let mut state = self.shared.state.lock().await;
+        let Some(record) = state.outstanding.get_mut(&self.outstanding_key(key)) else {
+            return;
+        };
+        record.context = context;
+        if let Err(error) = self.persist_state(&state).await {
+            tracing::warn!(service = %self.shared.name, %error, "could not amend an outstanding delivery");
+        }
+    }
+
+    /// Forget a delivery that has been resolved one way or the other.
+    pub(super) async fn clear_outstanding(&self, key: &str) {
+        let mut state = self.shared.state.lock().await;
+        if state.outstanding.remove(&self.outstanding_key(key)).is_none() {
+            return;
+        }
+        if let Err(error) = self.persist_state(&state).await {
+            tracing::warn!(service = %self.shared.name, %error, "could not clear a resolved delivery");
+        }
+    }
+
+    /// Every delivery this channel accepted and never answered.
+    ///
+    /// Records are left in place rather than consumed: a channel interrupted
+    /// again while reconciling must find them a second time, and resolving one
+    /// twice edits the same message rather than losing it.
+    pub(super) async fn outstanding(&self) -> Vec<(String, OutstandingDelivery)> {
+        let prefix = format!("{}:", self.channel_id);
+        self.shared
+            .state
+            .lock()
+            .await
+            .outstanding
+            .iter()
+            .filter(|(_, record)| record.channel_id == self.channel_id)
+            .map(|(key, record)| {
+                (
+                    key.strip_prefix(&prefix).unwrap_or(key).to_string(),
+                    record.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn outstanding_key(&self, key: &str) -> String {
+        format!("{}:{key}", self.channel_id)
+    }
+
+    /// Rebuild a receipt for a delivery recorded before a restart.
+    ///
+    /// `None` when the session it was routed to no longer exists, which is the
+    /// one case a resumed wait cannot recover from.
+    pub(super) async fn resume_outstanding(
+        &self,
+        record: &OutstandingDelivery,
+    ) -> Option<IngressReceipt> {
+        self.shared.manager.get_entry(&record.session).await?;
+        // The reply tool authorizes against this map, which did not survive
+        // the restart either. Without it a turn still running would be told
+        // its delivery is unknown at the moment it tries to answer.
+        if let Some(delivery_id) = record.delivery_id.as_ref() {
+            self.shared
+                .restore_delivery(delivery_id.clone(), record.session.clone())
+                .await;
+        }
+        Some(IngressReceipt {
+            session: record.session.clone(),
+            event_cursor: record.event_cursor,
+            delivery_id: record.delivery_id.clone(),
+        })
+    }
+
     /// Submit a native channel delivery and retain the transcript position at
     /// which its turn began. Long-lived adapters use this cursor to avoid
     /// mistaking the previous turn's final answer for the new one.
@@ -366,18 +503,22 @@ impl ServiceIngress {
     /// can tell its user rather than going silent for the whole turn. It is
     /// advisory: nothing here waits on a reader, and a channel that does not
     /// render progress simply ignores it.
+    /// `budget` is how much longer this turn may run. A delivery picked back up
+    /// after a restart passes what is left of its original allowance rather
+    /// than a fresh one, so surviving a restart cannot extend a turn's life.
     pub(super) async fn wait_for_final(
         &self,
         receipt: &IngressReceipt,
         cancel: &CancellationToken,
         progress: &watch::Sender<IngressProgress>,
+        budget: std::time::Duration,
     ) -> Result<String> {
         if let Some(delivery_id) = receipt.delivery_id.as_deref() {
             return self
-                .wait_for_explicit_reply(receipt, delivery_id, cancel, progress)
+                .wait_for_explicit_reply(receipt, delivery_id, cancel, progress, budget)
                 .await;
         }
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
+        let deadline = tokio::time::Instant::now() + budget;
         let mut watch = TurnWatch::default();
         loop {
             tokio::select! {
@@ -430,8 +571,9 @@ impl ServiceIngress {
         delivery_id: &str,
         cancel: &CancellationToken,
         progress: &watch::Sender<IngressProgress>,
+        budget: std::time::Duration,
     ) -> Result<String> {
-        let deadline = tokio::time::Instant::now() + PENDING_DELIVERY_TTL;
+        let deadline = tokio::time::Instant::now() + budget;
         let mut watch = TurnWatch::default();
         loop {
             tokio::select! {
@@ -935,10 +1077,10 @@ pub(super) fn pending_approval(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    async fn shared_for_delivery_tests() -> Arc<ServiceIngressShared> {
+    pub(in crate::service) async fn shared_for_delivery_tests() -> Arc<ServiceIngressShared> {
         let tmp = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
         let storage =
             Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
@@ -1106,6 +1248,132 @@ mod tests {
         let other = ServiceIngress::new("other-bot".to_string(), shared);
         assert!(!other.has_session("T1:C1:111.11").await);
         assert!(!other.has_session_under("T1:C1:").await);
+    }
+
+    #[tokio::test]
+    async fn an_accepted_delivery_stays_recorded_until_it_is_answered() {
+        // The record is what a restarted daemon reads. It has to exist for the
+        // whole window in which a restart could happen — from the moment the
+        // delivery is accepted to the moment something is finally said about
+        // it — because that window is exactly when a waiter can be lost.
+        let shared = shared_for_delivery_tests().await;
+        let ingress = ServiceIngress::new("C1".to_string(), shared);
+        let receipt = IngressReceipt {
+            session: "s1".to_string(),
+            event_cursor: 7,
+            delivery_id: Some("d1".to_string()),
+        };
+        let context = serde_json::json!({"channel": "C1", "thread_ts": "1.1"});
+
+        ingress
+            .record_outstanding("C1:1.1", &receipt, context.clone())
+            .await;
+        let outstanding = ingress.outstanding().await;
+        assert_eq!(outstanding.len(), 1);
+        let (key, record) = &outstanding[0];
+        assert_eq!(key, "C1:1.1", "the channel's own key comes back");
+        assert_eq!(record.session, "s1");
+        assert_eq!(record.event_cursor, 7, "a resumed wait starts where it left");
+        assert_eq!(record.delivery_id.as_deref(), Some("d1"));
+        assert_eq!(record.context, context);
+
+        // The affordance appears later than acceptance, so what the channel
+        // has on screen has to be amendable after the fact.
+        let amended = serde_json::json!({"channel": "C1", "thread_ts": "1.1", "placeholder_ts": "P1"});
+        ingress.amend_outstanding("C1:1.1", amended.clone()).await;
+        assert_eq!(ingress.outstanding().await[0].1.context, amended);
+
+        ingress.clear_outstanding("C1:1.1").await;
+        assert!(
+            ingress.outstanding().await.is_empty(),
+            "a resolved delivery stops being outstanding"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_outstanding_delivery_survives_being_written_and_read_back() {
+        // The record is only worth keeping if it reaches disk: an in-memory
+        // one is lost by exactly the event it exists to survive.
+        let shared = shared_for_delivery_tests().await;
+        let ingress = ServiceIngress::new("C1".to_string(), shared.clone());
+        ingress
+            .record_outstanding(
+                "C1:1.1",
+                &IngressReceipt {
+                    session: "s1".to_string(),
+                    event_cursor: 3,
+                    delivery_id: None,
+                },
+                serde_json::json!({"channel": "C1"}),
+            )
+            .await;
+
+        let raw = tokio::fs::read(&shared.state_path)
+            .await
+            .expect("state was persisted");
+        let reloaded: PersistedState = serde_json::from_slice(&raw).expect("state parses");
+        let record = reloaded
+            .outstanding
+            .get("C1:C1:1.1")
+            .expect("the delivery is on disk");
+        assert_eq!(record.session, "s1");
+        assert_eq!(record.channel_id, "C1");
+    }
+
+    #[tokio::test]
+    async fn a_delivery_whose_session_is_gone_cannot_be_resumed() {
+        // The one thing a resumed wait cannot recover from: there is nothing
+        // left to wait on, so the channel has to report it instead.
+        let shared = shared_for_delivery_tests().await;
+        let ingress = ServiceIngress::new("C1".to_string(), shared);
+        let record = OutstandingDelivery {
+            channel_id: "C1".into(),
+            session: "s-does-not-exist".into(),
+            delivery_id: None,
+            event_cursor: 0,
+            submitted_at: chrono::Utc::now(),
+            context: serde_json::Value::Null,
+        };
+        assert!(ingress.resume_outstanding(&record).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn one_channels_outstanding_deliveries_are_not_anothers() {
+        // A service runs several channels against one state file. A channel
+        // that reconciled another's deliveries would answer into a
+        // conversation it does not own.
+        let shared = shared_for_delivery_tests().await;
+        let first = ServiceIngress::new("C1".to_string(), shared.clone());
+        let second = ServiceIngress::new("C2".to_string(), shared);
+        first
+            .record_outstanding(
+                "1.1",
+                &IngressReceipt {
+                    session: "s1".to_string(),
+                    event_cursor: 0,
+                    delivery_id: None,
+                },
+                serde_json::Value::Null,
+            )
+            .await;
+
+        assert_eq!(first.outstanding().await.len(), 1);
+        assert!(second.outstanding().await.is_empty());
+
+        // Same key, different channels: the records must not collide.
+        second
+            .record_outstanding(
+                "1.1",
+                &IngressReceipt {
+                    session: "s2".to_string(),
+                    event_cursor: 0,
+                    delivery_id: None,
+                },
+                serde_json::Value::Null,
+            )
+            .await;
+        assert_eq!(first.outstanding().await[0].1.session, "s1");
+        assert_eq!(second.outstanding().await[0].1.session, "s2");
     }
 
     #[test]

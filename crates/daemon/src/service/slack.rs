@@ -4,11 +4,13 @@
 //! token for a short-lived WebSocket URL, acknowledges each envelope before
 //! doing work, then posts the completed answer with the bot token.
 
-use super::ingress::{IngressProgress, IngressRequest, ServiceIngress};
+use super::ingress::{
+    IngressProgress, IngressReceipt, IngressRequest, ServiceIngress, PENDING_DELIVERY_TTL,
+};
 use super::{SlackFollowUp, SlackProgress};
 use anyhow::{anyhow, Context, Result};
 use futures::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
@@ -216,6 +218,10 @@ async fn serve_with_api(
     cancel: CancellationToken,
     api: SlackApi,
 ) -> Result<()> {
+    // Before taking anything new: finish whatever a previous daemon accepted
+    // and never answered. Doing this ahead of the socket keeps a reconnect
+    // from racing a resumed turn for the same thread.
+    reconcile_outstanding(&ingress, &config, &cancel, &api).await;
     let mut backoff = std::time::Duration::from_secs(1);
     loop {
         if cancel.is_cancelled() {
@@ -378,10 +384,21 @@ fn progress_text(progress: &IngressProgress, elapsed: std::time::Duration) -> St
     }
 }
 
-/// What the affordance left behind in Slack, so the answer can replace it.
-#[derive(Default)]
-struct Affordance {
+/// Everything needed to finish one delivery in Slack: where the conversation
+/// is, and what has already been placed in it on this delivery's behalf.
+///
+/// This is what the ingress persists as the delivery's channel context, so a
+/// daemon that restarts mid-turn can find the placeholder it left behind
+/// instead of adding a second one below it.
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct DeliveryTrace {
+    channel: String,
+    thread_ts: String,
+    /// The message being answered — where reactions belong.
+    message_ts: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     placeholder_ts: Option<String>,
+    #[serde(default)]
     reacted: bool,
 }
 
@@ -392,37 +409,49 @@ struct Affordance {
 async fn run_affordance(
     api: SlackApi,
     config: SlackConfig,
-    channel: String,
-    thread_ts: String,
-    message_ts: String,
+    ingress: Arc<ServiceIngress>,
+    key: String,
+    mut state: DeliveryTrace,
     after: std::time::Duration,
+    already_waited: std::time::Duration,
     mut progress: watch::Receiver<IngressProgress>,
     cancel: CancellationToken,
-) -> Affordance {
-    let mut state = Affordance::default();
+) -> DeliveryTrace {
     if config.progress == SlackProgress::Off {
         return state;
     }
     // Measured from when the turn was submitted, not from when the placeholder
     // appeared: the elapsed time this reports is the wait the person in Slack
-    // has actually had, which started when they hit send.
-    let started = tokio::time::Instant::now();
-    tokio::select! {
-        _ = cancel.cancelled() => return state,
-        _ = tokio::time::sleep(after) => {}
+    // has actually had, which started when they hit send — including, for a
+    // delivery picked back up after a restart, the part served by the daemon
+    // that took it.
+    let now = tokio::time::Instant::now();
+    let started = now.checked_sub(already_waited).unwrap_or(now);
+    // That same earlier daemon may already have put the affordance in the
+    // channel, so only the unserved remainder of the delay is waited out.
+    let remaining = after.saturating_sub(already_waited);
+    if !remaining.is_zero() {
+        tokio::select! {
+            _ = cancel.cancelled() => return state,
+            _ = tokio::time::sleep(remaining) => {}
+        }
     }
-    if config.progress.reacts() {
+    let mut placed = false;
+    if config.progress.reacts() && !state.reacted {
         match api
             .set_reaction(
                 &config.bot_token,
                 "reactions.add",
-                &channel,
-                &message_ts,
+                &state.channel,
+                &state.message_ts,
                 WORKING_EMOJI,
             )
             .await
         {
-            Ok(_) => state.reacted = true,
+            Ok(_) => {
+                state.reacted = true;
+                placed = true;
+            }
             Err(error) => tracing::warn!(
                 %error,
                 "Slack progress reaction failed; the answer is unaffected \
@@ -430,15 +459,25 @@ async fn run_affordance(
             ),
         }
     }
-    if config.progress.posts_placeholder() {
+    if config.progress.posts_placeholder() && state.placeholder_ts.is_none() {
         let text = progress_text(&progress.borrow_and_update().clone(), started.elapsed());
         match api
-            .post_message(&config.bot_token, &channel, &thread_ts, &text)
+            .post_message(&config.bot_token, &state.channel, &state.thread_ts, &text)
             .await
         {
-            Ok(ts) => state.placeholder_ts = ts,
+            Ok(ts) => {
+                state.placeholder_ts = ts;
+                placed = true;
+            }
             Err(error) => tracing::warn!(%error, "Slack progress placeholder failed"),
         }
+    }
+    // Record what is now standing in the channel *before* waiting on the turn.
+    // Anything placed and not recorded is exactly what a restart would strand.
+    if placed {
+        ingress
+            .amend_outstanding(&key, serde_json::to_value(&state).unwrap_or_default())
+            .await;
     }
     // Keep the placeholder honest on both counts: a turn that stops at an
     // approval must stop claiming it is working, and a placeholder that has
@@ -462,11 +501,79 @@ async fn run_affordance(
         };
         let text = progress_text(&phase, started.elapsed());
         if let Err(error) = api
-            .update_message(&config.bot_token, &channel, ts, &text)
+            .update_message(&config.bot_token, &state.channel, ts, &text)
             .await
         {
             tracing::warn!(%error, "Slack progress update failed");
         }
+    }
+}
+
+/// Finish deliveries this channel accepted but never answered.
+///
+/// Called once per connection attempt, before any new delivery is taken. A
+/// turn interrupted by a restart is usually still running — the harness
+/// outlives the daemon and is reattached — so the wait is picked back up
+/// rather than declared lost, on what remains of the delivery's original
+/// allowance. Only a delivery that cannot be resumed is reported as over.
+async fn reconcile_outstanding(
+    ingress: &Arc<ServiceIngress>,
+    config: &SlackConfig,
+    cancel: &CancellationToken,
+    api: &SlackApi,
+) {
+    for (key, record) in ingress.outstanding().await {
+        let Ok(trace) = serde_json::from_value::<DeliveryTrace>(record.context.clone()) else {
+            // Written by a version that framed its context differently; there
+            // is nothing here to find in Slack, so stop tracking it.
+            ingress.clear_outstanding(&key).await;
+            continue;
+        };
+        if trace.channel.is_empty() {
+            ingress.clear_outstanding(&key).await;
+            continue;
+        }
+        let waited = (chrono::Utc::now() - record.submitted_at)
+            .to_std()
+            .unwrap_or_default();
+        let receipt = ingress.resume_outstanding(&record).await;
+        let unfinished = match receipt {
+            None => Some("_The session answering this is gone; the turn never finished._"),
+            Some(_) if waited >= PENDING_DELIVERY_TTL => {
+                Some("_The turn was interrupted and did not finish._")
+            }
+            Some(_) => None,
+        };
+        if let Some(text) = unfinished {
+            tracing::info!(
+                service = %ingress.service_name(),
+                channel = %ingress.channel_id(),
+                session = %record.session,
+                waited_seconds = waited.as_secs(),
+                "outstanding service delivery cannot be resumed; reporting it"
+            );
+            settle(api, config, &trace, text, false).await;
+            ingress.clear_outstanding(&key).await;
+            continue;
+        }
+        let Some(receipt) = receipt else { continue };
+        let (ingress, config, cancel, api) =
+            (ingress.clone(), config.clone(), cancel.clone(), api.clone());
+        tracing::info!(
+            service = %ingress.service_name(),
+            channel = %ingress.channel_id(),
+            session = %record.session,
+            waited_seconds = waited.as_secs(),
+            "resuming a service delivery left outstanding by a restart"
+        );
+        tokio::spawn(async move {
+            if let Err(error) =
+                resolve_delivery(&ingress, &config, &cancel, &api, &key, trace, receipt, waited)
+                    .await
+            {
+                tracing::warn!(%error, "resumed Slack delivery failed");
+            }
+        });
     }
 }
 
@@ -513,7 +620,7 @@ async fn first_engagement_context(
 }
 
 async fn process_delivery(
-    ingress: &ServiceIngress,
+    ingress: &Arc<ServiceIngress>,
     config: &SlackConfig,
     cancel: &CancellationToken,
     api: &SlackApi,
@@ -528,29 +635,82 @@ async fn process_delivery(
         Some(context) => format!("{context}\n\n{}", delivery.text),
         None => delivery.text.clone(),
     };
+    let key = delivery.request_id();
     let receipt = ingress
         .submit_tracked(IngressRequest {
             message,
             session_key: Some(session_key),
-            request_id: Some(delivery.request_id()),
+            request_id: Some(key.clone()),
         })
         .await?;
+    let trace = DeliveryTrace {
+        channel: delivery.channel.clone(),
+        thread_ts: delivery.thread_ts.clone(),
+        message_ts: delivery.message_ts.clone(),
+        placeholder_ts: None,
+        reacted: false,
+    };
+    // Recorded before the wait begins: from here until it resolves, this
+    // delivery is recoverable by whichever daemon is running when it does.
+    ingress
+        .record_outstanding(
+            &key,
+            &receipt,
+            serde_json::to_value(&trace).unwrap_or_default(),
+        )
+        .await;
+    resolve_delivery(
+        ingress,
+        config,
+        cancel,
+        api,
+        &key,
+        trace,
+        receipt,
+        std::time::Duration::ZERO,
+    )
+    .await
+}
+
+/// Wait out one delivery's turn and put the outcome in the thread.
+///
+/// Shared by a delivery that just arrived and one picked back up after a
+/// restart; `already_waited` is what the second kind has already spent, and is
+/// zero for the first. The delivery stops being outstanding only once
+/// something has been said about it.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_delivery(
+    ingress: &Arc<ServiceIngress>,
+    config: &SlackConfig,
+    cancel: &CancellationToken,
+    api: &SlackApi,
+    key: &str,
+    trace: DeliveryTrace,
+    receipt: IngressReceipt,
+    already_waited: std::time::Duration,
+) -> Result<()> {
     let (progress_tx, progress_rx) = watch::channel(IngressProgress::default());
     let affordance_cancel = CancellationToken::new();
     let affordance = tokio::spawn(run_affordance(
         api.clone(),
         config.clone(),
-        delivery.channel.clone(),
-        delivery.thread_ts.clone(),
-        delivery.message_ts.clone(),
+        ingress.clone(),
+        key.to_string(),
+        trace.clone(),
         PROGRESS_AFTER,
+        already_waited,
         progress_rx,
         affordance_cancel.clone(),
     ));
 
-    let reply = ingress.wait_for_final(&receipt, cancel, &progress_tx).await;
+    // Surviving a restart must not extend a turn's life, so what is left of
+    // the original allowance is what it gets.
+    let budget = PENDING_DELIVERY_TTL.saturating_sub(already_waited);
+    let reply = ingress
+        .wait_for_final(&receipt, cancel, &progress_tx, budget)
+        .await;
     affordance_cancel.cancel();
-    let affordance = affordance.await.unwrap_or_default();
+    let trace = affordance.await.unwrap_or(trace);
 
     // A turn that failed used to leave the thread silent forever. Now that
     // something in the channel says "working", it must not keep saying that.
@@ -559,27 +719,39 @@ async fn process_delivery(
         Err(error) => format!("_The turn ended without an answer: {error}_"),
     };
     if cancel.is_cancelled() {
+        // The channel is stopping, not the turn. Leave the delivery recorded:
+        // this is precisely the case the record exists for.
         return Err(anyhow!("channel stopped"));
     }
-    match affordance.placeholder_ts.as_deref() {
-        Some(ts) => {
-            api.update_message(&config.bot_token, &delivery.channel, ts, &text)
-                .await?;
-        }
-        None => {
-            api.post_message(
-                &config.bot_token,
-                &delivery.channel,
-                &delivery.thread_ts,
-                &text,
-            )
-            .await?;
-        }
-    }
-    if affordance.reacted {
-        settle_reaction(api, config, &delivery, reply.is_ok()).await;
-    }
+    settle(api, config, &trace, &text, reply.is_ok()).await;
+    ingress.clear_outstanding(key).await;
     reply.map(|_| ())
+}
+
+/// Put the outcome where the affordance was, and mark the message with it.
+async fn settle(
+    api: &SlackApi,
+    config: &SlackConfig,
+    trace: &DeliveryTrace,
+    text: &str,
+    answered: bool,
+) {
+    let posted = match trace.placeholder_ts.as_deref() {
+        Some(ts) => api
+            .update_message(&config.bot_token, &trace.channel, ts, text)
+            .await
+            .map(|_| ()),
+        None => api
+            .post_message(&config.bot_token, &trace.channel, &trace.thread_ts, text)
+            .await
+            .map(|_| ()),
+    };
+    if let Err(error) = posted {
+        tracing::warn!(%error, "Slack outcome delivery failed");
+    }
+    if trace.reacted {
+        settle_reaction(api, config, trace, answered).await;
+    }
 }
 
 /// Swap the working reaction for the outcome. Cosmetic: a workspace that
@@ -587,15 +759,15 @@ async fn process_delivery(
 async fn settle_reaction(
     api: &SlackApi,
     config: &SlackConfig,
-    delivery: &SlackDelivery,
+    trace: &DeliveryTrace,
     answered: bool,
 ) {
     let _ = api
         .set_reaction(
             &config.bot_token,
             "reactions.remove",
-            &delivery.channel,
-            &delivery.message_ts,
+            &trace.channel,
+            &trace.message_ts,
             WORKING_EMOJI,
         )
         .await;
@@ -608,8 +780,8 @@ async fn settle_reaction(
         .set_reaction(
             &config.bot_token,
             "reactions.add",
-            &delivery.channel,
-            &delivery.message_ts,
+            &trace.channel,
+            &trace.message_ts,
             settled,
         )
         .await
@@ -1156,10 +1328,11 @@ mod tests {
         let state = run_affordance(
             api,
             config(),
-            "C1".into(),
-            "1.1".into(),
-            "1.1".into(),
+            test_ingress().await,
+            "C1:1.1".to_string(),
+            trace(),
             PROGRESS_AFTER,
+            std::time::Duration::ZERO,
             rx,
             cancel,
         )
@@ -1184,10 +1357,11 @@ mod tests {
         let state = run_affordance(
             api,
             config,
-            "C1".into(),
-            "1.1".into(),
-            "1.1".into(),
+            test_ingress().await,
+            "C1:1.1".to_string(),
+            trace(),
             PROGRESS_AFTER,
+            std::time::Duration::ZERO,
             rx,
             CancellationToken::new(),
         )
@@ -1195,6 +1369,51 @@ mod tests {
 
         assert!(state.placeholder_ts.is_none());
         assert!(!state.reacted);
+    }
+
+    async fn test_ingress() -> Arc<ServiceIngress> {
+        let shared = super::super::ingress::tests::shared_for_delivery_tests().await;
+        Arc::new(ServiceIngress::new("C1".to_string(), shared))
+    }
+
+    fn trace() -> DeliveryTrace {
+        DeliveryTrace {
+            channel: "C1".into(),
+            thread_ts: "1.1".into(),
+            message_ts: "1.1".into(),
+            placeholder_ts: None,
+            reacted: false,
+        }
+    }
+
+    #[test]
+    fn what_the_channel_left_on_screen_survives_a_round_trip() {
+        // This is the payload a restart reads back to find the placeholder it
+        // has to replace. If it does not round-trip, a resumed delivery posts
+        // a second message below the stale one instead of editing it.
+        let trace = DeliveryTrace {
+            channel: "C1".into(),
+            thread_ts: "111.11".into(),
+            message_ts: "222.22".into(),
+            placeholder_ts: Some("P1".into()),
+            reacted: true,
+        };
+        let encoded = serde_json::to_value(&trace).expect("encode");
+        let decoded: DeliveryTrace = serde_json::from_value(encoded).expect("decode");
+        assert_eq!(decoded.channel, "C1");
+        assert_eq!(decoded.thread_ts, "111.11");
+        assert_eq!(decoded.message_ts, "222.22");
+        assert_eq!(decoded.placeholder_ts.as_deref(), Some("P1"));
+        assert!(decoded.reacted);
+
+        // A delivery recorded before the affordance appeared carries neither,
+        // and must still decode — that is the common case at acceptance.
+        let bare: DeliveryTrace = serde_json::from_value(
+            serde_json::json!({"channel": "C1", "thread_ts": "1.1", "message_ts": "1.1"}),
+        )
+        .expect("decode without an affordance");
+        assert!(bare.placeholder_ts.is_none());
+        assert!(!bare.reacted);
     }
 
     /// Stub Slack Web API: answers every method `ok` and records the calls.
@@ -1288,10 +1507,17 @@ mod tests {
         let affordance = tokio::spawn(run_affordance(
             api,
             config,
-            "C1".into(),
-            "111.11".into(),
-            "222.22".into(),
+            test_ingress().await,
+            "C1:222.22".to_string(),
+            DeliveryTrace {
+                channel: "C1".into(),
+                thread_ts: "111.11".into(),
+                message_ts: "222.22".into(),
+                placeholder_ts: None,
+                reacted: false,
+            },
             std::time::Duration::from_millis(10),
+            std::time::Duration::ZERO,
             rx,
             cancel.clone(),
         ));
