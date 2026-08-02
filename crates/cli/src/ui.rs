@@ -8026,6 +8026,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
                 .wrap(Wrap { trim: false }),
             area,
         );
+        clear_pane_side_borders(f, area, app);
         return;
     };
 
@@ -8068,6 +8069,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
     );
     let inner = block.inner(area);
     f.render_widget(block, area);
+    clear_pane_side_borders(f, area, app);
     if inner.width < 36 || inner.height < 8 {
         return;
     }
