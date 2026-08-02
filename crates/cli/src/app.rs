@@ -209,7 +209,10 @@ pub enum ListItem {
     },
     Session {
         summary: SessionSummary,
-        indented: bool,
+        /// Visual depth in the session tree, keeping every generation
+        /// distinct (fork of fork, subagent of subagent, and mixed trees)
+        /// without changing depth-first list order.
+        nesting_depth: usize,
         has_children: bool,
         children_expanded: bool,
         /// A hidden non-archived descendant needs attention while this row is collapsed.
@@ -229,7 +232,8 @@ pub enum ListItem {
         section: ArchiveSection,
         count: usize,
         expanded: bool,
-        indented: bool,
+        /// Visual depth of this disclosure in the session tree.
+        nesting_depth: usize,
     },
 }
 
@@ -588,41 +592,14 @@ pub(crate) fn daemon_restart_status_message(
     }
 }
 
-pub(crate) fn list_session_indent_cells(
-    s: &SessionSummary,
-    indented: bool,
-    has_children: bool,
-) -> u16 {
-    if is_subagent_session(s) || s.forked_from.is_some() {
-        // Align the child's STATUS glyph with its parent session's name.
-        // A grouped parent starts one cell later. Account for the child's
-        // own disclosure, optional lineage marker, and the leading space
-        // before its status glyph.
-        let parent_name_col = 5 + u16::from(s.group_id.is_some());
-        let child_prefix = u16::from(has_children) + u16::from(s.forked_from.is_some()) + 1; // leading space before status
-        parent_name_col.saturating_sub(child_prefix)
-    } else if indented && has_children {
-        1
-    } else if indented {
-        2
-    } else {
-        0
-    }
+pub(crate) fn list_session_indent_cells(nesting_depth: usize) -> u16 {
+    u16::try_from(nesting_depth)
+        .unwrap_or(u16::MAX)
+        .saturating_mul(2)
 }
 
-pub(crate) fn list_archive_indent_cells(
-    section: &ArchiveSection,
-    indented: bool,
-    parent_grouped: bool,
-) -> u16 {
-    match section {
-        // Align the disclosure triangle with the parent session's name —
-        // forks and subagents share the same indent alignment
-        // (`list_session_indent_cells` gives both the same formula).
-        ArchiveSection::Children(_) => 5 + u16::from(parent_grouped),
-        _ if indented => 2,
-        _ => 0,
-    }
+pub(crate) fn list_archive_indent_cells(nesting_depth: usize) -> u16 {
+    list_session_indent_cells(nesting_depth)
 }
 
 impl ListItem {
@@ -3589,8 +3566,8 @@ pub enum SessionListViewMode {
     /// One line per session: markers + status glyph + name + harness.
     #[default]
     Compact,
-    /// Two lines per session: the compact line plus a muted detail line
-    /// (model·effort, context gauge, activity, tokens, cost).
+    /// Three lines per session: the compact line, a muted detail line
+    /// (model·effort, context gauge, activity, tokens), and a blank spacer.
     Full,
 }
 
@@ -4009,7 +3986,7 @@ pub struct LayoutSnapshot {
     pub list_items_area: Option<ratatui::layout::Rect>,
     /// Display-row → list-item map for the rows drawn inside
     /// `list_items_area` this frame. One entry per screen row, top to
-    /// bottom. In full mode a session item spans two display rows, so
+    /// bottom. In full mode a session item spans three display rows, so
     /// clicks can no longer assume one row per item; when this is empty
     /// (list not rendered this frame, e.g. in tests that fabricate the
     /// layout) hit-testing falls back to the 1:1 compact mapping.
@@ -7950,7 +7927,7 @@ impl App {
         fn push_session_tree<'a>(
             out: &mut Vec<ListItem>,
             s: &SessionSummary,
-            indented: bool,
+            nesting_depth: usize,
             subagents_by_parent: &HashMap<&'a str, Vec<&'a SessionSummary>>,
             forks_by_parent: &HashMap<&'a str, Vec<&'a SessionSummary>>,
             collapsed: &HashSet<String>,
@@ -7968,7 +7945,7 @@ impl App {
                 && descendants_need_attention(&s.id, subagents_by_parent, forks_by_parent);
             out.push(ListItem::Session {
                 summary: s.clone(),
-                indented,
+                nesting_depth,
                 has_children,
                 children_expanded,
                 attention_rollup,
@@ -7988,7 +7965,7 @@ impl App {
                     push_session_tree(
                         out,
                         child,
-                        true,
+                        nesting_depth + 1,
                         subagents_by_parent,
                         forks_by_parent,
                         collapsed,
@@ -8016,7 +7993,7 @@ impl App {
             while let Some((fork, depth)) = stack.pop() {
                 out.push(ListItem::Session {
                     summary: fork.clone(),
-                    indented: true,
+                    nesting_depth: nesting_depth + depth,
                     has_children: false,
                     children_expanded: false,
                     attention_rollup: false,
@@ -8046,13 +8023,13 @@ impl App {
                     section,
                     count: archived_count,
                     expanded,
-                    indented: true,
+                    nesting_depth: nesting_depth + 1,
                 });
                 if expanded {
                     for fork in archived_forks {
                         out.push(ListItem::Session {
                             summary: fork.clone(),
-                            indented: true,
+                            nesting_depth: nesting_depth + 1,
                             has_children: false,
                             children_expanded: false,
                             attention_rollup: false,
@@ -8062,7 +8039,7 @@ impl App {
                         push_session_tree(
                             out,
                             child,
-                            true,
+                            nesting_depth + 1,
                             subagents_by_parent,
                             forks_by_parent,
                             collapsed,
@@ -8073,11 +8050,11 @@ impl App {
             }
         }
 
-        let push_session = |out: &mut Vec<ListItem>, s: &SessionSummary, indented: bool| {
+        let push_session = |out: &mut Vec<ListItem>, s: &SessionSummary, nesting_depth: usize| {
             push_session_tree(
                 out,
                 s,
-                indented,
+                nesting_depth,
                 &subagents_by_parent,
                 &forks_by_parent,
                 &self.children_collapsed,
@@ -8113,7 +8090,7 @@ impl App {
             });
             if sessions_expanded {
                 for session in routed {
-                    push_session(&mut out, session, true);
+                    push_session(&mut out, session, 1);
                 }
             }
         }
@@ -8144,7 +8121,7 @@ impl App {
         let (ungrouped_active, ungrouped_archived): (Vec<&SessionSummary>, Vec<&SessionSummary>) =
             ungrouped.into_iter().partition(|s| !s.archived);
         for s in ungrouped_active {
-            push_session(&mut out, s, false);
+            push_session(&mut out, s, 0);
         }
         if !ungrouped_archived.is_empty() {
             let expanded = self.show_archived_ungrouped;
@@ -8152,11 +8129,11 @@ impl App {
                 section: ArchiveSection::Ungrouped,
                 count: ungrouped_archived.len(),
                 expanded,
-                indented: true,
+                nesting_depth: 1,
             });
             if expanded {
                 for s in ungrouped_archived {
-                    push_session(&mut out, s, false);
+                    push_session(&mut out, s, 0);
                 }
             }
         }
@@ -8195,7 +8172,7 @@ impl App {
             });
             if !g.collapsed {
                 for s in active {
-                    push_session(&mut out, s, true);
+                    push_session(&mut out, s, 1);
                 }
                 if !archived.is_empty() {
                     let expanded = self.show_archived_groups.contains(&g.id);
@@ -8203,11 +8180,11 @@ impl App {
                         section: ArchiveSection::Group(g.id.clone()),
                         count: archived.len(),
                         expanded,
-                        indented: true,
+                        nesting_depth: 1,
                     });
                     if expanded {
                         for s in archived {
-                            push_session(&mut out, s, true);
+                            push_session(&mut out, s, 1);
                         }
                     }
                 }
@@ -11643,19 +11620,19 @@ impl App {
     }
 
     /// A list item's display height under the current view mode: full-mode
-    /// session cards take two rows, everything else (group headers, archived
+    /// session cards take three rows, everything else (group headers, archived
     /// disclosure rows, every compact-mode row) takes one.
     pub(crate) fn list_item_display_height(&self, item: &ListItem) -> usize {
         match item {
             ListItem::Service { .. } => 1,
-            ListItem::Session { .. } if self.list_mode == SessionListViewMode::Full => 2,
+            ListItem::Session { .. } if self.list_mode == SessionListViewMode::Full => 3,
             _ => 1,
         }
     }
 
     /// Largest useful `list_scroll_offset`: the smallest offset that still
     /// fills the viewport down to the last item. Measured in display rows so
-    /// full-mode's two-row cards count double; with uniform one-row items
+    /// full-mode's three-row cards count triple; with uniform one-row items
     /// this reduces to `len − visible_rows`.
     pub(crate) fn list_max_scroll(&self, items: &[ListItem], visible_rows: usize) -> usize {
         let mut rows = 0usize;
@@ -32052,7 +32029,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_mode_list_max_scroll_counts_cards_as_two_rows() {
+    async fn full_mode_list_max_scroll_counts_cards_as_three_rows() {
         let (mut app, _dir, server) = empty_app().await;
         app.sessions = (0..10)
             .map(|index| {
@@ -32069,13 +32046,13 @@ mod tests {
             "compact mode reduces to len − visible_rows"
         );
         app.list_mode = SessionListViewMode::Full;
-        // Four rows fit two 2-row cards, so the last page starts at item 8.
-        assert_eq!(app.list_max_scroll(&items, 4), 8);
+        // Four rows fit one 3-row card, so the last page starts at item 9.
+        assert_eq!(app.list_max_scroll(&items, 4), 9);
         server.abort();
     }
 
     /// Scroll-into-view measures display rows, not items. In full mode a
-    /// card is two rows tall, so an offset computed by item count would put
+    /// card is three rows tall, so an offset computed by item count would put
     /// the target's second line just past the bottom edge — visible enough to
     /// pass a naive check, and clipped in the terminal.
     #[tokio::test]
@@ -32094,8 +32071,8 @@ mod tests {
         // Compact: four one-row items fit, so item 9 sits at offset 6.
         assert_eq!(app.list_scroll_offset_for_visible(&items, 9, 4, 0), 6);
         app.list_mode = SessionListViewMode::Full;
-        // Full: only two 2-row cards fit, so item 9 sits at offset 8.
-        assert_eq!(app.list_scroll_offset_for_visible(&items, 9, 4, 0), 8);
+        // Full: only one 3-row card fits, so item 9 sits at offset 9.
+        assert_eq!(app.list_scroll_offset_for_visible(&items, 9, 4, 0), 9);
         server.abort();
     }
 
@@ -32186,10 +32163,10 @@ mod tests {
             .expect("render");
 
         let items_area = app.layout.list_items_area.expect("list items area");
-        // Each session card spans two display rows: s1 at rows 0-1, s2 at
-        // rows 2-3.
+        // Each session card spans three display rows: s1 at rows 0-2, s2 at
+        // rows 3-5.
         assert_eq!(
-            app.layout.list_visible_rows[..4].to_vec(),
+            app.layout.list_visible_rows[..6].to_vec(),
             vec![
                 ListRowHit {
                     item_index: 0,
@@ -32200,8 +32177,16 @@ mod tests {
                     first_line: false
                 },
                 ListRowHit {
+                    item_index: 0,
+                    first_line: false
+                },
+                ListRowHit {
                     item_index: 1,
                     first_line: true
+                },
+                ListRowHit {
+                    item_index: 1,
+                    first_line: false
                 },
                 ListRowHit {
                     item_index: 1,
@@ -32222,11 +32207,11 @@ mod tests {
             row,
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
-        // A click on s2's DETAIL line (row 3) selects s2 — under the old 1:1
+        // A click on s2's DETAIL line (row 4) selects s2 — under the old 1:1
         // row mapping it would have landed past the end of the list.
         let col = items_area.x + items_area.width / 2;
-        app.on_mouse(click(col, items_area.y + 3)).await;
-        app.on_mouse(release(col, items_area.y + 3)).await;
+        app.on_mouse(click(col, items_area.y + 4)).await;
+        app.on_mouse(release(col, items_area.y + 4)).await;
         assert_eq!(app.selection, Selection::Session("s2".into()));
 
         // A click on s1's detail line selects the session, not a control.
@@ -32235,6 +32220,12 @@ mod tests {
         app.on_mouse(release(items_area.x + 2, items_area.y + 1))
             .await;
         assert_eq!(app.selection, Selection::Session("s1".into()));
+
+        // The breathing row remains part of its card for selection and
+        // scrolling even though it paints no content.
+        app.on_mouse(click(col, items_area.y + 5)).await;
+        app.on_mouse(release(col, items_area.y + 5)).await;
+        assert_eq!(app.selection, Selection::Session("s2".into()));
         server.abort();
     }
 
@@ -32274,15 +32265,19 @@ mod tests {
         .await;
         assert_eq!(app.list_mode, SessionListViewMode::Full);
 
-        // The next frame renders the session as a two-row card.
+        // The next frame renders the session as a three-row card.
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("render");
         assert_eq!(
-            app.layout.list_visible_rows[..2].to_vec(),
+            app.layout.list_visible_rows[..3].to_vec(),
             vec![
                 ListRowHit {
                     item_index: 0,
                     first_line: true
+                },
+                ListRowHit {
+                    item_index: 0,
+                    first_line: false
                 },
                 ListRowHit {
                     item_index: 0,
@@ -41883,7 +41878,7 @@ mod tests {
         ));
         assert!(matches!(
             &items[1],
-            ListItem::Session { summary, indented: true, .. }
+            ListItem::Session { summary, nesting_depth: 1, .. }
                 if summary.id == "service-session"
         ));
         assert_eq!(
@@ -43192,21 +43187,23 @@ mod tests {
         });
         app.sessions.push(nested);
         let items = app.list_items();
-        let rows: Vec<(String, bool)> = items
+        let rows: Vec<(String, usize)> = items
             .iter()
             .filter_map(|it| match it {
                 ListItem::Session {
-                    summary, indented, ..
-                } => Some((summary.id.clone(), *indented)),
+                    summary,
+                    nesting_depth,
+                    ..
+                } => Some((summary.id.clone(), *nesting_depth)),
                 _ => None,
             })
             .collect();
         assert_eq!(
             rows,
             vec![
-                ("s1".to_string(), false),
-                ("s1-fork".to_string(), true),
-                ("s1-fork-fork".to_string(), true),
+                ("s1".to_string(), 0),
+                ("s1-fork".to_string(), 1),
+                ("s1-fork-fork".to_string(), 2),
             ],
             "forks nest indented under their parent, recursively, and \
              never appear as their own top-level rows"
@@ -43266,7 +43263,7 @@ mod tests {
         assert!(
             items.iter().any(|it| matches!(
                 it,
-                ListItem::Session { summary, indented: true, .. } if summary.id == "s1-fork"
+                ListItem::Session { summary, nesting_depth: 1, .. } if summary.id == "s1-fork"
             )),
             "expanding the row reveals the fork's own row"
         );
@@ -43317,14 +43314,14 @@ mod tests {
         assert!(
             items.iter().any(|it| matches!(
                 it,
-                ListItem::Session { summary, indented: true, .. } if summary.id == "s1-fork"
+                ListItem::Session { summary, nesting_depth: 1, .. } if summary.id == "s1-fork"
             )),
             "expanding reveals the archived fork"
         );
         assert!(
             items.iter().any(|it| matches!(
                 it,
-                ListItem::Session { summary, indented: true, .. } if summary.id == "s1-sub-archived"
+                ListItem::Session { summary, nesting_depth: 1, .. } if summary.id == "s1-sub-archived"
             )),
             "expanding reveals the archived subagent"
         );
@@ -43535,13 +43532,13 @@ mod tests {
         match &items[0] {
             ListItem::Session {
                 summary,
-                indented,
+                nesting_depth,
                 has_children,
                 children_expanded,
                 ..
             } => {
                 assert_eq!(summary.id, "sparent");
-                assert!(!indented);
+                assert_eq!(*nesting_depth, 0);
                 assert!(*has_children);
                 assert!(*children_expanded);
             }
@@ -43550,19 +43547,19 @@ mod tests {
         match &items[1] {
             ListItem::Session {
                 summary,
-                indented,
+                nesting_depth,
                 has_children,
                 ..
             } => {
                 assert_eq!(summary.id, "schild");
-                assert!(*indented);
+                assert_eq!(*nesting_depth, 1);
                 assert!(*has_children);
             }
             _ => panic!("expected subagent session"),
         }
         assert!(matches!(
             &items[2],
-            ListItem::Session { summary, indented: true, has_children: false, .. }
+            ListItem::Session { summary, nesting_depth: 2, has_children: false, .. }
                 if summary.id == "sgrandchild"
         ));
 
@@ -43859,11 +43856,11 @@ mod tests {
             matches!(&items[0], ListItem::Session { summary, has_children: true, children_expanded: true, .. } if summary.id == "sparent")
         );
         assert!(
-            matches!(&items[1], ListItem::Session { summary, indented: true, .. } if summary.id == "sactive-child"),
+            matches!(&items[1], ListItem::Session { summary, nesting_depth: 1, .. } if summary.id == "sactive-child"),
             "active subagent should remain ungrouped under its parent",
         );
         assert!(
-            matches!(&items[2], ListItem::Session { summary, indented: true, .. } if summary.id == "sfork"),
+            matches!(&items[2], ListItem::Session { summary, nesting_depth: 1, .. } if summary.id == "sfork"),
             "fork should follow active subagents and precede the archive disclosure",
         );
         match &items[3] {
@@ -43871,12 +43868,12 @@ mod tests {
                 section,
                 count,
                 expanded,
-                indented,
+                nesting_depth,
             } => {
                 assert_eq!(*section, ArchiveSection::Children("sparent".into()));
                 assert_eq!(*count, 1);
                 assert!(!*expanded, "archived subagent row starts collapsed");
-                assert!(*indented, "archived subagent row is nested under parent");
+                assert_eq!(*nesting_depth, 1, "archive row is nested under parent");
             }
             other => panic!("expected archived subagent disclosure row, got {other:?}"),
         }
@@ -43891,7 +43888,7 @@ mod tests {
             ListItem::ArchivedRow { expanded: true, .. }
         ));
         assert!(
-            matches!(&expanded[4], ListItem::Session { summary, indented: true, .. } if summary.id == "sarchived-child" && summary.archived),
+            matches!(&expanded[4], ListItem::Session { summary, nesting_depth: 1, .. } if summary.id == "sarchived-child" && summary.archived),
             "expanded archived subagent should follow its disclosure row",
         );
 
@@ -43942,7 +43939,7 @@ mod tests {
             "active session should render directly",
         );
         assert!(
-            matches!(&items[1], ListItem::Session { summary, indented: true, .. } if summary.id == "subagent"),
+            matches!(&items[1], ListItem::Session { summary, nesting_depth: 1, .. } if summary.id == "subagent"),
             "subagent should render indented before the archive disclosure",
         );
         match &items[2] {
@@ -43950,12 +43947,12 @@ mod tests {
                 section,
                 count,
                 expanded,
-                indented,
+                nesting_depth,
             } => {
                 assert_eq!(*section, ArchiveSection::Ungrouped);
                 assert_eq!(*count, 1);
                 assert!(!*expanded, "archived row starts collapsed");
-                assert!(*indented, "archive disclosure is nested under its section");
+                assert_eq!(*nesting_depth, 1, "archive disclosure is nested");
             }
             other => panic!("expected an archived row, got {other:?}"),
         }
@@ -44218,52 +44215,13 @@ mod tests {
     }
 
     #[test]
-    fn list_session_indent_policy_distinguishes_subagents_and_grouped_parents() {
-        let user = summary_with_kind(construct_protocol::SessionKind::User);
-        let subagent = summary_with_kind(construct_protocol::SessionKind::Subagent);
-        let mut fork = summary_with_kind(construct_protocol::SessionKind::User);
-        fork.forked_from = Some(construct_protocol::ForkedFrom {
-            session_id: "parent".into(),
-            transcript_seq: 0,
-            at_ms: 0,
-            parent_busy_ms: 0,
-            parent_message_count: 0,
-            parent_tokens: Default::default(),
-            is_reset_snapshot: false,
-        });
-
-        assert_eq!(list_session_indent_cells(&user, false, false), 0);
-        assert_eq!(list_session_indent_cells(&user, true, false), 2);
-        assert_eq!(list_session_indent_cells(&user, true, true), 1);
-        assert_eq!(list_session_indent_cells(&subagent, true, false), 4);
-        assert_eq!(list_session_indent_cells(&fork, true, false), 3);
-        let mut grouped_subagent = subagent.clone();
-        grouped_subagent.group_id = Some("group".into());
-        let mut grouped_fork = fork.clone();
-        grouped_fork.group_id = Some("group".into());
-        assert_eq!(list_session_indent_cells(&grouped_subagent, true, false), 5);
-        assert_eq!(list_session_indent_cells(&grouped_fork, true, false), 4);
-        assert_eq!(list_session_indent_cells(&subagent, true, true), 3);
-        assert_eq!(
-            list_archive_indent_cells(&ArchiveSection::Ungrouped, true, false),
-            2
-        );
-        assert_eq!(
-            list_archive_indent_cells(&ArchiveSection::Group("group".into()), true, false),
-            2
-        );
-        assert_eq!(
-            list_archive_indent_cells(&ArchiveSection::Children("parent".into()), true, false),
-            5
-        );
-        assert_eq!(
-            list_archive_indent_cells(
-                &ArchiveSection::Children("grouped-parent".into()),
-                true,
-                true
-            ),
-            6
-        );
+    fn list_indent_policy_preserves_every_nesting_level() {
+        assert_eq!(list_session_indent_cells(0), 0);
+        assert_eq!(list_session_indent_cells(1), 2);
+        assert_eq!(list_session_indent_cells(2), 4);
+        assert_eq!(list_session_indent_cells(3), 6);
+        assert_eq!(list_archive_indent_cells(1), 2);
+        assert_eq!(list_archive_indent_cells(4), 8);
     }
 
     #[tokio::test]

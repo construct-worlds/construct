@@ -3090,10 +3090,11 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 }
                 AppListItem::Session {
                     summary: s,
-                    indented,
+                    nesting_depth,
                     has_children,
                     children_expanded,
                     attention_rollup,
+                    ..
                 } => {
                     let expand_glyph = if *has_children {
                         Some(if *children_expanded { "▼" } else { "▶" })
@@ -3101,11 +3102,9 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         None
                     };
                     let lineage_glyph = session_list_marker(s);
-                    let indent_prefix = " ".repeat(crate::app::list_session_indent_cells(
-                        s,
-                        *indented,
-                        *has_children,
-                    ) as usize);
+                    let indent_prefix = " ".repeat(
+                        crate::app::list_session_indent_cells(*nesting_depth) as usize,
+                    );
                     // Fixed-width left side: indent + optional disclosure (1)
                     // + optional lineage (1) + " glyph " (3).
                     // Only forks reserve the lineage cell, keeping ordinary
@@ -3156,6 +3155,10 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         Style::default()
                             .fg(app.theme.dim)
                             .add_modifier(Modifier::DIM)
+                    } else if *has_children {
+                        Style::default()
+                            .fg(app.theme.text)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(app.theme.text)
                     };
@@ -3203,6 +3206,9 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                             prefix_w,
                             row_w,
                         ));
+                        // Full mode trades viewport density for breathing
+                        // room while keeping the exact same information.
+                        lines.push(Line::default());
                     }
                     lines
                 }
@@ -3227,29 +3233,18 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     ])]
                 }
                 AppListItem::ArchivedRow {
-                    section,
                     count,
                     expanded,
-                    indented,
+                    nesting_depth,
+                    ..
                 } => {
                     // Expandable footer: "▸ N archived" (collapsed) /
                     // "▾ N archived" (open). Indented to sit under a project's
-                    // members. A subagent archive triangle aligns with the
-                    // parent name, matching the child status glyphs above it.
+                    // members or at the next depth beneath a parent session.
                     let disclosure = if *expanded { "▾" } else { "▸" };
-                    let parent_grouped = match section {
-                        crate::app::ArchiveSection::Children(parent_id) => app
-                            .sessions
-                            .iter()
-                            .find(|s| s.id == *parent_id)
-                            .is_some_and(|s| s.group_id.is_some()),
-                        _ => false,
-                    };
-                    let indent = " ".repeat(crate::app::list_archive_indent_cells(
-                        section,
-                        *indented,
-                        parent_grouped,
-                    ) as usize);
+                    let indent = " ".repeat(
+                        crate::app::list_archive_indent_cells(*nesting_depth) as usize,
+                    );
                     vec![Line::from(Span::styled(
                         format!("{indent}{disclosure} {count} archived"),
                         session_list_secondary_style(&app.theme),
@@ -22816,7 +22811,7 @@ mod tests {
         };
         let item = |s: &SessionSummary| Item::Session {
             summary: s.clone(),
-            indented: false,
+            nesting_depth: 0,
             has_children: false,
             children_expanded: false,
             attention_rollup: false,
@@ -24601,7 +24596,7 @@ mod tests {
     fn tally_row(summary: SessionSummary) -> AppListItem {
         AppListItem::Session {
             summary,
-            indented: false,
+            nesting_depth: 0,
             has_children: false,
             children_expanded: false,
             attention_rollup: false,
@@ -24787,7 +24782,7 @@ mod tests {
         parent.needs_attention = false;
         let items = vec![AppListItem::Session {
             summary: parent,
-            indented: false,
+            nesting_depth: 0,
             has_children: true,
             children_expanded: false,
             attention_rollup: true,

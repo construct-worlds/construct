@@ -1,7 +1,7 @@
 # 0078-forks-carry-lineage-branch-rail-and-merge
 
 Status: accepted
-Date: 2026-07-10
+Date: 2026-08-01
 Area: ux
 Scope: A single harness-picker fork action whose same-harness default requires
 no initial prompt and whose result is always lineage-tracked and mergeable.
@@ -47,8 +47,9 @@ transcript seeding, but it no longer requires separate keybindings or flows.
 - Forks remain visible user sessions, grouped and indented beneath their parent
   in clients that choose to render lineage. A fork's lineage marker and its
   independent pinned state occupy separate list affordances, so pinning a fork
-  never hides or replaces its fork identity. Its status glyph aligns with the
-  start of its parent session's name.
+  never hides or replaces its fork identity. Each successive fork generation
+  receives another indentation step, preserving the lineage hierarchy without
+  changing user-defined session order.
 - Same-harness adapters may use native fork state for full context fidelity;
   cross-harness forks retain the portable transcript-seed behavior (spec
   0031). Both are lineage-tracked identically.
