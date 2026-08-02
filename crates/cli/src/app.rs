@@ -40891,6 +40891,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_view_honors_pane_side_border_toggle() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".to_string());
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let view = app.layout.view_area.expect("service view");
+        assert_eq!(
+            term.backend()
+                .buffer()
+                .cell((view.x, view.y + 1))
+                .expect("left side border cell")
+                .symbol(),
+            " ",
+            "service side borders should start hidden like session side borders"
+        );
+
+        app.run_slash_command("border").await;
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        assert_eq!(
+            term.backend()
+                .buffer()
+                .cell((view.x, view.y + 1))
+                .expect("left side border cell")
+                .symbol(),
+            "│",
+            "service side borders should appear when enabled"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn service_view_renders_typed_public_channel_endpoint() {
         let (mut app, _dir, server) = captured_app().await;
         let service = service_summary_for_test("assistant");
