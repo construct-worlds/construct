@@ -1800,15 +1800,35 @@ pub struct PlaybookRunProgress {
     /// the projected status string is the client-facing contract.
     #[serde(default, skip_serializing)]
     pub queued_behind_current_turn: bool,
+    /// Internal daemon fact: the session whose turn this run actually is —
+    /// the Playbook's own session for an owner-targeted Run, the fork for a
+    /// fork Run/verb. Session lifecycle progress and stop signals are only
+    /// read from this session (spec 0176). `None` while a fork is still being
+    /// created, and for dispatches that fan out to sessions other than the
+    /// owner (instant dispatch), which no single session's turn governs.
+    #[serde(default, skip_serializing)]
+    pub execution_session_id: Option<String>,
+    /// Internal daemon fact: set once this run's prompt has actually reached
+    /// its execution session. Before that, every state transition the session
+    /// reports belongs to its boot or to a previous turn, never to this run.
+    #[serde(default, skip_serializing)]
+    pub dispatched_at_ms: Option<i64>,
+    /// Internal daemon fact: at dispatch the execution session was not
+    /// observably idle, so a `Running` already in flight belongs to whatever
+    /// it was doing before — this run's turn only starts at the next
+    /// `Running` after an intervening idle. See spec 0176.
+    #[serde(default, skip_serializing)]
+    pub awaiting_turn_start: bool,
     /// True once an in-run playbook declaration/edit has narrowed this run —
     /// i.e. the run is actively managed via per-block declarations rather than
     /// riding the untouched optimistic full-playbook shimmer. A managed run is
     /// cleared by its pending set emptying, a terminal owning-session state, or
-    /// the inactivity backstop — NOT by the owning session merely returning to
-    /// awaiting-input (a self-scheduling agent goes idle while delegated or
+    /// the inactivity backstop — NOT by its execution session merely returning
+    /// to awaiting-input (a self-scheduling agent goes idle while delegated or
     /// background work is still in flight). An unmanaged run that no
-    /// declaration has narrowed still clears when the owning session goes idle
-    /// after being seen running. See `specs/0042-playbook-run-progress-affordance.md`.
+    /// declaration has narrowed still clears when its execution session goes
+    /// idle after being seen running; spec 0176 decides which transitions count
+    /// as this run's. See `specs/0042-playbook-run-progress-affordance.md`.
     #[serde(default)]
     pub agent_managed: bool,
     /// Derived compact stage for clients to render next to the Run control.
@@ -4506,6 +4526,9 @@ mod playbook_block_tests {
             seen_running: false,
             first_output_seen: false,
             queued_behind_current_turn: false,
+            execution_session_id: None,
+            dispatched_at_ms: None,
+            awaiting_turn_start: false,
             agent_managed: false,
             stage: PlaybookRunStage::Pressed,
             settled_block_count: 0,

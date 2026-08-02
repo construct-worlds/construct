@@ -227,6 +227,10 @@ impl SessionManager {
             .collect()
     }
 
+    /// Test helper: arm a run and immediately mark it delivered to its own
+    /// session, which is what every caller that isn't a fork does one await
+    /// later. Unit tests drive the lifecycle directly, so they need the run
+    /// already past the dispatch gate.
     #[cfg(test)]
     pub(super) fn start_playbook_run(
         &self,
@@ -235,14 +239,21 @@ impl SessionManager {
         is_selection: bool,
         initial: Option<&[bool]>,
     ) -> Option<PlaybookRunProgress> {
-        self.start_playbook_run_with_dispatch_state(
+        let run = self.start_playbook_run_with_dispatch_state(
             session_id,
             body,
             is_selection,
             initial,
             false,
             None,
-        )
+        );
+        if run.is_some() {
+            self.mark_playbook_run_dispatched(
+                session_id,
+                construct_protocol::SessionState::AwaitingInput,
+            );
+        }
+        run
     }
 
     pub(super) fn start_playbook_run_with_dispatch_state(
@@ -360,6 +371,13 @@ impl SessionManager {
             seen_running: false,
             first_output_seen: false,
             queued_behind_current_turn,
+            // The run is armed before its prompt goes out (#1122), so it does
+            // not yet belong to any session's turn: it binds to its execution
+            // session, and starts reading that session's lifecycle, only once
+            // the prompt has actually been delivered (spec 0176).
+            execution_session_id: None,
+            dispatched_at_ms: None,
+            awaiting_turn_start: false,
             // Unmanaged until the agent narrows it with a declaration/edit.
             // Until then it is the optimistic full-playbook shimmer and stays
             // subject to the owning-session idle stop signal.
@@ -556,16 +574,89 @@ impl SessionManager {
         }
     }
 
-    pub(super) fn mark_playbook_run_output_seen(&self, session_id: &str) {
-        let mut updated = false;
+    /// Bind an armed run to the session its turn will actually happen in.
+    /// Called as soon as a fork Run knows its fork's id, so the owner's own
+    /// lifecycle can never be mistaken for the fork's work (spec 0176).
+    pub(super) fn bind_playbook_run_execution(&self, session_id: &str, execution_session_id: &str) {
         if let Ok(mut runs) = self.playbook_runs.lock() {
             if let Some(run) = runs.get_mut(session_id) {
-                if !run.first_output_seen {
-                    run.first_output_seen = true;
-                    updated = true;
+                run.execution_session_id = Some(execution_session_id.to_string());
+            }
+        }
+    }
+
+    /// The run's prompt has reached `execution_session_id`: from here on that
+    /// session's turn is this run's turn (spec 0176).
+    ///
+    /// `state_at_dispatch` is the execution session's state as the daemon has
+    /// observed it so far. Anything but idle means a turn is already in
+    /// flight — the session's boot, or whatever it was doing before — so the
+    /// `Running` currently in effect is not ours: this run's turn starts at
+    /// the next `Running` after an intervening idle. Because the daemon's view
+    /// of a session's state is advanced by the same in-order event drain that
+    /// reports these transitions, an observed idle also means every event the
+    /// adapter emitted before it has already been consumed — so a `Running`
+    /// seen after an idle-at-dispatch can only be a new turn.
+    pub(super) fn mark_playbook_run_dispatched(
+        &self,
+        execution_session_id: &str,
+        state_at_dispatch: construct_protocol::SessionState,
+    ) {
+        let now_ms = Utc::now().timestamp_millis();
+        if let Ok(mut runs) = self.playbook_runs.lock() {
+            // The run is keyed by its Playbook's session; a fork Run's
+            // execution session is a different one, already bound above.
+            let key = runs
+                .iter()
+                .find(|(key, run)| {
+                    run.execution_session_id.as_deref() == Some(execution_session_id)
+                        || (run.execution_session_id.is_none()
+                            && key.as_str() == execution_session_id)
+                })
+                .map(|(key, _)| key.clone());
+            if let Some(run) = key.and_then(|key| runs.get_mut(&key)) {
+                run.execution_session_id = Some(execution_session_id.to_string());
+                run.dispatched_at_ms = Some(now_ms);
+                run.awaiting_turn_start =
+                    state_at_dispatch != construct_protocol::SessionState::AwaitingInput;
+            }
+        }
+    }
+
+    /// Find the run whose lifecycle `session_id` drives: the one it executes,
+    /// falling back to the one it owns while that run has no execution
+    /// session bound yet.
+    fn playbook_run_key_for_execution_session(
+        runs: &std::collections::HashMap<String, PlaybookRunProgress>,
+        session_id: &str,
+    ) -> Option<String> {
+        runs.iter()
+            .find(|(key, run)| match run.execution_session_id.as_deref() {
+                Some(exec) => exec == session_id,
+                None => key.as_str() == session_id,
+            })
+            .map(|(key, _)| key.clone())
+    }
+
+    pub(super) fn mark_playbook_run_output_seen(&self, session_id: &str) {
+        let mut updated = false;
+        let mut owner: Option<String> = None;
+        if let Ok(mut runs) = self.playbook_runs.lock() {
+            let key = Self::playbook_run_key_for_execution_session(&runs, session_id);
+            if let Some(key) = key {
+                if let Some(run) = runs.get_mut(&key) {
+                    // Output from before the prompt was delivered is the
+                    // session's own boot chatter, not this run producing
+                    // something (spec 0176).
+                    if !run.first_output_seen && run.dispatched_at_ms.is_some() {
+                        run.first_output_seen = true;
+                        updated = true;
+                        owner = Some(key);
+                    }
                 }
             }
         }
+        let session_id = owner.as_deref().unwrap_or(session_id);
         if updated {
             if let Ok(playbook) = self.storage.read_playbook(session_id) {
                 self.broadcast_playbook_state(playbook);
@@ -582,15 +673,52 @@ impl SessionManager {
         let now_ms = Utc::now().timestamp_millis();
         let mut clear = false;
         let mut updated = false;
+        let mut owner: Option<String> = None;
         if let Ok(mut runs) = self.playbook_runs.lock() {
-            if let Some(run) = runs.get_mut(session_id) {
+            // Progress and stop signals come from the session executing the
+            // run — the fork for a fork Run — never from a bystander that
+            // merely owns the Playbook (spec 0176). A terminal state is the
+            // exception: the Playbook's own session dying takes its run with
+            // it, because nothing is left to render or settle it.
+            let executed_key = runs
+                .iter()
+                .find(|(_, run)| run.execution_session_id.as_deref() == Some(session_id))
+                .map(|(key, _)| key.clone());
+            let is_execution_session = executed_key.is_some();
+            let key = match executed_key {
+                Some(key) => key,
+                // Not executing anything: only this session's own run, and
+                // only its death, is ours to act on.
+                None if runs.contains_key(session_id)
+                    && matches!(state, SessionState::Done | SessionState::Errored) =>
+                {
+                    session_id.to_string()
+                }
+                None => return,
+            };
+            owner = Some(key.clone());
+            if let Some(run) = runs.get_mut(&key) {
+                // Nothing this session reports counts toward the run until the
+                // run's prompt has actually reached it: before that, every
+                // transition is the session's boot or its previous turn
+                // winding down (spec 0176). This is what makes arming the run
+                // before delivery (#1122) safe.
+                let dispatched = is_execution_session && run.dispatched_at_ms.is_some();
                 match state {
-                    SessionState::Running => {
+                    SessionState::Running if dispatched && !run.awaiting_turn_start => {
                         if !run.seen_running {
                             run.seen_running = true;
                             updated = true;
                         }
                     }
+                    SessionState::Running => {}
+                    SessionState::AwaitingInput if dispatched && run.awaiting_turn_start => {
+                        // The turn that was already in flight at dispatch has
+                        // ended. This idle belongs to it, not to us; the next
+                        // Running is the start of our turn.
+                        run.awaiting_turn_start = false;
+                    }
+                    SessionState::AwaitingInput if !dispatched => {}
                     SessionState::Done | SessionState::Errored => {
                         // Terminal: the owning agent is gone and can never
                         // settle the remaining blocks, so clear
@@ -636,12 +764,16 @@ impl SessionManager {
                         // however many hours the work takes. The debounce
                         // covers the dispatch window itself, where a trailing
                         // idle from the previous turn can still arrive before
-                        // this one starts.
+                        // this one starts. It runs from delivery, not from
+                        // when the run was armed: a fork Run's prompt only
+                        // goes out once the fork's harness is ready, which can
+                        // be seconds after arming (spec 0149).
                         if !run.seen_running
                             && !run.first_output_seen
                             && !run.agent_managed
-                            && now_ms.saturating_sub(run.started_at_ms)
-                                > PLAYBOOK_RUN_IDLE_WITHOUT_TURN_GRACE_MS
+                            && now_ms.saturating_sub(
+                                run.dispatched_at_ms.unwrap_or(run.started_at_ms),
+                            ) > PLAYBOOK_RUN_IDLE_WITHOUT_TURN_GRACE_MS
                         {
                             clear = true;
                         }
@@ -650,9 +782,10 @@ impl SessionManager {
                 }
             }
             if clear {
-                runs.remove(session_id);
+                runs.remove(&key);
             }
         }
+        let session_id = owner.as_deref().unwrap_or(session_id);
         if clear || updated {
             if let Ok(playbook) = self.storage.read_playbook(session_id) {
                 self.broadcast_playbook_state(playbook);

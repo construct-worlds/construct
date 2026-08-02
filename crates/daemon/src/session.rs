@@ -3122,6 +3122,22 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Deliver a Run/verb prompt to the session that will execute it and, on
+    /// success, hand the armed run its dispatch fact (spec 0176). The state is
+    /// sampled *before* the prompt goes out: it is the daemon's record of how
+    /// far that session's own event stream has been consumed, and an idle
+    /// there is what makes the next `Running` provably this run's turn rather
+    /// than the tail of the session's boot or of the turn before.
+    async fn deliver_playbook_run_prompt(&self, session_id: &str, text: &str) -> Result<()> {
+        let state_at_dispatch = match self.get_entry(session_id).await {
+            Some(entry) => entry.summary.read().await.state,
+            None => construct_protocol::SessionState::Pending,
+        };
+        self.deliver_text_to_session(session_id, text).await?;
+        self.mark_playbook_run_dispatched(session_id, state_at_dispatch);
+        Ok(())
+    }
+
     /// Create a visible interactive same-harness fork positioned beside its
     /// Playbook owner. Prompt delivery is deliberately separate so callers can
     /// seed owner-side Playbook state before the fork starts acting.
@@ -3265,6 +3281,9 @@ impl SessionManager {
                 "playbook fork prompt: harness never reported ready; delivering anyway",
             );
         }
+        // Sampled after the readiness wait and before the paste — see
+        // `deliver_playbook_run_prompt` for why this is the right instant.
+        let state_at_dispatch = entry.summary.read().await.state;
         match delivery {
             PlaybookExecutionDelivery::ExternalPtyTypedSubmit => {
                 self.playbook_submit_typed_prompt_cold_start(fork_id, prompt)
@@ -3278,6 +3297,7 @@ impl SessionManager {
                 self.send_input(fork_id, prompt.to_string()).await?;
             }
         }
+        self.mark_playbook_run_dispatched(fork_id, state_at_dispatch);
         Ok(())
     }
 
@@ -3429,6 +3449,11 @@ impl SessionManager {
                     return Err(e);
                 }
             };
+            // This run's turn happens in the fork, so the fork's lifecycle —
+            // not the owner's — is what starts and stops it (spec 0176). Bind
+            // it before the (backgrounded) delivery so nothing the owner does
+            // in the meantime is mistaken for the fork's work.
+            self.bind_playbook_run_execution(&params.session_id, &fork_id);
             // The fork's own context env points at this sidecar. Store the
             // owner's Playbook context there before delivering the first turn.
             self.write_playbook_run_context(&fork_id, &run_context)?;
@@ -3443,7 +3468,7 @@ impl SessionManager {
         } else {
             let prompt = playbook_execution_prompt_with_comment(run_comment);
             if let Err(e) = self
-                .deliver_text_to_session(&params.session_id, &prompt)
+                .deliver_playbook_run_prompt(&params.session_id, &prompt)
                 .await
             {
                 self.clear_playbook_run(&params.session_id);
@@ -3732,7 +3757,7 @@ impl SessionManager {
                 comment,
                 Some((&params.session_id, &params.selection)),
             );
-            self.deliver_text_to_session(&params.session_id, &prompt)
+            self.deliver_playbook_run_prompt(&params.session_id, &prompt)
                 .await?;
             self.broadcast_playbook_state(playbook.clone());
             let blocks = self.playbook_blocks_projection(&params.session_id, &playbook.markdown);
@@ -3778,6 +3803,8 @@ impl SessionManager {
             false,
             params.selection_block_ids.as_deref(),
         );
+        // The verb's turn happens in its own session (spec 0176).
+        self.bind_playbook_run_execution(&params.session_id, &verb_session_id);
 
         let anchor = format!("{} @{{session:{}}}", params.selection, verb_session_id);
         let content_id = construct_protocol::playbook_block_spans(&anchor)
@@ -11879,11 +11906,13 @@ mod tests {
             .expect("start_playbook_run");
 
         // Backdate past the dispatch debounce: this idle report is no longer
-        // the previous turn winding down.
+        // the previous turn winding down. The debounce runs from delivery.
         {
             let mut runs = mgr.playbook_runs.lock().expect("runs");
             let run = runs.get_mut(&id).expect("run");
-            run.started_at_ms -= PLAYBOOK_RUN_IDLE_WITHOUT_TURN_GRACE_MS + 1_000;
+            let backdate = PLAYBOOK_RUN_IDLE_WITHOUT_TURN_GRACE_MS + 1_000;
+            run.started_at_ms -= backdate;
+            run.dispatched_at_ms = run.dispatched_at_ms.map(|ms| ms - backdate);
         }
 
         mgr.handle_event(
@@ -14892,7 +14921,22 @@ done
             run.system_status.as_deref(),
             Some(PLAYBOOK_SHIMMER_STATUS_QUEUED)
         );
+        // Dispatched into a session that is mid-turn: the Running already in
+        // effect belongs to that turn, so it does not start this run (spec
+        // 0176) — the status stays "queued" through it.
+        mgr.mark_playbook_run_dispatched(&id, SessionState::Running);
+        mgr.note_session_state_for_playbook_run(&id, SessionState::Running);
+        assert_eq!(
+            mgr.playbook_run_snapshot(&id)
+                .expect("queued snapshot")
+                .system_status
+                .as_deref(),
+            Some(PLAYBOOK_SHIMMER_STATUS_QUEUED),
+            "the turn already in flight at dispatch is not this run's turn"
+        );
 
+        // That turn ends, and the next one is ours.
+        mgr.note_session_state_for_playbook_run(&id, SessionState::AwaitingInput);
         mgr.note_session_state_for_playbook_run(&id, SessionState::Running);
         assert_eq!(
             mgr.playbook_run_snapshot(&id)
@@ -14910,6 +14954,100 @@ done
                 .system_status
                 .as_deref(),
             Some(PLAYBOOK_SHIMMER_STATUS_AGENT_WORKING)
+        );
+    }
+
+    /// Spec 0176. A Run is armed before its prompt goes out (#1122), so the
+    /// transitions a session reports in that window are its own boot — a PTY
+    /// harness announces `Running` on spawn and idles again at its first
+    /// prompt — or the tail of the turn before. Reading them as this run's
+    /// turn starting and ending settled the shimmer within milliseconds of
+    /// arming it, which is what made both Playbook e2e tests flaky.
+    #[tokio::test]
+    async fn playbook_run_ignores_transitions_from_before_its_prompt_was_delivered() {
+        use construct_protocol::SessionState;
+        let body = "# T\n\n- alpha\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        mgr.start_playbook_run_with_dispatch_state(&id, body, false, None, false, None)
+            .expect("arm run");
+
+        // The session's boot pair lands after the run was armed but before
+        // its prompt was delivered.
+        mgr.note_session_state_for_playbook_run(&id, SessionState::Running);
+        mgr.note_session_state_for_playbook_run(&id, SessionState::AwaitingInput);
+        assert!(
+            mgr.playbook_run_snapshot(&id).is_some(),
+            "a turn that ended before this run was dispatched is not this run's turn"
+        );
+
+        // Delivery, then the session's real turn: that one does stop it.
+        mgr.mark_playbook_run_dispatched(&id, SessionState::AwaitingInput);
+        mgr.note_session_state_for_playbook_run(&id, SessionState::Running);
+        assert!(
+            mgr.playbook_run_snapshot(&id)
+                .expect("run present")
+                .seen_running,
+            "a Running after delivery is this run's turn"
+        );
+        mgr.note_session_state_for_playbook_run(&id, SessionState::AwaitingInput);
+        assert!(
+            mgr.playbook_run_snapshot(&id).is_none(),
+            "this run's own turn ending still stops it"
+        );
+    }
+
+    /// Spec 0176. A fork Run's turn happens in the fork. The Playbook's own
+    /// session is a bystander — it can boot, be typed in, and go idle any
+    /// number of times while the fork works, and none of that settles the
+    /// fork's blocks. Only the fork's own lifecycle does.
+    #[tokio::test]
+    async fn playbook_fork_run_reads_the_fork_lifecycle_not_the_owners() {
+        use construct_protocol::SessionState;
+        let body = "# T\n\n- alpha\n";
+        let (mgr, _storage, owner) = playbook_test_mgr(body).await;
+        let fork = "sfork".to_string();
+        mgr.sessions.write().await.insert(
+            fork.clone(),
+            synthetic_entry(&fork, construct_protocol::SessionKind::User, 1),
+        );
+        mgr.start_playbook_run_with_dispatch_state(&owner, body, false, None, false, None)
+            .expect("arm run");
+        mgr.bind_playbook_run_execution(&owner, &fork);
+        mgr.mark_playbook_run_dispatched(&fork, SessionState::AwaitingInput);
+
+        // The owner runs a turn of its own and goes idle. The fork is still
+        // working, so its blocks keep shimmering.
+        mgr.note_session_state_for_playbook_run(&owner, SessionState::Running);
+        mgr.note_session_state_for_playbook_run(&owner, SessionState::AwaitingInput);
+        assert!(
+            mgr.playbook_run_snapshot(&owner).is_some(),
+            "the Playbook owner's own turn does not settle the fork's work"
+        );
+
+        // The fork's turn ending does.
+        mgr.note_session_state_for_playbook_run(&fork, SessionState::Running);
+        mgr.note_session_state_for_playbook_run(&fork, SessionState::AwaitingInput);
+        assert!(
+            mgr.playbook_run_snapshot(&owner).is_none(),
+            "the fork finishing its turn stops the run it was dispatched for"
+        );
+    }
+
+    /// Spec 0176 consequence: the Playbook's session dying still takes its
+    /// run with it, even when a fork was executing it — nothing is left to
+    /// render or settle those blocks (#1090).
+    #[tokio::test]
+    async fn playbook_fork_run_clears_when_the_playbook_session_dies() {
+        use construct_protocol::SessionState;
+        let body = "# T\n\n- alpha\n";
+        let (mgr, _storage, owner) = playbook_test_mgr(body).await;
+        mgr.start_playbook_run_with_dispatch_state(&owner, body, false, None, false, None)
+            .expect("arm run");
+        mgr.bind_playbook_run_execution(&owner, "sfork");
+        mgr.note_session_state_for_playbook_run(&owner, SessionState::Errored);
+        assert!(
+            mgr.playbook_run_snapshot(&owner).is_none(),
+            "a dead Playbook session clears its run whoever was executing it"
         );
     }
 
