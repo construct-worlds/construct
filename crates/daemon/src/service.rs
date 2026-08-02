@@ -23,6 +23,8 @@ pub struct ServiceConfig {
     pub harness: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub session_mode: ServiceSessionMode,
     #[serde(default = "default_service_cwd")]
     pub cwd: String,
     #[serde(default)]
@@ -38,6 +40,23 @@ pub struct ServiceConfig {
     pub sandbox: ServiceSandboxConfig,
     #[serde(default)]
     pub channels: BTreeMap<String, ServiceChannelConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServiceSessionMode {
+    #[default]
+    Headless,
+    Interactive,
+}
+
+impl ServiceSessionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Headless => "headless",
+            Self::Interactive => "interactive",
+        }
+    }
 }
 
 /// Capability limits applied to every session a service creates.
@@ -192,10 +211,13 @@ pub fn put_definition(
         "single" => ServiceRouting::Single,
         other => return Err(anyhow!("invalid routing mode `{other}`")),
     };
+    let session_mode =
+        parse_service_session_mode(&params.service.harness, &params.service.session_mode)?;
     let config = ServiceConfig {
         instruction: params.service.instruction,
         harness: params.service.harness,
         model: params.service.model,
+        session_mode,
         cwd: params.service.cwd,
         routing,
         paused: params.service.paused,
@@ -211,6 +233,21 @@ pub fn put_definition(
         service: summary(params.service.name, &config),
         applied: Default::default(),
     })
+}
+
+fn parse_service_session_mode(harness: &str, mode: &str) -> Result<ServiceSessionMode> {
+    match mode {
+        "headless" => Ok(ServiceSessionMode::Headless),
+        "interactive" if matches!(harness, "codex" | "claude") => {
+            Ok(ServiceSessionMode::Interactive)
+        }
+        "interactive" => {
+            return Err(anyhow!(
+                "interactive service sessions currently require the `codex` or `claude` harness"
+            ))
+        }
+        other => return Err(anyhow!("invalid service session mode `{other}`")),
+    }
 }
 
 pub fn delete_definition(dir: &std::path::Path, name: &str) -> Result<()> {
@@ -720,6 +757,7 @@ fn summary(name: String, config: &ServiceConfig) -> construct_protocol::ServiceS
         instruction: config.instruction.clone(),
         harness: config.harness.clone(),
         model: config.model.clone(),
+        session_mode: config.session_mode.as_str().to_string(),
         cwd: config.cwd.clone(),
         routing: match config.routing {
             ServiceRouting::PerEvent => "per-event",
@@ -889,6 +927,7 @@ mod tests {
             instruction: String::new(),
             harness: "smith".into(),
             model: None,
+            session_mode: ServiceSessionMode::Headless,
             cwd: ".".into(),
             routing: ServiceRouting::SessionKey,
             paused,
@@ -908,6 +947,23 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[test]
+    fn interactive_mode_is_limited_to_native_agent_harnesses() {
+        assert_eq!(
+            parse_service_session_mode("codex", "interactive").unwrap(),
+            ServiceSessionMode::Interactive
+        );
+        assert_eq!(
+            parse_service_session_mode("claude", "interactive").unwrap(),
+            ServiceSessionMode::Interactive
+        );
+        assert!(parse_service_session_mode("smith", "interactive")
+            .unwrap_err()
+            .to_string()
+            .contains("codex` or `claude"));
+        assert!(parse_service_session_mode("codex", "unknown").is_err());
     }
 
     #[tokio::test]
@@ -1112,6 +1168,7 @@ mod tests {
             instruction: "hi".into(),
             harness: "smith".into(),
             model: None,
+            session_mode: ServiceSessionMode::Headless,
             cwd: ".".into(),
             routing: ServiceRouting::SessionKey,
             paused: false,
@@ -1132,6 +1189,7 @@ mod tests {
                     instruction: "changed".into(),
                     harness: "smith".into(),
                     model: None,
+                    session_mode: "headless".into(),
                     cwd: ".".into(),
                     routing: "session-key".into(),
                     paused: false,
@@ -1308,6 +1366,7 @@ mod tests {
             instruction: "triage".into(),
             harness: "smith".into(),
             model: None,
+            session_mode: "headless".into(),
             cwd: ".".into(),
             routing: "session-key".into(),
             paused: false,
@@ -1392,6 +1451,7 @@ mod tests {
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,
+                    session_mode: "headless".into(),
                     cwd: ".".into(),
                     routing: "session-key".into(),
                     paused: false,
@@ -1456,6 +1516,7 @@ mod tests {
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,
+                    session_mode: "headless".into(),
                     cwd: ".".into(),
                     routing: "session-key".into(),
                     paused: false,
@@ -1523,6 +1584,7 @@ mod tests {
                         instruction: String::new(),
                         harness: "smith".into(),
                         model: None,
+                        session_mode: "headless".into(),
                         cwd: ".".into(),
                         routing: "session-key".into(),
                         paused: false,
@@ -1607,6 +1669,7 @@ mod tests {
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,
+                    session_mode: "headless".into(),
                     cwd: ".".into(),
                     routing: "session-key".into(),
                     paused: false,
@@ -1659,6 +1722,7 @@ mod tests {
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,
+                    session_mode: "headless".into(),
                     cwd: ".".into(),
                     routing: "session-key".into(),
                     paused: false,

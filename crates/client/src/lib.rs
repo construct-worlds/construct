@@ -458,6 +458,12 @@ impl Client {
         self.request(ipc_method::SERVICE_LIST, &serde_json::Value::Null)
             .await
     }
+    pub async fn service_reply(
+        &self,
+        params: construct_protocol::ServiceReplyParams,
+    ) -> Result<()> {
+        self.request(ipc_method::SERVICE_REPLY, &params).await
+    }
     pub async fn put_service(
         &self,
         params: construct_protocol::ServicePutParams,

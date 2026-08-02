@@ -1325,6 +1325,22 @@ async fn dispatch(
     dispatch_entry!(ipc_method::SESSION_LIST, {
         ok!(req, &manager.list().await)
     });
+    dispatch_entry!(ipc_method::SERVICE_REPLY, {
+        let p = params!(req, construct_protocol::ServiceReplyParams);
+        let Some(supervisor) = manager.service_supervisor() else {
+            return Response::err(
+                req.id.clone(),
+                ErrorObject::internal("service supervisor is not running"),
+            );
+        };
+        match supervisor.reply(p.session_id, p.delivery_id, p.text).await {
+            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Err(error) => Response::err(
+                req.id.clone(),
+                ErrorObject::invalid_params(error.to_string()),
+            ),
+        }
+    });
     dispatch_entry!(ipc_method::SERVICE_LIST, {
         match crate::service::list_summaries(&construct_protocol::paths::Paths::discover().services_dir()) {
             Ok(mut services) => {

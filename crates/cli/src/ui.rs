@@ -544,11 +544,16 @@ fn service_dialog_field_help(
             "Enter opens the picker · applies to new sessions.",
         ),
         4 => (
+            "Session mode",
+            "Headless sessions use structured events. Interactive sessions run the native Codex or Claude PTY and deliver replies through a session-bound tool.",
+            "Enter opens the picker · applies to new sessions.",
+        ),
+        5 => (
             "Working directory",
             "Directory where service sessions start and from which relative paths are resolved.",
             "Type to edit · applies to new sessions.",
         ),
-        5 => {
+        6 => {
             let explanation = match dialog.service.routing.as_str() {
                 "per-event" => {
                     "Creates a fresh session for every accepted request. Requests never share conversation history."
@@ -566,7 +571,7 @@ fn service_dialog_field_help(
                 "←/→ or Space cycles · applies to the next request.",
             )
         }
-        6 => (
+        7 => (
             "State",
             "Serving starts the listener. Pausing stops it and releases its port; callers get 503 until it resumes.",
             "Space or ←/→ toggles · applies immediately.",
@@ -7774,6 +7779,7 @@ fn service_picker_lines(
     let title = match dialog.picker {
         Some(crate::app::ServiceDialogPickerKind::Harness) => "Choose harness",
         Some(crate::app::ServiceDialogPickerKind::Model) => "Choose model",
+        Some(crate::app::ServiceDialogPickerKind::SessionMode) => "Choose session mode",
         None => "",
     };
     let options = dialog.picker_options(app);
@@ -8078,6 +8084,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         "Instruction",
         "Harness",
         "Model",
+        "Session mode",
         "Working dir",
         "Routing",
         "State",
@@ -8103,7 +8110,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         )));
     }
 
-    let top_h = 9.min(inner.height.saturating_sub(4));
+    let top_h = 10.min(inner.height.saturating_sub(4));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

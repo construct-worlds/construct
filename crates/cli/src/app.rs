@@ -40317,6 +40317,7 @@ mod tests {
             instruction: "Answer briefly.".to_string(),
             harness: "smith".to_string(),
             model: Some("test-model".to_string()),
+            session_mode: "headless".to_string(),
             cwd: "/tmp".to_string(),
             routing: "session-key".to_string(),
             paused: false,
@@ -40536,9 +40537,9 @@ mod tests {
 
         let focus = |app: &App| app.service_dialog.as_ref().unwrap().focus;
         // Channels is no longer one of the definition rows; the last one is State.
-        assert_eq!(SERVICE_FIELD_COUNT, 7);
+        assert_eq!(SERVICE_FIELD_COUNT, 8);
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().field_value(6),
+            app.service_dialog.as_ref().unwrap().field_value(7),
             "serving"
         );
 
@@ -41404,6 +41405,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_editor_selects_interactive_mode_only_for_codex_or_claude() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.open_edit_service_view("assistant");
+        let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+
+        {
+            let dialog = app.service_dialog.as_mut().unwrap();
+            dialog.focus = ServiceDialogFocus::Field(4);
+            dialog.service.harness = "smith".into();
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        let options = app.service_dialog.as_ref().unwrap().picker_options(&app);
+        assert_eq!(options[1].value, "interactive");
+        assert!(!options[1].available);
+        app.on_key(ctrl_n).await;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().service.session_mode,
+            "headless"
+        );
+        assert!(app
+            .service_dialog
+            .as_ref()
+            .unwrap()
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("codex or claude")));
+
+        {
+            let dialog = app.service_dialog.as_mut().unwrap();
+            dialog.picker = None;
+            dialog.picker_selected = 0;
+            dialog.note = None;
+            dialog.service.harness = "codex".into();
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        app.on_key(ctrl_n).await;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.service_dialog.as_ref().unwrap().service.session_mode,
+            "interactive"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn service_channel_editor_supports_multiple_http_channels() {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
@@ -41875,7 +41927,7 @@ mod tests {
             "service editor footer has a spacer above it"
         );
 
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(5);
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(6);
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let view_text = term
             .backend()

@@ -3,9 +3,9 @@
 use super::*;
 
 /// Definition rows in the service view: Name, Instruction, Harness, Model,
-/// Working dir, Routing, State. Channels and routed sessions are not fields —
+/// Session mode, Working dir, Routing, State. Channels and routed sessions are not fields —
 /// they are their own navigable sections below the definition (spec 0175).
-pub const FIELD_COUNT: usize = 7;
+pub const FIELD_COUNT: usize = 8;
 /// Re-exported name for consumers outside this module (renderers, hit tests).
 pub const SERVICE_FIELD_COUNT: usize = FIELD_COUNT;
 pub const SERVICE_PICKER_VISIBLE_ROWS: usize = 5;
@@ -134,6 +134,7 @@ pub enum ServiceDialogMode {
 pub enum ServiceDialogPickerKind {
     Harness,
     Model,
+    SessionMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,6 +259,7 @@ fn same_editable_definition(left: &ServiceSummary, right: &ServiceSummary) -> bo
         && left.instruction == right.instruction
         && left.harness == right.harness
         && left.model == right.model
+        && left.session_mode == right.session_mode
         && left.cwd == right.cwd
         && left.routing == right.routing
         && left.paused == right.paused
@@ -311,9 +313,10 @@ impl ServiceDialog {
                 .map(|(route, model)| format!("{model} · {route}"))
                 .or_else(|| self.service.model.clone())
                 .unwrap_or_default(),
-            4 => self.service.cwd.clone(),
-            5 => self.service.routing.clone(),
-            6 => {
+            4 => self.service.session_mode.clone(),
+            5 => self.service.cwd.clone(),
+            6 => self.service.routing.clone(),
+            7 => {
                 if self.service.paused {
                     "paused".to_string()
                 } else {
@@ -420,6 +423,24 @@ impl ServiceDialog {
                 }
                 options
             }
+            Some(ServiceDialogPickerKind::SessionMode) => vec![
+                ServiceDialogPickerOption {
+                    value: "headless".to_string(),
+                    label: "Headless / structured".to_string(),
+                    detail: "structured events; automatic reply extraction".to_string(),
+                    available: true,
+                },
+                ServiceDialogPickerOption {
+                    value: "interactive".to_string(),
+                    label: "Interactive / native PTY".to_string(),
+                    detail: if matches!(self.service.harness.as_str(), "codex" | "claude") {
+                        "native UI; replies through the bound service tool".to_string()
+                    } else {
+                        "currently requires codex or claude".to_string()
+                    },
+                    available: matches!(self.service.harness.as_str(), "codex" | "claude"),
+                },
+            ],
             None => Vec::new(),
         }
     }
@@ -434,6 +455,7 @@ fn default_service(app: &App, suggested: String) -> ServiceSummary {
             .map(|session| session.harness.clone())
             .unwrap_or_else(|| "smith".to_string()),
         model: selected.and_then(|session| session.model.clone()),
+        session_mode: "headless".to_string(),
         cwd: selected
             .map(|session| session.cwd.clone())
             .unwrap_or_else(|| ".".to_string()),
@@ -1249,6 +1271,7 @@ impl App {
                 .as_deref()
                 .map(canonical_service_model)
                 .unwrap_or_default(),
+            ServiceDialogPickerKind::SessionMode => dialog.service.session_mode.clone(),
         };
         dialog.picker_selected = options
             .iter()
@@ -1300,6 +1323,12 @@ impl App {
         let Some(option) = options.get(snapshot.picker_selected) else {
             return;
         };
+        if !option.available {
+            if let Some(dialog) = self.service_dialog.as_mut() {
+                dialog.note = Some(option.detail.clone());
+            }
+            return;
+        }
         let value = option.value.clone();
         if let Some(dialog) = self.service_dialog.as_mut() {
             match kind {
@@ -1307,6 +1336,7 @@ impl App {
                 ServiceDialogPickerKind::Model => {
                     dialog.service.model = (!value.is_empty()).then_some(value)
                 }
+                ServiceDialogPickerKind::SessionMode => dialog.service.session_mode = value,
             }
             dialog.picker = None;
             dialog.picker_selected = 0;
@@ -1332,11 +1362,11 @@ impl App {
         match field {
             0 => edit(&mut dialog.service.name),
             1 => edit(&mut dialog.service.instruction),
-            // Harness and model are catalog-backed fields. They deliberately
+            // Harness, model, and session mode are catalog-backed fields. They deliberately
             // do not accept typed or pasted text: Enter opens the picker and
             // the picker is the only way to change either value.
-            2 | 3 => return,
-            4 => edit(&mut dialog.service.cwd),
+            2 | 3 | 4 => return,
+            5 => edit(&mut dialog.service.cwd),
             _ => {}
         }
         dialog.note = None;
@@ -1375,7 +1405,7 @@ impl App {
             return;
         };
         match dialog.focus.field() {
-            Some(5) => {
+            Some(6) => {
                 const ROUTING: [&str; 3] = ["session-key", "per-event", "single"];
                 let current = ROUTING
                     .iter()
@@ -1388,7 +1418,7 @@ impl App {
                 };
                 dialog.service.routing = ROUTING[next].to_string();
             }
-            Some(6) => dialog.service.paused = !dialog.service.paused,
+            Some(7) => dialog.service.paused = !dialog.service.paused,
             _ => {}
         }
         dialog.note = None;
@@ -1406,6 +1436,12 @@ impl App {
             Some("Harness cannot be empty.")
         } else if service.cwd.trim().is_empty() {
             Some("Working directory cannot be empty.")
+        } else if service.session_mode == "interactive"
+            && !matches!(service.harness.as_str(), "codex" | "claude")
+        {
+            Some("Interactive sessions currently require the codex or claude harness.")
+        } else if !matches!(service.session_mode.as_str(), "headless" | "interactive") {
+            Some("Session mode must be headless or interactive.")
         } else if !matches!(
             service.routing.as_str(),
             "session-key" | "per-event" | "single"
@@ -1614,6 +1650,9 @@ impl App {
                 ServiceDialogFocus::Field(3) => {
                     self.open_service_picker(ServiceDialogPickerKind::Model)
                 }
+                ServiceDialogFocus::Field(4) => {
+                    self.open_service_picker(ServiceDialogPickerKind::SessionMode)
+                }
                 ServiceDialogFocus::Field(_) => self.save_service_dialog().await,
                 ServiceDialogFocus::Channel(index) => {
                     if self.service_channel_catalog.is_empty() {
@@ -1700,7 +1739,7 @@ impl App {
             KeyCode::BackTab | KeyCode::Up => self.move_service_dialog_focus(false),
             KeyCode::Left => self.cycle_service_dialog_value(true),
             KeyCode::Right | KeyCode::Char(' ')
-                if matches!(snapshot.focus, ServiceDialogFocus::Field(5 | 6)) =>
+                if matches!(snapshot.focus, ServiceDialogFocus::Field(6 | 7)) =>
             {
                 self.cycle_service_dialog_value(false)
             }
