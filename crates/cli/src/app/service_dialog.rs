@@ -118,13 +118,34 @@ fn channel_field_count(editor: &ServiceChannelDialog) -> usize {
     }
 }
 
+fn canonical_service_model(model: &str) -> String {
+    construct_protocol::published_model::decode_published_model_id(model)
+        .ok()
+        .flatten()
+        .map(|(route, model)| {
+            construct_protocol::published_model::published_model_id(&route, &model)
+        })
+        .unwrap_or_else(|| model.to_string())
+}
+
 impl ServiceDialog {
     pub fn field_value(&self, field: usize) -> String {
         match field {
             0 => self.service.name.clone(),
             1 => self.service.instruction.replace('\n', " ↵ "),
             2 => self.service.harness.clone(),
-            3 => self.service.model.clone().unwrap_or_default(),
+            3 => self
+                .service
+                .model
+                .as_deref()
+                .and_then(|model| {
+                    construct_protocol::published_model::decode_published_model_id(model)
+                        .ok()
+                        .flatten()
+                })
+                .map(|(route, model)| format!("{model} · {route}"))
+                .or_else(|| self.service.model.clone())
+                .unwrap_or_default(),
             4 => self.service.cwd.clone(),
             5 => self.service.routing.clone(),
             6 => format!("{} attached", self.service.channels.len()),
@@ -179,7 +200,9 @@ impl ServiceDialog {
                     detail: "let the selected harness choose its default model".to_string(),
                     available: true,
                 }];
-                if !app.service_route_catalog.is_empty() {
+                if matches!(self.service.harness.as_str(), "codex" | "claude")
+                    && !app.service_route_catalog.is_empty()
+                {
                     for route in &app.service_route_catalog {
                         let models = if route.models.is_empty() {
                             vec![route.model.clone()]
@@ -196,7 +219,10 @@ impl ServiceDialog {
                                 format!("route: {}", route.name)
                             };
                             options.push(ServiceDialogPickerOption {
-                                value: model.clone(),
+                                value: construct_protocol::published_model::published_model_id(
+                                    &route.name,
+                                    &model,
+                                ),
                                 label: format!("{} / {model}", route.name),
                                 detail,
                                 available: route.unavailable_reason.is_none(),
@@ -218,10 +244,11 @@ impl ServiceDialog {
                     }));
                 }
                 if let Some(current) = self.service.model.as_deref() {
+                    let current = canonical_service_model(current);
                     if !options.iter().any(|option| option.value == current) {
                         options.push(ServiceDialogPickerOption {
-                            value: current.to_string(),
-                            label: current.to_string(),
+                            value: current.clone(),
+                            label: current,
                             detail: "current value; not advertised by this harness".to_string(),
                             available: false,
                         });
@@ -979,8 +1006,13 @@ impl App {
         dialog.picker_scroll = 0;
         let options = dialog.picker_options(self);
         let current = match kind {
-            ServiceDialogPickerKind::Harness => dialog.service.harness.as_str(),
-            ServiceDialogPickerKind::Model => dialog.service.model.as_deref().unwrap_or(""),
+            ServiceDialogPickerKind::Harness => dialog.service.harness.clone(),
+            ServiceDialogPickerKind::Model => dialog
+                .service
+                .model
+                .as_deref()
+                .map(canonical_service_model)
+                .unwrap_or_default(),
         };
         dialog.picker_selected = options
             .iter()
