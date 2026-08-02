@@ -6561,6 +6561,9 @@ async fn generate_auto_title(
         .args(&prefix_args)
         .arg("--title-mode")
         .arg(&prompt)
+        // Same credential floor the adapters get (spec 0180), so a key
+        // declared in `[daemon.env]` names sessions as an exported one does.
+        .envs(crate::daemon_env::child_env_base())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -6846,6 +6849,8 @@ async fn generate_suggestions(
     let child = tokio::process::Command::new(&binary)
         .args(&prefix_args)
         .arg("--suggest-mode")
+        // Same credential floor as the adapters (spec 0180).
+        .envs(crate::daemon_env::child_env_base())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

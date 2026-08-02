@@ -20,6 +20,7 @@ mod availability;
 mod channel_publication;
 mod config;
 mod cost_history;
+mod daemon_env;
 pub mod doctor;
 mod loops;
 pub mod plugins;
@@ -132,6 +133,11 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     };
 
     let mut config = config::Config::load_or_default(&paths)?;
+    // Layer `[daemon.env]` under the real environment before anything
+    // resolves a credential (spec 0180). Done here, immediately after the
+    // config is read, so every later reader — route targets, availability
+    // probes, spawned sessions — sees the same environment.
+    daemon_env::install(config.daemon.env.clone());
     // Merge installed-plugin contributions (spec 0152) into the same
     // adapter map user config and built-ins land in, so a plugin harness
     // is indistinguishable from a community adapter downstream.

@@ -96,10 +96,12 @@ pub fn probe_generic_adapter(
     }
 }
 
+/// Credential presence as the daemon resolves it: the real environment,
+/// then `[daemon.env]` from config.toml (spec 0180). A key declared in
+/// config must read as present here, or `/configure` and `doctor` would
+/// report "not set" for a provider the router is happily routing to.
 fn env_present(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
+    crate::daemon_env::present(name)
 }
 
 /// Probe real availability for one configured harness (spec 0068). The
@@ -801,5 +803,38 @@ mod tests {
             "auto must not report available from a subscription-only credential"
         );
         assert!(auto.detail.contains("subscriptions and Ollama"));
+    }
+
+    /// A credential declared in `[daemon.env]` must read as present here
+    /// (spec 0180). `/configure` and `doctor` both render these entries, so
+    /// reporting "not set" for a key the router is already using would send
+    /// the user looking for a problem that isn't there.
+    #[tokio::test]
+    async fn a_key_declared_in_daemon_env_reads_as_available() {
+        let _lock = crate::router::oauth::test_env_guard();
+        let saved = std::env::var("DEEPSEEK_API_KEY").ok();
+        std::env::remove_var("DEEPSEEK_API_KEY");
+        crate::daemon_env::install([("DEEPSEEK_API_KEY", "sk-from-config")]);
+
+        let cache = std::sync::Mutex::new(AvailabilityCache::default());
+        let methods = smith_auth_methods(&cache).await;
+
+        crate::daemon_env::install(Vec::<(String, String)>::new());
+        if let Some(v) = saved {
+            std::env::set_var("DEEPSEEK_API_KEY", v);
+        }
+
+        // Asserted on the DeepSeek entry alone, not on overall smith
+        // availability: the developer's own exported keys would satisfy the
+        // latter no matter what this test installed.
+        let deepseek = methods
+            .iter()
+            .find(|m| m.id == "deepseek_api_key")
+            .expect("deepseek entry present");
+        assert!(
+            deepseek.available,
+            "a key from [daemon.env] must count as set: {}",
+            deepseek.detail
+        );
     }
 }

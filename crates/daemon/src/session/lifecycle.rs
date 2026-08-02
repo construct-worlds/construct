@@ -135,6 +135,13 @@ impl SessionManager {
         // --env KEY=VAL`), overridden in turn by daemon-meta. So a
         // CLI flag always wins over config.toml, and daemon meta
         // always wins over both.
+        //
+        // `[daemon.env]` sits below all of this but is deliberately NOT
+        // merged here: this map is persisted as the session's start params,
+        // and baking credentials into per-session state on disk would both
+        // leak them and freeze them (a key rotated in config.toml would
+        // never reach an existing session). The floor is applied at spawn
+        // instead — see `Adapter::spawn_reconnectable` (spec 0180).
         let mut env_with_meta = adapter_cfg.env.clone();
         for (k, v) in &params.env {
             env_with_meta.insert(k.clone(), v.clone());
