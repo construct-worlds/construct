@@ -6016,7 +6016,7 @@ function sessionRowDescriptor(item) {
       ? `<span class="fork-count" title="${item.liveForkCount} fork${item.liveForkCount === 1 ? "" : "s"}">⑂${item.liveForkCount}</span>`
       : "") +
     (s.pinned ? `<span class="pin-indicator" title="pinned" aria-label="pinned">★</span>` : "") +
-    (s.needs_attention && !s.archived
+    (s.needs_attention && !s.archived && !s.native_subagent
       ? `<span class="attention-dot" title="needs attention" aria-label="needs attention">●</span>`
       : "");
   const harness = s.harness ? `<div class="sub">${escape(sessionHarnessLabel(s))}</div>` : "";

@@ -15259,4 +15259,115 @@ done
                 .archived
         );
     }
+
+    /// A harness-native mirror is a read-only projection the operator cannot
+    /// drive, so it never raises the "needs you" dot no matter how its
+    /// projected child events move it — the owning session is the row the
+    /// operator can actually act on. Spec 0054/0079.
+    #[tokio::test]
+    async fn native_mirror_never_raises_needs_attention() {
+        use construct_protocol::MessageRole;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage = Arc::new(Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(Config::default());
+        let (manager, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("manager");
+        let owner = synthetic_entry("owner", construct_protocol::SessionKind::User, 0);
+        owner.summary.write().await.harness = "claude".into();
+        manager
+            .sessions
+            .write()
+            .await
+            .insert(owner.id.clone(), owner.clone());
+
+        // The child works unwatched — genuine activity, which for an ordinary
+        // session is exactly what makes the following stop "need you".
+        manager
+            .handle_event(
+                &owner,
+                SessionEvent::NativeSubagent {
+                    id: "child".into(),
+                    parent_id: None,
+                    title: Some("Inspect parser".into()),
+                    state: SessionState::Running,
+                    event: Some(Box::new(SessionEvent::Message {
+                        role: MessageRole::Assistant,
+                        text: "working".into(),
+                    })),
+                    seq: None,
+                },
+            )
+            .await;
+
+        let projected_id = native_subagent_session_id("owner", "child");
+        let entry = manager.get_entry(&projected_id).await.expect("mirror");
+        assert!(
+            entry.unseen_activity.load(Ordering::Relaxed),
+            "projected child output is still unseen activity — the marker is \
+             suppressed by what the mirror IS, not by pretending it was idle"
+        );
+
+        // ...and then stops, unfocused. An ordinary session flags here.
+        manager
+            .handle_event(
+                &owner,
+                SessionEvent::NativeSubagent {
+                    id: "child".into(),
+                    parent_id: None,
+                    title: None,
+                    state: SessionState::Running,
+                    event: Some(Box::new(SessionEvent::Status {
+                        state: SessionState::AwaitingInput,
+                        detail: None,
+                    })),
+                    seq: None,
+                },
+            )
+            .await;
+
+        let mirror = manager.detail(&projected_id).await.expect("mirror").summary;
+        assert_eq!(mirror.state, SessionState::AwaitingInput);
+        assert!(
+            !mirror.needs_attention,
+            "a native mirror must not wear a dot the operator has no way to act on"
+        );
+
+        // A marker persisted by an earlier build must not survive either:
+        // the next projection retires it rather than letting it resurface
+        // when the mirror unarchives.
+        manager
+            .get_entry(&projected_id)
+            .await
+            .expect("mirror")
+            .summary
+            .write()
+            .await
+            .needs_attention = true;
+        manager
+            .handle_event(
+                &owner,
+                SessionEvent::NativeSubagent {
+                    id: "child".into(),
+                    parent_id: None,
+                    title: None,
+                    state: SessionState::Running,
+                    event: None,
+                    seq: None,
+                },
+            )
+            .await;
+        assert!(
+            !manager
+                .detail(&projected_id)
+                .await
+                .expect("mirror")
+                .summary
+                .needs_attention,
+            "a legacy stored marker is cleared on the next projection"
+        );
+    }
 }

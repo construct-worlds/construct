@@ -518,7 +518,12 @@ async fn main() -> Result<()> {
             for s in list {
                 println!(
                     "{marker}{glyph} {id}  {harness:<7}  {state:<14}  {cwd}{title}",
-                    marker = if s.needs_attention { "● " } else { "  " },
+                    // Native mirrors never wear the dot (spec 0054).
+                    marker = if s.needs_attention && s.native_subagent.is_none() {
+                        "● "
+                    } else {
+                        "  "
+                    },
                     glyph = s.state.glyph(),
                     id = &s.id[..s.id.len().min(10)],
                     harness = s.harness,

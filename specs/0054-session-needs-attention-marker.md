@@ -68,6 +68,15 @@ on you."
   through the resume regains normal tracking). Without this rule, every
   daemon restart raises the marker on every backgrounded session — a fleet
   of dots with nothing new behind them.
+- **Harness-native mirrors never carry the marker.** A read-only projection of
+  a harness's own child is not a session the operator can drive — no input, no
+  resume, no approvals — so "waiting on you" would name an action that does not
+  exist; the owning harness is what drives the child, and the operator's lever
+  is the owning session's own row. The daemon does not raise the marker on a
+  mirror, mirrors do not contribute to a collapsed ancestor's rolled-up dot,
+  and clients do not paint one for a mirror even if a stored marker says
+  otherwise. This matches the fleet tally, which already excludes mirrors so a
+  busy native child tree cannot drown out the fleet's own signal.
 - **The marker is persisted** and survives daemon and client restarts. On
   restart, sessions that were waiting still show the marker; a reconnecting
   viewer re-asserts focus so the session it is looking at clears. Restart
@@ -134,6 +143,11 @@ daemon, which already tracks last-output time.
 - The marker is orthogonal to run state and to pinning/archival. It must not be
   repurposed as a state variant, and clients must treat it as advisory display,
   not control flow.
+- Excluding mirrors means a native child that genuinely stalls waiting on
+  something raises no dot of its own. Accepted: the operator acts through the
+  owning session, which flags normally when it stops. If a harness ever gains a
+  real control contract for its children, revisit this alongside the rest of
+  that contract rather than lighting a dot no action can clear.
 
 ## Non-Goals
 
