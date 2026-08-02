@@ -154,6 +154,44 @@ pub struct SessionPtyResizeParams {
     pub claim: bool,
 }
 
+/// Open (or re-size an already-open) console for this connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleOpenParams {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleOpenResult {
+    /// False when this call adopted a console the connection already had
+    /// open, so the client knows not to expect a fresh repaint.
+    pub started: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleInputParams {
+    /// Base64-encoded raw bytes to write to the console PTY.
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleResizeParams {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Console PTY bytes, base64-encoded. Delivered directly to the owning
+/// connection rather than broadcast — a console has exactly one viewer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleOutputParams {
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleExitParams {
+    pub exit_code: i32,
+}
+
 fn default_pty_activity_claim() -> bool {
     // Compatibility with clients predating explicit ownership: their resize
     // and input calls historically claimed the PTY, so an omitted field keeps
@@ -1395,6 +1433,21 @@ pub mod ipc_method {
     /// `refreshing: true`. Backs the TUI's hover tooltip over a harness name.
     pub const USAGE_QUERY: &str = "usage.query";
     pub const TOKEN_HISTORY: &str = "usage.token_history";
+    /// Open this connection's console: a PTY running the daemon's own TUI
+    /// client, streamed back as `console/output`. A console is *not* a
+    /// session — it is not listed, persisted, counted, or resumable. It
+    /// belongs to the connection that opened it and dies with it.
+    /// Idempotent: opening an already-open console just resizes it.
+    pub const CONSOLE_OPEN: &str = "console.open";
+    /// Raw bytes for the console PTY's master (base64), same shape as
+    /// `session.pty_input`. No geometry ownership arbitration: a console
+    /// has exactly one viewer.
+    pub const CONSOLE_INPUT: &str = "console.input";
+    /// SIGWINCH the console PTY to the viewer's grid.
+    pub const CONSOLE_RESIZE: &str = "console.resize";
+    /// Close the console and kill its client process. Also happens
+    /// automatically when the connection drops.
+    pub const CONSOLE_CLOSE: &str = "console.close";
 }
 
 pub mod ipc_notif {
@@ -1421,6 +1474,13 @@ pub mod ipc_notif {
     /// surface the degradation without polling.
     pub const FEATURES_STATE: &str = "features/state";
     pub const CHANNEL_PUBLICATION_STATE: &str = "service/channel-publication-state";
+    /// Console PTY bytes for the connection that opened the console. Not a
+    /// broadcast: consoles are per-connection, so this never reaches another
+    /// client and carries no session id.
+    pub const CONSOLE_OUTPUT: &str = "console/output";
+    /// The console's client process exited (the user quit the TUI, or it
+    /// crashed). The connection may open a new one.
+    pub const CONSOLE_EXIT: &str = "console/exit";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

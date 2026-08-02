@@ -1,11 +1,13 @@
 //! Unix-socket IPC server. Dispatches JSON-RPC requests to [`SessionManager`]
 //! and forwards subscribed broadcast events back to the client.
 
+use crate::console::ConsoleSlot;
 use crate::remote::RemoteState;
 use crate::session::{BroadcastMsg, SessionManager};
 use construct_protocol::jsonrpc::{self, MessageKind};
 use construct_protocol::{
-    ipc_method, ipc_notif, transport, ChatViewerActiveResult, CreateSessionParams, ErrorObject,
+    ipc_method, ipc_notif, transport, ChatViewerActiveResult, ConsoleInputParams, ConsoleOpenParams,
+    ConsoleOpenResult, ConsoleResizeParams, CreateSessionParams, ErrorObject,
     LayoutSetParams, Notification, PingResult, PlaybookCursorParams, PlaybookEditParams,
     PlaybookExecuteParams, PlaybookGetParams, PlaybookUpdateActor, PlaybookUpdateParams,
     PlaybookVerbExecuteParams, ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams,
@@ -101,6 +103,10 @@ async fn run_session<I: Inbound>(
 ) {
     let conn_id = manager.alloc_conn_id();
     let (sub_cmd_tx, sub_cmd_rx) = mpsc::channel::<SubCmd>(8);
+    // This connection's console, if it ever opens one. Owned here so the
+    // client process is reaped on every exit path — a browser tab that goes
+    // away must not leave a TUI running on the daemon host.
+    let console = Arc::new(ConsoleSlot::new());
 
     let sub_out_tx = out_tx.clone();
     let sub_manager = manager.clone();
@@ -127,7 +133,16 @@ async fn run_session<I: Inbound>(
                 continue;
             }
         };
-        let resp = dispatch(&manager, &sub_cmd_tx, kind, conn_id, req).await;
+        let resp = dispatch(
+            &manager,
+            &sub_cmd_tx,
+            kind,
+            conn_id,
+            req,
+            &console,
+            &out_tx,
+        )
+        .await;
         let v = match serde_json::to_value(&resp) {
             Ok(v) => v,
             Err(e) => {
@@ -141,6 +156,7 @@ async fn run_session<I: Inbound>(
     }
 
     sub_task.abort();
+    console.close();
     manager.clear_pty_client(conn_id).await;
     manager.clear_conn(conn_id);
 }
@@ -1183,7 +1199,10 @@ async fn dispatch(
     kind: ClientKind,
     conn_id: u64,
     req: Request,
+    console: &Arc<ConsoleSlot>,
+    out_tx: &mpsc::UnboundedSender<serde_json::Value>,
 ) -> Response {
+    use base64::Engine as _;
     macro_rules! ok {
         ($request:expr, $v:expr) => {{
             match serde_json::to_value($v) {
@@ -1220,6 +1239,38 @@ async fn dispatch(
     });
     dispatch_entry!(ipc_method::HARNESS_LIST, {
         ok!(req, &manager.harnesses().await)
+    });
+    // Console: this connection's own instance of our TUI, rendered by the
+    // client. Not routed through SessionManager — a console is a client, not
+    // a session, and nothing else in the fleet can see or address it.
+    dispatch_entry!(ipc_method::CONSOLE_OPEN, {
+        let p = params!(req, ConsoleOpenParams);
+        match console.open(out_tx.clone(), p.cols, p.rows) {
+            Ok(started) => ok!(req, &ConsoleOpenResult { started }),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::CONSOLE_INPUT, {
+        let p = params!(req, ConsoleInputParams);
+        match base64::engine::general_purpose::STANDARD.decode(p.data.as_bytes()) {
+            Ok(bytes) => {
+                console.input(bytes);
+                ok!(req, &json!({ "ok": true }))
+            }
+            Err(e) => Response::err(
+                req.id.clone(),
+                ErrorObject::invalid_params(format!("console.input data: {e}")),
+            ),
+        }
+    });
+    dispatch_entry!(ipc_method::CONSOLE_RESIZE, {
+        let p = params!(req, ConsoleResizeParams);
+        console.resize(p.cols, p.rows);
+        ok!(req, &json!({ "ok": true }))
+    });
+    dispatch_entry!(ipc_method::CONSOLE_CLOSE, {
+        console.close();
+        ok!(req, &json!({ "ok": true }))
     });
     dispatch_entry!(ipc_method::PLUGIN_LIST_ACTIONS, {
         ok!(
