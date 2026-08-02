@@ -283,11 +283,43 @@ enabled = true
 # api_key_env = "GROK_API_KEY"   # or XAI_API_KEY
 # model       = "grok-4.3"
 
+# ── Daemon environment ────────────────────────────────────────────────────────
+#
+# `[daemon.env]` is layered UNDERNEATH the daemon's real environment: each pair
+# applies only where that variable is not already set to a non-empty value, so
+# whatever you export for a given run always wins.
+#
+# It covers the credentials the daemon itself resolves — built-in route targets
+# (e.g. DeepSeek), `[smith.models.*]` profiles that name no key, and what
+# /configure and `construct doctor` report — and is passed down as the base
+# environment of every process the daemon spawns: session adapters, title
+# generation, suggestions.
+#
+# Why this exists: the daemon's environment is fixed when it launches, and
+# `construct daemon restart` re-execs the running image, carrying that same
+# environment across. A key exported after the daemon started stays invisible
+# until the process is fully stopped and re-spawned from a shell that has it.
+# config.toml is re-read on every start, so a key declared here takes effect on
+# a plain restart.
+#
+# Values here are stored in plaintext — `chmod 600 config.toml`, or keep the
+# credential in the environment and leave this table out.
+#
+# [daemon.env]
+# DEEPSEEK_API_KEY = "sk-..."
+# META_API_KEY     = "..."
+
 # ── Environment variable reference ────────────────────────────────────────────
 #
-# These env vars are read by the daemon or adapters at runtime. They are NOT
-# part of config.toml — set them in the shell that launches the daemon (or in
-# a systemd unit / launchd plist / wrapper script).
+# These env vars are read by the daemon or adapters at runtime. Set them in the
+# shell that launches the daemon (or in a systemd unit / launchd plist / wrapper
+# script), or declare them in [daemon.env] above.
+#
+# Two groups are environment-only and ignore [daemon.env]: the path overrides
+# below (read while locating config.toml, before there is a table to consult),
+# and the daemon's own CONSTRUCT_* knobs (web UI port, remote listener,
+# templates dir). Everything a spawned adapter reads, and every credential the
+# daemon resolves, honors the table.
 #
 # Path overrides (XDG-style):
 #   CONSTRUCT_HOME         — base directory for config, state, data, and run path overrides
@@ -499,6 +531,8 @@ pub struct Config {
     #[serde(default)]
     pub adapters: BTreeMap<String, AdapterConfig>,
     #[serde(default)]
+    pub daemon: DaemonConfig,
+    #[serde(default)]
     pub defaults: Defaults,
     #[serde(default)]
     pub orchestrator: OrchestratorConfig,
@@ -653,10 +687,20 @@ impl SmithConfig {
     }
 }
 
+/// `[daemon]` — settings for the daemon process itself.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DaemonConfig {
+    /// `[daemon.env]` — environment the daemon layers *under* its real one
+    /// (spec 0180), and passes down to every session it spawns. Lets a
+    /// credential be declared in config.toml, where a restart picks it up,
+    /// instead of exported into the shell that happens to launch the
+    /// daemon. A variable that is really set wins; this only fills gaps.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
 fn env_var_present(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
+    crate::daemon_env::present(name)
 }
 
 /// One `[smith.models.<name>]` entry (spec 0030).
@@ -720,10 +764,7 @@ impl ModelProfile {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            return std::env::var(var)
-                .ok()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
+            return crate::daemon_env::var(var)
                 .ok_or_else(|| format!("{var} is not set in the daemon's environment"));
         }
         if let Some(key) = self.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -731,11 +772,8 @@ impl ModelProfile {
         }
         let defaults = self.default_key_envs();
         for var in defaults {
-            if let Ok(v) = std::env::var(var) {
-                let v = v.trim().to_string();
-                if !v.is_empty() {
-                    return Ok(v);
-                }
+            if let Some(v) = crate::daemon_env::var(var) {
+                return Ok(v);
             }
         }
         if defaults.is_empty() {
@@ -1398,6 +1436,79 @@ mod tests {
         // An empty/whitespace value is not a credential either.
         let profiles = with_deepseek_key(Some("   "), || cfg.smith.route_profiles());
         assert!(!profiles.contains_key(DEEPSEEK_ROUTE_NAME));
+    }
+
+    /// Run `f` with the real `DEEPSEEK_API_KEY` forced to `shell_value` and
+    /// `cfg`'s `[daemon.env]` installed as the fallback layer, clearing the
+    /// overlay before the env guard is released so no other test observes it.
+    fn with_daemon_env<T>(cfg: &Config, shell_value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        with_deepseek_key(shell_value, || {
+            crate::daemon_env::install(cfg.daemon.env.clone());
+            let out = f();
+            crate::daemon_env::install(Vec::<(String, String)>::new());
+            out
+        })
+    }
+
+    /// The point of `[daemon.env]` (spec 0180): a key declared in config.toml
+    /// creates the built-in target on a machine that exported nothing, so a
+    /// plain `daemon restart` is enough to start routing to it.
+    #[test]
+    fn a_key_declared_in_daemon_env_creates_the_builtin_target() {
+        let toml = r#"
+            [daemon.env]
+            DEEPSEEK_API_KEY = "sk-from-config"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        let profiles = with_daemon_env(&cfg, None, || {
+            let profiles = cfg.smith.route_profiles();
+            let key = profiles
+                .get(DEEPSEEK_ROUTE_NAME)
+                .expect("built-in target")
+                .resolve_api_key();
+            assert_eq!(key.as_deref(), Ok("sk-from-config"));
+            profiles
+        });
+        assert!(profiles.contains_key(DEEPSEEK_ROUTE_NAME));
+    }
+
+    /// Config fills gaps, it never overrides: whatever the operator exported
+    /// for this run is what the endpoint is called with.
+    #[test]
+    fn an_exported_key_wins_over_daemon_env() {
+        let toml = r#"
+            [daemon.env]
+            DEEPSEEK_API_KEY = "sk-from-config"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        with_daemon_env(&cfg, Some("sk-from-shell"), || {
+            let profiles = cfg.smith.route_profiles();
+            let key = profiles
+                .get(DEEPSEEK_ROUTE_NAME)
+                .expect("built-in target")
+                .resolve_api_key();
+            assert_eq!(key.as_deref(), Ok("sk-from-shell"));
+        });
+    }
+
+    /// A profile naming `api_key_env` resolves that variable through the same
+    /// two layers — otherwise declaring the key and the profile that reads it
+    /// in one file still wouldn't work.
+    #[test]
+    fn a_named_api_key_env_resolves_from_daemon_env() {
+        let toml = r#"
+            [daemon.env]
+            WORK_DEEPSEEK_KEY = "sk-work"
+
+            [smith.models.work]
+            provider = "deepseek"
+            api_key_env = "WORK_DEEPSEEK_KEY"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        with_daemon_env(&cfg, None, || {
+            let profile = cfg.smith.models.get("work").expect("declared profile");
+            assert_eq!(profile.resolve_api_key().as_deref(), Ok("sk-work"));
+        });
     }
 
     /// User config always wins: a declared `deepseek` profile is never

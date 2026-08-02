@@ -623,6 +623,13 @@ fn config_section(paths: &Paths) -> (Section, Config) {
         }
     };
 
+    // Doctor runs with no daemon, so it must build the same environment the
+    // daemon would from the same config before probing any credential
+    // (spec 0180) — otherwise it reports "no API key" for a provider that
+    // works, which is worse than not checking. On a parse failure this
+    // installs nothing, matching the fallback config it just chose.
+    crate::daemon_env::install(cfg.daemon.env.clone());
+
     let orchestrator = match cfg.orchestrator.effective_harness() {
         Some(h) => Finding::info("config.orchestrator", "operator", format!("enabled ({h})")),
         None => Finding::info("config.orchestrator", "operator", "disabled"),

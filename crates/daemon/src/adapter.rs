@@ -267,6 +267,13 @@ impl Adapter {
 
         let mut cmd = Command::new(&binary);
         cmd.args(&args);
+        // `[daemon.env]` is the floor under every adapter (spec 0180): a
+        // credential declared in config.toml must reach the harness exactly
+        // as an exported one would. Applied here rather than in the
+        // session's env map so it is never persisted into start params —
+        // the value is re-read from config on each spawn, and rotating it
+        // takes effect on the next one.
+        cmd.envs(crate::daemon_env::child_env_base());
         for (k, v) in env {
             cmd.env(k, v);
         }
