@@ -11389,12 +11389,6 @@ function focusPane(
   }
 }
 
-/**
- * Rebuild the pane DOM from the shared tree.
- *
- * Cheap to call: the expensive things (xterm instances, transcript panes) are
- * cached per session and only re-parented here, never recreated.
- */
 function paneHeadButton(glyph, tip, onClick) {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -11480,7 +11474,83 @@ function paneSplitButton(direction, tip, onClick) {
   return btn;
 }
 
+/**
+ * Everything the grid renders out of shared state, flattened to a string.
+ *
+ * `renderSessions` runs on every `session/state` delta — a background
+ * worker's status tick, a token count, a spinner frame — and each rebuild
+ * re-parents the focused pane's `#viewStack`. Comparing this against the
+ * last render lets the session-list path skip the rebuild when nothing the
+ * grid actually draws has moved.
+ */
+function paneGridSignature() {
+  if (!splitLayoutActive()) return "single";
+  const parts = [`f:${state.focusedPaneId}`, state.paneZoom ? "zoom" : "-"];
+  const walk = (node) => {
+    if (!node) {
+      parts.push("nil");
+      return;
+    }
+    if (node.kind !== "leaf") {
+      parts.push(`split:${node.direction}:${node.ratio_percent || 50}`);
+      walk(node.first);
+      walk(node.second);
+      return;
+    }
+    const service = node.service_name
+      ? state.services.find((item) => item.name === node.service_name)
+      : null;
+    const session = node.session_id
+      ? state.sessions.find((s) => s.id === node.session_id)
+      : null;
+    parts.push(
+      `leaf:${node.id}:${node.session_id || ""}:${node.service_name || ""}`,
+      // Pane title + which surface the mirror mounts are the only
+      // session-derived things a pane draws.
+      session
+        ? `${sessionViewTitle(session)}|${preferredViewModeForSession(session)}`
+        : "-",
+      service
+        ? `${service.routing || ""}|${service.harness || ""}|${service.paused ? "paused" : "-"}`
+        : "-",
+    );
+  };
+  walk(state.layout.tree);
+  return parts.join("");
+}
+
+let paneGridRenderedSignature = null;
+
+/**
+ * Rebuild the grid, keeping the caret where the user left it.
+ *
+ * The rebuild moves `#viewStack` — and with it the focused xterm's helper
+ * textarea — into a freshly built pane element. Detaching the node that holds
+ * `document.activeElement` blurs it, and re-attaching does not bring focus
+ * back, so without this the caret silently dies mid-keystroke every time
+ * anything repaints the grid. Restoring synchronously means no keystroke can
+ * land in the gap, and it leaves later deliberate focus moves (a pane click
+ * that selects another session) with the last word.
+ */
 function renderPaneGrid() {
+  const typing = captureTypingFocus();
+  try {
+    renderPaneGridNow();
+    // Only a render that actually completed may satisfy a later skip.
+    paneGridRenderedSignature = paneGridSignature();
+  } finally {
+    restoreTypingFocus(typing);
+  }
+}
+
+/**
+ * Rebuild the pane DOM from the shared tree.
+ *
+ * The expensive things (xterm instances, transcript panes) are cached per
+ * session and only re-parented here, never recreated — but re-parenting is
+ * not free either. Go through `renderPaneGrid`, never straight to this.
+ */
+function renderPaneGridNow() {
   if (!splitLayoutActive()) {
     // Single-session mode — the pre-split layout, verbatim. Any mirrored
     // terminal hosts go home so the normal show/hide logic owns them again.
@@ -12021,7 +12091,14 @@ function schedulePaneGridRefresh() {
   paneGridRefreshQueued = true;
   requestAnimationFrame(() => {
     paneGridRefreshQueued = false;
-    if (splitLayoutActive()) renderPaneGrid();
+    if (!splitLayoutActive()) return;
+    // A busy fleet pushes `session/state` several times a second, and this
+    // path fires on every one of them. Rebuilding for a status tick that
+    // changes nothing the grid draws churns the terminal re-parent, refit and
+    // caret restore for no reason — and an IME composition does not survive
+    // that. Only rebuild when a pane's own content moved.
+    if (paneGridSignature() === paneGridRenderedSignature) return;
+    renderPaneGrid();
   });
 }
 
