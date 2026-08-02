@@ -1,7 +1,7 @@
 # 0081-lineage-section-in-sidebar
 
 Status: accepted
-Date: 2026-07-16
+Date: 2026-08-01
 Area: tui
 Scope: Fork/subagent lineage renders as a collapsible section of the left sidebar — between the session rows and the operator panel — showing the selected session's tree; there is no floating per-pane lineage widget.
 
@@ -114,7 +114,8 @@ purpose.
 
 Relatedly, the session list itself shows lineage structure ambiently: a
 fork renders as an indented child row under its parent (like subagent
-rows) — recursively, so a fork of a fork still appears — never as its own
+rows) — recursively, with every generation receiving another indentation
+step, so a fork of a fork is visibly deeper — never as its own
 top-level row, and a parent row badges its live fork count. Collapsing a
 parent row hides its complete child tree (subagents, forks, and the archived-
 children disclosure), and that parent-row collapse preference survives TUI
@@ -150,7 +151,7 @@ pinning, archived hidden) while a lineage tree is time-ordered history
 (merged/discarded forks, turn-info rows that aren't sessions). Mixing them
 in one scroll region forces conflicting ordering/filtering rules and
 complicates row hit-testing and reordering. Keeping two stacked surfaces
-with separate rules — plus lightweight fork indentation in the rows —
+with separate rules — plus lightweight, depth-accurate indentation in the rows —
 captures the benefits of both.
 
 ## Consequences
@@ -172,8 +173,8 @@ captures the benefits of both.
 
 ## Non-Goals
 
-- No lineage rows interleaved into the session list beyond simple fork
-  indentation.
+- No temporal lineage rows interleaved into the session list beyond simple,
+  depth-accurate session indentation.
 - No per-session pin/open state and no floating, pane-anchored lineage
   surface.
 

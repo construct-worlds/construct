@@ -1,9 +1,9 @@
 # 0106-session-list-view-modes
 
 Status: accepted
-Date: 2026-07-21
+Date: 2026-08-01
 Area: tui
-Scope: The sidebar session list offers a compact one-line view and a full two-line card view per session, toggled from the pane's border and persisted per user.
+Scope: The sidebar session list offers a compact one-line view and a vertically spaced full card view per session, toggled from the pane's border and persisted per user.
 
 ## Decision
 
@@ -19,9 +19,9 @@ The session list renders in one of two user-selectable view modes:
   rows, tool blocks, and daemon-restart resume events do not reset it —
   sessions with no messages fall back to the last recorded event), and
   lifetime token
-  volume. Cost is deliberately excluded. The gauge's fill rounds to the
-  nearest step so the bar tracks the percentage (just over half reads as
-  half, not three quarters).
+  volume, followed by one blank separator row. Cost is deliberately excluded.
+  The gauge's fill rounds to the nearest step so the bar tracks the percentage
+  (just over half reads as half, not three quarters).
 
 Rules both modes must preserve:
 
@@ -55,6 +55,12 @@ Rules both modes must preserve:
   keeping the context gauge longest — and identically on every row. Full
   mode never forces the sidebar wider and never horizontally scrolls.
 - Group headers and archived-disclosure rows stay one line in both modes.
+- Session nesting uses the same two-cell indentation step in both modes. Each
+  generation gets its own depth, including fork-of-fork, subagent-of-subagent,
+  and mixed trees. Muted branch and continuation rails make those levels
+  explicit and remain connected through full mode's detail and spacing rows;
+  the hierarchy never changes the user's depth-first session order. Parent
+  titles render one emphasis step above leaf titles.
 - The web UI's session list shows the same detail line with the same
   content and omission/fallback rules, but always on — it has no
   compact/full mode pair. Its gauge may render at finer resolution than
@@ -71,7 +77,7 @@ Rules both modes must preserve:
 The compact list answers "which session" but not "how is it doing" — model,
 context pressure, activity, and spend previously required selecting each
 session and reading the modeline. Scanning a fleet benefits from a denser
-per-session summary, but permanently taller rows would halve the visible
+per-session summary, but permanently taller rows materially reduce the visible
 session count, so the density is a user choice, mirroring the precedent the
 lineage section set for a full/compact pair.
 
@@ -81,7 +87,7 @@ lineage section set for a full/compact pair.
   (hover zones, drag targets, new gutter affordances) must go through the
   row-to-item mapping and declare which line of a card it lives on.
 - Scroll limits and scrollbar geometry are measured in display rows, so
-  mixed-height items (one-line headers among two-line cards) stay correct.
+  mixed-height items (one-line headers among three-row cards) stay correct.
 - Adding new per-session data to the detail line means placing it in the
   existing drop-priority order, not appending unconditionally.
 

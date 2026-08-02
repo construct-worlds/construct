@@ -405,7 +405,7 @@ impl App {
         }
         let visible_row = (row - items_area.y) as usize;
         // Display rows and items are 1:1 only in compact mode; full mode's
-        // two-row session cards need the render-time row map. An empty map
+        // multi-row session cards need the render-time row map. An empty map
         // (layouts fabricated without a render, e.g. in tests) falls back to
         // the 1:1 compact mapping.
         let (idx, first_line) = match self.layout.list_visible_rows.get(visible_row) {
@@ -425,13 +425,13 @@ impl App {
         // the detail line is a plain row selection.
         if let ListItem::Session {
             summary,
-            indented,
+            nesting_depth,
             has_children,
             ..
         } = &items[idx]
         {
             if first_line {
-                let indent = list_session_indent_cells(summary, *indented, *has_children);
+                let indent = list_session_indent_cells(*nesting_depth);
                 let disclosure_col = list.x + 1 + indent;
                 if *has_children && col == disclosure_col {
                     let id = summary.id.clone();
