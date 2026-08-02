@@ -168,6 +168,33 @@ impl ServiceIngress {
         Ok(self.submit_tracked(request).await?.session)
     }
 
+    /// Whether this channel already routes a conversation for `session_key`.
+    ///
+    /// A channel asks this to decide whether it is *already engaged* — which
+    /// is what lets it answer a message that did not address it directly.
+    /// Engagement is exactly "a session exists for this key", so it needs no
+    /// second record that could disagree with the routing table.
+    pub(super) async fn has_session(&self, session_key: &str) -> bool {
+        let lookup_key = format!("{}:{session_key}", self.channel_id);
+        let state = self.shared.state.lock().await;
+        state.sessions.contains_key(&lookup_key)
+            || (self.channel_id == "http" && state.sessions.contains_key(session_key))
+    }
+
+    /// Whether this channel routes any conversation whose key starts with
+    /// `prefix` — "have I been engaged anywhere in this Slack channel", where
+    /// the caller's keys nest the channel above the thread.
+    pub(super) async fn has_session_under(&self, prefix: &str) -> bool {
+        let lookup_prefix = format!("{}:{prefix}", self.channel_id);
+        self.shared
+            .state
+            .lock()
+            .await
+            .sessions
+            .keys()
+            .any(|key| key.starts_with(&lookup_prefix))
+    }
+
     /// Submit a native channel delivery and retain the transcript position at
     /// which its turn began. Long-lived adapters use this cursor to avoid
     /// mistaking the previous turn's final answer for the new one.
@@ -934,6 +961,32 @@ mod tests {
             service_seed_prompt("Be brief.", "ship it".to_string(), None),
             "Be brief.\n\nship it"
         );
+    }
+
+    #[tokio::test]
+    async fn engagement_is_having_a_session_for_the_thread_or_the_channel() {
+        let shared = shared_for_delivery_tests().await;
+        let ingress = ServiceIngress::new("bot".to_string(), shared.clone());
+        shared
+            .state
+            .lock()
+            .await
+            .sessions
+            .insert("bot:T1:C1:111.11".to_string(), "s1".to_string());
+
+        // Thread follow-up: only the thread that already has a conversation.
+        assert!(ingress.has_session("T1:C1:111.11").await);
+        assert!(!ingress.has_session("T1:C1:999.99").await);
+
+        // Channel follow-up: any thread in the same Slack channel counts.
+        assert!(ingress.has_session_under("T1:C1:").await);
+        assert!(!ingress.has_session_under("T1:C2:").await);
+
+        // A key belonging to another channel of the same service must not
+        // read as engagement here — channels own their own conversations.
+        let other = ServiceIngress::new("other-bot".to_string(), shared);
+        assert!(!other.has_session("T1:C1:111.11").await);
+        assert!(!other.has_session_under("T1:C1:").await);
     }
 
     #[test]
