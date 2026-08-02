@@ -13117,7 +13117,13 @@ impl App {
                 self.theme_name = name;
                 self.theme_revision += 1;
                 self.report_terminal_background();
-                self.set_status(format!("theme: {}", name.label()));
+                // Do not set a transient status on success. The modeline's
+                // persistent `theme:<name>` notice already shows the active
+                // theme, and a left-side status message preempts that whole
+                // right-aligned notice block (theme + remote + version) —
+                // including their click targets — until the status expires.
+                // That made click-to-cycle unusable for a few seconds after
+                // each switch.
             }
             Err(e) => self.set_status(format!("theme failed: {e}")),
         }
@@ -36298,6 +36304,69 @@ mod tests {
         assert!(
             hovered_modeline.contains("Theme: matrix. Click to cycle theme"),
             "theme tooltip should appear when hovering the label"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cycle_theme_keeps_persistent_notices_clickable() {
+        // Regression: a success status of "theme: <name>" used to land on the
+        // left side of the modeline and preempt the right-aligned notice
+        // block whenever left content ran into it. That hid `theme:<name> |
+        // remote | version` and dropped the CycleTheme hit zone for ~5s,
+        // so click-to-cycle felt stuck until the status expired.
+        let (mut app, _dir, server) = empty_app().await;
+        // Narrow enough that a left-side "theme: basic" status would collide
+        // with the right-aligned notice block on this empty-app modeline.
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        assert_eq!(app.theme_name, crate::theme::ThemeName::Matrix);
+        app.run_action(KeyAction::CycleTheme).await;
+        assert_eq!(app.theme_name, crate::theme::ThemeName::Basic);
+        assert!(
+            app.status.is_none(),
+            "successful theme cycle must not set a transient status that \
+             preempts the persistent notices: {:?}",
+            app.status.as_ref().map(|(m, _)| m.as_str())
+        );
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw after cycle");
+        let screen = rendered_text(terminal.backend().buffer());
+        let modeline = screen
+            .lines()
+            .find(|line| line.contains("construct") && line.contains("theme:basic"))
+            .expect("cycled theme label should remain in the modeline");
+        assert!(
+            modeline.contains("theme:basic")
+                && modeline.contains("remote")
+                && modeline.contains(crate::BUILD_ID),
+            "remote and version notices must stay visible after cycling:\n{modeline}"
+        );
+        assert!(
+            app.layout.modeline_theme_hit.is_some(),
+            "theme label must remain a click target after cycling"
+        );
+        assert!(
+            app.layout
+                .shortcut_hints
+                .iter()
+                .any(|h| h.action == KeyAction::CycleTheme),
+            "CycleTheme hit zone must remain registered after cycling"
+        );
+
+        // Immediate second cycle — no wait for status expiry.
+        app.run_action(KeyAction::CycleTheme).await;
+        assert_eq!(app.theme_name, crate::theme::ThemeName::Dark);
+        assert!(app.status.is_none());
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw after second cycle");
+        assert!(
+            app.layout.modeline_theme_hit.is_some(),
+            "theme click target must survive rapid successive cycles"
         );
         server.abort();
     }
