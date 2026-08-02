@@ -40364,6 +40364,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_view_title_bar_includes_the_service_diamond() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".into());
+        app.session_transitions.clear();
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("service view title should render");
+
+        let view = app.layout.view_area.expect("service view");
+        let title_row = (view.x..view.right())
+            .filter_map(|x| term.backend().buffer().cell((x, view.y)))
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            title_row.contains("◈ service: assistant"),
+            "service pane title should include its diamond: {title_row:?}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn bare_tab_follows_sidebar_visual_order() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
