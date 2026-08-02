@@ -4,6 +4,7 @@
 //! HTTP remains loopback-only. Transport adapters are separate from the shared
 //! ingress router so adding a channel does not fork session semantics.
 
+mod harness_error;
 mod http;
 mod ingress;
 mod slack;

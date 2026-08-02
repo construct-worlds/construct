@@ -340,20 +340,40 @@ where
 /// that has already become long enough to look like a dropped request.
 const PROGRESS_AFTER: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// How often the placeholder is rewritten so its elapsed time stays current.
+///
+/// A minute is slow enough to be nowhere near Slack's edit rate limits and
+/// fast enough that the number on screen is never meaningfully stale.
+const PROGRESS_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
+
 const WORKING_EMOJI: &str = "eyes";
 const ANSWERED_EMOJI: &str = "white_check_mark";
 const FAILED_EMOJI: &str = "warning";
 
-fn progress_text(progress: &IngressProgress) -> String {
+/// How long this has been going, for the placeholder to admit to.
+///
+/// Below a minute there is nothing worth saying — the affordance has barely
+/// appeared. Past that, a number that visibly moves is the difference between
+/// a wait someone can sit through and one that reads as a dropped request.
+fn elapsed_suffix(elapsed: std::time::Duration) -> String {
+    let minutes = elapsed.as_secs() / 60;
+    if minutes == 0 {
+        return String::new();
+    }
+    format!(" ({minutes}m)")
+}
+
+fn progress_text(progress: &IngressProgress, elapsed: std::time::Duration) -> String {
+    let waited = elapsed_suffix(elapsed);
     match progress {
-        IngressProgress::Working => "_Working on it…_".to_string(),
+        IngressProgress::Working => format!("_Working on it…{waited}_"),
         // Say who has to act. A turn stopped here will not move on its own,
         // and the person waiting in Slack cannot see the approval prompt.
         IngressProgress::AwaitingApproval { tool, summary } if summary.is_empty() => {
-            format!("_Waiting for an operator to approve `{tool}`._")
+            format!("_Waiting for an operator to approve `{tool}`.{waited}_")
         }
         IngressProgress::AwaitingApproval { tool, summary } => {
-            format!("_Waiting for an operator to approve `{tool}`: {summary}_")
+            format!("_Waiting for an operator to approve `{tool}`: {summary}{waited}_")
         }
     }
 }
@@ -383,6 +403,10 @@ async fn run_affordance(
     if config.progress == SlackProgress::Off {
         return state;
     }
+    // Measured from when the turn was submitted, not from when the placeholder
+    // appeared: the elapsed time this reports is the wait the person in Slack
+    // has actually had, which started when they hit send.
+    let started = tokio::time::Instant::now();
     tokio::select! {
         _ = cancel.cancelled() => return state,
         _ = tokio::time::sleep(after) => {}
@@ -407,7 +431,7 @@ async fn run_affordance(
         }
     }
     if config.progress.posts_placeholder() {
-        let text = progress_text(&progress.borrow_and_update().clone());
+        let text = progress_text(&progress.borrow_and_update().clone(), started.elapsed());
         match api
             .post_message(&config.bot_token, &channel, &thread_ts, &text)
             .await
@@ -416,25 +440,32 @@ async fn run_affordance(
             Err(error) => tracing::warn!(%error, "Slack progress placeholder failed"),
         }
     }
-    // Keep the placeholder honest: a turn that stops at an approval must stop
-    // claiming it is working.
+    // Keep the placeholder honest on both counts: a turn that stops at an
+    // approval must stop claiming it is working, and a placeholder that has
+    // said the same words for twenty minutes is indistinguishable from one
+    // left behind by a turn nobody is waiting on any more.
+    let mut refresh = tokio::time::interval(PROGRESS_REFRESH);
+    refresh.tick().await;
     loop {
-        tokio::select! {
+        let phase = tokio::select! {
             _ = cancel.cancelled() => return state,
             changed = progress.changed() => {
                 if changed.is_err() {
                     return state;
                 }
-                let text = progress_text(&progress.borrow_and_update().clone());
-                let Some(ts) = state.placeholder_ts.as_deref() else {
-                    continue;
-                };
-                if let Err(error) =
-                    api.update_message(&config.bot_token, &channel, ts, &text).await
-                {
-                    tracing::warn!(%error, "Slack progress update failed");
-                }
+                progress.borrow_and_update().clone()
             }
+            _ = refresh.tick() => progress.borrow().clone(),
+        };
+        let Some(ts) = state.placeholder_ts.as_deref() else {
+            continue;
+        };
+        let text = progress_text(&phase, started.elapsed());
+        if let Err(error) = api
+            .update_message(&config.bot_token, &channel, ts, &text)
+            .await
+        {
+            tracing::warn!(%error, "Slack progress update failed");
         }
     }
 }
@@ -1035,23 +1066,66 @@ mod tests {
         // "Working on it" is a lie once the turn is parked on an approval:
         // nothing moves until a human at the TUI acts, and the person waiting
         // in Slack cannot see that prompt.
+        let fresh = std::time::Duration::ZERO;
         assert_eq!(
-            progress_text(&IngressProgress::Working),
+            progress_text(&IngressProgress::Working, fresh),
             "_Working on it…_"
         );
         assert_eq!(
-            progress_text(&IngressProgress::AwaitingApproval {
-                tool: "bash".into(),
-                summary: "cargo test".into(),
-            }),
+            progress_text(
+                &IngressProgress::AwaitingApproval {
+                    tool: "bash".into(),
+                    summary: "cargo test".into(),
+                },
+                fresh
+            ),
             "_Waiting for an operator to approve `bash`: cargo test_"
         );
         assert_eq!(
-            progress_text(&IngressProgress::AwaitingApproval {
-                tool: "bash".into(),
-                summary: String::new(),
-            }),
+            progress_text(
+                &IngressProgress::AwaitingApproval {
+                    tool: "bash".into(),
+                    summary: String::new(),
+                },
+                fresh
+            ),
             "_Waiting for an operator to approve `bash`._"
+        );
+    }
+
+    #[test]
+    fn a_long_wait_says_how_long_it_has_been() {
+        // The affordance exists for waits long enough to look dropped. One
+        // that never changes reads as abandoned no matter what it says, so
+        // past the first minute the placeholder carries a number that moves.
+        let minutes = |n: u64| std::time::Duration::from_secs(n * 60);
+        assert_eq!(
+            progress_text(&IngressProgress::Working, minutes(0)),
+            "_Working on it…_"
+        );
+        assert_eq!(
+            progress_text(&IngressProgress::Working, std::time::Duration::from_secs(59)),
+            "_Working on it…_"
+        );
+        assert_eq!(
+            progress_text(&IngressProgress::Working, minutes(1)),
+            "_Working on it… (1m)_"
+        );
+        assert_eq!(
+            progress_text(&IngressProgress::Working, minutes(17)),
+            "_Working on it… (17m)_"
+        );
+        // An approval that nobody has answered needs the elapsed time most of
+        // all: it is the case that will never resolve on its own.
+        assert_eq!(
+            progress_text(
+                &IngressProgress::AwaitingApproval {
+                    tool: "bash".into(),
+                    summary: String::new(),
+                },
+                minutes(9)
+            ),
+            "_Waiting for an operator to approve `bash`. (9m)_"
         );
     }
 

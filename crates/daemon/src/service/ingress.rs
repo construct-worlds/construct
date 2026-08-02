@@ -22,6 +22,20 @@ use uuid::Uuid;
 const REQUEST_DEDUP_CAP: usize = 4096;
 const PENDING_DELIVERY_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// How long a session must sit idle and quiet, with no approval pending,
+/// before a turn that produced no answer is called finished-and-failed.
+///
+/// Long enough that the gap between two tool calls cannot be mistaken for the
+/// end of a turn, short enough that the person waiting learns something in
+/// seconds rather than at the delivery TTL.
+const IDLE_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The same, for a delivery whose turn was never observed to start at all.
+/// More generous, because "has not begun yet" is the normal state of a session
+/// for the first moments after input reaches it, and a harness that is slow to
+/// pick input up must not be declared broken.
+const NEVER_STARTED_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
 struct PendingDelivery {
     session_id: String,
     created_at: tokio::time::Instant,
@@ -364,12 +378,14 @@ impl ServiceIngress {
                 .await;
         }
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30 * 60);
+        let mut watch = TurnWatch::default();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return Err(anyhow!("channel stopped")),
                 _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
             }
-            if tokio::time::Instant::now() >= deadline {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
                 return Err(anyhow!("service turn timed out"));
             }
             let Ok(detail) = self.shared.manager.detail(&receipt.session).await else {
@@ -396,8 +412,14 @@ impl ServiceIngress {
                     return Ok(reply);
                 }
                 if detail.summary.state == SessionState::Errored {
-                    return Err(anyhow!("service session errored without a final reply"));
+                    return Err(turn_failed_error(&detail));
                 }
+            }
+            // The turn is over and left no answer behind. Without this the
+            // loop would keep polling a session that has already gone back to
+            // its composer, and say nothing until the deadline above.
+            if watch.settled_without_answer(&detail, now) {
+                return Err(turn_failed_error(&detail));
             }
         }
     }
@@ -410,6 +432,7 @@ impl ServiceIngress {
         progress: &watch::Sender<IngressProgress>,
     ) -> Result<String> {
         let deadline = tokio::time::Instant::now() + PENDING_DELIVERY_TTL;
+        let mut watch = TurnWatch::default();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -418,7 +441,8 @@ impl ServiceIngress {
                 },
                 _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
             }
-            if tokio::time::Instant::now() >= deadline {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
                 self.shared.cancel_delivery(delivery_id).await;
                 return Err(anyhow!("service turn timed out"));
             }
@@ -434,9 +458,14 @@ impl ServiceIngress {
             }
             if detail.summary.state == SessionState::Errored {
                 self.shared.cancel_delivery(delivery_id).await;
-                return Err(anyhow!(
-                    "interactive service session errored before replying"
-                ));
+                return Err(turn_failed_error(&detail));
+            }
+            // A live agent TUI that fails mid-turn returns to its composer
+            // without ever erroring its session, so the reply this loop is
+            // waiting for is never coming. Nothing above would notice.
+            if watch.settled_without_answer(&detail, now) {
+                self.shared.cancel_delivery(delivery_id).await;
+                return Err(turn_failed_error(&detail));
             }
         }
     }
@@ -754,6 +783,96 @@ pub(super) enum IngressProgress {
         tool: String,
         summary: String,
     },
+}
+
+/// Watches one delivery's turn for the moment it stops without answering.
+///
+/// A harness that fails mid-turn does not necessarily error its session. An
+/// interactive TUI prints the failure into its viewport and returns to its
+/// composer, which from outside looks exactly like a turn that finished — the
+/// session is idle, nothing is pending, and the only thing distinguishing the
+/// two is that no answer was produced. Left undetected, that difference costs
+/// the person waiting the entire delivery TTL of silence.
+///
+/// Idleness alone is not enough to conclude anything: a session is briefly
+/// idle before it picks up delivered input, and a coarse state can lag the
+/// transcript. So the turn must be idle, unqueued, not stopped at an approval,
+/// and appending nothing, all continuously, before it is called over.
+#[derive(Default)]
+struct TurnWatch {
+    /// Whether this turn was ever seen running. Until it has been, the session
+    /// being idle means "not started yet", not "finished".
+    saw_running: bool,
+    /// When the current continuous stretch of quiet idleness began.
+    idle_since: Option<tokio::time::Instant>,
+    /// Count of transcript events that represent progress. PTY frames are
+    /// excluded deliberately: an interactive harness repaints its viewport
+    /// constantly — including while idle — so counting those would mean a
+    /// turn never looks quiet and this never fires.
+    progress_events: usize,
+}
+
+impl TurnWatch {
+    /// Fold in one poll of the session. True once the turn has demonstrably
+    /// stopped without producing an answer.
+    fn settled_without_answer(
+        &mut self,
+        detail: &construct_protocol::SessionDetail,
+        now: tokio::time::Instant,
+    ) -> bool {
+        let idle = matches!(
+            detail.summary.state,
+            SessionState::AwaitingInput | SessionState::Done
+        ) && !detail.summary.pending_input
+            && pending_approval(&detail.events).is_none();
+        let progress_events = detail
+            .events
+            .iter()
+            .filter(|event| is_progress_event(&event.event))
+            .count();
+
+        if !idle {
+            self.saw_running = true;
+            self.idle_since = None;
+            self.progress_events = progress_events;
+            return false;
+        }
+        // Still appending is still working, whatever the coarse state says.
+        if progress_events != self.progress_events {
+            self.progress_events = progress_events;
+            self.idle_since = Some(now);
+            return false;
+        }
+        let since = *self.idle_since.get_or_insert(now);
+        let grace = if self.saw_running {
+            IDLE_SETTLE
+        } else {
+            NEVER_STARTED_GRACE
+        };
+        now.duration_since(since) >= grace
+    }
+}
+
+/// Whether an event represents the turn getting somewhere, as opposed to the
+/// harness redrawing what is already on screen.
+fn is_progress_event(event: &SessionEvent) -> bool {
+    matches!(
+        event,
+        SessionEvent::Message { .. }
+            | SessionEvent::Reasoning { .. }
+            | SessionEvent::ToolUse { .. }
+            | SessionEvent::ToolResult { .. }
+            | SessionEvent::ToolApprovalRequest { .. }
+    )
+}
+
+/// Why a turn that produced no answer ended, in the harness's own words where
+/// it left any. Phrased to read as a cause, since channels present it as one.
+fn turn_failed_error(detail: &construct_protocol::SessionDetail) -> anyhow::Error {
+    match super::harness_error::harness_error_detail(&detail.events) {
+        Some(reported) => anyhow!("{reported}"),
+        None => anyhow!("the session stopped without replying"),
+    }
 }
 
 /// Publish the turn's current phase, if it changed. Only the waiting task
@@ -1248,6 +1367,239 @@ mod tests {
             granted.get(construct_protocol::adapter::SERVICE_REPLY_ONLY_MCP_ENV),
             None,
             "general MCP grants keep plugin tools, including an installed Slack MCP, available"
+        );
+    }
+
+    /// A session detail with only the fields turn-watching reads.
+    fn watched(
+        state: SessionState,
+        pending_input: bool,
+        events: Vec<SessionEvent>,
+    ) -> construct_protocol::SessionDetail {
+        let at = chrono::Utc::now();
+        construct_protocol::SessionDetail {
+            summary: construct_protocol::SessionSummary {
+                id: "s1".into(),
+                harness: "codex".into(),
+                cwd: "/tmp".into(),
+                title: None,
+                auto_title_pending: false,
+                state,
+                created_at: at,
+                last_event_at: Some(at),
+                last_message_at: None,
+                cost_usd: None,
+                model: None,
+                effort: None,
+                route: None,
+                route_capable: false,
+                worktree: None,
+                pending_input,
+                last_prompt: None,
+                event_count: events.len() as u64,
+                has_pty: true,
+                mode: Some("interactive".into()),
+                pinned: false,
+                position: 0,
+                group_id: None,
+                parent_session_id: None,
+                native_subagent: None,
+                last_pty_at_ms: None,
+                busy_ms: 0,
+                busy_running_since_ms: None,
+                message_count: 0,
+                tokens: Default::default(),
+                context_used: None,
+                context_window: None,
+                context_segments: Vec::new(),
+                approval_mode: construct_protocol::ApprovalMode::Manual,
+                kind: SessionKind::User,
+                archived: false,
+                forked_from: None,
+                merge: None,
+                operator_loop_disabled: false,
+                needs_attention: false,
+            },
+            events: events
+                .into_iter()
+                .enumerate()
+                .map(|(seq, event)| construct_protocol::TimestampedEvent {
+                    at,
+                    seq: seq as u64,
+                    event,
+                })
+                .collect(),
+            ui_panels: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_turn_that_returns_to_its_composer_without_answering_is_over() {
+        // The failure this exists for: an interactive harness loses its
+        // upstream mid-turn, draws the error in its viewport, and goes back to
+        // awaiting input. The session never errors, so nothing else in either
+        // wait loop notices, and the caller would otherwise poll until the
+        // delivery TTL — half an hour of a channel saying "working on it".
+        let mut watch = TurnWatch::default();
+        let start = tokio::time::Instant::now();
+
+        let running = watched(SessionState::Running, false, vec![]);
+        assert!(!watch.settled_without_answer(&running, start));
+
+        let idle = watched(SessionState::AwaitingInput, false, vec![]);
+        assert!(!watch.settled_without_answer(&idle, start));
+        // Idle, but not for long enough to be sure yet.
+        assert!(!watch.settled_without_answer(&idle, start + IDLE_SETTLE / 2));
+        assert!(watch.settled_without_answer(&idle, start + IDLE_SETTLE));
+    }
+
+    #[test]
+    fn a_turn_still_appending_is_never_called_finished() {
+        // Coarse state can lag the transcript, and some harnesses sit at
+        // "awaiting input" between steps. Anything new arriving restarts the
+        // clock, so only genuine quiet concludes a turn.
+        let mut watch = TurnWatch::default();
+        let start = tokio::time::Instant::now();
+        watch.settled_without_answer(&watched(SessionState::Running, false, vec![]), start);
+
+        let mut events = vec![SessionEvent::Message {
+            role: MessageRole::User,
+            text: "go".into(),
+        }];
+        let mut now = start;
+        for step in 0..4 {
+            events.push(SessionEvent::ToolUse {
+                tool: "bash".into(),
+                args: serde_json::Value::Null,
+                call_id: Some(format!("c{step}")),
+            });
+            now += IDLE_SETTLE - std::time::Duration::from_secs(1);
+            assert!(
+                !watch.settled_without_answer(
+                    &watched(SessionState::AwaitingInput, false, events.clone()),
+                    now
+                ),
+                "a turn that just appended a tool call has not stopped"
+            );
+        }
+        // Once it genuinely stops appending, the clock runs out.
+        now += IDLE_SETTLE;
+        assert!(watch.settled_without_answer(
+            &watched(SessionState::AwaitingInput, false, events),
+            now
+        ));
+    }
+
+    #[test]
+    fn a_repainting_idle_harness_does_not_look_busy() {
+        // An interactive TUI writes to its PTY constantly, including while it
+        // sits at an empty composer. If PTY frames counted as progress this
+        // would never fire for exactly the sessions it exists to serve.
+        let mut watch = TurnWatch::default();
+        let start = tokio::time::Instant::now();
+        watch.settled_without_answer(&watched(SessionState::Running, false, vec![]), start);
+
+        let repaint = |events: &mut Vec<SessionEvent>| {
+            events.push(SessionEvent::Pty {
+                data: "cmVwYWludA==".into(),
+            })
+        };
+        let mut events = Vec::new();
+        repaint(&mut events);
+
+        // The first idle poll starts the clock.
+        let idle_began = start;
+        assert!(!watch.settled_without_answer(
+            &watched(SessionState::AwaitingInput, false, events.clone()),
+            idle_began
+        ));
+        // Repaints keep arriving and must not push the conclusion back.
+        for step in 1..=3 {
+            repaint(&mut events);
+            assert!(
+                !watch.settled_without_answer(
+                    &watched(SessionState::AwaitingInput, false, events.clone()),
+                    idle_began + IDLE_SETTLE / 4 * step,
+                ),
+                "not settled yet, but only because too little time has passed"
+            );
+        }
+        repaint(&mut events);
+        assert!(watch.settled_without_answer(
+            &watched(SessionState::AwaitingInput, false, events),
+            idle_began + IDLE_SETTLE
+        ));
+    }
+
+    #[test]
+    fn a_turn_stopped_at_an_approval_is_waiting_not_finished() {
+        // An approval is the one kind of stop that is *supposed* to last: it
+        // resolves when a human acts. Calling it a failure would replace a
+        // truthful "waiting for an operator" with a wrong "it broke".
+        let mut watch = TurnWatch::default();
+        let start = tokio::time::Instant::now();
+        watch.settled_without_answer(&watched(SessionState::Running, false, vec![]), start);
+
+        let parked = watched(
+            SessionState::AwaitingInput,
+            false,
+            vec![SessionEvent::ToolApprovalRequest {
+                call_id: "c1".into(),
+                tool: "bash".into(),
+                args_summary: "cargo test".into(),
+                risk: construct_protocol::ToolRisk::Risky,
+                allow_auto_review: true,
+            }],
+        );
+        assert!(!watch.settled_without_answer(&parked, start + IDLE_SETTLE * 10));
+    }
+
+    #[test]
+    fn input_still_queued_means_the_turn_has_not_started() {
+        // Between delivery and pickup the session is idle with work waiting.
+        // That is the normal opening moment of every turn, not a failure.
+        let mut watch = TurnWatch::default();
+        let start = tokio::time::Instant::now();
+        let queued = watched(SessionState::AwaitingInput, true, vec![]);
+        assert!(!watch.settled_without_answer(&queued, start));
+        assert!(!watch.settled_without_answer(&queued, start + NEVER_STARTED_GRACE * 2));
+    }
+
+    #[test]
+    fn a_turn_never_seen_running_gets_the_longer_grace() {
+        // A harness slow to pick input up must not be declared broken at the
+        // ten-second mark — but it must not hold the caller forever either.
+        let mut watch = TurnWatch::default();
+        let start = tokio::time::Instant::now();
+        let idle = watched(SessionState::AwaitingInput, false, vec![]);
+        assert!(!watch.settled_without_answer(&idle, start));
+        assert!(!watch.settled_without_answer(&idle, start + IDLE_SETTLE * 2));
+        assert!(watch.settled_without_answer(&idle, start + NEVER_STARTED_GRACE));
+    }
+
+    #[test]
+    fn a_failed_turn_is_reported_in_the_harnesss_own_words() {
+        use base64::Engine as _;
+        let detail = watched(
+            SessionState::AwaitingInput,
+            false,
+            vec![SessionEvent::Pty {
+                data: base64::engine::general_purpose::STANDARD.encode(
+                    "\x1b[K■ stream disconnected before completion\x1b[K› ask me anything",
+                ),
+            }],
+        );
+        assert_eq!(
+            turn_failed_error(&detail).to_string(),
+            "stream disconnected before completion"
+        );
+
+        // A harness that left nothing quotable still gets a straight answer,
+        // not silence and not a lie about what happened.
+        let bare = watched(SessionState::AwaitingInput, false, vec![]);
+        assert_eq!(
+            turn_failed_error(&bare).to_string(),
+            "the session stopped without replying"
         );
     }
 }
