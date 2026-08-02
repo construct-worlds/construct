@@ -21776,7 +21776,7 @@ mod tests {
 
         assert!(text.contains("▶"), "title run icon should render: {text:?}");
         assert!(
-            text.contains("▣"),
+            text.contains("◫"),
             "playbook mode toggle should render: {text:?}"
         );
         assert!(
@@ -34591,9 +34591,9 @@ mod tests {
             );
             // Chip text includes one filled space before the glyph and after
             // the trailing '.'; exterior cells stay transparent.
-            let chip = " ◇ C-x . ";
+            let chip = " ✦ C-x . ";
             assert!(
-                rendered_text(terminal.backend().buffer()).contains("◇ C-x ."),
+                rendered_text(terminal.backend().buffer()).contains("✦ C-x ."),
                 "full-screen PTY repaint must not cover suggestion chrome"
             );
             let buffer = terminal.backend().buffer();
@@ -35233,11 +35233,11 @@ mod tests {
             .expect("draw s2");
         let text = rendered_text(terminal.backend().buffer());
         assert!(
-            text.contains("◇ C-x ."),
+            text.contains("✦ C-x ."),
             "s2's affordance is idle (no hand/pending): {text}"
         );
         assert!(
-            !text.contains("✦"),
+            !text.contains("✦1 C-x ."),
             "s1's dealt hand must not appear while s2 is selected: {text}"
         );
         assert!(
@@ -40349,13 +40349,13 @@ mod tests {
             .chunks(term.backend().buffer().area.width as usize)
             .flat_map(|row| row.iter().map(|cell| cell.symbol()))
             .collect::<String>();
-        assert!(rendered.contains("◈"));
+        assert!(rendered.contains("⛓︎"));
         assert!(rendered.contains("assistant"));
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_view_title_bar_includes_the_service_diamond() {
+    async fn service_view_title_bar_includes_the_service_glyph() {
         let (mut app, _dir, server) = captured_app().await;
         app.services.push(service_summary_for_test("assistant"));
         app.select_service("assistant".into());
@@ -40372,8 +40372,8 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            title_row.contains("◈ service: assistant"),
-            "service pane title should include its diamond: {title_row:?}"
+            title_row.contains("⛓︎ service: assistant"),
+            "service pane title should include its glyph: {title_row:?}"
         );
         server.abort();
     }

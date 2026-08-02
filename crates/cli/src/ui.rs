@@ -3070,7 +3070,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         service.harness.clone()
                     };
                     let suffix_w = suffix.chars().count();
-                    let prefix_w = 5; // disclosure + `◈ ` plus the name's gap
+                    let prefix_w = 5; // disclosure + `⛓︎ ` plus the name's gap
                     let name_avail = row_w.saturating_sub(prefix_w + 1 + suffix_w);
                     let name = fit_name(&service.name, name_avail, None);
                     let name_w = name.chars().count();
@@ -3082,7 +3082,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     };
                     vec![Line::from(vec![
                         Span::styled(disclosure, Style::default().fg(app.theme.group)),
-                        Span::styled("◈ ", Style::default().fg(app.theme.accent)),
+                        Span::styled("⛓︎ ", Style::default().fg(app.theme.accent)),
                         Span::styled(name, name_style),
                         Span::raw(" ".repeat(gap)),
                         Span::styled(suffix, session_list_secondary_style(&app.theme)),
@@ -6018,11 +6018,11 @@ fn focused_session_pane(app: &App) -> Option<WindowPaneHit> {
 /// Persistent suggestion-deck affordance (specs 0109/0155). One chip per
 /// eligible session pane — not a single global control. Right-aligned flush
 /// against that pane's right edge, one row above its bottom border. Visual
-/// state (idle ◇ / pending spinner / dealt ✦N) is looked up by that pane's
+/// state (idle ✦ / pending spinner / dealt ✦N) is looked up by that pane's
 /// `session_id` so generating for session A never paints on session B.
 ///
 /// Layout (one row, left → right):
-///   `[transparent][ bg " " ][ bg "◇ C-x ." ][ bg " " ][transparent]`
+///   `[transparent][ bg " " ][ bg "✦ C-x ." ][ bg " " ][transparent]`
 ///
 /// - **Interior spaces** (with filled bg) give the chip breathing room before
 ///   the glyph and after the trailing `.` so the tint is visibly a pad, not
@@ -6078,7 +6078,7 @@ fn render_suggest_affordances(f: &mut Frame, app: &mut App) {
         } else if app.suggest_pending_active(&session_id) {
             format!("{spinner} C-x . suggesting…")
         } else {
-            "◇ C-x .".to_string()
+            "✦ C-x .".to_string()
         };
         let label = format!(" {core} ");
         let width = UnicodeWidthStr::width(label.as_str())
@@ -8011,7 +8011,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(pane_border_style(&app.theme, focused))
-            .title(format!(" ◈ service: {name} "));
+            .title(format!(" ⛓︎ service: {name} "));
         f.render_widget(
             Paragraph::new("service definition is no longer available")
                 .block(block)
@@ -8047,7 +8047,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         .borders(Borders::ALL)
         .border_style(border_style)
         .padding(ratatui::widgets::Padding::new(2, 2, 1, 1))
-        .title(format!(" ◈ service: {}{unsaved} ", summary.name));
+        .title(format!(" ⛓︎ service: {}{unsaved} ", summary.name));
     let block = apply_pane_title_right_cluster(
         app,
         area,
@@ -14636,7 +14636,7 @@ fn session_status_glyph(app: &App, s: &SessionSummary) -> &'static str {
 
 /// Same animation gate as `session_status_glyph`, but with a caller-supplied
 /// static fallback glyph instead of the lifecycle glyph. Lets the Playbook-open
-/// indicator (a static `▣` otherwise) animate exactly like the normal status
+/// indicator (a static `◫` otherwise) animate exactly like the normal status
 /// dot while the session is actively working.
 fn session_mode_glyph(app: &App, s: &SessionSummary, static_glyph: &'static str) -> &'static str {
     // `agent_statuses` only holds entries while a turn is active (the live
@@ -18121,7 +18121,7 @@ fn playbook_title_line<'a>(
 }
 
 fn playbook_mode_glyph() -> &'static str {
-    "▣"
+    "◫"
 }
 
 fn playbook_toggle_style(app: &App, popup: &crate::app::PlaybookPopup, active: bool) -> Style {
@@ -27798,7 +27798,7 @@ mod tests {
     #[test]
     fn playbook_open_title_glyph_takes_playbook_border_color() {
         // When the Playbook view is open for the selected session, the title
-        // bar's mode glyph (▣ or the animated spinner in its place) must read
+        // bar's mode glyph (◫ or the animated spinner in its place) must read
         // as part of the Playbook frame it toggles into — the playbook border
         // color, focus-dimmed the same way `playbook_border_style` dims the
         // actual Playbook pane's border.
@@ -27828,9 +27828,9 @@ mod tests {
 
     #[test]
     fn playbook_mode_glyph_differs_from_every_spinner_frame() {
-        // `session_mode_glyph` swaps in a spinner frame in place of `▣`
+        // `session_mode_glyph` swaps in a spinner frame in place of `◫`
         // whenever `session_should_animate_status` is true, falling back to
-        // the static `▣` otherwise. If the static glyph ever collided with a
+        // the static `◫` otherwise. If the static glyph ever collided with a
         // spinner frame, the Playbook-open indicator would silently stop
         // appearing to animate.
         assert!(!crate::app::SPINNER_FRAMES.contains(&playbook_mode_glyph()));
