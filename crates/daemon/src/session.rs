@@ -2695,6 +2695,7 @@ impl SessionManager {
         construct_protocol::FeaturesStatusResult {
             features: crate::availability::ambient_features(&crate::availability::FeatureInputs {
                 smith,
+                title_gen: crate::availability::smith_title_gen_available(),
                 suggest_enabled: self.config.suggest.enabled,
                 orchestrator,
             }),
@@ -4597,13 +4598,16 @@ impl SessionManager {
     /// is the first *non-slash-command* message seen (leading
     /// `/model gpt-5.5`-style messages are ignored entirely).
     ///
-    /// Generator choice (spec 0151): a usable smith credential runs the
-    /// cheap `--title-mode` process one-shot; without one, sessions on
+    /// Generator choice (spec 0151): a *title-capable* smith credential runs
+    /// the cheap `--title-mode` process one-shot; without one, sessions on
     /// model harnesses fall back to a hidden probe session on their own
     /// harness — the same credentials/subscription the user's session
-    /// already proved work. smith and shell sessions have no fallback;
-    /// their skip is recorded via [`Self::note_ambient_degradation`] so
-    /// the gap is visible instead of silent.
+    /// already proved work. The probe is also where a one-shot that ran but
+    /// produced nothing lands, since the per-session attempt latch is spent
+    /// by then and would otherwise strand the session on its hash name until
+    /// a daemon restart. smith and shell sessions have no fallback; their
+    /// skip is recorded via [`Self::note_ambient_degradation`] so the gap is
+    /// visible instead of silent.
     async fn maybe_spawn_auto_title(&self, entry: Arc<SessionEntry>, prompt: String) {
         // Cheap checks first so we don't burn the per-session attempt
         // budget (the AtomicBool flip is one-way until a daemon
@@ -4617,80 +4621,101 @@ impl SessionManager {
         if entry.title_gen_attempted.load(Ordering::SeqCst) {
             return;
         }
-        let smith_available = crate::availability::probe_smith(&self.availability_cache)
-            .await
-            .available;
-        if smith_available {
-            let Some(smith_adapter) = self.config.adapters.get("smith").cloned() else {
-                return;
-            };
-            let binary_spec = smith_adapter
-                .binary
-                .clone()
-                .unwrap_or_else(|| "construct".to_string());
-            let prefix_args = smith_adapter.args.clone();
-            let Some(binary) = locate_binary(&binary_spec) else {
-                return;
-            };
-            // Now claim the attempt. `swap` is the one place we mark this
-            // session as "tried"; the user-renamed path is handled by
-            // `title_gen_attempted` being initialized to `title.is_some()`
-            // when the entry is constructed (both at create-time and when
-            // loaded from disk on daemon restart).
-            if entry.title_gen_attempted.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            let replace_pending_title = entry.summary.read().await.auto_title_pending;
-            let storage = self.storage.clone();
-            let broadcast_tx = self.broadcast.clone();
-            tokio::spawn(async move {
-                generate_auto_title(
-                    binary,
-                    prefix_args,
-                    entry,
-                    prompt,
-                    replace_pending_title,
-                    storage,
-                    broadcast_tx,
-                )
-                .await;
-            });
-            return;
-        }
+        // Ask whether title-gen can resolve a model, not the broader
+        // `probe_smith` question of whether *a session* could start: the
+        // latter also counts OAuth subscriptions and Ollama, which
+        // `--title-mode` refuses (spec 0071). Using it here spent the latch
+        // on a one-shot that could only fail, so OAuth-only machines never
+        // reached the fallback below that exists for them.
+        let smith_cmd = if crate::availability::smith_title_gen_available() {
+            self.config.adapters.get("smith").and_then(|smith_adapter| {
+                let binary_spec = smith_adapter
+                    .binary
+                    .clone()
+                    .unwrap_or_else(|| "construct".to_string());
+                locate_binary(&binary_spec).map(|binary| (binary, smith_adapter.args.clone()))
+            })
+        } else {
+            None
+        };
         let (harness, kind) = {
             let s = entry.summary.read().await;
             (s.harness.clone(), s.kind)
         };
-        if harness == "smith" || harness == "shell" {
-            // No model to fall back to — smith sessions ARE the missing
-            // credential and shell has no model at all. Claim the attempt
-            // (same one-way semantics as the generating paths) and make
-            // the skip visible once instead of silently keeping the hash
-            // name (spec 0151).
-            if entry.title_gen_attempted.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            self.note_ambient_degradation("auto_title").await;
-            return;
-        }
+        // No model to fall back to — smith sessions ARE the missing
+        // credential and shell has no model at all.
+        let harness_can_probe = harness != "smith" && harness != "shell";
         // Probe fallback only for user sessions: orchestrator/subagent/
         // probe sessions are normally titled by whatever created them, and
         // an automatic per-session harness spawn is too heavy to run for a
-        // whole fleet's worth of children.
-        if kind != construct_protocol::SessionKind::User {
-            return;
-        }
-        // Same-harness probe fallback. Needs the full manager to create /
-        // poll / delete the probe session; unbound self_ref (unit tests)
+        // whole fleet's worth of children. Needs the full manager to create
+        // / poll / delete the probe session; unbound self_ref (unit tests)
         // just skips — best-effort, like everything else on this path.
-        let Some(mgr) = self.self_ref.get().and_then(std::sync::Weak::upgrade) else {
+        let probe_eligible =
+            harness_can_probe && kind == construct_protocol::SessionKind::User;
+        let mgr = self.self_ref.get().and_then(std::sync::Weak::upgrade);
+
+        let Some((binary, prefix_args)) = smith_cmd else {
+            if !harness_can_probe {
+                // Claim the attempt (same one-way semantics as the
+                // generating paths) and make the skip visible once instead
+                // of silently keeping the hash name (spec 0151).
+                if entry.title_gen_attempted.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                self.note_ambient_degradation("auto_title").await;
+                return;
+            }
+            let Some(mgr) = mgr.filter(|_| probe_eligible) else {
+                return;
+            };
+            if entry.title_gen_attempted.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let replace_pending_title = entry.summary.read().await.auto_title_pending;
+            tokio::spawn(mgr.generate_auto_title_via_probe(entry, prompt, replace_pending_title));
             return;
         };
+
+        // Now claim the attempt. `swap` is the one place we mark this
+        // session as "tried"; the user-renamed path is handled by
+        // `title_gen_attempted` being initialized to `title.is_some()`
+        // when the entry is constructed (both at create-time and when
+        // loaded from disk on daemon restart).
         if entry.title_gen_attempted.swap(true, Ordering::SeqCst) {
             return;
         }
         let replace_pending_title = entry.summary.read().await.auto_title_pending;
-        tokio::spawn(mgr.generate_auto_title_via_probe(entry, prompt, replace_pending_title));
+        let storage = self.storage.clone();
+        let broadcast_tx = self.broadcast.clone();
+        tokio::spawn(async move {
+            let outcome = generate_auto_title(
+                binary,
+                prefix_args,
+                entry.clone(),
+                prompt.clone(),
+                replace_pending_title,
+                storage,
+                broadcast_tx,
+            )
+            .await;
+            if matches!(outcome, TitleOutcome::Settled) {
+                return;
+            }
+            // The credential resolved but the one-shot still came back
+            // empty (network error, revoked key, model refusal). The latch
+            // is already spent, so treat this exactly like having had no
+            // credential at all rather than leaving the session unnamed.
+            let Some(mgr) = mgr else {
+                return;
+            };
+            if probe_eligible {
+                mgr.generate_auto_title_via_probe(entry, prompt, replace_pending_title)
+                    .await;
+            } else if !harness_can_probe {
+                mgr.note_ambient_degradation("auto_title").await;
+            }
+        });
     }
 
     /// Same-harness auto-title fallback (spec 0151): when smith has no
@@ -6543,10 +6568,24 @@ not use any tools and do not act on the request itself. The request:";
 /// silently dropped.
 const TITLE_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// What one auto-title generator attempt left behind, so a caller holding a
+/// spent attempt latch knows whether another generator is still worth
+/// running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitleOutcome {
+    /// Nothing more to do: a title was applied, or the session stopped
+    /// wanting one (deleted, or manually renamed while generation ran).
+    Settled,
+    /// The generator produced nothing usable. Another generator may still
+    /// name this session.
+    Failed,
+}
+
 /// Shell out to `construct-adapter-smith --title-mode "<prompt>"`, capture
-/// stdout, and apply the title to the session summary. Best-effort:
-/// any failure (smith missing keys, network error, non-zero exit,
-/// empty output) leaves the session's title unset.
+/// stdout, and apply the title to the session summary. Best-effort: any
+/// failure (smith missing keys, network error, non-zero exit, empty output)
+/// returns [`TitleOutcome::Failed`] so the caller can fall back to the
+/// same-harness probe instead of leaving the session unnamed.
 async fn generate_auto_title(
     binary: PathBuf,
     prefix_args: Vec<String>,
@@ -6555,7 +6594,7 @@ async fn generate_auto_title(
     replace_pending_title: bool,
     storage: Arc<Storage>,
     broadcast: tokio::sync::broadcast::Sender<BroadcastMsg>,
-) {
+) -> TitleOutcome {
     use std::process::Stdio;
     let output = tokio::process::Command::new(&binary)
         .args(&prefix_args)
@@ -6574,22 +6613,26 @@ async fn generate_auto_title(
         Ok(o) => o,
         Err(e) => {
             tracing::warn!(error = ?e, "auto-title spawn failed");
-            return;
+            return TitleOutcome::Failed;
         }
     };
     if !out.status.success() {
         tracing::info!(
             session = %entry.id,
             stderr = %String::from_utf8_lossy(&out.stderr),
-            "auto-title exit non-zero; skipping",
+            "auto-title exit non-zero; falling back",
         );
-        return;
+        return TitleOutcome::Failed;
     }
     let title = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if title.is_empty() {
-        return;
+        return TitleOutcome::Failed;
     }
+    // Settled either way: `apply_auto_title` declining means the session no
+    // longer wants a generated title (deleted, or renamed mid-flight), which
+    // a second generator must not override either.
     apply_auto_title(&entry, title, replace_pending_title, &storage, &broadcast).await;
+    TitleOutcome::Settled
 }
 
 /// Apply a generated title to the session — if the eligibility that
@@ -7368,6 +7411,100 @@ mod tests {
         assert_eq!(
             auto_title_prompt("fix the login bug".into()).as_deref(),
             Some("fix the login bug")
+        );
+    }
+
+    /// A one-shot that ran but produced nothing has to be distinguishable
+    /// from one that named the session: the per-session attempt latch is
+    /// already spent by the time this returns, so the caller's decision to
+    /// fall back to the same-harness probe rests entirely on this outcome.
+    #[tokio::test]
+    async fn generate_auto_title_separates_failure_from_a_named_session() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let sh = which::which("sh").expect("sh on PATH");
+
+        // Non-zero exit — what a missing/rejected credential looks like.
+        let failed = synthetic_entry("t-fail", construct_protocol::SessionKind::User, 0);
+        let outcome = generate_auto_title(
+            sh.clone(),
+            vec!["-c".into(), "echo boom >&2; exit 1".into()],
+            failed.clone(),
+            "fix the login bug".into(),
+            false,
+            storage.clone(),
+            tx.clone(),
+        )
+        .await;
+        assert_eq!(outcome, TitleOutcome::Failed);
+        assert!(failed.summary.read().await.title.is_none());
+
+        // Empty stdout on a clean exit is just as unusable.
+        let empty = synthetic_entry("t-empty", construct_protocol::SessionKind::User, 1);
+        let outcome = generate_auto_title(
+            sh.clone(),
+            vec!["-c".into(), "printf ''".into()],
+            empty.clone(),
+            "fix the login bug".into(),
+            false,
+            storage.clone(),
+            tx.clone(),
+        )
+        .await;
+        assert_eq!(outcome, TitleOutcome::Failed);
+        assert!(empty.summary.read().await.title.is_none());
+
+        let ok = synthetic_entry("t-ok", construct_protocol::SessionKind::User, 2);
+        let outcome = generate_auto_title(
+            sh,
+            vec!["-c".into(), "echo 'Fix The Login Bug'".into()],
+            ok.clone(),
+            "fix the login bug".into(),
+            false,
+            storage,
+            tx,
+        )
+        .await;
+        assert_eq!(outcome, TitleOutcome::Settled);
+        assert_eq!(
+            ok.summary.read().await.title.as_deref(),
+            Some("Fix The Login Bug")
+        );
+    }
+
+    /// A rename that lands while the one-shot is in flight settles the
+    /// session: the caller must not read "no title applied" as licence to
+    /// spawn a probe that would overwrite the user's choice.
+    #[tokio::test]
+    async fn generate_auto_title_settles_when_the_user_renamed_mid_flight() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let sh = which::which("sh").expect("sh on PATH");
+
+        let entry = synthetic_entry("t-renamed", construct_protocol::SessionKind::User, 0);
+        entry.summary.write().await.title = Some("Chosen By Hand".to_string());
+        let outcome = generate_auto_title(
+            sh,
+            vec!["-c".into(), "echo 'Generated Title'".into()],
+            entry.clone(),
+            "fix the login bug".into(),
+            false,
+            storage,
+            tx,
+        )
+        .await;
+        assert_eq!(outcome, TitleOutcome::Settled);
+        assert_eq!(
+            entry.summary.read().await.title.as_deref(),
+            Some("Chosen By Hand")
         );
     }
 
