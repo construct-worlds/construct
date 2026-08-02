@@ -835,8 +835,29 @@ fn session_list_marker(summary: &SessionSummary) -> &'static str {
     }
 }
 
-fn session_list_marker_width(summary: &SessionSummary) -> usize {
-    1 + usize::from(summary.forked_from.is_some())
+/// Cells every session row reserves between its tree prefix and its status
+/// glyph: one for the children disclosure, one for the fork lineage mark.
+/// Both are reserved unconditionally — a childless session and a session that
+/// isn't a fork paint a space there — so all rows at one depth share a left
+/// edge, and a child's status glyph lands under its parent's title.
+const SESSION_ROW_GUTTER_CELLS: usize = 2;
+
+/// That gutter's two glyphs: `(disclosure, lineage)`. Each is exactly one
+/// cell wide in every combination, so a session gaining children or being a
+/// fork never nudges its own title — or its siblings' — sideways.
+fn session_row_gutter(
+    summary: &SessionSummary,
+    has_children: bool,
+    children_expanded: bool,
+) -> (&'static str, &'static str) {
+    let disclosure = if !has_children {
+        " "
+    } else if children_expanded {
+        "▼"
+    } else {
+        "▶"
+    };
+    (disclosure, session_list_marker(summary))
 }
 
 /// Hit zone for the `+` button on the session-list pane's title
@@ -3180,21 +3201,13 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     attention_rollup,
                     ..
                 } => {
-                    let expand_glyph = if *has_children {
-                        Some(if *children_expanded { "▼" } else { "▶" })
-                    } else {
-                        None
-                    };
-                    let lineage_glyph = session_list_marker(s);
+                    let (expand_glyph, lineage_glyph) =
+                        session_row_gutter(s, *has_children, *children_expanded);
                     let tree_prefix = list_tree_branch_prefix(&app_items, i, *nesting_depth);
-                    // Fixed-width left side: indent + optional disclosure (1)
-                    // + optional lineage (1) + " glyph " (3).
-                    // Only forks reserve the lineage cell, keeping ordinary
-                    // project members at their established position.
-                    let prefix_w = tree_prefix.chars().count()
-                        + usize::from(expand_glyph.is_some())
-                        + session_list_marker_width(s)
-                        + 3;
+                    // Fixed-width left side: tree rails + the always-reserved
+                    // disclosure/lineage gutter + " glyph " (3) + one cell of
+                    // right inset, matching the service row's prefix budget.
+                    let prefix_w = tree_prefix.chars().count() + SESSION_ROW_GUTTER_CELLS + 3 + 1;
                     let harness = harness_label(s);
                     let harness_w = harness.chars().count();
                     // Reserve room for the trailing unblock marker (" ●") so the
@@ -3248,18 +3261,14 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         tree_prefix,
                         session_list_secondary_style(&app.theme),
                     )];
-                    if let Some(expand_glyph) = expand_glyph {
-                        spans.push(Span::styled(
-                            expand_glyph.to_string(),
-                            Style::default().fg(app.theme.group),
-                        ));
-                    }
-                    if s.forked_from.is_some() {
-                        spans.push(Span::styled(
-                            lineage_glyph.to_string(),
-                            Style::default().fg(app.theme.info),
-                        ));
-                    }
+                    spans.push(Span::styled(
+                        expand_glyph.to_string(),
+                        Style::default().fg(app.theme.group),
+                    ));
+                    spans.push(Span::styled(
+                        lineage_glyph.to_string(),
+                        Style::default().fg(app.theme.info),
+                    ));
                     spans.extend([
                         Span::styled(
                             format!(" {} ", session_status_glyph(app, s)),
@@ -24726,6 +24735,49 @@ mod tests {
         assert_eq!(list_tree_branch_prefix(&items, 4, 0), "");
     }
 
+    /// Regression: a project member that grew a subagent or a fork used to
+    /// render its disclosure as an EXTRA cell, pushing its title one column
+    /// right of its childless siblings. The gutter is now reserved on every
+    /// row, so nesting state changes the glyphs, never the geometry.
+    #[test]
+    fn session_row_gutter_is_the_same_width_with_and_without_children() {
+        let plain = clip_test_session("plain", Some("plain"), "smith", SessionState::Done);
+        let mut fork = clip_test_session("fork", Some("fork"), "smith", SessionState::Done);
+        fork.forked_from = Some(construct_protocol::ForkedFrom {
+            session_id: "plain".into(),
+            transcript_seq: 0,
+            at_ms: 0,
+            parent_busy_ms: 0,
+            parent_message_count: 0,
+            parent_tokens: Default::default(),
+            is_reset_snapshot: false,
+        });
+
+        for (summary, has_children, children_expanded) in [
+            (&plain, false, false),
+            (&plain, true, false),
+            (&plain, true, true),
+            (&fork, false, false),
+            (&fork, true, true),
+        ] {
+            let (disclosure, lineage) = session_row_gutter(summary, has_children, children_expanded);
+            assert_eq!(
+                UnicodeWidthStr::width(disclosure) + UnicodeWidthStr::width(lineage),
+                SESSION_ROW_GUTTER_CELLS,
+                "gutter must stay {SESSION_ROW_GUTTER_CELLS} cells for \
+                 has_children={has_children} expanded={children_expanded} \
+                 fork={}",
+                summary.forked_from.is_some()
+            );
+        }
+
+        // The glyphs still carry their meaning inside that fixed width.
+        assert_eq!(session_row_gutter(&plain, false, false), (" ", " "));
+        assert_eq!(session_row_gutter(&plain, true, false), ("▶", " "));
+        assert_eq!(session_row_gutter(&plain, true, true), ("▼", " "));
+        assert_eq!(session_row_gutter(&fork, false, false), (" ", "⑂"));
+    }
+
     #[test]
     fn full_mode_tree_rails_continue_through_detail_and_spacing_rows() {
         let items = vec![
@@ -25073,7 +25125,6 @@ mod tests {
         });
 
         assert_eq!(session_list_marker(&fork), "⑂");
-        assert_eq!(session_list_marker_width(&fork), 2);
 
         let project_member = clip_test_session(
             "project-member",
@@ -25081,7 +25132,11 @@ mod tests {
             "codex",
             SessionState::Running,
         );
-        assert_eq!(session_list_marker_width(&project_member), 1);
+        // A non-fork still paints the lineage cell — as a space — so the
+        // fork's mark never shifts its neighbours' titles.
+        assert_eq!(session_list_marker(&project_member), " ");
+        assert_eq!(session_list_marker(&fork).chars().count(), 1);
+        assert_eq!(session_list_marker(&project_member).chars().count(), 1);
     }
 
     #[test]
