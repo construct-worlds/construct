@@ -231,7 +231,11 @@ impl ServiceIngress {
                         .register_delivery(delivery_id.clone(), id.clone())
                         .await;
                 }
-                if let Err(error) = self.shared.manager.send_input(&id, message).await {
+                // Not `send_input`: an interactive service session is a live
+                // agent TUI, and LF-terminated input lands in its composer
+                // without submitting. `deliver_user_text` picks the framing
+                // the session's harness actually submits on.
+                if let Err(error) = self.shared.manager.deliver_user_text(&id, &message).await {
                     if let Some(delivery_id) = delivery_id.as_deref() {
                         self.shared.cancel_delivery(delivery_id).await;
                     }
@@ -459,11 +463,7 @@ impl ServiceIngress {
         // Use one definition snapshot for the whole creation so a reload
         // cannot combine fields from two versions of a service.
         let config = self.shared.config();
-        let prompt = if config.instruction.trim().is_empty() {
-            message
-        } else {
-            format!("{}\n\n{}", config.instruction.trim(), message)
-        };
+        let prompt = service_seed_prompt(&config.instruction, message, delivery_id);
         let model = service_session_model(&config.harness, config.model.as_deref())?;
         let interactive = config.session_mode == ServiceSessionMode::Interactive;
         let env = service_session_env(&config);
@@ -473,7 +473,7 @@ impl ServiceIngress {
             .create(CreateSessionParams {
                 harness: config.harness.clone(),
                 cwd: config.cwd.clone(),
-                prompt: (!interactive).then_some(prompt.clone()),
+                prompt: Some(prompt),
                 model,
                 title,
                 mode: Some(config.session_mode.as_str().to_string()),
@@ -491,15 +491,14 @@ impl ServiceIngress {
                 forked_from: None,
             })
             .await?;
+        // Registered as soon as the session exists. The seed prompt starts the
+        // turn, but the harness still has to boot and connect its MCP client
+        // before it can call the reply tool, so the id is always pending by
+        // the time a reply is possible.
         if let Some(delivery_id) = delivery_id {
             self.shared
                 .register_delivery(delivery_id.to_string(), id.clone())
                 .await;
-            let message = interactive_delivery_prompt(&prompt, delivery_id);
-            if let Err(error) = self.shared.manager.send_input(&id, message).await {
-                self.shared.cancel_delivery(delivery_id).await;
-                return Err(error);
-            }
         }
         Ok(id)
     }
@@ -521,6 +520,29 @@ fn service_session_env(config: &ServiceConfig) -> HashMap<String, String> {
         }
     }
     env
+}
+
+/// Compose the seed prompt a service session is created with: the service's
+/// standing instruction, this delivery's message, and — for an interactive
+/// session — the binding that tells the agent which delivery id its reply
+/// belongs to.
+///
+/// The opening delivery goes in here rather than being written into the
+/// session afterwards (spec 0177). A freshly spawned agent TUI has not
+/// attached its input handler yet, and the terminal discards anything written
+/// before the harness switches it into raw mode, so a post-spawn write of the
+/// first message is silently lost. As the seed prompt it reaches the adapter
+/// as structured data and starts the first turn natively (spec 0046).
+fn service_seed_prompt(instruction: &str, message: String, delivery_id: Option<&str>) -> String {
+    let prompt = if instruction.trim().is_empty() {
+        message
+    } else {
+        format!("{}\n\n{}", instruction.trim(), message)
+    };
+    match delivery_id {
+        Some(delivery_id) => interactive_delivery_prompt(&prompt, delivery_id),
+        None => prompt,
+    }
 }
 
 fn interactive_delivery_prompt(message: &str, delivery_id: &str) -> String {
@@ -798,6 +820,32 @@ mod tests {
         assert!(prompt.contains("construct_service_reply"));
         assert_eq!(prompt.matches("delivery-123").count(), 2);
         assert!(prompt.contains("do not choose a workspace, channel, recipient, or thread"));
+    }
+
+    #[test]
+    fn interactive_first_delivery_is_carried_by_the_seed_prompt() {
+        // Spec 0177: the opening channel message must reach the harness as the
+        // session's seed prompt, delivery binding included. Returning the bare
+        // message here would mean the daemon had to write it into the PTY
+        // after spawn, which is exactly the race that silently swallowed the
+        // first Slack message of a thread.
+        let prompt = service_seed_prompt("Be brief.", "ship it".to_string(), Some("d-1"));
+
+        assert!(prompt.starts_with("Be brief.\n\nship it\n\n"));
+        assert!(prompt.contains("construct_service_reply"));
+        assert_eq!(prompt.matches("d-1").count(), 2);
+    }
+
+    #[test]
+    fn headless_seed_prompt_carries_no_delivery_binding() {
+        assert_eq!(
+            service_seed_prompt("  ", "ship it".to_string(), None),
+            "ship it"
+        );
+        assert_eq!(
+            service_seed_prompt("Be brief.", "ship it".to_string(), None),
+            "Be brief.\n\nship it"
+        );
     }
 
     #[test]

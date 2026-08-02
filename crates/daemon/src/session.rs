@@ -623,25 +623,29 @@ fn should_record_pty_user_message(harness: &str) -> bool {
     )
 }
 
+/// How "say this to the session as if the user typed it" has to be framed for
+/// a given harness. Shared by every daemon-originated delivery — Playbook Run,
+/// verb-drift escalation, and service channel deliveries — because the framing
+/// is a property of the harness, not of the feature doing the talking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlaybookExecutionDelivery {
+enum SessionInputDelivery {
     AdapterInput,
     ExternalPtyTypedSubmit,
     PtySubmit,
 }
 
-fn playbook_execution_delivery(
+fn session_input_delivery(
     summary: &construct_protocol::SessionSummary,
-) -> PlaybookExecutionDelivery {
+) -> SessionInputDelivery {
     if !summary.has_pty {
-        PlaybookExecutionDelivery::AdapterInput
+        SessionInputDelivery::AdapterInput
     } else if matches!(
         summary.harness.as_str(),
         "claude" | "codex" | "antigravity" | "agy" | "grok" | "hermes"
     ) {
-        PlaybookExecutionDelivery::ExternalPtyTypedSubmit
+        SessionInputDelivery::ExternalPtyTypedSubmit
     } else {
-        PlaybookExecutionDelivery::PtySubmit
+        SessionInputDelivery::PtySubmit
     }
 }
 
@@ -3092,9 +3096,11 @@ impl SessionManager {
     /// picking the framing its harness needs (bracketed-paste typed submit
     /// for an external agent TUI, CR-terminated PTY submit for a PTY-backed
     /// line editor, or a structured adapter input for a headless harness).
-    /// Shared by Playbook Run's prompt delivery and verb-drift escalation
-    /// (spec 0089) — both are "say this to the session as if the user typed
-    /// it," differing only in the message.
+    /// Shared by Playbook Run's prompt delivery, verb-drift escalation
+    /// (spec 0089), and service channel deliveries (spec 0176) — all are "say
+    /// this to the session as if the user typed it," differing only in the
+    /// message. Callers that need the text to appear in the transcript should
+    /// go through [`Self::deliver_user_text`] instead.
     async fn deliver_text_to_session(&self, session_id: &str, text: &str) -> Result<()> {
         let entry = self
             .get_entry(session_id)
@@ -3102,24 +3108,68 @@ impl SessionManager {
             .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
         let delivery = {
             let summary = entry.summary.read().await;
-            playbook_execution_delivery(&summary)
+            session_input_delivery(&summary)
         };
         match delivery {
-            PlaybookExecutionDelivery::ExternalPtyTypedSubmit => {
+            SessionInputDelivery::ExternalPtyTypedSubmit => {
                 self.playbook_submit_typed_prompt(session_id, text).await?;
             }
-            PlaybookExecutionDelivery::PtySubmit => {
+            SessionInputDelivery::PtySubmit => {
                 // Delivery-awaited (not the enqueue-ACK typing path): callers
                 // start run/verb bookkeeping right after this returns, so the
                 // prompt must have actually reached the harness by then.
                 self.pty_input_delivered(session_id, playbook_pty_submit_bytes(text))
                     .await?;
             }
-            PlaybookExecutionDelivery::AdapterInput => {
+            SessionInputDelivery::AdapterInput => {
                 self.send_input(session_id, text.to_string()).await?;
             }
         }
         Ok(())
+    }
+
+    /// Deliver `text` to an already-running session as a user turn: record it
+    /// in the transcript, then hand it to the harness with the framing that
+    /// harness needs (see [`Self::deliver_text_to_session`]).
+    ///
+    /// This is the entry point for text that arrives from outside the session
+    /// — a service channel delivery, say — where the session is live and its
+    /// harness must actually *start a turn* from the message. Plain
+    /// [`Self::send_input`] is not equivalent for a PTY-backed agent TUI: it
+    /// writes `text` + LF, and an LF is not the byte a terminal's Enter key
+    /// sends, so the message lands in the harness's input box and sits there
+    /// unsubmitted.
+    ///
+    /// The transcript record is conditional because who owns it differs by
+    /// path. `send_input` already records on the adapter path. The PTY paths
+    /// write without keystroke capture, so nothing implicit attributes the
+    /// message to the user — but a harness that mirrors its own native
+    /// transcript (codex rollouts) reports the turn itself, and recording it
+    /// here too would show the caller's message twice. The harnesses that need
+    /// the daemon to speak for them are exactly the ones
+    /// [`should_record_pty_user_message`] already names.
+    pub(crate) async fn deliver_user_text(&self, session_id: &str, text: &str) -> Result<()> {
+        let entry = self
+            .get_entry(session_id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
+        let (delivery, harness) = {
+            let summary = entry.summary.read().await;
+            (session_input_delivery(&summary), summary.harness.clone())
+        };
+        if delivery != SessionInputDelivery::AdapterInput
+            && should_record_pty_user_message(&harness)
+        {
+            self.handle_event(
+                &entry,
+                SessionEvent::Message {
+                    role: MessageRole::User,
+                    text: text.to_string(),
+                },
+            )
+            .await;
+        }
+        self.deliver_text_to_session(session_id, text).await
     }
 
     /// Deliver a Run/verb prompt to the session that will execute it and, on
@@ -3269,7 +3319,7 @@ impl SessionManager {
             .ok_or_else(|| anyhow!("session not found: {fork_id}"))?;
         let (delivery, has_pty) = {
             let summary = entry.summary.read().await;
-            (playbook_execution_delivery(&summary), summary.has_pty)
+            (session_input_delivery(&summary), summary.has_pty)
         };
         if has_pty
             && !self
@@ -3285,15 +3335,15 @@ impl SessionManager {
         // `deliver_playbook_run_prompt` for why this is the right instant.
         let state_at_dispatch = entry.summary.read().await.state;
         match delivery {
-            PlaybookExecutionDelivery::ExternalPtyTypedSubmit => {
+            SessionInputDelivery::ExternalPtyTypedSubmit => {
                 self.playbook_submit_typed_prompt_cold_start(fork_id, prompt)
                     .await?;
             }
-            PlaybookExecutionDelivery::PtySubmit => {
+            SessionInputDelivery::PtySubmit => {
                 self.pty_input_delivered(fork_id, playbook_pty_submit_bytes(prompt))
                     .await?;
             }
-            PlaybookExecutionDelivery::AdapterInput => {
+            SessionInputDelivery::AdapterInput => {
                 self.send_input(fork_id, prompt.to_string()).await?;
             }
         }
@@ -7484,8 +7534,8 @@ mod tests {
         let summary = placement_summary("s1", 0, None, construct_protocol::SessionKind::User);
 
         assert_eq!(
-            playbook_execution_delivery(&summary),
-            PlaybookExecutionDelivery::PtySubmit
+            session_input_delivery(&summary),
+            SessionInputDelivery::PtySubmit
         );
     }
 
@@ -7560,8 +7610,24 @@ mod tests {
         summary.harness = "claude".to_string();
 
         assert_eq!(
-            playbook_execution_delivery(&summary),
-            PlaybookExecutionDelivery::ExternalPtyTypedSubmit
+            session_input_delivery(&summary),
+            SessionInputDelivery::ExternalPtyTypedSubmit
+        );
+    }
+
+    #[test]
+    fn interactive_codex_takes_the_typed_submit_framing() {
+        // The harness behind interactive service sessions (spec 0176). Codex
+        // is a crossterm TUI in raw mode, where LF is Ctrl+J ("insert a
+        // newline"), not Enter — classifying it as anything but a typed
+        // submit regresses to a delivery that types the message into the
+        // composer and never submits it.
+        let mut summary = placement_summary("s1", 0, None, construct_protocol::SessionKind::User);
+        summary.harness = "codex".to_string();
+
+        assert_eq!(
+            session_input_delivery(&summary),
+            SessionInputDelivery::ExternalPtyTypedSubmit
         );
     }
 
@@ -7699,8 +7765,8 @@ mod tests {
         summary.has_pty = false;
 
         assert_eq!(
-            playbook_execution_delivery(&summary),
-            PlaybookExecutionDelivery::AdapterInput
+            session_input_delivery(&summary),
+            SessionInputDelivery::AdapterInput
         );
     }
 
