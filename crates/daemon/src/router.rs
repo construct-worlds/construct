@@ -112,13 +112,36 @@ pub enum EffortSupport {
     Grok,
     /// Kimi K3's always-on thinking plus `output_config.effort`.
     Kimi,
+    /// DeepSeek's `reasoning_effort` enum. Its accepted values include
+    /// `medium` and `xhigh`, but only `low` / `high` / `max` were observed to
+    /// grade the work monotonically, so those are the levels offered.
+    DeepSeek,
 }
 
-pub fn profile_effort_support(provider: &str) -> EffortSupport {
+/// How a declared or built-in profile consumes a requested effort.
+///
+/// Model-aware, not provider-aware: a vendor may grade effort on one model
+/// and floor every level to the same value on another, and advertising a
+/// scale the model does not honor is worse than advertising none.
+pub fn profile_effort_support(provider: &str, model: &str) -> EffortSupport {
     match provider.to_ascii_lowercase().as_str() {
         "anthropic" => EffortSupport::Thinking,
         "openai" | "openai-responses" | "azure" | "azure-openai" => EffortSupport::Verbatim,
+        "deepseek" => deepseek_effort_support(model),
         _ => EffortSupport::Unsupported,
+    }
+}
+
+/// DeepSeek grades effort on the flash tier only. The pro tier accepts every
+/// level and floors them all to its own default, so measured reasoning length
+/// is flat and non-monotonic across `low` / `high` / `max` — it gets no scale
+/// rather than a picker column that changes nothing.
+fn deepseek_effort_support(model: &str) -> EffortSupport {
+    let m = model.to_ascii_lowercase();
+    if m.contains("flash") {
+        EffortSupport::DeepSeek
+    } else {
+        EffortSupport::Unsupported
     }
 }
 
@@ -133,6 +156,8 @@ pub fn effort_level_set(support: EffortSupport) -> (&'static str, &'static [&'st
         EffortSupport::Thinking => ("minimal", &["minimal", "low", "medium", "high"]),
         EffortSupport::Grok => ("high", &["low", "medium", "high"]),
         EffortSupport::Kimi => ("high", &["low", "high", "xhigh"]),
+        // DeepSeek's own default effort is `high`.
+        EffortSupport::DeepSeek => ("high", &["low", "high", "max"]),
         EffortSupport::Unsupported => ("medium", &["medium"]),
     }
 }
@@ -1099,19 +1124,17 @@ impl Router {
                 "route \"{name}\": azure-openai base_url contains an unresolved placeholder"
             ));
         }
+        // Resolve the model once: the endpoint, the armed model, and the
+        // effort scale must all describe the same model, since effort support
+        // varies per model within a provider.
+        let resolved_model = model
+            .map(str::to_string)
+            .or_else(|| profile.model.clone())
+            .unwrap_or_default();
         Ok(ArmedRoute {
             name: name.to_string(),
-            endpoint: translate::target_url(
-                &base_url,
-                target_dialect,
-                model.or(profile.model.as_deref()).unwrap_or_default(),
-                true,
-            ),
+            endpoint: translate::target_url(&base_url, target_dialect, &resolved_model, true),
             base_url,
-            model: model
-                .map(str::to_string)
-                .or_else(|| profile.model.clone())
-                .unwrap_or_default(),
             api_key: profile.resolve_api_key().map_err(|e| anyhow!(e))?,
             auth: match profile.provider.to_ascii_lowercase().as_str() {
                 "anthropic" => TargetAuth::ApiKeyHeader,
@@ -1124,7 +1147,8 @@ impl Router {
             drop_params: &[],
             target_dialect,
             client_dialect: routing.dialect,
-            effort: profile_effort_support(&profile.provider),
+            effort: profile_effort_support(&profile.provider, &resolved_model),
+            model: resolved_model,
             pin_effort: None,
             client: reqwest::Client::new(),
         })
@@ -1246,8 +1270,9 @@ impl Router {
             .iter()
             .map(|(name, profile)| {
                 let models = self.profile_model_list(profile);
-                let support = profile_effort_support(&profile.provider);
-                let efforts = efforts_for_models(models.iter().cloned(), |_| support);
+                let efforts = efforts_for_models(models.iter().cloned(), |m| {
+                    profile_effort_support(&profile.provider, m)
+                });
                 RouteOption {
                     name: name.clone(),
                     dialect: provider_dialect(&profile.provider)
@@ -2039,6 +2064,102 @@ mod tests {
         assert!(
             ctx.armed_route().unwrap().translates(),
             "a chat-completions target from an anthropic harness must translate"
+        );
+    }
+
+    /// Effort support is per model, not per provider. Measured against the
+    /// live API: on flash, `low` / `high` / `max` produce cleanly separated
+    /// reasoning lengths; on pro every level floors to the same default, so
+    /// pro advertises no scale rather than a control that does nothing.
+    #[test]
+    fn deepseek_effort_scale_is_flash_only() {
+        assert_eq!(
+            profile_effort_support("deepseek", "deepseek-v4-flash"),
+            EffortSupport::DeepSeek
+        );
+        assert_eq!(
+            effort_level_set(EffortSupport::DeepSeek),
+            ("high", &["low", "high", "max"][..]),
+            "DeepSeek's own default effort is high"
+        );
+        assert_eq!(
+            profile_effort_support("deepseek", "deepseek-v4-pro"),
+            EffortSupport::Unsupported
+        );
+        assert!(
+            effort_levels_for_picker(profile_effort_support("deepseek", "deepseek-v4-pro"))
+                .is_empty(),
+            "pro must not render a picker column it cannot honor"
+        );
+        // Other providers keep provider-wide behavior regardless of model.
+        assert_eq!(
+            profile_effort_support("openai", "gpt-5"),
+            EffortSupport::Verbatim
+        );
+    }
+
+    /// `Unsupported` strips the effort before it reaches the wire, so pro
+    /// never receives a level the picker did not offer. `DeepSeek` must not
+    /// be caught by that arm — flash's levels have to survive to the emitter.
+    #[test]
+    fn deepseek_flash_effort_is_not_stripped_as_unsupported() {
+        assert_ne!(EffortSupport::DeepSeek, EffortSupport::Unsupported);
+    }
+
+    /// The per-model split has to reach the picker, not just the helper.
+    #[tokio::test]
+    async fn deepseek_route_offers_effort_on_flash_but_not_pro() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CONSTRUCT_TEST_DEEPSEEK_EFFORT_KEY", "sk-deepseek");
+        let r = started_with(
+            &dir,
+            cfg_with(true),
+            profiles(vec![(
+                "deepseek",
+                ModelProfile {
+                    provider: "deepseek".to_string(),
+                    base_url: None,
+                    api_key_env: Some("CONSTRUCT_TEST_DEEPSEEK_EFFORT_KEY".to_string()),
+                    api_key: None,
+                    model: Some("deepseek-v4-pro".to_string()),
+                },
+            )]),
+        )
+        .await;
+        r.attach_session("s1", "claude", None).unwrap();
+
+        let listed = r.list_routes("claude", true, None, false);
+        let deepseek = route_named(&listed, "deepseek");
+        assert_eq!(
+            deepseek.efforts.get("deepseek-v4-flash").map(Vec::as_slice),
+            Some(&["low".to_string(), "high".to_string(), "max".to_string()][..]),
+            "flash grades effort: {:?}",
+            deepseek.efforts
+        );
+        assert!(
+            !deepseek.efforts.contains_key("deepseek-v4-pro"),
+            "pro floors every level, so it offers none: {:?}",
+            deepseek.efforts
+        );
+
+        // An armed route carries the effort scale of the model it resolved.
+        let armed = r
+            .set_route(
+                "s1",
+                "claude",
+                Some("deepseek"),
+                Some("deepseek-v4-flash"),
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(armed.model, "deepseek-v4-flash");
+        let ctx = r.sessions.read().unwrap()["s1"].clone();
+        assert_eq!(
+            ctx.armed_route().unwrap().effort,
+            EffortSupport::DeepSeek,
+            "arming flash must carry flash's scale, not the provider default"
         );
     }
 

@@ -69,11 +69,12 @@ impl Router {
                 continue;
             }
             for model in self.profile_model_list(profile) {
+                let effort = profile_effort_support(&profile.provider, &model);
                 out.push(PublishedModel {
                     id: published_model_id_for_harness(harness, route, &model),
                     route: route.clone(),
                     model,
-                    effort: profile_effort_support(&profile.provider),
+                    effort,
                 });
             }
         }
@@ -373,6 +374,11 @@ pub fn build_codex_catalog(
                 {"effort": "low", "description": "Lower Kimi thinking effort"},
                 {"effort": "high", "description": "High Kimi thinking effort"},
                 {"effort": "xhigh", "description": "Maximum Kimi thinking effort"}
+            ]),
+            EffortSupport::DeepSeek => json!([
+                {"effort": "low", "description": "Brief reasoning, fastest"},
+                {"effort": "high", "description": "DeepSeek default reasoning depth"},
+                {"effort": "max", "description": "Longest reasoning, slowest"}
             ]),
             EffortSupport::Unsupported => json!([{
                 "effort": "medium",

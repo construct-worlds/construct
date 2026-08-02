@@ -32,6 +32,12 @@ A target is somewhere the router can send a model request:
   makes DeepSeek a route target (spec 0179). Declaring a profile under the
   same name replaces the built-in, so a private gateway or second account
   still overrides it.
+
+  DeepSeek's reasoning effort is offered per model: `deepseek-v4-flash`
+  exposes `low` / `high` / `max` (default `high`), and `deepseek-v4-pro`
+  exposes none, because it floors every level to the same default. Effort
+  levels are advertised only where they were measured to change the work
+  (spec 0160), so the picker's third column is absent rather than inert.
 - **Declared endpoints** are the `[smith.models.*]` profiles in
   `config.toml` — declare an endpoint once and it is reachable from both
   smith and a routed session:
