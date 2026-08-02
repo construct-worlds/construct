@@ -12,11 +12,16 @@ from one that dropped it. A channel may therefore show that a turn is still
 running, and the operator chooses how visible that is per channel — including
 turning it off.
 
-Three rules constrain it.
+Four rules constrain it.
 
 **Silence is correct for a turn that answers promptly.** The affordance exists
 for a wait that has already become long enough to look like a failure, so it
 appears only after such a wait. A quick turn leaves no trace of one.
+
+**It must keep looking alive.** An affordance whose words have not changed in
+twenty minutes reads as abandoned, which is the impression it exists to
+prevent. Past the point where the wait is worth remarking on, it carries
+something that visibly advances — how long this has been going.
 
 **It must not claim to be working when it is not.** A turn stopped at a tool
 approval is not making progress and will not resume until a human acts at
