@@ -39,8 +39,8 @@ mod widgets;
 
 #[cfg(test)]
 use lifecycle::{
-    force_redraw_size_on_resume, install_session_identity_env, resume_redraw_ready,
-    should_resume_on_startup, start_params_for_create,
+    force_redraw_size_on_resume, install_session_identity_env, reattached_state,
+    resume_redraw_ready, should_resume_on_startup, start_params_for_create,
 };
 
 const BROADCAST_CAP: usize = 4096;
@@ -7416,6 +7416,35 @@ mod tests {
         assert!(should_resume_on_startup(SessionState::Paused));
         assert!(should_resume_on_startup(SessionState::Errored));
         assert!(!should_resume_on_startup(SessionState::Done));
+    }
+
+    /// Reattaching to an adapter that outlived the daemon must not invent a
+    /// turn. The adapter is parked exactly where it was, and for a headless
+    /// session it will not speak again until one runs — so a false `Running`
+    /// there is unfalsifiable by anything except a client opening the session,
+    /// and meanwhile it spins a working glyph and banks fake compute time.
+    #[test]
+    fn reattach_leaves_an_idle_session_idle() {
+        assert_eq!(
+            reattached_state(SessionState::AwaitingInput),
+            SessionState::AwaitingInput
+        );
+        // Everything else: a live adapter means the session is live. Mid-turn
+        // stays mid-turn, a never-started session gets a non-terminal
+        // placeholder, and an `Errored` one must stop looking dead now that
+        // its adapter answered.
+        assert_eq!(
+            reattached_state(SessionState::Running),
+            SessionState::Running
+        );
+        assert_eq!(
+            reattached_state(SessionState::Pending),
+            SessionState::Running
+        );
+        assert_eq!(
+            reattached_state(SessionState::Errored),
+            SessionState::Running
+        );
     }
 
     #[test]
