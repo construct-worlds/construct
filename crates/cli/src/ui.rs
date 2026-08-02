@@ -322,6 +322,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.lineage_hscrollbar = None;
     app.layout.lineage_box_hits.clear();
     app.layout.service_session_hits.clear();
+    app.layout.service_channel_row_hits.clear();
     app.layout.service_channel_action_hits.clear();
     app.layout.lineage_subagent_toggle_hits.clear();
     app.layout.lineage_segment_tooltip = None;
@@ -7876,11 +7877,29 @@ fn service_session_route_label(
     (channel.to_string(), label)
 }
 
-/// Append the selected channel's visible action bar and register button-sized
+/// Push prose into the service view's scrolling section, pre-wrapped to the
+/// section width. The section scrolls by row, so every line it holds has to be
+/// exactly one row tall — widget-level wrapping would silently desynchronize
+/// the scroll offset and the row hit tests from what is on screen.
+fn push_wrapped_service_line(
+    activity: &mut Vec<Line<'static>>,
+    text: &str,
+    width: u16,
+    style: Style,
+) {
+    for piece in wrap_plain(text, width.max(1) as usize) {
+        activity.push(Line::from(Span::styled(piece, style)));
+    }
+}
+
+/// Append the selected channel's visible action bar and collect button-sized
 /// hit targets. Buttons wrap as whole units on narrow panes, so their click
-/// geometry always matches what was painted.
+/// geometry always matches what was painted. The section scrolls, so each hit
+/// is returned with its row *index* parked in `area.y`; the caller converts
+/// that to a screen row once the scroll offset is known.
 fn append_service_channel_actions(
     activity: &mut Vec<Line<'static>>,
+    hits: &mut Vec<crate::app::ServiceChannelActionHit>,
     app: &mut App,
     area: Rect,
     actions: &crate::app::ServiceChannelActions,
@@ -7960,22 +7979,15 @@ fn append_service_channel_actions(
 
     let first_row = activity.len();
     for (offset, row) in rows.into_iter().enumerate() {
-        let y = area
-            .y
-            .saturating_add(first_row as u16)
-            .saturating_add(offset as u16);
-        if y < area.bottom() {
-            app.layout
-                .service_channel_action_hits
-                .extend(row.buttons.into_iter().map(|(action, x, width)| {
-                    crate::app::ServiceChannelActionHit {
-                        service_name: actions.service_name.clone(),
-                        channel_index: actions.channel_index,
-                        action,
-                        area: Rect::new(area.x.saturating_add(x), y, width, 1),
-                    }
-                }));
-        }
+        let row_index = first_row.saturating_add(offset).min(u16::MAX as usize) as u16;
+        hits.extend(row.buttons.into_iter().map(|(action, x, width)| {
+            crate::app::ServiceChannelActionHit {
+                service_name: actions.service_name.clone(),
+                channel_index: actions.channel_index,
+                action,
+                area: Rect::new(area.x.saturating_add(x), row_index, width, 1),
+            }
+        }));
         activity.push(Line::from(row.spans));
     }
 }
@@ -8147,6 +8159,13 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         .iter()
         .filter(|channel| channel.attached_to.as_deref() == Some(summary.name.as_str()))
         .count();
+    // The section below the definition scrolls, so rows are collected with
+    // their index in `activity` — their on-screen position is only known once
+    // the scroll offset has been resolved, at the end of this function.
+    let mut focus_row: Option<usize> = None;
+    let mut channel_rows: Vec<(usize, usize)> = Vec::new();
+    let mut session_rows: Vec<(usize, String)> = Vec::new();
+    let mut action_hits: Vec<crate::app::ServiceChannelActionHit> = Vec::new();
     let mut activity = vec![Line::from(vec![
         Span::styled(
             "Channels  ",
@@ -8163,8 +8182,13 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         // The empty-catalog line is still a navigable row so the keyboard can
         // reach channel creation with nothing in the catalog yet.
         let selected = editing && dialog.focus.channel() == Some(0);
-        activity.push(Line::from(Span::styled(
+        if selected {
+            focus_row = Some(activity.len());
+        }
+        push_wrapped_service_line(
+            &mut activity,
             "  No channels in the catalog. Press a or Enter to create an HTTP channel.",
+            chunks[2].width,
             if selected {
                 Style::default()
                     .fg(app.theme.highlight_fg)
@@ -8172,7 +8196,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
             } else {
                 Style::default().fg(app.theme.dim)
             },
-        )));
+        );
     } else {
         for (index, channel) in catalog.iter().enumerate() {
             let selected = editing && dialog.focus.channel() == Some(index);
@@ -8232,6 +8256,10 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
                 "{marker} {checkbox} {}  {:<5} {endpoint}  {state}{owner}{publication}",
                 channel.id, channel.kind
             );
+            if selected {
+                focus_row = Some(activity.len());
+            }
+            channel_rows.push((index, activity.len()));
             activity.push(Line::from(Span::styled(
                 truncate_to_width(&row, chunks[2].width as usize),
                 style,
@@ -8239,7 +8267,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         }
     }
     if let Some(actions) = selected_channel_actions.as_ref() {
-        append_service_channel_actions(&mut activity, app, chunks[2], actions);
+        append_service_channel_actions(&mut activity, &mut action_hits, app, chunks[2], actions);
     }
     activity.push(Line::from(""));
     activity.push(Line::from(vec![
@@ -8255,21 +8283,23 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         ),
     ]));
     if routed.is_empty() {
-        activity.push(Line::from(Span::styled(
+        push_wrapped_service_line(
+            &mut activity,
             "No requests have created a session yet.",
+            chunks[2].width,
             Style::default().fg(app.theme.dim),
-        )));
+        );
     } else {
-        let mut session_hits = Vec::new();
-        for (index, session) in routed
-            .iter()
-            .enumerate()
-            .take(chunks[2].height.saturating_sub(3) as usize)
-        {
+        // Every routed session gets a row: the section scrolls, so the list is
+        // no longer cut off at the fold.
+        for (index, session) in routed.iter().enumerate() {
             let (channel, label) =
                 service_session_route_label(session, &summary.name, &catalog, &summary.channels);
-            let row = chunks[2].y + activity.len() as u16;
             let selected = editing && dialog.focus.session() == Some(index);
+            if selected {
+                focus_row = Some(activity.len());
+            }
+            session_rows.push((activity.len(), session.id.clone()));
             let text_style = if selected {
                 Style::default()
                     .fg(app.theme.highlight_fg)
@@ -8304,25 +8334,20 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
                     },
                 ),
             ]));
-            if row < chunks[2].bottom() {
-                session_hits.push(crate::app::ServiceSessionHit {
-                    session_id: session.id.clone(),
-                    area: Rect::new(chunks[2].x, row, chunks[2].width, 1),
-                });
-            }
         }
-        app.layout.service_session_hits.extend(session_hits);
     }
     if let Some(note) = &dialog.note {
         activity.push(Line::from(""));
-        activity.push(Line::from(Span::styled(
-            note.clone(),
+        push_wrapped_service_line(
+            &mut activity,
+            note,
+            chunks[2].width,
             Style::default().fg(if dialog.confirm_delete {
                 app.theme.danger
             } else {
                 app.theme.dim
             }),
-        )));
+        );
     }
     // Esc no longer "closes to a view-only state" — there isn't one. It backs
     // out of unsaved edits, and once there's nothing to back out of it hands
@@ -8337,14 +8362,93 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         "Enter/C-s save · Space attach · d delete channel · p publish/withdraw · o open · y copy · Esc reverts edits"
     };
     activity.push(Line::from(""));
-    activity.push(Line::from(Span::styled(
+    push_wrapped_service_line(
+        &mut activity,
         footer,
+        chunks[2].width,
         Style::default().fg(app.theme.dim),
-    )));
-    f.render_widget(
-        Paragraph::new(activity).wrap(Wrap { trim: false }),
-        chunks[2],
     );
+
+    let section = chunks[2];
+    let viewport_h = section.height as usize;
+    // Every line was built to fit the width, so rows and lines are the same
+    // thing here and the scroll offset means exactly what it says.
+    let content_h = activity.len();
+    let max_scroll = content_h.saturating_sub(viewport_h);
+    if editing {
+        // Keyboard navigation owns the viewport: the row the operator just
+        // moved to is always brought back into view.
+        if let Some(row) = focus_row {
+            if row < app.service_view_scroll {
+                app.service_view_scroll = row;
+            } else if viewport_h > 0 && row >= app.service_view_scroll + viewport_h {
+                app.service_view_scroll = row + 1 - viewport_h;
+            }
+        }
+    }
+    app.service_view_scroll = app.service_view_scroll.min(max_scroll);
+    let scroll = app.service_view_scroll;
+
+    // Rows collected during the build carry their index in the section; give
+    // them their screen position now that the offset is settled, and drop the
+    // ones the fold hides.
+    let visible_row = |row: usize| -> Option<u16> {
+        let offset = row.checked_sub(scroll)?;
+        (offset < viewport_h).then(|| section.y + offset as u16)
+    };
+    app.layout
+        .service_channel_row_hits
+        .extend(channel_rows.into_iter().filter_map(|(index, row)| {
+            visible_row(row).map(|y| crate::app::ServiceChannelRowHit {
+                channel_index: index,
+                area: Rect::new(section.x, y, section.width, 1),
+            })
+        }));
+    app.layout
+        .service_session_hits
+        .extend(session_rows.into_iter().filter_map(|(row, session_id)| {
+            visible_row(row).map(|y| crate::app::ServiceSessionHit {
+                session_id,
+                area: Rect::new(section.x, y, section.width, 1),
+            })
+        }));
+    app.layout
+        .service_channel_action_hits
+        .extend(action_hits.into_iter().filter_map(|mut hit| {
+            // `append_service_channel_actions` parks the row index in `y`.
+            visible_row(hit.area.y as usize).map(|y| {
+                hit.area.y = y;
+                hit
+            })
+        }));
+
+    f.render_widget(
+        Paragraph::new(activity).scroll((scroll.min(u16::MAX as usize) as u16, 0)),
+        section,
+    );
+    // Same treatment as the session view's scrollback bar, resting at the top
+    // instead of the bottom: hidden while parked there unless something just
+    // scrolled, and absent entirely when everything fits.
+    if focused {
+        let revealed = scroll > 0
+            || app.dragging_terminal_scrollbar.is_some()
+            || app
+                .terminal_scrollbar_visible_until(None)
+                .is_some_and(|until| Instant::now() < until);
+        // The bar rides the pane's right edge just inside the border, like the
+        // session view's, rather than the padded column where the text stops.
+        let bar_area = Rect {
+            x: area.x.saturating_add(1),
+            y: section.y,
+            width: area.width.saturating_sub(2),
+            height: section.height,
+        };
+        if let Some(hit) =
+            render_scroll_overlay(f, bar_area, &app.theme, revealed, scroll, max_scroll)
+        {
+            app.layout.terminal_scrollbar = Some(hit);
+        }
+    }
 }
 
 fn render_service_channel_editor(
@@ -11023,6 +11127,9 @@ fn strip_markdown_emphasis(s: &str) -> String {
     s.replace("**", "")
 }
 
+/// The session view's scrollback overlay. Scrollback counts rows *up* from the
+/// bottom, so its resting position is `0` — at rest the bar shows only while
+/// the reveal timer is live.
 fn render_terminal_scrollbar(
     f: &mut Frame,
     area: Rect,
@@ -11031,31 +11138,43 @@ fn render_terminal_scrollbar(
     rendered_scrollback: usize,
     max_scrollback: usize,
 ) -> Option<crate::app::TerminalScrollbarHit> {
-    if area.height < 3 || area.width < 2 || max_scrollback == 0 {
+    let revealed = rendered_scrollback > 0
+        || visible_until.is_some_and(|visible_until| Instant::now() < visible_until);
+    render_scroll_overlay(
+        f,
+        area,
+        theme,
+        revealed,
+        max_scrollback.saturating_sub(rendered_scrollback),
+        max_scrollback,
+    )
+}
+
+/// Paint the two-column scrollbar overlay shared by the scrolling panes: track
+/// and thumb applied as background tints so the text underneath shows through.
+/// `offset_from_top` and `max_offset` are in the surface's own row units.
+/// Auto-hide is the caller's call — each surface rests at a different end and
+/// keeps its own reveal timer — but with nothing to scroll there is no bar.
+fn render_scroll_overlay(
+    f: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    revealed: bool,
+    offset_from_top: usize,
+    max_offset: usize,
+) -> Option<crate::app::TerminalScrollbarHit> {
+    if area.height < 3 || area.width < 2 || max_offset == 0 || !revealed {
         return None;
-    }
-    let at_bottom = rendered_scrollback == 0;
-    if at_bottom {
-        let Some(visible_until) = visible_until else {
-            return None;
-        };
-        if Instant::now() >= visible_until {
-            return None;
-        }
     }
 
     let track_h = area.height as usize;
     let viewport_h = area.height as usize;
-    let total_h = max_scrollback.saturating_add(viewport_h).max(1);
+    let total_h = max_offset.saturating_add(viewport_h).max(1);
     let thumb_h = ((viewport_h * track_h + total_h - 1) / total_h)
         .clamp(1, track_h)
         .max((track_h / 8).max(1));
     let max_thumb_top = track_h.saturating_sub(thumb_h);
-    let thumb_top = if max_scrollback == 0 {
-        0
-    } else {
-        ((max_scrollback.saturating_sub(rendered_scrollback)) * max_thumb_top) / max_scrollback
-    };
+    let thumb_top = (offset_from_top.min(max_offset) * max_thumb_top) / max_offset;
 
     const SCROLLBAR_W: u16 = 2;
     let bar_w = area.width.min(SCROLLBAR_W);
@@ -11098,7 +11217,7 @@ fn render_terminal_scrollbar(
     Some(crate::app::TerminalScrollbarHit {
         area: scrollbar_area,
         thumb,
-        max_scrollback,
+        max_scrollback: max_offset,
     })
 }
 

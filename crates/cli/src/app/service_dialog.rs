@@ -516,6 +516,10 @@ impl App {
                 dialog.focus.prev(channels, sessions)
             };
         }
+        // Moving the selection can scroll the section (the render pass brings
+        // the focused row back into view), so reveal the bar the same way the
+        // session view reveals its scrollback bar on a scroll.
+        self.show_terminal_scrollbar();
     }
 
     pub fn open_new_service_view(&mut self, suggested: impl Into<String>) {
@@ -574,6 +578,9 @@ impl App {
         {
             return;
         }
+        // A different service brings its own channels and sessions, so the
+        // section starts at the top again.
+        self.service_view_scroll = 0;
         match self
             .services
             .iter()
