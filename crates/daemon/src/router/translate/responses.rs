@@ -61,7 +61,33 @@ pub fn parse_request(body: &Value) -> CanonRequest {
                 });
                 continue;
             }
-            Some("function_call_output") => {
+            // A freeform call the harness already made. Replayed as the
+            // same single-string argument the target was offered, so the
+            // conversation it sees matches the schema it was given.
+            Some("custom_tool_call") => {
+                messages.push(CanonMessage {
+                    role: CanonRole::Assistant,
+                    blocks: vec![CanonBlock::ToolUse {
+                        id: item
+                            .get("call_id")
+                            .or_else(|| item.get("id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        name: item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        input: json!({
+                            super::FREEFORM_INPUT_PROPERTY:
+                                item.get("input").and_then(Value::as_str).unwrap_or_default()
+                        }),
+                    }],
+                });
+                continue;
+            }
+            Some("function_call_output") | Some("custom_tool_call_output") => {
                 messages.push(CanonMessage {
                     role: CanonRole::Tool,
                     blocks: vec![CanonBlock::ToolResult {
@@ -180,6 +206,13 @@ pub fn parse_request(body: &Value) -> CanonRequest {
                     .filter_map(|t| {
                         // Responses puts the function fields flat on the
                         // tool, unlike Chat's nested `function` object.
+                        //
+                        // `custom` tools are freeform: they carry a
+                        // `format` (a grammar) and no `parameters` at all.
+                        // Recording that is what stops them from being
+                        // emitted downstream as argument-less functions.
+                        let freeform = (t.get("type").and_then(Value::as_str) == Some("custom"))
+                            .then(|| t.get("format").cloned().unwrap_or(Value::Null));
                         Some(CanonTool {
                             name: t.get("name")?.as_str()?.to_string(),
                             description: t
@@ -191,6 +224,7 @@ pub fn parse_request(body: &Value) -> CanonRequest {
                                 .get("parameters")
                                 .cloned()
                                 .unwrap_or_else(|| json!({"type":"object","properties":{}})),
+                            freeform,
                         })
                     })
                     .collect()
@@ -295,10 +329,19 @@ pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
             json!(req
                 .tools
                 .iter()
-                .map(|t| json!({
-                    "type":"function","name":t.name,
-                    "description":t.description,"parameters":t.schema
-                }))
+                // A Responses target understands freeform tools, so hand
+                // the original format back rather than the synthesized
+                // schema a JSON-only target needs.
+                .map(|t| match t.freeform.as_ref() {
+                    Some(format) => json!({
+                        "type":"custom","name":t.name,
+                        "description":t.description,"format":format
+                    }),
+                    None => json!({
+                        "type":"function","name":t.name,
+                        "description":t.description,"parameters":t.schema
+                    }),
+                })
                 .collect::<Vec<_>>()),
         );
     }
@@ -509,6 +552,13 @@ pub struct StreamEncoder {
     text: String,
     /// Accumulated arguments per open function call, for the same reason.
     tool_args: Vec<String>,
+    /// Names of the offered tools that are freeform. A call to one of them
+    /// is emitted as `custom_tool_call` carrying raw text, because that is
+    /// the item shape the harness declared the tool with and the only one
+    /// it will dispatch.
+    freeform_tools: Vec<String>,
+    /// Per open call: the tool name, and whether it is freeform.
+    tool_names: Vec<(String, bool)>,
     /// Items already closed, replayed on `response.completed`. A client
     /// that reconstructs the turn from the terminal event needs them.
     completed_items: Vec<Value>,
@@ -520,6 +570,10 @@ pub struct StreamEncoder {
 
 impl StreamEncoder {
     pub fn new(model: &str) -> Self {
+        Self::with_freeform_tools(model, &[])
+    }
+
+    pub fn with_freeform_tools(model: &str, freeform_tools: &[String]) -> Self {
         Self {
             model: model.to_string(),
             response_id: "resp_construct_router".to_string(),
@@ -530,6 +584,8 @@ impl StreamEncoder {
             tools: Vec::new(),
             text: String::new(),
             tool_args: Vec::new(),
+            freeform_tools: freeform_tools.to_vec(),
+            tool_names: Vec::new(),
             completed_items: Vec::new(),
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -763,26 +819,40 @@ impl StreamEncoder {
                 }
                 let text = std::mem::take(&mut self.text);
                 out.push_str(&self.close_message(&text));
+                let freeform = self.freeform_tools.iter().any(|t| t == name);
                 let item_id = format!("fc_{}_{}", self.response_id, self.output_index);
                 let seq = self.next();
+                let item = if freeform {
+                    json!({
+                        "id": item_id,
+                        "type": "custom_tool_call",
+                        "status": "in_progress",
+                        "call_id": id,
+                        "name": name,
+                        "input": "",
+                    })
+                } else {
+                    json!({
+                        "id": item_id,
+                        "type": "function_call",
+                        "status": "in_progress",
+                        "call_id": id,
+                        "name": name,
+                        "arguments": "",
+                    })
+                };
                 out.push_str(&sse(
                     "response.output_item.added",
                     &json!({
                         "type":"response.output_item.added",
                         "sequence_number": seq,
                         "output_index": self.output_index,
-                        "item": {
-                            "id": item_id,
-                            "type": "function_call",
-                            "status": "in_progress",
-                            "call_id": id,
-                            "name": name,
-                            "arguments": "",
-                        },
+                        "item": item,
                     }),
                 ));
                 self.tools.push((*index, item_id));
                 self.tool_args.push(String::new());
+                self.tool_names.push((name.clone(), freeform));
             }
             CanonEvent::ToolArgsDelta { index, json: args } => {
                 let Some(slot) = self.tools.iter().position(|(i, _)| i == index) else {
@@ -790,6 +860,13 @@ impl StreamEncoder {
                 };
                 if let Some(buf) = self.tool_args.get_mut(slot) {
                     buf.push_str(args);
+                }
+                // A freeform call's payload is the *unwrapped* string
+                // inside the target's JSON arguments, which cannot be
+                // recovered from a partial fragment. Buffer it and emit the
+                // whole input once the call closes.
+                if self.tool_names.get(slot).is_some_and(|(_, f)| *f) {
+                    return out;
                 }
                 let item_id = self.tools[slot].1.clone();
                 let seq = self.next();
@@ -810,6 +887,55 @@ impl StreamEncoder {
         out
     }
 
+    /// Unwrap a freeform call's raw text out of the JSON arguments the
+    /// target produced and close it as a `custom_tool_call`.
+    ///
+    /// The target was handed a synthesized single-string schema, so a
+    /// well-behaved call is `{"input": "<body>"}`. A model that ignores the
+    /// schema and streams the body directly still gets its text through:
+    /// anything unparseable is passed along verbatim rather than dropped.
+    fn close_freeform_call(&mut self, item_id: &str, name: &str, args: &str) -> String {
+        let input = serde_json::from_str::<Value>(args)
+            .ok()
+            .and_then(|v| {
+                v.get(super::FREEFORM_INPUT_PROPERTY)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| args.to_string());
+        let mut out = String::new();
+        let seq = self.next();
+        out.push_str(&sse(
+            "response.custom_tool_call_input.done",
+            &json!({
+                "type":"response.custom_tool_call_input.done",
+                "sequence_number": seq,
+                "output_index": self.output_index,
+                "item_id": item_id,
+                "input": input,
+            }),
+        ));
+        let item = json!({
+            "id": item_id,
+            "type": "custom_tool_call",
+            "status": "completed",
+            "name": name,
+            "input": input,
+        });
+        let seq = self.next();
+        out.push_str(&sse(
+            "response.output_item.done",
+            &json!({
+                "type":"response.output_item.done",
+                "sequence_number": seq,
+                "output_index": self.output_index,
+                "item": item,
+            }),
+        ));
+        self.completed_items.push(item);
+        out
+    }
+
     /// Close every open item and the response itself. Emitted even when
     /// the target produced nothing, so the harness sees a finished turn
     /// rather than a stream that simply stops.
@@ -824,6 +950,17 @@ impl StreamEncoder {
         let tools = std::mem::take(&mut self.tools);
         for (slot, (_, item_id)) in tools.iter().enumerate() {
             let args = self.tool_args.get(slot).cloned().unwrap_or_default();
+            if let Some((name, true)) = self
+                .tool_names
+                .get(slot)
+                .cloned()
+                .as_ref()
+                .map(|(n, f)| (n.clone(), *f))
+            {
+                out.push_str(&self.close_freeform_call(item_id, &name, &args));
+                self.output_index += 1;
+                continue;
+            }
             let seq = self.next();
             out.push_str(&sse(
                 "response.function_call_arguments.done",
@@ -890,6 +1027,14 @@ pub fn error_event(message: &str) -> String {
 
 /// Build a non-streaming Responses body from canonical events.
 pub fn encode_full(events: &[CanonEvent], model: &str) -> Value {
+    encode_full_with_freeform(events, model, &[])
+}
+
+pub fn encode_full_with_freeform(
+    events: &[CanonEvent],
+    model: &str,
+    freeform_tools: &[String],
+) -> Value {
     let mut text = String::new();
     let mut output = Vec::new();
     let mut calls: Vec<(String, String, String)> = Vec::new();
@@ -919,6 +1064,24 @@ pub fn encode_full(events: &[CanonEvent], model: &str) -> Value {
         }));
     }
     for (id, name, args) in calls {
+        // Same shape rule as the streaming encoder: a freeform tool was
+        // declared as `custom` and is only dispatched from a
+        // `custom_tool_call` carrying raw text.
+        if freeform_tools.iter().any(|t| *t == name) {
+            let input = serde_json::from_str::<Value>(&args)
+                .ok()
+                .and_then(|v| {
+                    v.get(super::FREEFORM_INPUT_PROPERTY)
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| args.clone());
+            output.push(json!({
+                "id": format!("fc_{id}"), "type":"custom_tool_call","status":"completed",
+                "call_id": id, "name": name, "input": input,
+            }));
+            continue;
+        }
         output.push(json!({
             "id": format!("fc_{id}"), "type":"function_call","status":"completed",
             "call_id": id, "name": name, "arguments": args,
@@ -976,6 +1139,175 @@ mod tests {
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.tools[0].name, "read");
         assert_eq!(req.tools[0].schema["type"], "object");
+    }
+
+    /// Codex's real tool list: `exec` is a `custom` grammar tool with no
+    /// `parameters` at all. Captured from a live outgoing request.
+    fn codex_exec_tool() -> Value {
+        json!({
+            "type": "custom",
+            "name": "exec",
+            "description": "Run JavaScript code to orchestrate/compose tool calls",
+            "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: pragma_source | plain_source\n"
+            }
+        })
+    }
+
+    #[test]
+    fn reads_a_custom_tool_as_freeform() {
+        let req = parse_request(&json!({"input":[], "tools":[codex_exec_tool()]}));
+        assert_eq!(req.tools.len(), 1);
+        assert!(
+            req.tools[0].freeform.is_some(),
+            "a `custom` tool must be recorded as freeform"
+        );
+    }
+
+    /// The bug this fixes: a freeform tool reaching a JSON-only target as a
+    /// function with an empty property set tells the model it takes no
+    /// arguments, so it cannot express the call at all and writes prose
+    /// instead. It must arrive callable.
+    #[test]
+    fn a_freeform_tool_reaches_a_json_target_with_a_callable_schema() {
+        let req = parse_request(&json!({"input":[], "tools":[codex_exec_tool()]}));
+        let schema = req.tools[0].schema_for_json_target();
+        assert_eq!(
+            schema["required"],
+            json!([super::super::FREEFORM_INPUT_PROPERTY])
+        );
+        assert_eq!(
+            schema["properties"][super::super::FREEFORM_INPUT_PROPERTY]["type"],
+            "string"
+        );
+        let described = schema["properties"][super::super::FREEFORM_INPUT_PROPERTY]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            described.contains("lark") && described.contains("plain_source"),
+            "the grammar must reach the model: {described}"
+        );
+    }
+
+    /// A Responses target does understand freeform tools, so it gets the
+    /// original `custom` declaration back rather than the synthesized one.
+    #[test]
+    fn a_responses_target_gets_the_custom_tool_verbatim() {
+        let req = parse_request(&json!({"input":[], "tools":[codex_exec_tool()]}));
+        let out = emit_request(&req, "m");
+        assert_eq!(out["tools"][0]["type"], "custom");
+        assert_eq!(out["tools"][0]["format"]["syntax"], "lark");
+        assert!(out["tools"][0].get("parameters").is_none());
+    }
+
+    /// A call to a freeform tool has to go back as `custom_tool_call` with
+    /// raw text. A `function_call` carrying JSON is not dispatchable — the
+    /// harness declared the tool as `custom`.
+    #[test]
+    fn a_freeform_call_streams_back_as_a_custom_tool_call() {
+        let mut enc = StreamEncoder::with_freeform_tools("m", &["exec".to_string()]);
+        let mut out = String::new();
+        out.push_str(&enc.push(&CanonEvent::ToolStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "exec".into(),
+        }));
+        out.push_str(&enc.push(&CanonEvent::ToolArgsDelta {
+            index: 0,
+            json: "{\"input\":\"await tools.exec_command('ls')\"}".into(),
+        }));
+        out.push_str(&enc.finish());
+
+        assert!(out.contains("custom_tool_call"), "got {out}");
+        assert!(
+            !out.contains("\"type\":\"function_call\""),
+            "must not emit a function_call for a freeform tool: {out}"
+        );
+        // The raw body, unwrapped out of the target's JSON arguments.
+        assert!(
+            out.contains("await tools.exec_command('ls')"),
+            "raw input must survive: {out}"
+        );
+    }
+
+    /// A model that ignores the synthesized schema and streams the body
+    /// directly still gets its text through rather than losing the turn.
+    #[test]
+    fn unparseable_freeform_arguments_pass_through_verbatim() {
+        let mut enc = StreamEncoder::with_freeform_tools("m", &["exec".to_string()]);
+        enc.push(&CanonEvent::ToolStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "exec".into(),
+        });
+        enc.push(&CanonEvent::ToolArgsDelta {
+            index: 0,
+            json: "console.log(1)".into(),
+        });
+        let out = enc.finish();
+        assert!(out.contains("console.log(1)"), "got {out}");
+    }
+
+    /// An ordinary function tool must be untouched by any of this.
+    #[test]
+    fn a_function_call_still_streams_back_as_a_function_call() {
+        let mut enc = StreamEncoder::with_freeform_tools("m", &["exec".to_string()]);
+        enc.push(&CanonEvent::ToolStart {
+            index: 0,
+            id: "call_1".into(),
+            name: "wait".into(),
+        });
+        enc.push(&CanonEvent::ToolArgsDelta {
+            index: 0,
+            json: "{\"ms\":10}".into(),
+        });
+        let out = enc.finish();
+        assert!(out.contains("function_call"), "got {out}");
+        assert!(!out.contains("custom_tool_call"), "got {out}");
+    }
+
+    /// Multi-turn: the harness replays its own freeform call and result on
+    /// the next request. Both must survive into the conversation the target
+    /// sees, in the shape matching the schema it was offered.
+    #[test]
+    fn replays_a_freeform_call_and_its_output() {
+        let req = parse_request(&json!({
+            "input":[
+                {"type":"custom_tool_call","call_id":"call_1","name":"exec","input":"ls -la"},
+                {"type":"custom_tool_call_output","call_id":"call_1","output":"a\nb"}
+            ],
+            "tools":[codex_exec_tool()]
+        }));
+        let uses: Vec<_> = req
+            .messages
+            .iter()
+            .flat_map(|m| m.blocks.iter())
+            .filter_map(|b| match b {
+                CanonBlock::ToolUse { name, input, .. } => Some((name.clone(), input.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            uses.len(),
+            1,
+            "freeform call must replay: {:?}",
+            req.messages
+        );
+        assert_eq!(uses[0].0, "exec");
+        assert_eq!(uses[0].1[super::super::FREEFORM_INPUT_PROPERTY], "ls -la");
+
+        let results: Vec<_> = req
+            .messages
+            .iter()
+            .flat_map(|m| m.blocks.iter())
+            .filter_map(|b| match b {
+                CanonBlock::ToolResult { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, vec!["a\nb".to_string()]);
     }
 
     #[test]
