@@ -97,6 +97,19 @@ pub(crate) enum SessionMutationResult {
         session_id: String,
         entries: Vec<TurnPickerEntry>,
     },
+    /// Background load of the session that selection landed on after the
+    /// selected session was deleted. `generation` is checked against
+    /// `App::selected_load_generation` so a newer navigation supersedes an
+    /// in-flight load instead of overwriting the pane behind the user.
+    SelectedSessionLoaded {
+        session_id: String,
+        generation: u64,
+        /// `None` when the transcript fetch failed — the pane keeps
+        /// whatever it had rather than blanking.
+        transcript: Option<Vec<TimestampedEvent>>,
+        bootstrap: Option<Box<TerminalBootstrap>>,
+        error: Option<String>,
+    },
 }
 
 /// Which pane currently owns the keyboard. `View` covers both the transcript
@@ -1716,6 +1729,11 @@ pub struct App {
     /// is still in flight — the hint row says so, and the arriving
     /// `TurnEntriesLoaded` clears it.
     pub turn_picker_loading: bool,
+    /// Bumped every time the selected session changes or a background
+    /// selected-session load is dispatched. An arriving
+    /// `SelectedSessionLoaded` carrying an older generation is dropped —
+    /// the user has navigated on since it was requested.
+    pub selected_load_generation: u64,
     /// Rotation index into the idle minibuffer placeholder's context hint
     /// pool: advances by the shown-window size every
     /// `MINIBUFFER_HINT_ROTATE_EVERY`, or immediately whenever
@@ -5273,6 +5291,7 @@ async fn run_with_socket_initial_selection(
         turn_picker_entries: Vec::new(),
         turn_picker_selected: 0,
         turn_picker_loading: false,
+        selected_load_generation: 0,
         minibuffer_hint_offset: 0,
         minibuffer_hint_rotated_at: None,
         minibuffer_hint_context: None,
@@ -6341,6 +6360,21 @@ async fn run_loop(
                         SessionMutationResult::TurnEntriesLoaded { session_id, entries } => {
                             app.apply_turn_entries_loaded(&session_id, entries);
                         }
+                        SessionMutationResult::SelectedSessionLoaded {
+                            session_id,
+                            generation,
+                            transcript,
+                            bootstrap,
+                            error,
+                        } => {
+                            app.apply_selected_session_load(
+                                session_id,
+                                generation,
+                                transcript,
+                                bootstrap,
+                                error,
+                            );
+                        }
                         SessionMutationResult::Forked { id, source_id, harness } => {
                             app.set_status(format!("forked {} → {} ({harness})", short_id(&source_id), short_id(&id)));
                             if !app.histories.contains_key(&id) {
@@ -7284,6 +7318,9 @@ impl App {
             session.needs_attention = false;
         }
         self.selection = Selection::Session(id);
+        // Any navigation supersedes a background selected-session load that
+        // was dispatched for the outgoing selection.
+        self.selected_load_generation = self.selected_load_generation.wrapping_add(1);
         if sync_window {
             // Keep the pane tree in sync before reporting focus. Most
             // navigation callers also synchronize after selecting, but
@@ -8414,97 +8451,161 @@ impl App {
         }
     }
 
+    /// `refresh_selected_transcript`, but off the event loop.
+    ///
+    /// The synchronous half (view mode, scrollback, transition) runs here so
+    /// the pane reacts in the same frame; the daemon round-trips — a full
+    /// transcript, and for a PTY session a pty.log replay plus the vt parse
+    /// that rebuilds its scrollback — run on a dedicated connection and land
+    /// via `SessionMutationResult::SelectedSessionLoaded`. Awaiting them
+    /// inline froze the whole TUI for as long as the neighbor session's
+    /// history took to fetch and parse (the same trap the fork picker's
+    /// turn list hit, spec 0163).
+    fn spawn_selected_transcript_load(&mut self) {
+        let Some(id) = self.selected_id() else {
+            self.transcript.clear();
+            self.transcript_session = None;
+            return;
+        };
+        if self.transcript_session.as_deref() == Some(&id) {
+            return;
+        }
+        // Switching sessions in single-pane mode snaps to live for the new one.
+        if !self.is_split_layout() {
+            self.view_scrollback = 0;
+        }
+        // Same view-mode decision `refresh_selected_transcript` makes — see
+        // the comment there for why `natural_view_mode` and not `has_pty`.
+        let natural = self
+            .selected_session()
+            .map(natural_view_mode)
+            .unwrap_or(ViewMode::Chat);
+        self.set_active_view(natural);
+        if self.selection.session_id() == Some(id.as_str()) {
+            self.start_session_transition();
+        }
+        let bootstrap_inputs = (natural == ViewMode::Terminal && !self.histories.contains_key(&id))
+            .then(|| self.terminal_bootstrap_inputs(&id));
+        self.selected_load_generation = self.selected_load_generation.wrapping_add(1);
+        let generation = self.selected_load_generation;
+        let socket = self.client.socket_path().to_path_buf();
+        let tx = self.session_mutation_tx.clone();
+        tokio::spawn(async move {
+            let client = match construct_client::Client::connect(&socket).await {
+                Ok(client) => client,
+                Err(e) => {
+                    let _ = tx.send(SessionMutationResult::SelectedSessionLoaded {
+                        session_id: id,
+                        generation,
+                        transcript: None,
+                        bootstrap: None,
+                        error: Some(format!("load transcript: {e}")),
+                    });
+                    return;
+                }
+            };
+            let (transcript, error) = match client.transcript(&id, 0, None).await {
+                Ok(t) => (Some(t.events), None),
+                Err(e) => (None, Some(format!("load transcript: {e}"))),
+            };
+            let bootstrap = match bootstrap_inputs {
+                Some(inputs) => Some(Box::new(
+                    fetch_terminal_bootstrap(&client, &id, inputs).await,
+                )),
+                None => None,
+            };
+            let _ = tx.send(SessionMutationResult::SelectedSessionLoaded {
+                session_id: id,
+                generation,
+                transcript,
+                bootstrap,
+                error,
+            });
+        });
+    }
+
+    /// Install a background selected-session load, unless the user has moved
+    /// on — a stale load must never replace the pane's current content.
+    pub(crate) fn apply_selected_session_load(
+        &mut self,
+        session_id: String,
+        generation: u64,
+        transcript: Option<Vec<TimestampedEvent>>,
+        bootstrap: Option<Box<TerminalBootstrap>>,
+        error: Option<String>,
+    ) {
+        if generation != self.selected_load_generation
+            || self.selected_id().as_deref() != Some(session_id.as_str())
+        {
+            return;
+        }
+        if let Some(events) = transcript {
+            self.transcript = events;
+            self.transcript_session = Some(session_id.clone());
+            self.transcript_scroll = u16::MAX; // sentinel = bottom
+        }
+        if let Some(e) = error {
+            self.set_status(e);
+        }
+        if let Some(bootstrap) = bootstrap {
+            let had_history = self.histories.contains_key(&session_id);
+            self.apply_terminal_bootstrap(&session_id, *bootstrap);
+            if !had_history {
+                self.spawn_bootstrapped_pty_resize(&session_id);
+            }
+        }
+    }
+
     async fn bootstrap_terminal(&mut self, id: &str) {
         if self.histories.contains_key(id) {
             return;
         }
-        let mut history = crate::pty_render::ItemHistory::new();
-        match self.client.pty_replay(id).await {
-            Ok(snap) => {
-                // Size the shadow parser to match the PTY the
-                // daemon last knew about (falls back to the
-                // current pane size) BEFORE feeding rehydrated
-                // bytes. Codex / claude / any normal-screen TUI
-                // emits cursor positioning that depends on
-                // terminal dims — replaying those bytes against
-                // the shadow's default 80×24 leaves scrollback
-                // showing clamped, incoherent fragments.
-                let (cols, rows) = snap
-                    .size
-                    .as_ref()
-                    .map(|s| (s.cols, s.rows))
-                    .unwrap_or(self.terminal_pane_size);
-                history.set_pty_size(cols, rows);
-                use base64::Engine;
-                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&snap.data) {
-                    history.feed_pty(&bytes);
-                }
-            }
-            Err(e) => {
-                self.set_status(format!("pty_replay: {e}"));
-            }
+        let inputs = self.terminal_bootstrap_inputs(id);
+        let bootstrap = fetch_terminal_bootstrap(&self.client, id, inputs).await;
+        self.apply_terminal_bootstrap(id, bootstrap);
+        self.resize_bootstrapped_pty(id).await;
+    }
+
+    /// The `App` state `fetch_terminal_bootstrap` needs, snapshotted on the
+    /// event loop so the fetch itself can run on a background connection.
+    fn terminal_bootstrap_inputs(&self, id: &str) -> TerminalBootstrapInputs {
+        TerminalBootstrapInputs {
+            fallback_pty_size: self.terminal_pane_size,
+            is_headless: self
+                .sessions
+                .iter()
+                .find(|s| s.id == id)
+                .map(crate::ui::is_headless)
+                .unwrap_or(false),
+            record_turn_boundaries: self.session_records_turn_boundaries(id),
         }
-        // Rehydrate ToolBlocks. `feed_pty` parses the OSC fences in
-        // pty.log and creates empty `ToolBlock` items, but the
-        // structured `tool` / `args` / `output` fields live in
-        // transcript events — which the live path routes via
-        // `feed_tool_use` / `feed_tool_result` but the daemon does
-        // NOT re-broadcast on subscribe. So after a daemon restart
-        // the blocks would render as `→ ?` with no body and the
-        // dim-styled args + footer the user sees during a live
-        // session disappear. Replay the transcript here in the
-        // SAME ORDER `feed_pty` saw the fences (FIFO) so
-        // pending-hydration pairing in `ItemHistory` reattaches
-        // tools to their blocks; `feed_tool_result` matches by
-        // call_id and just fills `output` on the existing block.
-        let mut replayed_editor_state: Option<EditorState> = None;
-        let mut replayed_agent_status: Option<construct_protocol::AgentStatus> = None;
-        let mut replayed_ui_panels: HashMap<String, construct_protocol::UiPanel> = HashMap::new();
-        let is_headless = self
-            .sessions
-            .iter()
-            .find(|s| s.id == id)
-            .map(crate::ui::is_headless)
-            .unwrap_or(false);
-        match self.client.transcript(id, 0, None).await {
-            Ok(t) => {
-                if t.events
-                    .iter()
-                    .any(|ev| matches!(ev.event, SessionEvent::Pty { .. }))
-                {
-                    // New daemons persist PTY events in the transcript as ordering
-                    // markers. Prefer rebuilding from those markers so transcript-only
-                    // items (smith tool blocks) are interleaved with the raw bytes in
-                    // chronological order. The pty_replay path above remains the
-                    // fallback for older sessions whose transcripts do not contain PTY.
-                    history.clear_items();
-                }
-                apply_transcript_to_local_state(
-                    &t.events,
-                    &mut history,
-                    &mut replayed_editor_state,
-                    &mut replayed_agent_status,
-                    &mut replayed_ui_panels,
-                    is_headless,
-                    self.session_records_turn_boundaries(id),
-                );
-            }
-            Err(e) => {
-                self.set_status(format!("rehydrate transcript: {e}"));
-            }
+    }
+
+    /// Install a rehydrated terminal history and the session state replayed
+    /// alongside it. A history created by the live path while the fetch was
+    /// in flight wins — it has seen bytes the snapshot predates.
+    fn apply_terminal_bootstrap(&mut self, id: &str, bootstrap: TerminalBootstrap) {
+        if self.histories.contains_key(id) {
+            return;
         }
-        if let Some(state) = replayed_editor_state {
+        if let Some(err) = bootstrap.errors.last() {
+            self.set_status(err.clone());
+        }
+        if let Some(state) = bootstrap.editor_state {
             self.editor_states.insert(id.to_string(), state);
         }
-        if let Some(status) = replayed_agent_status {
+        if let Some(status) = bootstrap.agent_status {
             self.agent_statuses.insert(id.to_string(), status);
         }
-        if !replayed_ui_panels.is_empty() {
-            self.ui_panels.insert(id.to_string(), replayed_ui_panels);
+        if !bootstrap.ui_panels.is_empty() {
+            self.ui_panels.insert(id.to_string(), bootstrap.ui_panels);
         }
-        self.histories.insert(id.to_string(), history);
-        // Tell the daemon what size we'd like — this session's own pane width
-        // when it's visible in a split, not the active pane's.
+        self.histories.insert(id.to_string(), bootstrap.history);
+    }
+
+    /// Tell the daemon what size we'd like — this session's own pane width
+    /// when it's visible in a split, not the active pane's.
+    async fn resize_bootstrapped_pty(&mut self, id: &str) {
         let (cols, rows) = self
             .session_pane_size(id)
             .unwrap_or_else(|| self.active_pane_size());
@@ -8523,6 +8624,140 @@ impl App {
         let _ = self.client.pty_resize(id, cols, rows).await;
     }
 
+    /// `resize_bootstrapped_pty` for the background path: the two resize
+    /// RPCs are fire-and-forget, so they go out on their own connection
+    /// rather than blocking the event loop behind a daemon round-trip.
+    fn spawn_bootstrapped_pty_resize(&self, id: &str) {
+        let (cols, rows) = self
+            .session_pane_size(id)
+            .unwrap_or_else(|| self.active_pane_size());
+        let bump = should_force_hydration_redraw(
+            false,
+            is_remote_session() && self.session_visible_on_screen(id),
+        ) && cols > 1;
+        let socket = self.client.socket_path().to_path_buf();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            let Ok(client) = construct_client::Client::connect(&socket).await else {
+                return;
+            };
+            if bump {
+                let _ = client.pty_resize(&id, cols.saturating_add(1), rows).await;
+            }
+            let _ = client.pty_resize(&id, cols, rows).await;
+        });
+    }
+}
+
+/// A session's terminal state rebuilt from the daemon's PTY replay snapshot
+/// and transcript. Built entirely off the event loop — parsing a long
+/// pty.log through the vt emulator is the expensive half of a bootstrap —
+/// then installed by `App::apply_terminal_bootstrap`.
+pub(crate) struct TerminalBootstrap {
+    history: crate::pty_render::ItemHistory,
+    editor_state: Option<EditorState>,
+    agent_status: Option<construct_protocol::AgentStatus>,
+    ui_panels: HashMap<String, construct_protocol::UiPanel>,
+    /// Fetch failures, surfaced as a status line once applied.
+    errors: Vec<String>,
+}
+
+/// See `App::terminal_bootstrap_inputs`.
+#[derive(Clone, Copy)]
+pub(crate) struct TerminalBootstrapInputs {
+    fallback_pty_size: (u16, u16),
+    is_headless: bool,
+    record_turn_boundaries: bool,
+}
+
+/// Rebuild a session's terminal history from the daemon. Takes only a client
+/// and a plain-data snapshot of the app state it needs, so it runs equally
+/// well inline or in a spawned task.
+async fn fetch_terminal_bootstrap(
+    client: &construct_client::Client,
+    id: &str,
+    inputs: TerminalBootstrapInputs,
+) -> TerminalBootstrap {
+    let mut errors = Vec::new();
+    let mut history = crate::pty_render::ItemHistory::new();
+    match client.pty_replay(id).await {
+        Ok(snap) => {
+            // Size the shadow parser to match the PTY the
+            // daemon last knew about (falls back to the
+            // current pane size) BEFORE feeding rehydrated
+            // bytes. Codex / claude / any normal-screen TUI
+            // emits cursor positioning that depends on
+            // terminal dims — replaying those bytes against
+            // the shadow's default 80×24 leaves scrollback
+            // showing clamped, incoherent fragments.
+            let (cols, rows) = snap
+                .size
+                .as_ref()
+                .map(|s| (s.cols, s.rows))
+                .unwrap_or(inputs.fallback_pty_size);
+            history.set_pty_size(cols, rows);
+            use base64::Engine;
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&snap.data) {
+                history.feed_pty(&bytes);
+            }
+        }
+        Err(e) => {
+            errors.push(format!("pty_replay: {e}"));
+        }
+    }
+    // Rehydrate ToolBlocks. `feed_pty` parses the OSC fences in
+    // pty.log and creates empty `ToolBlock` items, but the
+    // structured `tool` / `args` / `output` fields live in
+    // transcript events — which the live path routes via
+    // `feed_tool_use` / `feed_tool_result` but the daemon does
+    // NOT re-broadcast on subscribe. So after a daemon restart
+    // the blocks would render as `→ ?` with no body and the
+    // dim-styled args + footer the user sees during a live
+    // session disappear. Replay the transcript here in the
+    // SAME ORDER `feed_pty` saw the fences (FIFO) so
+    // pending-hydration pairing in `ItemHistory` reattaches
+    // tools to their blocks; `feed_tool_result` matches by
+    // call_id and just fills `output` on the existing block.
+    let mut replayed_editor_state: Option<EditorState> = None;
+    let mut replayed_agent_status: Option<construct_protocol::AgentStatus> = None;
+    let mut replayed_ui_panels: HashMap<String, construct_protocol::UiPanel> = HashMap::new();
+    match client.transcript(id, 0, None).await {
+        Ok(t) => {
+            if t.events
+                .iter()
+                .any(|ev| matches!(ev.event, SessionEvent::Pty { .. }))
+            {
+                // New daemons persist PTY events in the transcript as ordering
+                // markers. Prefer rebuilding from those markers so transcript-only
+                // items (smith tool blocks) are interleaved with the raw bytes in
+                // chronological order. The pty_replay path above remains the
+                // fallback for older sessions whose transcripts do not contain PTY.
+                history.clear_items();
+            }
+            apply_transcript_to_local_state(
+                &t.events,
+                &mut history,
+                &mut replayed_editor_state,
+                &mut replayed_agent_status,
+                &mut replayed_ui_panels,
+                inputs.is_headless,
+                inputs.record_turn_boundaries,
+            );
+        }
+        Err(e) => {
+            errors.push(format!("rehydrate transcript: {e}"));
+        }
+    }
+    TerminalBootstrap {
+        history,
+        editor_state: replayed_editor_state,
+        agent_status: replayed_agent_status,
+        ui_panels: replayed_ui_panels,
+        errors,
+    }
+}
+
+impl App {
     async fn move_selected(&mut self, up: bool) {
         let dir = if up {
             construct_protocol::MoveDirection::Up
@@ -10344,7 +10579,12 @@ impl App {
         // above.
         self.refresh_orchestrator_id();
         self.ensure_selection_valid();
-        self.refresh_selected_transcript().await;
+        // Deletion is dispatched off the event loop on purpose (see
+        // `spawn_session_delete`), and reacting to it must be too: the
+        // selection lands on a neighbor whose transcript and PTY history
+        // are not loaded yet, and fetching those inline is what made
+        // `C-x k d` stutter.
+        self.spawn_selected_transcript_load();
     }
 
     /// Is this session "busy" right now — i.e. has it produced PTY bytes
@@ -16454,6 +16694,7 @@ mod tests {
             turn_picker_entries: Vec::new(),
             turn_picker_selected: 0,
             turn_picker_loading: false,
+            selected_load_generation: 0,
             minibuffer_hint_offset: 0,
             minibuffer_hint_rotated_at: None,
             minibuffer_hint_context: None,
@@ -18920,6 +19161,102 @@ mod tests {
         );
         // s2's playbook state is untouched — only s1's is gone.
         assert!(app.playbook_popups.contains_key("s2"));
+    }
+
+    /// Regression: `C-x k d` froze the TUI for as long as the *neighbor*
+    /// session's history took to load. The delete RPC itself was already
+    /// dispatched off the event loop, but reacting to the daemon's
+    /// `session/deleted` reselected a neighbor and then awaited that
+    /// session's transcript (and, for a PTY session, its pty.log replay)
+    /// inline — no frames, no keystrokes, until the daemon answered.
+    ///
+    /// The mock here accepts the connection and then goes silent, so any
+    /// inline request blocks for the client's full 120s response timeout.
+    /// A real-time budget of a few seconds therefore distinguishes the two
+    /// behaviors: the fetch has to be spawned for this to return at all.
+    #[tokio::test]
+    async fn deleting_the_selected_session_does_not_await_the_neighbor_load() {
+        use tokio::net::UnixListener;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&sock).expect("bind mock daemon");
+        // Hold every accepted connection open and never answer: a silent
+        // daemon, not a disconnected one (a dropped stream would fail
+        // requests instantly and prove nothing).
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let client = Client::connect(&sock).await.expect("client connects");
+        let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        let mut s2 = summary_with_kind(construct_protocol::SessionKind::User);
+        s2.id = "s2".into();
+        let mut app = test_app(client, vec![s1, s2]);
+        app.selection = Selection::Session("s1".into());
+
+        let deleted = tokio::time::timeout(
+            Duration::from_secs(5),
+            app.on_session_deleted(&"s1".to_string()),
+        )
+        .await;
+        assert!(
+            deleted.is_ok(),
+            "reacting to a deletion must not block the event loop on a daemon round-trip"
+        );
+        assert_eq!(
+            app.selection,
+            Selection::Session("s2".into()),
+            "selection should have moved to the surviving neighbor"
+        );
+        assert!(
+            app.transcript_session.is_none(),
+            "the neighbor's transcript is still in flight, not applied inline"
+        );
+        server.abort();
+    }
+
+    /// A background selected-session load that lands after the user has
+    /// navigated on must be dropped, not painted into whatever pane is
+    /// showing now.
+    #[tokio::test]
+    async fn stale_selected_session_load_is_discarded() {
+        fn pty_event(seq: u64) -> TimestampedEvent {
+            TimestampedEvent {
+                seq,
+                at: chrono::Utc::now(),
+                event: SessionEvent::Pty {
+                    data: String::new(),
+                },
+            }
+        }
+        let (mut app, _dir, _server) = two_session_app().await;
+        app.selection = Selection::Session("s2".into());
+        let stale_generation = app.selected_load_generation;
+        // The user navigates — every selection change supersedes an
+        // in-flight load.
+        app.select_session("s1".into());
+
+        app.apply_selected_session_load(
+            "s2".into(),
+            stale_generation,
+            Some(vec![pty_event(1)]),
+            None,
+            None,
+        );
+        assert!(
+            app.transcript.is_empty(),
+            "a superseded load must not repaint the pane"
+        );
+        assert!(app.transcript_session.is_none());
+
+        // The load for the session actually selected still applies.
+        let current = app.selected_load_generation;
+        app.apply_selected_session_load("s1".into(), current, Some(vec![pty_event(1)]), None, None);
+        assert_eq!(app.transcript_session.as_deref(), Some("s1"));
+        assert_eq!(app.transcript.len(), 1);
     }
 
     // Split-view focus cue: when focus moves to the session list, the pane
