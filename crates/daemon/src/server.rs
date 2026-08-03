@@ -48,8 +48,9 @@ pub async fn serve(manager: Arc<SessionManager>, socket_path: PathBuf) -> Result
     }
 }
 
+// Visibility matches `dispatch`, which takes it in its signature.
 #[derive(Debug)]
-enum SubCmd {
+pub(crate) enum SubCmd {
     Subscribe(Option<String>),
     Unsubscribe,
 }
@@ -1193,7 +1194,10 @@ fn enrich_service_publications(
     }
 }
 
-async fn dispatch(
+// `pub(crate)` so the session tests can drive a real IPC request through the
+// same entry point a TUI/CLI/MCP caller hits, rather than asserting against
+// the manager helper the dispatch happens to call today.
+pub(crate) async fn dispatch(
     manager: &Arc<SessionManager>,
     sub_cmd_tx: &mpsc::Sender<SubCmd>,
     kind: ClientKind,
@@ -1590,7 +1594,14 @@ async fn dispatch(
     });
     dispatch_entry!(ipc_method::SESSION_INPUT, {
         let p = params!(req, SessionInputParams);
-        match manager.send_input(&p.session_id, p.text).await {
+        // Not `send_input`: that writes the text LF-terminated, and LF is not
+        // the byte a terminal's Enter key sends. Against a PTY-backed agent
+        // TUI the message lands in the composer and sits there unsubmitted,
+        // so `construct send` and the MCP input tool looked like no-ops.
+        // `deliver_user_text` picks the framing the session's harness
+        // actually submits on, and still routes headless harnesses through
+        // `send_input` unchanged.
+        match manager.deliver_user_text(&p.session_id, &p.text).await {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }

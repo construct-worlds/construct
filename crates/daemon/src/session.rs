@@ -13679,6 +13679,75 @@ done
         }
     }
 
+    /// `construct send` and the MCP input tool both arrive as SESSION_INPUT.
+    /// Against a PTY-backed agent TUI the message has to be *submitted*, not
+    /// typed: the LF-terminated `send_input` that dispatch used to call left
+    /// the text sitting in the composer, so the send looked like a no-op.
+    #[tokio::test]
+    async fn user_text_submits_into_an_agent_tui_instead_of_its_composer() {
+        use base64::Engine as _;
+        let (mgr, _storage, id) = playbook_test_mgr("# T\n").await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (record, release, _adapter_rx) =
+            install_blocking_pty_mock_adapter(&mgr, &id, dir.path()).await;
+        std::fs::write(&release, b"go").expect("release");
+        {
+            let entry = mgr.get_entry(&id).await.expect("entry");
+            let mut summary = entry.summary.write().await;
+            summary.harness = "codex".to_string();
+            summary.has_pty = true;
+        }
+
+        // Drive the real SESSION_INPUT dispatch, not the manager helper it
+        // delegates to — the bug was the wiring, not the delivery.
+        let mgr = Arc::new(mgr);
+        let (sub_tx, _sub_rx) = mpsc::channel(8);
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let console = Arc::new(crate::console::ConsoleSlot::new());
+        let response = crate::server::dispatch(
+            &mgr,
+            &sub_tx,
+            crate::server::ClientKind::Tui,
+            1,
+            construct_protocol::Request {
+                jsonrpc: "2.0".into(),
+                id: serde_json::json!(1),
+                method: construct_protocol::ipc_method::SESSION_INPUT.to_string(),
+                params: Some(
+                    serde_json::to_value(construct_protocol::SessionInputParams {
+                        session_id: id.clone(),
+                        text: "count the files".to_string(),
+                    })
+                    .expect("params"),
+                ),
+            },
+            &console,
+            &out_tx,
+        )
+        .await;
+        assert!(response.error.is_none(), "dispatch failed: {response:?}");
+
+        let b64 = base64::engine::general_purpose::STANDARD;
+        // Quoted so the Enter's short encoding can't match inside the paste's.
+        let paste = format!(
+            "\"{}\"",
+            b64.encode(playbook_bracketed_paste_bytes("count the files"))
+        );
+        let enter = format!("\"{}\"", b64.encode(b"\r"));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let recorded = std::fs::read_to_string(&record).unwrap_or_default();
+            if recorded.contains(&paste) && recorded.contains(&enter) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "expected a bracketed paste then a submit Enter, got {recorded:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     #[tokio::test]
     async fn missing_adapter_closes_session_for_restart() {
         let (mgr, storage, id) = playbook_test_mgr("# T\n").await;
