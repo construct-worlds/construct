@@ -2355,6 +2355,15 @@ pub struct App {
     pub frame_text: Vec<String>,
     /// In-app text selection driven by left-drag while mouse capture is on.
     pub text_selection: Option<TextSelection>,
+    /// A left-drag is in flight that we handed to a mouse-grabbing child.
+    /// Set on the forwarded drag, read on the forwarded release, to tell a
+    /// user who just tried to select text that Shift is how they do it.
+    child_swallowed_drag: bool,
+    /// Whether that hint has already been shown. Shown once per run: it
+    /// teaches a gesture, and repeating it would nag users whose children
+    /// legitimately use drag (vim visual mode, draggable scrollbars), whose
+    /// drags are indistinguishable from a failed selection attempt.
+    shift_select_hint_shown: bool,
     /// Copied selection text. After mouse release we re-find this text in
     /// the latest rendered frame so the highlight follows content shifts.
     pub selected_text: Option<String>,
@@ -5454,6 +5463,8 @@ async fn run_with_socket_initial_selection(
         hide_pane_side_borders: persisted.hide_pane_side_borders,
         frame_text: Vec::new(),
         text_selection: None,
+        child_swallowed_drag: false,
+        shift_select_hint_shown: false,
         selected_text: None,
         selected_text_bounds: None,
         selected_text_range: None,
@@ -10424,6 +10435,35 @@ impl App {
             )
     }
 
+    /// Tell a user who just tried to drag-select over a mouse-grabbing pane
+    /// how to actually do it.
+    ///
+    /// Without this the Shift override is undiscoverable: the failure is
+    /// silent — the drag goes to the child, no selection appears, and nothing
+    /// explains why the gesture that works everywhere else in the TUI did
+    /// nothing here. A completed left-drag that we forwarded is the one signal
+    /// that distinguishes "tried to select" from ordinary clicking, so the
+    /// hint rides the release rather than firing on every motion event.
+    ///
+    /// It cannot be a *reliable* signal — a child that uses drag itself (vim
+    /// visual mode, a draggable scrollbar) produces exactly the same events
+    /// from a user who wanted the drag forwarded. That ambiguity is why this
+    /// shows once per run and then stays quiet.
+    fn note_drag_forwarded_to_child(&mut self, ev: &MouseEvent) {
+        let (drag_in_flight, show_hint) = drag_hint_transition(
+            ev.kind,
+            self.child_swallowed_drag,
+            self.shift_select_hint_shown,
+        );
+        self.child_swallowed_drag = drag_in_flight;
+        if show_hint {
+            self.shift_select_hint_shown = true;
+            self.set_status(
+                "this pane's harness handles the mouse — hold Shift and drag to select text".into(),
+            );
+        }
+    }
+
     async fn on_mouse(&mut self, ev: MouseEvent) {
         if !self.mouse_capture_enabled {
             return;
@@ -10648,6 +10688,7 @@ impl App {
             && !Self::is_shift_select_gesture(&ev)
             && self.forward_mouse_to_child(&ev)
         {
+            self.note_drag_forwarded_to_child(&ev);
             return;
         }
         match ev.kind {
@@ -14737,6 +14778,29 @@ fn normalized_points(a: ScreenPoint, b: ScreenPoint) -> (ScreenPoint, ScreenPoin
     }
 }
 
+/// Pure half of the Shift-select hint (see `note_drag_forwarded_to_child`),
+/// split out so the state machine is testable without a live `App`.
+///
+/// Takes the forwarded event's kind plus the two current flags, and returns
+/// `(drag_still_in_flight, show_the_hint_now)`. The hint fires on the release
+/// that ends a forwarded drag, and only while it has never been shown.
+fn drag_hint_transition(
+    kind: MouseEventKind,
+    drag_in_flight: bool,
+    already_shown: bool,
+) -> (bool, bool) {
+    use crossterm::event::MouseButton;
+    match kind {
+        // A fresh press starts a new gesture: nothing dragged yet.
+        MouseEventKind::Down(MouseButton::Left) => (false, false),
+        MouseEventKind::Drag(MouseButton::Left) => (true, false),
+        MouseEventKind::Up(MouseButton::Left) => (false, drag_in_flight && !already_shown),
+        // Wheel, other buttons and bare motion leave the gesture untouched —
+        // a wheel tick mid-drag must not cancel the pending hint.
+        _ => (drag_in_flight, false),
+    }
+}
+
 /// The frame rows and columns a drag covers, clipped to the surface it
 /// started on. `None` when the selection falls entirely outside those
 /// bounds and therefore covers no cell at all.
@@ -16556,6 +16620,8 @@ mod tests {
             hide_pane_side_borders: true,
             frame_text: Vec::new(),
             text_selection: None,
+            child_swallowed_drag: false,
+            shift_select_hint_shown: false,
             selected_text: None,
             selected_text_bounds: None,
             selected_text_range: None,
@@ -46235,6 +46301,39 @@ mod tests {
             frame_selection_text(&filled, &sel),
             "hello\n  world\n  again"
         );
+    }
+
+    #[test]
+    fn a_swallowed_drag_hints_once_at_the_release() {
+        use crossterm::event::MouseButton;
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let drag = MouseEventKind::Drag(MouseButton::Left);
+        let up = MouseEventKind::Up(MouseButton::Left);
+
+        // Press, drag, release: the hint lands on the release, not before.
+        let (in_flight, hint) = drag_hint_transition(down, false, false);
+        assert!(!in_flight && !hint, "a press alone is not a drag");
+        let (in_flight, hint) = drag_hint_transition(drag, in_flight, false);
+        assert!(in_flight, "the drag is now in flight");
+        assert!(!hint, "but the gesture has not finished yet");
+        let (in_flight, hint) = drag_hint_transition(up, in_flight, false);
+        assert!(hint, "the completed drag is what earns the hint");
+        assert!(!in_flight, "and it clears the gesture");
+
+        // A plain click — press then release, no motion — stays silent, so
+        // clicking inside a harness never nags.
+        let (in_flight, _) = drag_hint_transition(down, false, false);
+        let (_, hint) = drag_hint_transition(up, in_flight, false);
+        assert!(!hint, "a click is not an attempted selection");
+
+        // Once shown, it stays quiet: a child that uses drag itself produces
+        // these same events from a user who wanted them forwarded.
+        let (_, hint) = drag_hint_transition(up, true, true);
+        assert!(!hint, "the hint is shown once per run");
+
+        // A wheel tick mid-drag must not swallow the pending hint.
+        let (in_flight, _) = drag_hint_transition(MouseEventKind::ScrollUp, true, false);
+        assert!(in_flight, "the wheel leaves the gesture in flight");
     }
 
     #[test]
