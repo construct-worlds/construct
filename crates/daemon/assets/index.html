@@ -2461,74 +2461,211 @@
   }
   .lineage-body {
     flex: 0 0 auto;
-    height: var(--lineage-h, 200px);
+    height: var(--lineage-h, 220px);
     min-height: 48px;
     overflow: auto;
-    padding: 6px 8px 10px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 11px;
-    line-height: 1.25;
+    padding: 8px 10px 12px;
+    font-size: 12px;
+    line-height: 1.3;
   }
-  /* Boxed-lane / rails diagram: monospaced character grid like the TUI. */
-  .lineage-diagram {
-    display: block;
-    margin: 0;
-    white-space: pre;
-    font: inherit;
-    line-height: 1.25;
-    color: var(--fg-dim);
-    min-width: max-content;
+  /* Rich HTML lineage graph — cards + CSS rails, not ASCII art. */
+  .lineage-graph {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    min-width: min(100%, 280px);
   }
-  .lineage-diagram .ld-row {
-    display: block;
-    min-height: 1.25em;
+  .ln-node {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
   }
-  .lineage-diagram .ld-span {
-    white-space: pre;
+  .ln-node + .ln-node,
+  .ln-children > .ln-node {
+    margin-top: 0;
   }
-  .lineage-diagram .ld-span.is-clickable {
+  .ln-card {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 7px 9px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg) 70%, var(--bg-elev));
     cursor: pointer;
+    transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+    min-width: 0;
   }
-  .lineage-diagram .ld-span.is-clickable:hover {
+  .ln-card:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg-elev));
+  }
+  .ln-card.is-selected {
+    border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+    background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+  .ln-card.is-focus {
+    border-color: var(--accent);
+  }
+  .ln-card.is-discarded {
+    opacity: 0.55;
+  }
+  .ln-card.is-discarded .ln-title {
+    text-decoration: line-through;
+  }
+  .ln-status {
+    flex: 0 0 auto;
+    width: 1.1em;
+    text-align: center;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--fg-faint);
+  }
+  .ln-status.state-running,
+  .ln-status.state-awaiting_input { color: var(--ok); }
+  .ln-status.state-done { color: var(--accent); }
+  .ln-status.state-errored { color: var(--err); }
+  .ln-status.state-paused { color: var(--warn); }
+  .ln-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .ln-title {
     color: var(--fg);
+    font-weight: 600;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ln-meta {
+    color: var(--fg-faint);
+    font-size: 10.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ln-badge {
+    flex: 0 0 auto;
+    align-self: center;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    padding: 2px 6px;
+    border-radius: 999px;
+    color: var(--fg-dim);
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+    white-space: nowrap;
+  }
+  .ln-badge.edge-fork {
+    color: color-mix(in srgb, var(--accent) 80%, var(--fg));
     background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
-  .lineage-diagram .ld-span.is-selected {
-    color: var(--fg);
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+  .ln-badge.edge-subagent {
+    color: color-mix(in srgb, var(--ok) 85%, var(--fg));
+    background: color-mix(in srgb, var(--ok) 12%, transparent);
   }
-  .lineage-diagram .ld-span.is-focus {
+  .ln-badge.edge-reset {
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 14%, transparent);
+  }
+  .ln-badge.edge-merged {
     color: var(--accent);
-    font-weight: 600;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
-  .lineage-diagram .ld-span.role-rail,
-  .lineage-diagram .ld-span.role-border {
+  .ln-children {
+    position: relative;
+    margin: 0 0 0 14px;
+    padding: 6px 0 2px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  /* Vertical rail down the child stack */
+  .ln-children::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 8px;
+    width: 2px;
+    border-radius: 1px;
+    background: color-mix(in srgb, var(--fg) 14%, transparent);
+  }
+  .ln-branch {
+    position: relative;
+  }
+  /* Horizontal stub from rail into child card */
+  .ln-branch::before {
+    content: "";
+    position: absolute;
+    left: -14px;
+    top: 16px;
+    width: 12px;
+    height: 2px;
+    border-radius: 1px;
+    background: color-mix(in srgb, var(--fg) 18%, transparent);
+  }
+  .ln-branch.edge-fork::before {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .ln-branch.edge-subagent::before {
+    background: color-mix(in srgb, var(--ok) 45%, transparent);
+  }
+  .ln-branch.edge-reset::before {
+    background: color-mix(in srgb, var(--warn) 50%, transparent);
+  }
+  .ln-toggle,
+  .ln-more {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    padding: 5px 8px;
+    border-radius: 8px;
+    border: 1px dashed color-mix(in srgb, var(--fg) 16%, transparent);
     color: var(--fg-faint);
-  }
-  .lineage-diagram .ld-span.role-edge {
-    color: var(--fg-dim);
-  }
-  .lineage-diagram .ld-span.role-segment,
-  .lineage-diagram .ld-span.role-segment-bullet {
-    color: var(--fg-dim);
-  }
-  .lineage-diagram .ld-span.role-segment-outcome.ok { color: var(--ok); }
-  .lineage-diagram .ld-span.role-segment-outcome.bad { color: var(--err); }
-  .lineage-diagram .ld-span.role-node { color: var(--fg); }
-  .lineage-diagram .ld-span.role-node-status.state-running,
-  .lineage-diagram .ld-span.role-node-status.state-awaiting_input { color: var(--ok); }
-  .lineage-diagram .ld-span.role-node-status.state-done { color: var(--accent); }
-  .lineage-diagram .ld-span.role-node-status.state-errored { color: var(--err); }
-  .lineage-diagram .ld-span.role-node-status.state-paused { color: var(--warn); }
-  .lineage-diagram .ld-span.role-more,
-  .lineage-diagram .ld-span.role-subagents {
-    color: var(--fg-faint);
+    font-size: 11px;
     font-style: italic;
     cursor: pointer;
+    background: transparent;
+    text-align: left;
+    width: 100%;
+    font-family: inherit;
   }
-  .lineage-diagram .ld-span.role-subagents:hover,
-  .lineage-diagram .ld-span.role-more:hover {
+  .ln-toggle:hover,
+  .ln-more:hover {
     color: var(--fg);
+    border-color: color-mix(in srgb, var(--fg) 28%, transparent);
+    background: color-mix(in srgb, var(--fg) 5%, transparent);
+  }
+  .ln-toggle .ln-chevron {
+    flex: 0 0 auto;
+    font-style: normal;
+    color: var(--fg-dim);
+    width: 1em;
+  }
+  .lineage-graph.is-compact .ln-card {
+    padding: 4px 7px;
+    border-radius: 7px;
+  }
+  .lineage-graph.is-compact .ln-meta { display: none; }
+  .lineage-graph.is-compact .ln-badge { display: none; }
+  .lineage-graph.is-compact .ln-children {
+    margin-left: 10px;
+    padding-left: 10px;
+    gap: 4px;
+  }
+  .lineage-graph.is-compact .ln-branch::before {
+    left: -10px;
+    width: 8px;
+    top: 13px;
   }
   .lineage-empty {
     padding: 10px 8px;
@@ -4519,6 +4656,7 @@ const state = {
   tokenMeterBusy: new Map(),
   tokenMeterSeeded: false,
   tokenMeterRaf: 0,
+  rainLoopRaf: 0,
   // Playbook view (per-session Markdown playbook surface, spec 0059).
   playbook: {
     // Last daemon snapshot per session id: { version, templateId, saved }.
@@ -5147,6 +5285,13 @@ function buildLineageTree(focusId, sessions, expanded) {
   return build(rootId, "root", 0);
 }
 
+function forkStatusOf(summary) {
+  const mode = summary && summary.merge && summary.merge.mode;
+  if (mode === "result") return "merged";
+  if (mode === "discard") return "discarded";
+  return "open";
+}
+
 function lineageSectionSessionId() {
   const id = state.currentId;
   if (!id) return null;
@@ -5171,904 +5316,135 @@ function lineageSectionSessionId() {
   return countNodes(tree) > 1 ? id : null;
 }
 
-// --- Boxed-lane / rails diagram (port of crates/cli/src/lineage.rs) ---
+// --- Rich HTML lineage graph (cards + CSS rails) ---
 
-const LINEAGE_MAX_BOX_W = 28;
-const LINEAGE_MAX_BOX_LINES = 2;
-const EV_BOX = 0;
-const EV_MERGE = 1;
-const EV_END = 2;
-
-function charWidth(ch) {
-  // Rough East-Asian wide detection; most glyphs we paint are single-cell.
-  const cp = ch.codePointAt(0);
-  if (cp >= 0x1100 && (
-    cp <= 0x115f || cp === 0x2329 || cp === 0x232a ||
-    (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) ||
-    (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe10 && cp <= 0xfe19) ||
-    (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) ||
-    (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x20000 && cp <= 0x2fffd)
-  )) return 2;
-  return 1;
-}
-function strWidth(s) {
-  let w = 0;
-  for (const ch of String(s || "")) w += charWidth(ch);
-  return w;
-}
-
-function lineageStatusGlyph(stateName) {
-  switch (String(stateName || "").toLowerCase()) {
-    case "pending": return "○";
-    case "running":
-    case "awaiting_input": return "●";
-    case "paused": return "⏸";
-    case "done": return "✓";
-    case "errored": return "✗";
-    default: return "○";
+function lineageEdgeKind(node, summary) {
+  if (node.edge === "fork" && summary && summary.forked_from && summary.forked_from.is_reset_snapshot) {
+    return "reset";
   }
+  return node.edge || "root";
 }
 
-function formatDurationMs(ms) {
-  const secs = Math.floor(Math.max(0, ms) / 1000);
-  const m = Math.floor(secs / 60);
-  const s = secs % 60;
-  return m > 0 ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`;
-}
-function formatElapsedMs(sinceMs, nowMs) {
-  return formatDurationMs(Math.max(0, nowMs - sinceMs));
-}
-function formatTokCount(n) {
-  n = Number(n) || 0;
-  if (n >= 10_000_000) return `${Math.floor(n / 1_000_000)}M`;
-  if (n >= 1_000_000) return `${(n / 1e6).toFixed(1)}M`;
-  if (n >= 10_000) return `${Math.floor(n / 1000)}k`;
-  if (n >= 1000) return `${(n / 1e3).toFixed(1)}k`;
-  return String(n);
-}
-function segmentCountLabel(deltaEvents, tokens) {
-  if (tokenTallyTotal(tokens) > 0) return `${formatTokCount(tokenTallyTotal(tokens))} tok`;
-  return `${deltaEvents} ${deltaEvents === 1 ? "msg" : "msgs"}`;
-}
-function segmentLabel(deltaEvents, tokens, startMs, endMs, nowMs) {
-  return `${segmentCountLabel(deltaEvents, tokens)} · ${formatElapsedMs(startMs, endMs == null ? nowMs : endMs)}`;
-}
-function segmentLabelBusy(deltaEvents, tokens, busyMs) {
-  return `${segmentCountLabel(deltaEvents, tokens)} · ${formatDurationMs(busyMs)}`;
-}
-
-function forkStatusOf(summary) {
-  const mode = summary && summary.merge && summary.merge.mode;
-  if (mode === "result") return "merged";
-  if (mode === "discard") return "discarded";
-  return "open";
-}
-
-function nodeBoxLabel(summary, sessionId) {
-  if (!summary) {
-    return `${String(sessionId).slice(0, 8)} (gone)`;
+function lineageEdgeBadge(edgeKind, summary) {
+  if (edgeKind === "reset") return { label: "reset", cls: "edge-reset" };
+  if (edgeKind === "fork") {
+    const st = forkStatusOf(summary);
+    if (st === "merged") return { label: "merged", cls: "edge-merged" };
+    if (st === "discarded") return { label: "discarded", cls: "edge-fork" };
+    return { label: "fork", cls: "edge-fork" };
   }
-  const status = lineageStatusGlyph(summary.state);
-  const title = String(summary.title || "").trim();
-  const harness = String(summary.harness || "");
-  let label = title ? `${status} ${title} (${harness})` : `${status} ${harness || sessionId}`;
-  if (forkStatusOf(summary) === "discarded") label += "  ✗ discarded";
-  return label;
-}
-
-function wrapBoxLabel(label) {
-  const words = String(label).split(/\s+/).filter(Boolean);
-  const lines = [];
-  let cur = "";
-  let curW = 0;
-  let truncated = false;
-  const push = () => {
-    if (cur || !lines.length) lines.push(cur);
-    cur = "";
-    curW = 0;
-  };
-  outer: for (const word of words) {
-    const ww = strWidth(word);
-    const sep = cur ? 1 : 0;
-    if (curW + sep + ww <= LINEAGE_MAX_BOX_W) {
-      cur += (sep ? " " : "") + word;
-      curW += sep + ww;
-      continue;
-    }
-    if (cur) {
-      if (lines.length + 1 === LINEAGE_MAX_BOX_LINES) { truncated = true; break; }
-      push();
-    }
-    if (ww <= LINEAGE_MAX_BOX_W) {
-      cur = word;
-      curW = ww;
-      continue;
-    }
-    for (const ch of word) {
-      const cw = charWidth(ch);
-      if (curW + cw > LINEAGE_MAX_BOX_W) {
-        if (lines.length + 1 === LINEAGE_MAX_BOX_LINES) { truncated = true; break outer; }
-        push();
-      }
-      cur += ch;
-      curW += cw;
-    }
-  }
-  if (cur || !lines.length) lines.push(cur);
-  if (truncated) {
-    let last = lines[lines.length - 1] || "";
-    while (strWidth(last) + 1 > LINEAGE_MAX_BOX_W && last) last = last.slice(0, -1);
-    lines[lines.length - 1] = last + "…";
-  }
-  return lines;
-}
-
-function nodeOutcomeOf(summary) {
-  if (!summary) return null;
-  const st = String(summary.state || "").toLowerCase();
-  if (st === "done") return true;
-  if (st === "errored") return false;
+  if (edgeKind === "subagent") return { label: "subagent", cls: "edge-subagent" };
   return null;
 }
 
-// Character-grid canvas
-function makeCanvas() {
-  return { cells: [], nodeRows: [], boxes: [] };
-}
-function canvasPut(c, y, x, text, role) {
-  while (c.cells.length <= y) c.cells.push([]);
-  const row = c.cells[y];
-  let cx = x;
-  for (const ch of String(text)) {
-    const w = charWidth(ch);
-    while (row.length < cx + w) row.push(null);
-    row[cx] = { ch, role };
-    for (let p = 1; p < w; p++) row[cx + p] = { ch: "\0", role };
-    cx += w;
+function lineageNodeMeta(summary) {
+  if (!summary) return "gone";
+  const parts = [];
+  if (summary.harness) parts.push(String(summary.harness));
+  const msgs = Number(summary.message_count || 0);
+  if (msgs > 0) parts.push(`${msgs} ${msgs === 1 ? "msg" : "msgs"}`);
+  const tokens = summary.tokens || {};
+  const tok = Number(tokens.input || 0) + Number(tokens.output || 0);
+  if (tok > 0) parts.push(`${formatTokenCount(tok)} tok`);
+  const busy = sessionBusyMsAt(summary);
+  if (busy > 0) {
+    const secs = Math.floor(busy / 1000);
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    parts.push(m > 0 ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`);
   }
-}
-function canvasPutIfEmpty(c, y, x, ch, role) {
-  while (c.cells.length <= y) c.cells.push([]);
-  const row = c.cells[y];
-  while (row.length <= x) row.push(null);
-  if (!row[x]) row[x] = { ch, role };
-}
-function canvasIntoRows(c) {
-  const nodeByRow = new Map(c.nodeRows);
-  return c.cells.map((cells, y) => {
-    let last = -1;
-    for (let i = cells.length - 1; i >= 0; i--) {
-      if (cells[i]) { last = i; break; }
-    }
-    const spans = [];
-    if (last >= 0) {
-      let curRole = null;
-      let curText = "";
-      const roleKey = (r) => JSON.stringify(r);
-      for (let i = 0; i <= last; i++) {
-        const cell = cells[i] || { ch: " ", role: { kind: "rail" } };
-        if (cell.ch === "\0") continue;
-        const rk = roleKey(cell.role);
-        if (!curRole || roleKey(curRole) !== rk) {
-          if (curRole) spans.push({ text: curText, role: curRole });
-          curRole = cell.role;
-          curText = cell.ch;
-        } else {
-          curText += cell.ch;
-        }
-      }
-      if (curRole) spans.push({ text: curText, role: curRole });
-    }
-    return { spans, node_session_id: nodeByRow.get(y) || null };
-  });
+  return parts.join(" · ") || String(summary.state || "pending");
 }
 
-function subagentMarkerText(count, running, expanded) {
-  const noun = count === 1 ? "subagent" : "subagents";
-  if (expanded) return `▾ ${count} ${noun}`;
-  if (running > 0) return `▸ ${count} ${noun} · ${running} running`;
-  return `▸ ${count} ${noun}`;
-}
+function buildLineageCardEl(node, byId, focusId) {
+  const wrap = document.createElement("div");
+  wrap.className = "ln-node";
+  wrap.dataset.sessionId = node.session_id;
 
-function collectLanes(node, byId, parent, nowMs, lanes) {
   const summary = byId.get(node.session_id) || null;
-  const parentBoxMs = parent != null ? lanes[parent].box_ms : Number.MIN_SAFE_INTEGER;
-  const forked = node.edge === "fork" && summary && summary.forked_from ? summary.forked_from : null;
-  const created = summary ? sessionTimeMs(summary.created_at) : 0;
-  const boxMs = Math.max(forked ? Number(forked.at_ms || 0) : created, parentBoxMs === Number.MIN_SAFE_INTEGER ? 0 : parentBoxMs);
-  const mergeRec = summary && summary.merge ? summary.merge : null;
-  let merge = null;
-  if (forked && mergeRec && mergeRec.mode === "result") {
-    merge = {
-      at: Math.max(Number(mergeRec.at_ms || 0), boxMs),
-      seq: Number(mergeRec.merged_seq || 0),
-      busy: Number(mergeRec.merged_busy_ms || 0),
-      msgs: Number(mergeRec.merged_message_count || 0),
-      tokens: tokenTallyOf(mergeRec.merged_tokens),
-    };
+  const edgeKind = lineageEdgeKind(node, summary);
+  const status = summary ? String(summary.state || "pending").toLowerCase() : "pending";
+  const title = sessionDisplayTitle(summary) || String(node.session_id).slice(0, 8);
+  const card = document.createElement("div");
+  card.className = "ln-card"
+    + (node.session_id === state.currentId ? " is-selected" : "")
+    + (node.session_id === focusId ? " is-focus" : "")
+    + (forkStatusOf(summary) === "discarded" ? " is-discarded" : "");
+  card.dataset.sessionId = node.session_id;
+  card.setAttribute("role", "treeitem");
+  card.setAttribute("aria-selected", node.session_id === state.currentId ? "true" : "false");
+
+  const statusEl = document.createElement("span");
+  statusEl.className = `ln-status state-${status}`;
+  statusEl.textContent = summary ? sessionStatusGlyph(summary) : "○";
+  card.appendChild(statusEl);
+
+  const main = document.createElement("div");
+  main.className = "ln-main";
+  const titleEl = document.createElement("div");
+  titleEl.className = "ln-title";
+  titleEl.textContent = title;
+  titleEl.title = title;
+  main.appendChild(titleEl);
+  const metaEl = document.createElement("div");
+  metaEl.className = "ln-meta";
+  metaEl.textContent = lineageNodeMeta(summary);
+  main.appendChild(metaEl);
+  card.appendChild(main);
+
+  const badge = lineageEdgeBadge(edgeKind, summary);
+  if (badge) {
+    const b = document.createElement("span");
+    b.className = `ln-badge ${badge.cls}`;
+    b.textContent = badge.label;
+    card.appendChild(b);
   }
-  let end = null;
-  if (merge) {
-    end = null;
-  } else if (forked && mergeRec && mergeRec.mode === "discard") {
-    const t = Math.max(Number(mergeRec.at_ms || 0), boxMs);
-    end = { at: t, labelEnd: Number(mergeRec.at_ms || 0), outcome: false };
-  } else {
-    const ok = nodeOutcomeOf(summary);
-    if (ok !== null) {
-      const t = Math.max(
-        summary && summary.last_event_at != null ? sessionTimeMs(summary.last_event_at) : boxMs,
-        boxMs,
-      );
-      end = { at: t, labelEnd: t, outcome: ok };
-    } else {
-      const labelEnd = summary && summary.last_event_at != null
-        ? sessionTimeMs(summary.last_event_at)
-        : null;
-      end = { at: Math.max(nowMs, boxMs), labelEnd, outcome: null };
+  wrap.appendChild(card);
+
+  const kids = node.children || [];
+  if (!kids.length) return wrap;
+
+  const children = document.createElement("div");
+  children.className = "ln-children";
+  children.setAttribute("role", "group");
+
+  for (const child of kids) {
+    if (child.kind === "subagents") {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ln-toggle";
+      btn.dataset.role = "subagents-toggle";
+      btn.dataset.parentId = node.session_id;
+      const chev = document.createElement("span");
+      chev.className = "ln-chevron";
+      chev.textContent = child.expanded ? "▾" : "▸";
+      btn.appendChild(chev);
+      const label = document.createElement("span");
+      const noun = child.count === 1 ? "subagent" : "subagents";
+      let text = `${child.count} ${noun}`;
+      if (!child.expanded && child.running > 0) text += ` · ${child.running} running`;
+      label.textContent = text;
+      btn.appendChild(label);
+      children.appendChild(btn);
+      continue;
     }
+    if (child.kind === "more") {
+      const more = document.createElement("div");
+      more.className = "ln-more";
+      more.textContent = `+${child.count} more`;
+      children.appendChild(more);
+      continue;
+    }
+    if (!child.session_id) continue;
+    const branch = document.createElement("div");
+    const cSum = byId.get(child.session_id);
+    const cEdge = lineageEdgeKind(child, cSum);
+    branch.className = `ln-branch edge-${cEdge}`;
+    branch.appendChild(buildLineageCardEl(child, byId, focusId));
+    children.appendChild(branch);
   }
-  const closeMs = merge ? merge.at : end.at;
-  const idx = lanes.length;
-  lanes.push({
-    node,
-    summary,
-    parent,
-    box_ms: boxMs,
-    fork_seq: forked ? Number(forked.transcript_seq || 0) : null,
-    fork_busy: forked ? Number(forked.parent_busy_ms || 0) : 0,
-    fork_msgs: forked ? Number(forked.parent_message_count || 0) : 0,
-    fork_tokens: forked ? tokenTallyOf(forked.parent_tokens) : { input: 0, output: 0, cached: 0 },
-    merge,
-    end,
-    close_ms: closeMs,
-    more: [],
-    subagent_marker: null,
-    label_lines: wrapBoxLabel(nodeBoxLabel(summary, node.session_id)),
-    busy_total: summary ? sessionBusyMsAt(summary, nowMs) : 0,
-    msgs_total: summary ? Number(summary.message_count || 0) : 0,
-    tokens_total: summary ? tokenTallyOf(summary.tokens) : { input: 0, output: 0, cached: 0 },
-    cp_seq: 0,
-    cp_ms: boxMs,
-    cp_busy: 0,
-    cp_msgs: 0,
-    cp_tokens: { input: 0, output: 0, cached: 0 },
-    x_abs: 0,
-    lane_col: 0,
-    box_bottom: 0,
-    last_row: 0,
-    placed: false,
-    ended: false,
-  });
-  for (const child of node.children || []) {
-    if (child.kind === "more") lanes[idx].more.push(child.count);
-    else if (child.kind === "subagents") {
-      lanes[idx].subagent_marker = {
-        count: child.count,
-        running: child.running,
-        expanded: child.expanded,
-      };
-    } else if (child.session_id) {
-      collectLanes(child, byId, idx, nowMs, lanes);
-    }
-  }
-  return idx;
-}
-
-function buildEvents(lanes) {
-  const events = [];
-  for (let i = 0; i < lanes.length; i++) {
-    events.push([lanes[i].box_ms, EV_BOX, i]);
-    if (lanes[i].merge) events.push([lanes[i].merge.at, EV_MERGE, i]);
-    if (lanes[i].end) events.push([lanes[i].end.at, EV_END, i]);
-  }
-  events.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
-  return events;
-}
-
-function boxContentW(lane) {
-  return Math.max(0, ...lane.label_lines.map(strWidth));
-}
-function boxRows(lane) {
-  return lane.label_lines.length + 2;
-}
-
-function isResetSnapshotEdge(lane) {
-  return !!(lane.summary && lane.summary.forked_from && lane.summary.forked_from.is_reset_snapshot);
-}
-
-function putSegment(c, y, laneCol, deltaEvents, tokens, startMs, endMs, nowMs, outcome, owner, busyMs) {
-  if (outcome === true || outcome === false) {
-    canvasPut(c, y, laneCol, outcome ? "✓" : "✗", {
-      kind: "segment_outcome", ok: outcome, session_id: owner,
-    });
-  } else {
-    canvasPut(c, y, laneCol, "•", { kind: "segment_bullet", session_id: owner });
-  }
-  const text = busyMs != null
-    ? segmentLabelBusy(deltaEvents, tokens, busyMs)
-    : segmentLabel(deltaEvents, tokens, startMs, endMs, nowMs);
-  canvasPut(c, y, laneCol + 2, text, {
-    kind: "segment",
-    session_id: owner,
-    delta_events: deltaEvents,
-    tokens,
-  });
-  return laneCol + 2 + strWidth(text);
-}
-
-function drawBox(c, lane, x, y) {
-  const lw = boxContentW(lane);
-  const border = { kind: "border", session_id: lane.node.session_id };
-  canvasPut(c, y, x, `┌${"─".repeat(lw + 2)}┐`, border);
-  const status = lane.summary ? lineageStatusGlyph(lane.summary.state) : null;
-  lane.label_lines.forEach((line, li) => {
-    const pad = lw - strWidth(line);
-    canvasPut(c, y + 1 + li, x, "│ ", border);
-    let tx = x + 2;
-    let rest = line;
-    if (li === 0 && status && line.startsWith(status)) {
-      canvasPut(c, y + 1, tx, status, {
-        kind: "node_status",
-        session_id: lane.node.session_id,
-        state: lane.summary ? String(lane.summary.state || "").toLowerCase() : "",
-      });
-      tx += strWidth(status);
-      rest = line.slice(status.length);
-    }
-    canvasPut(c, y + 1 + li, tx, rest + " ".repeat(Math.max(0, pad)), {
-      kind: "node", session_id: lane.node.session_id,
-    });
-    canvasPut(c, y + 1 + li, x + 2 + lw, " │", border);
-  });
-  const h = boxRows(lane);
-  canvasPut(c, y + h - 1, x, `└${"─".repeat(lw + 2)}┘`, border);
-  c.nodeRows.push([y + 1, lane.node.session_id]);
-  c.boxes.push({
-    session_id: lane.node.session_id,
-    x, y, width: lw + 4, height: h,
-  });
-}
-
-function putSubagentMarkerBox(c, y, lane) {
-  if (!lane.subagent_marker) return y;
-  const { count, running, expanded } = lane.subagent_marker;
-  canvasPut(c, y, lane.lane_col, "├─ ", {
-    kind: "border", session_id: lane.node.session_id,
-  });
-  canvasPut(c, y, lane.lane_col + 3, subagentMarkerText(count, running, expanded), {
-    kind: "subagents",
-    session_id: lane.node.session_id,
-    expanded,
-  });
-  lane.last_row = Math.max(lane.last_row, y);
-  return y + 1;
-}
-
-function backForkLabel(lane, parent) {
-  if (lane.fork_seq == null) return null;
-  if (lane.fork_seq >= parent.cp_seq) return null;
-  const msgs = Math.max(0, parent.cp_msgs - lane.fork_msgs);
-  if (parent.cp_msgs > 0 && msgs > 0) {
-    return `${msgs} ${msgs === 1 ? "msg" : "msgs"} back`;
-  }
-  const d = parent.cp_seq - lane.fork_seq;
-  return `${d} ${d === 1 ? "event" : "events"} back`;
-}
-
-function layoutTreeBoxes(root, sessions, nowMs) {
-  const byId = new Map(sessions.map((s) => [s.id, s]));
-  const c = makeCanvas();
-  const lanes = [];
-  collectLanes(root, byId, null, nowMs, lanes);
-  const events = buildEvents(lanes);
-  let cur = 0;
-  let gi = 0;
-  while (gi < events.length) {
-    const [t, kind, i] = events[gi];
-    if (kind === EV_BOX) {
-      const h = boxRows(lanes[i]);
-      const p = lanes[i].parent;
-      if (p == null) {
-        drawBox(c, lanes[i], 1, cur);
-        lanes[i].x_abs = 1;
-        lanes[i].lane_col = 3;
-        lanes[i].box_bottom = cur + h;
-        lanes[i].last_row = cur + h - 1;
-        lanes[i].placed = true;
-        cur += h;
-        cur = putSubagentMarkerBox(c, cur, lanes[i]);
-        gi += 1;
-        continue;
-      }
-      const back = backForkLabel(lanes[i], lanes[p]);
-      if (lanes[i].fork_seq != null) {
-        const seq = lanes[i].fork_seq;
-        const d = Math.max(0, seq - lanes[p].cp_seq);
-        if (d > 0) {
-          cur += 1;
-          const busy = lanes[i].fork_busy > 0
-            ? Math.max(0, lanes[i].fork_busy - lanes[p].cp_busy)
-            : null;
-          const shown = lanes[i].fork_msgs > 0
-            ? Math.max(0, lanes[i].fork_msgs - lanes[p].cp_msgs)
-            : d;
-          const tokens = tokenTallySub(lanes[i].fork_tokens, lanes[p].cp_tokens);
-          putSegment(c, cur, lanes[p].lane_col, shown, tokens, lanes[p].cp_ms, lanes[i].box_ms, nowMs, null, lanes[p].node.session_id, busy);
-          cur += 1;
-        }
-        if (seq >= lanes[p].cp_seq) {
-          lanes[p].cp_seq = seq;
-          lanes[p].cp_ms = lanes[i].box_ms;
-        }
-        lanes[p].cp_busy = Math.max(lanes[p].cp_busy, lanes[i].fork_busy);
-        lanes[p].cp_msgs = Math.max(lanes[p].cp_msgs, lanes[i].fork_msgs);
-        lanes[p].cp_tokens = tokenTallyMax(lanes[p].cp_tokens, lanes[i].fork_tokens);
-      }
-      let edgeWord = "";
-      if (isResetSnapshotEdge(lanes[i])) edgeWord = "↺";
-      else if (lanes[i].node.edge === "fork") edgeWord = back ? `⑂ ${back}` : "⑂";
-      else if (lanes[i].node.edge === "subagent") edgeWord = "▸";
-      const ew = strWidth(edgeWord);
-      const thisLo = lanes[i].box_ms;
-      const thisHi = lanes[i].close_ms;
-      const bw = boxContentW(lanes[i]) + 4;
-      let x = lanes[p].lane_col + Math.max(ew + 6, 7);
-      const SPREAD = 6;
-      let lanePick;
-      for (;;) {
-        const lo = x + 2;
-        const hi = Math.max(lo, x + bw - 2);
-        const occupied = [];
-        for (let j = 0; j < lanes.length; j++) {
-          const l = lanes[j];
-          if (j !== i && l.placed && l.box_ms <= thisHi && thisLo <= l.close_ms) {
-            occupied.push(l.lane_col);
-          }
-        }
-        let best = null;
-        let bestKey = null;
-        for (let cand = lo; cand <= hi; cand++) {
-          if (occupied.includes(cand)) continue;
-          const d = occupied.length
-            ? Math.min(...occupied.map((o) => Math.abs(o - cand)))
-            : 9999;
-          const key = [Math.min(d, SPREAD), -cand];
-          if (!bestKey || key[0] > bestKey[0] || (key[0] === bestKey[0] && key[1] > bestKey[1])) {
-            best = cand;
-            bestKey = key;
-          }
-        }
-        if (best != null) { lanePick = best; break; }
-        x += 2;
-      }
-      if (lanes.some((l, j) => j !== i && l.placed && !l.ended
-        && l.lane_col >= x && l.lane_col < x + bw && l.box_bottom >= cur)) {
-        cur += 1;
-      }
-      drawBox(c, lanes[i], x, cur);
-      const ay = cur + 1;
-      const plane = lanes[p].lane_col;
-      for (const lane of lanes) {
-        if (lane.placed && !lane.ended && lane.lane_col > plane && lane.lane_col < x && lane.box_bottom <= ay) {
-          canvasPutIfEmpty(c, ay, lane.lane_col, "│", {
-            kind: "border", session_id: lane.node.session_id,
-          });
-        }
-      }
-      const childBorder = { kind: "border", session_id: lanes[i].node.session_id };
-      const parentBorder = { kind: "border", session_id: lanes[p].node.session_id };
-      canvasPut(c, ay, plane, "├", parentBorder);
-      canvasPut(c, ay, plane + 1, "─", childBorder);
-      canvasPut(c, ay, plane + 3, edgeWord, {
-        kind: "edge", edge: lanes[i].node.edge, session_id: lanes[i].node.session_id,
-      });
-      for (let dx = plane + 4 + ew; dx < Math.max(plane + 4 + ew, x - 1); dx++) {
-        canvasPutIfEmpty(c, ay, dx, "─", childBorder);
-      }
-      canvasPut(c, ay, x - 1, "▸", childBorder);
-      lanes[p].last_row = Math.max(lanes[p].last_row, ay);
-      lanes[i].x_abs = x;
-      lanes[i].lane_col = lanePick;
-      lanes[i].box_bottom = cur + h;
-      lanes[i].last_row = cur + h - 1;
-      lanes[i].placed = true;
-      cur += h;
-      cur = putSubagentMarkerBox(c, cur, lanes[i]);
-      gi += 1;
-    } else if (kind === EV_MERGE) {
-      const m = lanes[i].merge;
-      const p = lanes[i].parent;
-      const dp = Math.max(0, m.seq - lanes[p].cp_seq);
-      const df = lanes[i].summary
-        ? Math.max(0, Number(lanes[i].summary.event_count || 0) - lanes[i].cp_seq)
-        : 0;
-      if (dp > 0 || df > 0) {
-        cur += 1;
-        let row = cur;
-        if (dp > 0) {
-          const busy = m.busy > 0 ? Math.max(0, m.busy - lanes[p].cp_busy) : null;
-          const shown = m.msgs > 0 ? Math.max(0, m.msgs - lanes[p].cp_msgs) : dp;
-          const tokens = tokenTallySub(m.tokens, lanes[p].cp_tokens);
-          const endX = putSegment(c, row, lanes[p].lane_col, shown, tokens, lanes[p].cp_ms, m.at, nowMs, null, lanes[p].node.session_id, busy);
-          if (df > 0 && lanes[i].lane_col < endX + 2) row += 1;
-        }
-        if (df > 0) {
-          const busy = lanes[i].busy_total > 0
-            ? Math.max(0, lanes[i].busy_total - lanes[i].cp_busy)
-            : null;
-          const shown = lanes[i].msgs_total > 0
-            ? Math.max(0, lanes[i].msgs_total - lanes[i].cp_msgs)
-            : df;
-          const tokens = tokenTallySub(lanes[i].tokens_total, lanes[i].cp_tokens);
-          putSegment(c, row, lanes[i].lane_col, shown, tokens, lanes[i].cp_ms, m.at, nowMs, true, lanes[i].node.session_id, busy);
-        }
-        cur = row + 1;
-      }
-      for (const n of lanes[i].more.splice(0)) {
-        canvasPut(c, cur, lanes[i].lane_col, "├─ ", { kind: "rail" });
-        canvasPut(c, cur, lanes[i].lane_col + 3, `+${n} more`, { kind: "more", count: n });
-        cur += 1;
-      }
-      const plane = lanes[p].lane_col;
-      const flane = lanes[i].lane_col;
-      for (const lane of lanes) {
-        if (lane.placed && !lane.ended && lane.lane_col > plane && lane.lane_col < flane && lane.box_bottom <= cur) {
-          canvasPutIfEmpty(c, cur, lane.lane_col, "│", {
-            kind: "border", session_id: lane.node.session_id,
-          });
-        }
-      }
-      const forkBorder = { kind: "border", session_id: lanes[i].node.session_id };
-      const parentBorder = { kind: "border", session_id: lanes[p].node.session_id };
-      canvasPut(c, cur, plane, "│", parentBorder);
-      canvasPut(c, cur, plane + 1, "◂─", forkBorder);
-      canvasPut(c, cur, plane + 4, "↩", forkBorder);
-      for (let dx = plane + 6; dx < flane; dx++) {
-        canvasPutIfEmpty(c, cur, dx, "─", forkBorder);
-      }
-      canvasPut(c, cur, flane, "┘", forkBorder);
-      if (m.seq >= lanes[p].cp_seq) {
-        lanes[p].cp_seq = m.seq;
-        lanes[p].cp_ms = m.at;
-      }
-      lanes[p].cp_busy = Math.max(lanes[p].cp_busy, m.busy);
-      lanes[p].cp_msgs = Math.max(lanes[p].cp_msgs, m.msgs);
-      lanes[p].cp_tokens = tokenTallyMax(lanes[p].cp_tokens, m.tokens);
-      lanes[p].last_row = Math.max(lanes[p].last_row, cur);
-      lanes[i].last_row = cur;
-      lanes[i].ended = true;
-      cur += 1;
-      gi += 1;
-    } else if (kind === EV_END) {
-      const group = [i];
-      while (gi + 1 < events.length && events[gi + 1][0] === t && events[gi + 1][1] === EV_END) {
-        gi += 1;
-        group.push(events[gi][2]);
-      }
-      for (const j of group) {
-        for (const n of lanes[j].more.splice(0)) {
-          canvasPut(c, cur, lanes[j].lane_col, "├─ ", { kind: "rail" });
-          canvasPut(c, cur, lanes[j].lane_col + 3, `+${n} more`, { kind: "more", count: n });
-          lanes[j].last_row = Math.max(lanes[j].last_row, cur);
-          cur += 1;
-        }
-      }
-      const closing = [];
-      for (const j of group) {
-        const d = lanes[j].summary
-          ? Math.max(0, Number(lanes[j].summary.event_count || 0) - lanes[j].cp_seq)
-          : 0;
-        if (d > 0) closing.push([j, d]);
-      }
-      if (closing.length) {
-        cur += 1;
-        closing.sort((a, b) => lanes[a[0]].lane_col - lanes[b[0]].lane_col);
-        let rowEndX = 0;
-        for (const [j, d] of closing) {
-          const end = lanes[j].end;
-          if (rowEndX > 0 && lanes[j].lane_col < rowEndX + 2) cur += 1;
-          const owner = lanes[j].node.session_id;
-          const busy = lanes[j].busy_total > 0
-            ? Math.max(0, lanes[j].busy_total - lanes[j].cp_busy)
-            : null;
-          const shown = lanes[j].msgs_total > 0
-            ? Math.max(0, lanes[j].msgs_total - lanes[j].cp_msgs)
-            : d;
-          const tokens = tokenTallySub(lanes[j].tokens_total, lanes[j].cp_tokens);
-          rowEndX = putSegment(
-            c, cur, lanes[j].lane_col, shown, tokens,
-            lanes[j].cp_ms, end.labelEnd, nowMs, end.outcome, owner, busy,
-          );
-          lanes[j].last_row = cur;
-        }
-        cur += 1;
-      }
-      for (const j of group) lanes[j].ended = true;
-      gi += 1;
-    } else {
-      gi += 1;
-    }
-  }
-  for (const lane of lanes) {
-    if (!lane.placed) continue;
-    const border = { kind: "border", session_id: lane.node.session_id };
-    for (let yy = lane.box_bottom; yy <= lane.last_row; yy++) {
-      canvasPutIfEmpty(c, yy, lane.lane_col, "│", border);
-    }
-  }
-  return canvasIntoRows(c);
-}
-
-function layoutTreeRails(root, sessions, nowMs) {
-  // Compact git-graph rails mode (TUI LineageViewMode::Rails).
-  const byId = new Map(sessions.map((s) => [s.id, s]));
-  const lanes = [];
-  const rootIdx = collectLanes(root, byId, null, nowMs, lanes);
-  const events = buildEvents(lanes);
-  const railOf = new Array(lanes.length).fill(0);
-  const railClose = [Number.MAX_SAFE_INTEGER];
-  const branchOrder = [];
-  for (let i = 0; i < lanes.length; i++) if (i !== rootIdx) branchOrder.push(i);
-  branchOrder.sort((a, b) => lanes[a].box_ms - lanes[b].box_ms || a - b);
-  for (const i of branchOrder) {
-    let rail = -1;
-    for (let r = 1; r < railClose.length; r++) {
-      if (railClose[r] < lanes[i].box_ms) { rail = r; break; }
-    }
-    if (rail < 0) {
-      rail = railClose.length;
-      railClose.push(lanes[i].close_ms);
-    } else {
-      railClose[rail] = lanes[i].close_ms;
-    }
-    railOf[i] = rail;
-  }
-  const nrails = railClose.length;
-  const col = (r) => 1 + 2 * r;
-  const textX = 1 + 2 * nrails + 1;
-  const c = makeCanvas();
-  const firstRow = new Array(lanes.length).fill(0);
-  const lastRow = new Array(lanes.length).fill(0);
-  const ended = new Array(lanes.length).fill(false);
-  const placed = new Array(lanes.length).fill(false);
-
-  const putLabel = (row, lane, edgePrefix) => {
-    let x = textX;
-    if (edgePrefix) {
-      canvasPut(c, row, x, edgePrefix, {
-        kind: "edge", edge: lane.node.edge, session_id: lane.node.session_id,
-      });
-      x += strWidth(edgePrefix) + 1;
-    }
-    const label = lane.label_lines.join(" ");
-    let rest = label;
-    const g = lane.summary ? lineageStatusGlyph(lane.summary.state) : null;
-    if (g && label.startsWith(g)) {
-      canvasPut(c, row, x, g, {
-        kind: "node_status",
-        session_id: lane.node.session_id,
-        state: lane.summary ? String(lane.summary.state || "").toLowerCase() : "",
-      });
-      x += strWidth(g);
-      rest = label.slice(g.length);
-    }
-    canvasPut(c, row, x, rest, { kind: "node", session_id: lane.node.session_id });
-    c.nodeRows.push([row, lane.node.session_id]);
-    c.boxes.push({
-      session_id: lane.node.session_id,
-      x: textX, y: row,
-      width: x - textX + strWidth(rest),
-      height: 1,
-    });
-  };
-  const putInfo = (row, railCol, delta, tokens, start, end, outcome, owner, busy) => {
-    if (outcome === true || outcome === false) {
-      canvasPut(c, row, railCol, outcome ? "✓" : "✗", {
-        kind: "segment_outcome", ok: outcome, session_id: owner,
-      });
-    } else {
-      canvasPut(c, row, railCol, "•", { kind: "segment_bullet", session_id: owner });
-    }
-    const text = busy != null
-      ? segmentLabelBusy(delta, tokens, busy)
-      : segmentLabel(delta, tokens, start, end, nowMs);
-    canvasPut(c, row, textX, text, { kind: "segment", session_id: owner });
-  };
-  const bridge = (row, from, to, owner) => {
-    const lo = Math.min(from, to);
-    const hi = Math.max(from, to);
-    for (let i = 0; i < lanes.length; i++) {
-      const rc = col(railOf[i]);
-      if (rc > lo && rc < hi && placed[i] && !ended[i]) {
-        canvasPutIfEmpty(c, row, rc, "│", {
-          kind: "border", session_id: lanes[i].node.session_id,
-        });
-      }
-    }
-    const dash = { kind: "border", session_id: owner };
-    for (let x = lo + 1; x < hi; x++) canvasPutIfEmpty(c, row, x, "─", dash);
-  };
-
-  let cur = 0;
-  let gi = 0;
-  while (gi < events.length) {
-    const [t, kind, i] = events[gi];
-    if (kind === EV_BOX) {
-      if (lanes[i].parent == null) {
-        const border = { kind: "border", session_id: lanes[i].node.session_id };
-        canvasPut(c, cur, col(0), "●", border);
-        putLabel(cur, lanes[i], null);
-        placed[i] = true;
-        firstRow[i] = cur + 1;
-        lastRow[i] = cur;
-        cur += 1;
-        if (lanes[i].subagent_marker) {
-          const m = lanes[i].subagent_marker;
-          canvasPut(c, cur, col(railOf[i]), "├", border);
-          canvasPut(c, cur, textX, subagentMarkerText(m.count, m.running, m.expanded), {
-            kind: "subagents", session_id: lanes[i].node.session_id, expanded: m.expanded,
-          });
-          lastRow[i] = cur;
-          cur += 1;
-        }
-        gi += 1;
-        continue;
-      }
-      const p = lanes[i].parent;
-      const rc = col(railOf[i]);
-      const prc = col(railOf[p]);
-      // parent segment before branch
-      if (lanes[i].fork_seq != null) {
-        const seq = lanes[i].fork_seq;
-        const d = Math.max(0, seq - lanes[p].cp_seq);
-        if (d > 0) {
-          const busy = lanes[i].fork_busy > 0
-            ? Math.max(0, lanes[i].fork_busy - lanes[p].cp_busy) : null;
-          const shown = lanes[i].fork_msgs > 0
-            ? Math.max(0, lanes[i].fork_msgs - lanes[p].cp_msgs) : d;
-          const tokens = tokenTallySub(lanes[i].fork_tokens, lanes[p].cp_tokens);
-          putInfo(cur, prc, shown, tokens, lanes[p].cp_ms, lanes[i].box_ms, null, lanes[p].node.session_id, busy);
-          lastRow[p] = cur;
-          cur += 1;
-        }
-        if (seq >= lanes[p].cp_seq) {
-          lanes[p].cp_seq = seq;
-          lanes[p].cp_ms = lanes[i].box_ms;
-        }
-        lanes[p].cp_busy = Math.max(lanes[p].cp_busy, lanes[i].fork_busy);
-        lanes[p].cp_msgs = Math.max(lanes[p].cp_msgs, lanes[i].fork_msgs);
-        lanes[p].cp_tokens = tokenTallyMax(lanes[p].cp_tokens, lanes[i].fork_tokens);
-      }
-      let edgePrefix = "▸";
-      if (isResetSnapshotEdge(lanes[i])) edgePrefix = "↺";
-      else if (lanes[i].node.edge === "fork") edgePrefix = "⑂";
-      else if (lanes[i].node.edge === "subagent") edgePrefix = "▸";
-      canvasPut(c, cur, prc, "├", { kind: "border", session_id: lanes[p].node.session_id });
-      bridge(cur, prc, rc, lanes[i].node.session_id);
-      canvasPut(c, cur, rc, "╮", { kind: "border", session_id: lanes[i].node.session_id });
-      putLabel(cur, lanes[i], edgePrefix);
-      placed[i] = true;
-      firstRow[i] = cur + 1;
-      lastRow[i] = cur;
-      lastRow[p] = Math.max(lastRow[p], cur);
-      cur += 1;
-      if (lanes[i].subagent_marker) {
-        const m = lanes[i].subagent_marker;
-        canvasPut(c, cur, rc, "├", { kind: "border", session_id: lanes[i].node.session_id });
-        canvasPut(c, cur, textX, subagentMarkerText(m.count, m.running, m.expanded), {
-          kind: "subagents", session_id: lanes[i].node.session_id, expanded: m.expanded,
-        });
-        lastRow[i] = cur;
-        cur += 1;
-      }
-      gi += 1;
-    } else if (kind === EV_MERGE) {
-      const m = lanes[i].merge;
-      const p = lanes[i].parent;
-      const rc = col(railOf[i]);
-      const prc = col(railOf[p]);
-      const dp = Math.max(0, m.seq - lanes[p].cp_seq);
-      const df = lanes[i].summary
-        ? Math.max(0, Number(lanes[i].summary.event_count || 0) - lanes[i].cp_seq) : 0;
-      if (dp > 0) {
-        const busy = m.busy > 0 ? Math.max(0, m.busy - lanes[p].cp_busy) : null;
-        const shown = m.msgs > 0 ? Math.max(0, m.msgs - lanes[p].cp_msgs) : dp;
-        const tokens = tokenTallySub(m.tokens, lanes[p].cp_tokens);
-        putInfo(cur, prc, shown, tokens, lanes[p].cp_ms, m.at, null, lanes[p].node.session_id, busy);
-        lastRow[p] = cur;
-        cur += 1;
-      }
-      if (df > 0) {
-        const busy = lanes[i].busy_total > 0
-          ? Math.max(0, lanes[i].busy_total - lanes[i].cp_busy) : null;
-        const shown = lanes[i].msgs_total > 0
-          ? Math.max(0, lanes[i].msgs_total - lanes[i].cp_msgs) : df;
-        const tokens = tokenTallySub(lanes[i].tokens_total, lanes[i].cp_tokens);
-        putInfo(cur, rc, shown, tokens, lanes[i].cp_ms, m.at, true, lanes[i].node.session_id, busy);
-        lastRow[i] = cur;
-        cur += 1;
-      }
-      canvasPut(c, cur, rc, "╯", { kind: "border", session_id: lanes[i].node.session_id });
-      bridge(cur, rc, prc, lanes[i].node.session_id);
-      canvasPut(c, cur, prc, "┤", { kind: "border", session_id: lanes[p].node.session_id });
-      canvasPut(c, cur, textX, "↩ merge", {
-        kind: "edge", edge: "fork", session_id: lanes[i].node.session_id,
-      });
-      if (m.seq >= lanes[p].cp_seq) {
-        lanes[p].cp_seq = m.seq;
-        lanes[p].cp_ms = m.at;
-      }
-      lanes[p].cp_busy = Math.max(lanes[p].cp_busy, m.busy);
-      lanes[p].cp_msgs = Math.max(lanes[p].cp_msgs, m.msgs);
-      lanes[p].cp_tokens = tokenTallyMax(lanes[p].cp_tokens, m.tokens);
-      lastRow[p] = Math.max(lastRow[p], cur);
-      lastRow[i] = cur;
-      ended[i] = true;
-      cur += 1;
-      gi += 1;
-    } else if (kind === EV_END) {
-      const group = [i];
-      while (gi + 1 < events.length && events[gi + 1][0] === t && events[gi + 1][1] === EV_END) {
-        gi += 1;
-        group.push(events[gi][2]);
-      }
-      for (const j of group) {
-        const d = lanes[j].summary
-          ? Math.max(0, Number(lanes[j].summary.event_count || 0) - lanes[j].cp_seq) : 0;
-        if (d > 0) {
-          const end = lanes[j].end;
-          const busy = lanes[j].busy_total > 0
-            ? Math.max(0, lanes[j].busy_total - lanes[j].cp_busy) : null;
-          const shown = lanes[j].msgs_total > 0
-            ? Math.max(0, lanes[j].msgs_total - lanes[j].cp_msgs) : d;
-          const tokens = tokenTallySub(lanes[j].tokens_total, lanes[j].cp_tokens);
-          putInfo(cur, col(railOf[j]), shown, tokens, lanes[j].cp_ms, end.labelEnd, end.outcome, lanes[j].node.session_id, busy);
-          lastRow[j] = cur;
-          cur += 1;
-        }
-        ended[j] = true;
-      }
-      gi += 1;
-    } else {
-      gi += 1;
-    }
-  }
-  // End-fill rails
-  for (let i = 0; i < lanes.length; i++) {
-    if (!placed[i]) continue;
-    const rc = col(railOf[i]);
-    const border = { kind: "border", session_id: lanes[i].node.session_id };
-    for (let yy = firstRow[i]; yy <= lastRow[i]; yy++) {
-      canvasPutIfEmpty(c, yy, rc, "│", border);
-    }
-  }
-  return canvasIntoRows(c);
-}
-
-function flattenLineageDiagram(focusId, sessions, mode) {
-  const tree = buildLineageTree(focusId, sessions, state.lineageSubagentsExpanded);
-  if (!tree) return [];
-  const nowMs = Date.now();
-  return mode === "rails"
-    ? layoutTreeRails(tree, sessions, nowMs)
-    : layoutTreeBoxes(tree, sessions, nowMs);
-}
-
-function roleClass(role) {
-  if (!role) return "role-rail";
-  switch (role.kind) {
-    case "border": return "role-border";
-    case "edge": return "role-edge";
-    case "segment": return "role-segment";
-    case "segment_bullet": return "role-segment-bullet";
-    case "segment_outcome": return `role-segment-outcome ${role.ok ? "ok" : "bad"}`;
-    case "node": return "role-node";
-    case "node_status": return `role-node-status state-${role.state || ""}`;
-    case "more": return "role-more";
-    case "subagents": return "role-subagents";
-    default: return "role-rail";
-  }
+  wrap.appendChild(children);
+  return wrap;
 }
 
 function renderLineageSection() {
@@ -6089,50 +5465,27 @@ function renderLineageSection() {
   }
   const modeBtn = $("lineageModeBtn");
   if (modeBtn) {
-    const full = state.lineageMode !== "rails";
-    modeBtn.textContent = full ? "full ⇄" : "compact ⇄";
-    modeBtn.title = full ? "Show compact rails" : "Show full boxed lanes";
+    const compact = state.lineageMode === "rails";
+    modeBtn.textContent = compact ? "compact ⇄" : "full ⇄";
+    modeBtn.title = compact ? "Show full cards" : "Show compact cards";
     modeBtn.hidden = !!state.lineageCollapsed;
   }
   if (state.lineageCollapsed) {
     lineageBodyEl.replaceChildren();
     return;
   }
-  const rows = flattenLineageDiagram(focusId, state.sessions, state.lineageMode);
-  if (!rows.length) {
+  const tree = buildLineageTree(focusId, state.sessions, state.lineageSubagentsExpanded);
+  if (!tree) {
     lineageBodyEl.innerHTML = `<div class="lineage-empty">no lineage</div>`;
     return;
   }
-  const diagram = document.createElement("div");
-  diagram.className = "lineage-diagram";
-  diagram.setAttribute("role", "tree");
-  for (const row of rows) {
-    const line = document.createElement("div");
-    line.className = "ld-row";
-    if (!row.spans.length) {
-      line.innerHTML = "&nbsp;";
-    } else {
-      for (const sp of row.spans) {
-        const el = document.createElement("span");
-        el.className = `ld-span ${roleClass(sp.role)}`;
-        el.textContent = sp.text;
-        const sid = sp.role && sp.role.session_id;
-        if (sid && sp.role.kind !== "subagents" && sp.role.kind !== "more") {
-          el.classList.add("is-clickable");
-          el.dataset.sessionId = sid;
-          if (sid === state.currentId) el.classList.add("is-selected");
-          if (sid === focusId) el.classList.add("is-focus");
-        }
-        if (sp.role && sp.role.kind === "subagents") {
-          el.dataset.parentId = sp.role.session_id;
-          el.dataset.role = "subagents-toggle";
-        }
-        line.appendChild(el);
-      }
-    }
-    diagram.appendChild(line);
-  }
-  lineageBodyEl.replaceChildren(diagram);
+  const byId = new Map(state.sessions.map((s) => [s.id, s]));
+  const graph = document.createElement("div");
+  graph.className = "lineage-graph" + (state.lineageMode === "rails" ? " is-compact" : "");
+  graph.setAttribute("role", "tree");
+  graph.setAttribute("aria-label", "session lineage");
+  graph.appendChild(buildLineageCardEl(tree, byId, focusId));
+  lineageBodyEl.replaceChildren(graph);
 }
 
 function bindLineageSection() {
@@ -6157,17 +5510,18 @@ function bindLineageSection() {
   }
   if (lineageBodyEl) {
     lineageBodyEl.addEventListener("click", (e) => {
-      const span = e.target.closest(".ld-span");
-      if (!span) return;
-      if (span.dataset.role === "subagents-toggle" && span.dataset.parentId) {
-        const pid = span.dataset.parentId;
+      const toggle = e.target.closest("[data-role='subagents-toggle']");
+      if (toggle && toggle.dataset.parentId) {
+        e.preventDefault();
+        const pid = toggle.dataset.parentId;
         if (state.lineageSubagentsExpanded.has(pid)) state.lineageSubagentsExpanded.delete(pid);
         else state.lineageSubagentsExpanded.add(pid);
         renderLineageSection();
         return;
       }
-      if (span.dataset.sessionId) {
-        selectSession(span.dataset.sessionId);
+      const card = e.target.closest(".ln-card[data-session-id]");
+      if (card && card.dataset.sessionId) {
+        selectSession(card.dataset.sessionId);
       }
     });
   }
@@ -6573,55 +5927,119 @@ function paintTokenMeter() {
   }
 }
 
-function paintOperatorRain() {
+function rainGlyph() {
+  // Katakana + digits + a few symbols — classic matrix rain set.
+  const r = Math.random();
+  if (r < 0.12) return String(Math.floor(Math.random() * 10));
+  if (r < 0.18) return ":·"=*+<>"[Math.floor(Math.random() * 8)];
+  return String.fromCharCode(0x30a0 + Math.floor(Math.random() * 96));
+}
+
+function ensureRainDrops(cssW, cssH) {
+  const colW = 12;
+  const cols = Math.max(6, Math.floor(cssW / colW));
+  if (!paintOperatorRain.drops) paintOperatorRain.drops = [];
+  const drops = paintOperatorRain.drops;
+  // Rebuild columns when width changes enough that the count drifts.
+  if (drops.length !== cols || paintOperatorRain.colsW !== colW) {
+    paintOperatorRain.colsW = colW;
+    drops.length = 0;
+    for (let i = 0; i < cols; i++) {
+      drops.push({
+        x: i * colW + 2,
+        y: Math.random() * cssH,
+        // px per second — much faster than the old 1.5–4 px/frame@1Hz.
+        speed: 90 + Math.random() * 160,
+        len: 10 + Math.floor(Math.random() * 16),
+        glyphs: [],
+        headBright: 0.7 + Math.random() * 0.3,
+      });
+    }
+  }
+  for (const d of drops) {
+    while (d.glyphs.length < d.len) d.glyphs.push(rainGlyph());
+  }
+  return drops;
+}
+
+function paintOperatorRain(dtMs = 16) {
   if (!operatorRainEl || operatorRainEl.hidden) return;
   const canvas = operatorRainEl;
   const dpr = window.devicePixelRatio || 1;
-  const cssW = Math.max(40, canvas.clientWidth || operatorBodyEl.clientWidth || 200);
+  const cssW = Math.max(40, canvas.clientWidth || (operatorBodyEl && operatorBodyEl.clientWidth) || 200);
   const cssH = Math.max(40, canvas.clientHeight || 100);
   const w = Math.round(cssW * dpr);
   const h = Math.round(cssH * dpr);
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
+    // Fresh field on resize so trails don't smear at the wrong scale.
+    paintOperatorRain.drops = null;
   }
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  // Trail
-  ctx.fillStyle = "rgba(0, 0, 0, 0.12)";
+
+  // Fade previous frame so trails persist briefly (head stays sharp).
+  ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
   ctx.fillRect(0, 0, cssW, cssH);
-  if (!paintOperatorRain.drops) paintOperatorRain.drops = [];
-  const cols = Math.max(8, Math.floor(cssW / 10));
-  while (paintOperatorRain.drops.length < cols) {
-    paintOperatorRain.drops.push({
-      x: paintOperatorRain.drops.length * 10 + 4,
-      y: Math.random() * cssH,
-      speed: 1.5 + Math.random() * 3,
-      len: 6 + Math.random() * 12,
-    });
-  }
-  // Intensity from fleet activity
+
   let active = 0;
   for (const s of state.sessions) {
     if (sessionShouldAnimateStatus(s)) active++;
   }
-  const intensity = Math.min(1, 0.25 + active * 0.15);
-  ctx.fillStyle = `rgba(92, 209, 166, ${0.35 + intensity * 0.45})`;
-  ctx.font = "11px ui-monospace, Menlo, monospace";
-  for (const d of paintOperatorRain.drops) {
-    d.y += d.speed * (0.6 + intensity);
-    if (d.y - d.len > cssH) {
-      d.y = -Math.random() * 20;
-      d.speed = 1.5 + Math.random() * 3;
+  const intensity = Math.min(1, 0.35 + active * 0.12);
+  const dt = Math.min(0.05, Math.max(0.008, (dtMs || 16) / 1000));
+  const cellH = 12;
+  const drops = ensureRainDrops(cssW, cssH);
+  ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  ctx.textBaseline = "top";
+
+  for (const d of drops) {
+    d.y += d.speed * dt * (0.85 + intensity * 0.45);
+    // Occasionally re-roll a mid-tail glyph so the cascade feels alive.
+    if (Math.random() < 0.08 && d.glyphs.length) {
+      const idx = 1 + Math.floor(Math.random() * Math.max(1, d.glyphs.length - 1));
+      d.glyphs[idx] = rainGlyph();
     }
+    if (d.y - d.len * cellH > cssH) {
+      d.y = -Math.random() * cssH * 0.4;
+      d.speed = 90 + Math.random() * 160;
+      d.len = 10 + Math.floor(Math.random() * 16);
+      d.glyphs = Array.from({ length: d.len }, rainGlyph);
+      d.headBright = 0.7 + Math.random() * 0.3;
+    }
+    // i=0 is the head (leading tip); higher i is the fading tail above it.
     for (let i = 0; i < d.len; i++) {
-      const ch = String.fromCharCode(0x30a0 + Math.floor(Math.random() * 96));
-      ctx.globalAlpha = (1 - i / d.len) * intensity;
-      ctx.fillText(ch, d.x, d.y - i * 10);
+      const gy = d.y - i * cellH;
+      if (gy < -cellH || gy > cssH) continue;
+      const ch = d.glyphs[i] || rainGlyph();
+      if (i === 0) {
+        // Bright white/cyan head — distinct from the green body.
+        ctx.globalAlpha = Math.min(1, d.headBright * (0.85 + intensity * 0.2));
+        ctx.fillStyle = "rgb(220, 255, 240)";
+        ctx.shadowColor = "rgba(160, 255, 210, 0.9)";
+        ctx.shadowBlur = 8;
+        ctx.fillText(ch, d.x, gy);
+        ctx.shadowBlur = 0;
+      } else if (i === 1) {
+        // Near-head: bright green.
+        const t = 1 - i / d.len;
+        ctx.globalAlpha = (0.55 + t * 0.4) * intensity;
+        ctx.fillStyle = "rgb(140, 255, 190)";
+        ctx.fillText(ch, d.x, gy);
+      } else {
+        // Tail: darker green, alpha falls off with distance from head.
+        const t = 1 - i / d.len;
+        ctx.globalAlpha = Math.max(0.04, t * t * 0.7) * intensity;
+        const g = Math.floor(70 + t * 140);
+        ctx.fillStyle = `rgb(30, ${g}, 80)`;
+        ctx.fillText(ch, d.x, gy);
+      }
     }
   }
   ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
 }
 
 function applyOperatorPanelMode() {
@@ -6641,6 +6059,9 @@ function applyOperatorPanelMode() {
     operatorModeBtn.textContent = tokens ? "tokens ⇄" : "rain ⇄";
     operatorModeBtn.title = tokens ? "Show matrix rain" : "Show token usage";
   }
+  // Rain needs a continuous rAF loop; tokens only need a slow tick.
+  if (!tokens && !state.operatorCollapsed) startRainLoop();
+  else stopRainLoop();
   scheduleOperatorPanelPaint();
 }
 
@@ -6649,18 +6070,52 @@ function scheduleOperatorPanelPaint() {
   state.tokenMeterRaf = requestAnimationFrame(() => {
     state.tokenMeterRaf = 0;
     if (!operatorPanelEl || state.operatorCollapsed) return;
-    if (state.operatorPanelMode === "rain") paintOperatorRain();
-    else paintTokenMeter();
+    if (state.operatorPanelMode === "rain") {
+      // Rain is driven by startRainLoop; a one-shot is still useful on
+      // mode switches / resize before the loop's next frame.
+      paintOperatorRain(16);
+    } else {
+      paintTokenMeter();
+    }
   });
+}
+
+function startRainLoop() {
+  if (state.rainLoopRaf) return;
+  let last = performance.now();
+  const tick = (now) => {
+    state.rainLoopRaf = 0;
+    if (!operatorPanelEl || state.operatorCollapsed || state.operatorPanelMode !== "rain") {
+      return;
+    }
+    const dt = now - last;
+    last = now;
+    paintOperatorRain(dt);
+    state.rainLoopRaf = requestAnimationFrame(tick);
+  };
+  state.rainLoopRaf = requestAnimationFrame(tick);
+}
+
+function stopRainLoop() {
+  if (state.rainLoopRaf) {
+    cancelAnimationFrame(state.rainLoopRaf);
+    state.rainLoopRaf = 0;
+  }
 }
 
 function startOperatorPanelLoop() {
   if (startOperatorPanelLoop.timer) return;
+  // Token meter: refresh once a second. Rain runs on its own rAF loop.
   startOperatorPanelLoop.timer = setInterval(() => {
     if (!state.ws || state.ws.readyState !== 1) return;
     if (state.operatorCollapsed) return;
+    if (state.operatorPanelMode === "rain") {
+      if (!state.rainLoopRaf) startRainLoop();
+      return;
+    }
     scheduleOperatorPanelPaint();
   }, 1000);
+  if (state.operatorPanelMode === "rain" && !state.operatorCollapsed) startRainLoop();
 }
 
 function bindOperatorPanel() {
