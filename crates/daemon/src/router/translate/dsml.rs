@@ -13,9 +13,28 @@
 //! ```
 //!
 //! Live Codex→DeepSeek turns have also produced a looser command form
-//! (double fullwidth pipes, `_command` / `<cmd>` tags). Neither shape is
-//! a structured OpenAI tool call, so without lifting it the harness sees
-//! prose and never runs a tool.
+//! (double fullwidth pipes, `_command` / `<cmd>` tags) and a third shape
+//! that garbles the wrapper tag, repeats it, and describes arguments with
+//! bespoke child elements instead of `parameter`:
+//!
+//! ```text
+//! <｜｜DSML｜｜ollapse_tool_calls>
+//! <｜｜DSML｜｜ollapse_tool_calls>
+//! <｜｜DSML｜｜invoke name="exec_command">
+//! <｜｜DSML｜｜tool_method>exec_command</｜｜DSML｜｜tool_method>
+//! <｜｜DSML｜｜tool_params>
+//! <｜｜DSML｜｜tool_command>find . -name '*.rs' | wc -l</｜｜DSML｜｜tool_command>
+//! </｜｜DSML｜｜tool_params>
+//! </｜｜DSML｜｜invoke>
+//! </｜｜DSML｜｜tool_calls>
+//! ```
+//!
+//! None of these is a structured OpenAI tool call, so without lifting it
+//! the harness sees prose and never runs a tool. Because the exact spelling
+//! varies turn to turn, parsing here is deliberately recovery-oriented:
+//! find `invoke` elements wherever they sit, harvest whatever child
+//! elements they carry, and never let an unrecognized wrapper discard a
+//! tool call that is nested inside it.
 //!
 //! This module:
 //! - parses DSML out of text into name + JSON arguments
@@ -315,21 +334,24 @@ fn parse_one_dsml_block(s: &str) -> Option<(usize, Vec<DsmlToolCall>)> {
     let inner = &s[open_end..close.start];
     let consumed = close.end;
 
-    let tools = match tag.as_str() {
-        "tool_calls" => parse_tool_calls_body(inner),
+    let tools = match tag.trim_start_matches('_') {
         "invoke" => {
+            let body = harvest_invoke(inner);
             let name = attrs
                 .get("name")
                 .cloned()
                 .filter(|n| !n.is_empty())
+                // Some turns carry the tool name in a `tool_method` child
+                // instead of the `name` attribute.
+                .or(body.name)
                 .unwrap_or_else(|| "unknown".into());
             vec![DsmlToolCall {
                 name,
-                arguments: parameters_to_json(inner),
+                arguments: body.arguments,
             }]
         }
         // Leaked agent form: <…DSML…_command> <cmd>…</…>
-        "command" | "_command" => {
+        "command" => {
             let cmd = extract_cmd(inner).unwrap_or_else(|| inner.trim().to_string());
             if cmd.is_empty() {
                 Vec::new()
@@ -342,9 +364,11 @@ fn parse_one_dsml_block(s: &str) -> Option<(usize, Vec<DsmlToolCall>)> {
                 }]
             }
         }
-        // Unknown DSML tag — still consume the block so it does not leak
-        // as assistant text, but do not invent a tool call.
-        _ => Vec::new(),
+        // `tool_calls`, a garbled variant of it, or any other wrapper we do
+        // not recognize. Consume the block so it never leaks as assistant
+        // text, but recurse first — the tool call we want is usually nested
+        // inside, and discarding the wrapper used to discard the call too.
+        _ => parse_tool_calls_body(inner),
     };
 
     Some((consumed, tools))
@@ -453,7 +477,7 @@ fn find_matching_close(s: &str, open_end: usize, tag: &str) -> Option<CloseSpan>
         };
         let end = abs + 2 + marker + name_len + gt + 1;
         let span = CloseSpan { start: abs, end };
-        if name == tag || name.trim_start_matches('_') == tag_norm {
+        if name == tag || close_matches(tag_norm, name.trim_start_matches('_')) {
             return Some(span);
         }
         if first_dsml_close.is_none() {
@@ -503,6 +527,21 @@ fn find_matching_close(s: &str, open_end: usize, tag: &str) -> Option<CloseSpan>
     None
 }
 
+/// Open and close tag names that should be treated as the same element.
+///
+/// Live DeepSeek turns drop leading characters from the opener (`tool_calls`
+/// arriving as `ollapse_tool_calls`), so an exact comparison strands the
+/// block and the whole turn leaks as text. Match on a shared suffix instead,
+/// long enough that unrelated tags cannot collide.
+fn close_matches(open: &str, close: &str) -> bool {
+    const MIN_SUFFIX: usize = 4;
+    if open == close {
+        return true;
+    }
+    let shorter = open.len().min(close.len());
+    shorter >= MIN_SUFFIX && (open.ends_with(close) || close.ends_with(open))
+}
+
 fn parse_tool_calls_body(inner: &str) -> Vec<DsmlToolCall> {
     let mut tools = Vec::new();
     let mut rest = inner;
@@ -513,49 +552,109 @@ fn parse_tool_calls_body(inner: &str) -> Vec<DsmlToolCall> {
                 tools.extend(recovered);
                 rest = &from[consumed..];
             }
-            None => break,
+            // A malformed or repeated opener (DeepSeek emits the wrapper
+            // twice but closes it once). Skip past just this tag rather
+            // than abandoning the scan — a well-formed `invoke` usually
+            // follows it.
+            None => match parse_open_tag(from) {
+                Some((open_end, _, _)) => rest = &from[open_end..],
+                None => break,
+            },
         }
     }
     tools
 }
 
-fn parameters_to_json(inner: &str) -> Value {
+/// Arguments recovered from an `invoke` body, plus a tool name if one of the
+/// child elements carried it instead of the `name` attribute.
+struct InvokeBody {
+    name: Option<String>,
+    arguments: Value,
+}
+
+/// Child elements that merely group the real arguments — flatten through them.
+fn is_argument_wrapper(tag: &str) -> bool {
+    matches!(
+        tag,
+        "tool_params" | "parameters" | "params" | "arguments" | "args"
+    )
+}
+
+/// Child elements that name the tool rather than carry an argument.
+fn is_tool_name_child(tag: &str) -> bool {
+    matches!(tag, "tool_method" | "tool_name" | "method")
+}
+
+/// Canonical argument key for a bespoke child element name.
+fn argument_key(tag: &str) -> &str {
+    match tag {
+        // Codex's shell tools take `cmd`; DeepSeek spells the element
+        // several ways depending on the turn.
+        "tool_command" | "command" | "cmd" => "cmd",
+        other => other,
+    }
+}
+
+fn harvest_invoke(inner: &str) -> InvokeBody {
     let mut map = serde_json::Map::new();
+    let mut name = None;
+    harvest_into(inner, &mut map, &mut name);
+    InvokeBody {
+        name,
+        arguments: Value::Object(map),
+    }
+}
+
+/// Walk the child elements of an `invoke` body, turning each into an
+/// argument. Handles the official `parameter name="…"` form and the looser
+/// bespoke-element form, and recurses through grouping wrappers.
+fn harvest_into(inner: &str, map: &mut serde_json::Map<String, Value>, name: &mut Option<String>) {
     let mut rest = inner;
     while let Some(start) = find_dsml_open(rest) {
         let from = &rest[start..];
         let Some((open_end, tag, attrs)) = parse_open_tag(from) else {
             break;
         };
-        if tag != "parameter" {
-            // Nested non-parameter: try to skip one block or abort.
-            if let Some((consumed, _)) = parse_one_dsml_block(from) {
-                rest = &from[consumed..];
-                continue;
-            }
-            break;
-        }
-        let Some(close) = find_matching_close(from, open_end, "parameter") else {
+        let Some(close) = find_matching_close(from, open_end, &tag) else {
+            // Unterminated child: leave it for the caller to keep buffering
+            // rather than emitting a half-built argument.
             break;
         };
         let raw = from[open_end..close.start].trim();
-        let name = attrs
-            .get("name")
-            .cloned()
-            .unwrap_or_else(|| format!("arg{}", map.len()));
-        let as_string = attrs
-            .get("string")
-            .map(|v| v == "true")
-            .unwrap_or(true);
-        let value = if as_string {
-            Value::String(raw.to_string())
+        let norm = tag.trim_start_matches('_');
+
+        if norm == "parameter" {
+            let key = attrs
+                .get("name")
+                .cloned()
+                .unwrap_or_else(|| format!("arg{}", map.len()));
+            let as_string = attrs.get("string").map(|v| v == "true").unwrap_or(true);
+            map.insert(key, decode_argument(raw, as_string));
+        } else if is_argument_wrapper(norm) {
+            harvest_into(raw, map, name);
+        } else if is_tool_name_child(norm) {
+            if name.is_none() && !raw.is_empty() {
+                *name = Some(raw.to_string());
+            }
+        } else if find_dsml_open(raw).is_some() {
+            // Unrecognized grouping element with markup inside it.
+            harvest_into(raw, map, name);
         } else {
-            serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
-        };
-        map.insert(name, value);
+            map.insert(
+                argument_key(norm).to_string(),
+                Value::String(raw.to_string()),
+            );
+        }
         rest = &from[close.end..];
     }
-    Value::Object(map)
+}
+
+fn decode_argument(raw: &str, as_string: bool) -> Value {
+    if as_string {
+        Value::String(raw.to_string())
+    } else {
+        serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+    }
 }
 
 fn extract_cmd(inner: &str) -> Option<String> {
@@ -697,6 +796,98 @@ mod tests {
     }
     fn fw_close(inner: &str) -> String {
         format!("</{FW}DSML{FW}{inner}>")
+    }
+
+    /// Double-pipe marker, garbled + repeated wrapper, and bespoke
+    /// `tool_method`/`tool_params`/`tool_command` children. Captured verbatim
+    /// from a live Codex→DeepSeek turn (session s7deb86bac) where the whole
+    /// block leaked into the transcript as prose and no tool ever ran.
+    fn live_garbled_wrapper_payload() -> String {
+        let d = format!("{FW}{FW}DSML{FW}{FW}");
+        format!(
+            "<{d}ollapse_tool_calls>\n\
+             <{d}ollapse_tool_calls>\n\
+             <{d}invoke name=\"exec_command\">\n\
+             <{d}tool_method>exec_command</{d}tool_method>\n\
+             <{d}tool_params>\n\
+             <{d}tool_command>find /Users/moon/construct -name '*.rs' | wc -l</{d}tool_command>\n\
+             </{d}tool_params>\n\
+             </{d}invoke>\n\
+             </{d}tool_calls>"
+        )
+    }
+
+    #[test]
+    fn lifts_garbled_wrapper_and_bespoke_parameter_elements() {
+        let lifted = lift_content(&live_garbled_wrapper_payload());
+        assert_eq!(lifted.tools.len(), 1, "got {:?}", lifted.tools);
+        assert_eq!(lifted.tools[0].name, "exec_command");
+        assert_eq!(
+            lifted.tools[0].arguments["cmd"],
+            json!("find /Users/moon/construct -name '*.rs' | wc -l")
+        );
+        assert!(
+            !lifted.text.contains("DSML"),
+            "markup must not leak as text: {:?}",
+            lifted.text
+        );
+    }
+
+    /// The same payload arriving as SSE deltas must produce the tool call
+    /// too — the streaming path is what live traffic actually exercises.
+    #[test]
+    fn streams_garbled_wrapper_payload_into_a_tool_call() {
+        let live = format!("Let me count them.\n\n{}", live_garbled_wrapper_payload());
+        let mut lift = StreamLift::new();
+        let mut out = Vec::new();
+        // Chunk on char boundaries, as JSON-decoded SSE deltas always are.
+        let chars: Vec<char> = live.chars().collect();
+        for chunk in chars.chunks(7) {
+            out.extend(lift.push(CanonEvent::TextDelta(chunk.iter().collect())));
+        }
+        out.extend(lift.push(CanonEvent::Stop {
+            reason: CanonStop::EndTurn,
+        }));
+
+        assert!(
+            out.iter().any(|e| matches!(
+                e,
+                CanonEvent::ToolStart { name, .. } if name == "exec_command"
+            )),
+            "expected exec_command tool call, got {out:?}"
+        );
+        assert!(out.iter().any(|e| matches!(
+            e,
+            CanonEvent::ToolArgsDelta { json, .. } if json.contains("wc -l")
+        )));
+        assert!(out.iter().any(|e| matches!(
+            e,
+            CanonEvent::Stop {
+                reason: CanonStop::ToolUse
+            }
+        )));
+        assert!(
+            !out.iter()
+                .any(|e| matches!(e, CanonEvent::TextDelta(t) if t.contains("DSML"))),
+            "markup must not leak as text: {out:?}"
+        );
+    }
+
+    /// A block that is still arriving must stay buffered — recovery parsing
+    /// must not invent a tool call from a truncated argument.
+    #[test]
+    fn incomplete_block_emits_no_tool_call() {
+        let d = format!("{FW}{FW}DSML{FW}{FW}");
+        let partial = format!(
+            "<{d}tool_calls>\n<{d}invoke name=\"exec_command\">\n<{d}tool_command>find /Us"
+        );
+        let mut lift = StreamLift::new();
+        let out = lift.push(CanonEvent::TextDelta(partial));
+        assert!(
+            !out.iter()
+                .any(|e| matches!(e, CanonEvent::ToolStart { .. })),
+            "partial block must not emit a tool: {out:?}"
+        );
     }
 
     #[test]
