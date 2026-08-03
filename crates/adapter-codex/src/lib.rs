@@ -30,6 +30,7 @@ use construct_protocol::{
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{BufRead, Seek};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -280,20 +281,18 @@ fn spawn_interactive_transcript_watcher(
         return;
     };
     tokio::spawn(async move {
-        // Files we've already inspected and determined are not ours —
-        // skip them on later ticks so a deep `~/.codex/sessions/` tree
-        // stays cheap to poll.
-        let mut not_ours: HashSet<String> = HashSet::new();
         let mut selected: Option<(String, PathBuf)> = None;
         let mut selected_mtime: Option<std::time::SystemTime> = None;
-        let mut next_line: usize = 0;
+        let mut root_cursor = JsonlCursor::default();
         let mut last_model = initial_model;
         let mut last_effort: Option<String> = None;
         let mut reported_usage = UsageTotals::default();
         // Report-on-change gate for the context breakdown (spec 0156).
         let mut breakdown_gate = BreakdownGate::default();
+        let mut discovery = RolloutDiscovery::new(sessions_root);
+        let mut pending_meta: HashMap<String, PathBuf> = HashMap::new();
         let mut known: HashMap<String, (PathBuf, SessionMeta)> = HashMap::new();
-        let mut child_lines: HashMap<String, usize> = HashMap::new();
+        let mut child_cursors: HashMap<String, JsonlCursor> = HashMap::new();
         let mut child_seq: HashMap<String, u64> = HashMap::new();
         let mut child_states: HashMap<String, SessionState> = HashMap::new();
         let mut child_usage: HashMap<String, UsageTotals> = HashMap::new();
@@ -302,11 +301,18 @@ fn spawn_interactive_transcript_watcher(
         loop {
             tick.tick().await;
 
-            for (name, path) in list_rollouts(&sessions_root) {
-                if known.contains_key(&name) {
-                    continue;
-                }
-                if let Some(meta) = read_session_meta(&path) {
+            for (name, path) in discovery.poll() {
+                pending_meta.insert(name, path);
+            }
+            // A just-created rollout may not have its first complete JSONL
+            // record yet. Keep only those unresolved paths in this retry set;
+            // established rollouts are never reopened for metadata again.
+            let resolved: Vec<(String, SessionMeta)> = pending_meta
+                .iter()
+                .filter_map(|(name, path)| read_session_meta(path).map(|meta| (name.clone(), meta)))
+                .collect();
+            for (name, meta) in resolved {
+                if let Some(path) = pending_meta.remove(&name) {
                     known.insert(name, (path, meta));
                 }
             }
@@ -315,11 +321,10 @@ fn spawn_interactive_transcript_watcher(
             // picks the live session; after /clear|/new a fresher file
             // appears with the same originator and we rebind.
             if let Some((name, path, uuid, mtime)) = find_best_matching_rollout(
-                &sessions_root,
+                &known,
                 &expected_originator,
                 expected_uuid.as_deref(),
                 expected_fork_parent.as_deref(),
-                &mut not_ours,
             ) {
                 let is_new = selected
                     .as_ref()
@@ -357,10 +362,10 @@ fn spawn_interactive_transcript_watcher(
                     // tally, so baseline off the file's last snapshot; a
                     // fresh conversation starts from zero.
                     if first_select && skip_existing {
-                        next_line = count_jsonl_lines(&path);
+                        root_cursor = JsonlCursor::at_end(&path);
                         reported_usage = last_rollout_usage_totals(&path);
                     } else {
-                        next_line = 0;
+                        root_cursor = JsonlCursor::default();
                         reported_usage = UsageTotals::default();
                     };
                     if !first_select {
@@ -385,7 +390,7 @@ fn spawn_interactive_transcript_watcher(
             };
             let usage_refreshed = emit_new_codex_rollout_lines(
                 path,
-                &mut next_line,
+                &mut root_cursor,
                 &emit,
                 &mut last_model,
                 &mut last_effort,
@@ -434,14 +439,14 @@ fn spawn_interactive_transcript_watcher(
                 if !related.contains(child_id) || !related.contains(parent_id) {
                     continue;
                 }
-                let first_seen = !child_lines.contains_key(child_id);
+                let first_seen = !child_cursors.contains_key(child_id);
                 // Child files are ALWAYS read from the top — pre-existing
                 // history backfills into the mirror instead of being skipped
                 // on resume/restart. Every emission derived from the file
                 // carries a deterministic per-child ordinal; the daemon
                 // drops ordinals below the mirror's high-water mark, so
                 // re-scans never duplicate.
-                let line = child_lines.entry(child_id.clone()).or_insert(0);
+                let cursor = child_cursors.entry(child_id.clone()).or_default();
                 let ord = child_seq.entry(child_id.clone()).or_insert(0);
                 let mut state = child_states
                     .get(child_id)
@@ -457,7 +462,7 @@ fn spawn_interactive_transcript_watcher(
                         seq: Some(next_native_seq(ord)),
                     });
                 }
-                for value in read_new_codex_values(child_path, line, &emit) {
+                for value in read_new_codex_values(child_path, cursor, &emit) {
                     if let Some(next_state) = codex_native_state(&value) {
                         state = next_state;
                         child_states.insert(child_id.clone(), state);
@@ -499,28 +504,20 @@ fn spawn_interactive_transcript_watcher(
     });
 }
 
-/// Scan rollouts under `sessions_root` and return the best match for this
-/// construct session: originator tag match, or (on resume) an exact uuid
-/// match. Among matches, the newest mtime wins so /clear's fresh rollout
-/// supersedes the pre-clear one.
+/// Return the best cached rollout match for this construct session:
+/// originator tag match, or (on resume) an exact uuid match. Among matches,
+/// the newest mtime wins so /clear's fresh rollout supersedes the pre-clear
+/// one. Metadata is populated once by [`RolloutDiscovery`]; matching must not
+/// reopen every historical transcript on each watcher tick.
 fn find_best_matching_rollout(
-    sessions_root: &Path,
+    known: &HashMap<String, (PathBuf, SessionMeta)>,
     expected_originator: &str,
     expected_uuid: Option<&str>,
     expected_fork_parent: Option<&str>,
-    not_ours: &mut HashSet<String>,
 ) -> Option<(String, PathBuf, String, Option<std::time::SystemTime>)> {
     let mut best: Option<(String, PathBuf, String, Option<std::time::SystemTime>)> = None;
-    for (name, path) in list_rollouts(sessions_root) {
-        if not_ours.contains(&name) {
-            continue;
-        }
-        let Some(meta) = read_session_meta(&path) else {
-            // File exists but session_meta isn't readable yet.
-            // Don't blacklist — codex may still be writing.
-            continue;
-        };
-        let uuid = meta.id.clone().or_else(|| uuid_from_rollout_name(&name));
+    for (name, (path, meta)) in known {
+        let uuid = meta.id.clone().or_else(|| uuid_from_rollout_name(name));
         // A fork child COPIES its parent's originator into its meta
         // (`codex fork`), so an originator hit alone isn't ours when the
         // rollout says it was forked from somewhere — otherwise a fork of
@@ -538,67 +535,116 @@ fn find_best_matching_rollout(
         let fork_matches = expected_fork_parent
             .is_some_and(|parent| meta.forked_from_id.as_deref() == Some(parent));
         if !originator_matches && !uuid_matches && !fork_matches {
-            not_ours.insert(name);
             continue;
         }
         let Some(uuid) = uuid else {
-            not_ours.insert(name);
             continue;
         };
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         let take = match best.as_ref().and_then(|(_, _, _, t)| *t) {
             Some(prev) => mtime.is_some_and(|cur| cur >= prev),
             None => true,
         };
         if take {
-            best = Some((name, path, uuid, mtime));
+            best = Some((name.clone(), path.clone(), uuid, mtime));
         }
     }
     best
 }
 
-fn count_jsonl_lines(path: &Path) -> usize {
-    std::fs::read_to_string(path)
-        .map(|s| s.lines().count())
-        .unwrap_or(0)
+/// Byte cursor for one append-only JSONL rollout.
+///
+/// A line-count cursor still required reading and splitting the entire file
+/// before skipping old records. This cursor seeks directly to the first
+/// unseen byte, so an idle transcript costs one metadata check and no content
+/// read regardless of its historical size.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct JsonlCursor {
+    offset: u64,
+}
+
+impl JsonlCursor {
+    fn at_end(path: &Path) -> Self {
+        Self {
+            offset: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+        }
+    }
+}
+
+type ParsedJsonlRecord = (u64, Result<Value, serde_json::Error>);
+
+/// Read complete records appended after `cursor.offset`.
+///
+/// Codex can expose a file between writing its first and last byte. An
+/// unterminated invalid JSON fragment is therefore left unread until a later
+/// tick instead of being logged and permanently skipped. A valid final record
+/// is accepted even when the writer omitted its trailing newline.
+fn read_new_jsonl_records(
+    path: &Path,
+    cursor: &mut JsonlCursor,
+) -> std::io::Result<Vec<ParsedJsonlRecord>> {
+    let len = std::fs::metadata(path)?.len();
+    if len < cursor.offset {
+        // Defensive handling for an in-place truncate/rewrite. Normal Codex
+        // /clear creates a new path, but resetting here avoids a stuck cursor.
+        cursor.offset = 0;
+    }
+    if len == cursor.offset {
+        return Ok(Vec::new());
+    }
+    let mut file = std::fs::File::open(path)?;
+    file.seek(std::io::SeekFrom::Start(cursor.offset))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut records = Vec::new();
+    loop {
+        let record_offset = cursor.offset;
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        let terminated = line.ends_with('\n');
+        if line.trim().is_empty() {
+            cursor.offset += read as u64;
+            continue;
+        }
+        let parsed = serde_json::from_str(&line);
+        if !terminated && parsed.is_err() {
+            break;
+        }
+        cursor.offset += read as u64;
+        records.push((record_offset, parsed));
+    }
+    Ok(records)
 }
 
 /// Returns true when any of the new lines refreshed the context gauge — the
 /// caller refreshes the context breakdown (spec 0156) at that same cadence.
 fn emit_new_codex_rollout_lines(
     path: &Path,
-    next_line: &mut usize,
+    cursor: &mut JsonlCursor,
     emit: &EventEmitter,
     last_model: &mut Option<String>,
     last_effort: &mut Option<String>,
     reported_usage: &mut UsageTotals,
 ) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(records) = read_new_jsonl_records(path, cursor) else {
         return false;
     };
-    let mut seen = 0usize;
     let mut usage_refreshed = false;
-    for (idx, line) in text.lines().enumerate() {
-        seen = idx + 1;
-        if idx < *next_line {
-            continue;
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<Value>(line) {
+    for (offset, record) in records {
+        match record {
             Ok(v) => {
                 usage_refreshed |=
                     emit_codex_rollout_event(emit, &v, last_model, last_effort, reported_usage);
             }
             Err(e) => emit.log(format!(
-                "codex transcript: failed to parse {} line {}: {e}",
+                "codex transcript: failed to parse {} at byte {}: {e}",
                 path.display(),
-                idx + 1
+                offset
             )),
         }
     }
-    *next_line = seen;
     usage_refreshed
 }
 
@@ -991,33 +1037,105 @@ fn codex_rollout_events(v: &Value) -> Vec<SessionEvent> {
     }
 }
 
-/// Recursively list every `rollout-*.jsonl` file under `root`. Returns
-/// `(filename, full_path)` pairs. Empty Vec if `root` doesn't exist
-/// yet — that's the "first ever codex run" case.
-fn list_rollouts(root: &Path) -> Vec<(String, PathBuf)> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
+/// Incremental discovery index for Codex's date-partitioned rollout tree.
+///
+/// Appending to a rollout changes the file but not its parent directory.
+/// Creating a new root or native-child rollout changes exactly one directory
+/// mtime. Remembering directory mtimes lets the watcher stat the small set of
+/// known directories and enumerate only those whose entries changed, instead
+/// of walking thousands of historical files twice every 500 ms. A periodic
+/// full enumeration is a backstop for filesystems with coarse or coalesced
+/// directory timestamps.
+struct RolloutDiscovery {
+    root: PathBuf,
+    directories: HashMap<PathBuf, Option<std::time::SystemTime>>,
+    files: HashSet<PathBuf>,
+    polls_since_full_scan: u16,
+}
+
+const ROLLOUT_FULL_SCAN_TICKS: u16 = 20;
+
+impl RolloutDiscovery {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            directories: HashMap::new(),
+            files: HashSet::new(),
+            polls_since_full_scan: 0,
+        }
+    }
+
+    fn poll(&mut self) -> Vec<(String, PathBuf)> {
+        let mut discovered = Vec::new();
+        if self.directories.is_empty() {
+            let root = self.root.clone();
+            self.scan_new_directory(root, &mut discovered);
+            return discovered;
+        }
+
+        self.polls_since_full_scan += 1;
+        let force_full_scan = self.polls_since_full_scan >= ROLLOUT_FULL_SCAN_TICKS;
+        if force_full_scan {
+            self.polls_since_full_scan = 0;
+        }
+        let directories: Vec<PathBuf> = self.directories.keys().cloned().collect();
+        for directory in directories {
+            let modified = directory_mtime(&directory);
+            if !force_full_scan && self.directories.get(&directory) == Some(&modified) {
+                continue;
+            }
+            // Record the timestamp observed before enumerating. If another
+            // entry appears during read_dir, its later timestamp remains
+            // different and guarantees a follow-up scan on the next tick.
+            self.directories.insert(directory.clone(), modified);
+            self.scan_directory_entries(&directory, &mut discovered);
+        }
+        discovered
+    }
+
+    fn scan_new_directory(&mut self, directory: PathBuf, discovered: &mut Vec<(String, PathBuf)>) {
+        if self.directories.contains_key(&directory) {
+            return;
+        }
+        self.directories
+            .insert(directory.clone(), directory_mtime(&directory));
+        self.scan_directory_entries(&directory, discovered);
+    }
+
+    fn scan_directory_entries(
+        &mut self,
+        directory: &Path,
+        discovered: &mut Vec<(String, PathBuf)>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
         };
-        for entry in rd.flatten() {
-            let Ok(ft) = entry.file_type() else { continue };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
             let path = entry.path();
-            if ft.is_dir() {
-                stack.push(path);
-            } else if ft.is_file() {
-                let name = match path.file_name().and_then(|n| n.to_str()) {
-                    Some(n) => n,
-                    None => continue,
-                };
-                if name.starts_with("rollout-") && name.ends_with(".jsonl") {
-                    out.push((name.to_string(), path));
-                }
+            if file_type.is_dir() {
+                self.scan_new_directory(path, discovered);
+                continue;
+            }
+            if !file_type.is_file() || !self.files.insert(path.clone()) {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with("rollout-") && name.ends_with(".jsonl") {
+                discovered.push((name.to_string(), path));
             }
         }
     }
-    out
+}
+
+fn directory_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
 }
 
 /// Subset of fields we care about from codex's `session_meta` JSONL line.
@@ -1036,9 +1154,13 @@ struct SessionMeta {
 /// `payload.originator`. Returns `None` if the file is empty / mid-write
 /// / not parseable — caller should re-check on a later tick.
 fn read_session_meta(path: &Path) -> Option<SessionMeta> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let first = text.lines().next()?;
-    let v: Value = serde_json::from_str(first).ok()?;
+    let file = std::fs::File::open(path).ok()?;
+    let mut first = String::new();
+    std::io::BufReader::new(file).read_line(&mut first).ok()?;
+    if first.is_empty() || !first.ends_with('\n') {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&first).ok()?;
     let payload = v.get("payload")?;
     Some(SessionMeta {
         id: payload.get("id").and_then(|s| s.as_str()).map(String::from),
@@ -1057,27 +1179,21 @@ fn read_session_meta(path: &Path) -> Option<SessionMeta> {
     })
 }
 
-fn read_new_codex_values(path: &Path, next_line: &mut usize, emit: &EventEmitter) -> Vec<Value> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+fn read_new_codex_values(path: &Path, cursor: &mut JsonlCursor, emit: &EventEmitter) -> Vec<Value> {
+    let Ok(records) = read_new_jsonl_records(path, cursor) else {
         return Vec::new();
     };
-    let mut seen = 0usize;
     let mut values = Vec::new();
-    for (idx, line) in text.lines().enumerate() {
-        seen = idx + 1;
-        if idx < *next_line || line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str(line) {
+    for (offset, record) in records {
+        match record {
             Ok(value) => values.push(value),
             Err(error) => emit.log(format!(
-                "codex subagent transcript: failed to parse {} line {}: {error}",
+                "codex subagent transcript: failed to parse {} at byte {}: {error}",
                 path.display(),
-                idx + 1
+                offset
             )),
         }
     }
-    *next_line = seen;
     values
 }
 
@@ -1470,6 +1586,15 @@ fn extract_text_from_blocks(v: Option<&Value>) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn load_test_rollout_metadata(root: &Path) -> HashMap<String, (PathBuf, SessionMeta)> {
+        let mut discovery = RolloutDiscovery::new(root.to_path_buf());
+        discovery
+            .poll()
+            .into_iter()
+            .filter_map(|(name, path)| read_session_meta(&path).map(|meta| (name, (path, meta))))
+            .collect()
+    }
+
     #[test]
     fn parse_token_count_handles_codex_formats() {
         // Plain integer, comma-separated, underscore-separated, with whitespace.
@@ -1687,6 +1812,23 @@ mod tests {
         assert_eq!(meta.originator.as_deref(), Some("agentd:sess-abc"));
         assert_eq!(meta.parent_thread_id, None);
 
+        // Metadata parsing reads only the first record. Invalid bytes deep in
+        // a large transcript must not force a whole-file UTF-8 decode or make
+        // the otherwise valid session metadata disappear.
+        {
+            use std::io::Write as _;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&mine)
+                .unwrap()
+                .write_all(&[0xff])
+                .unwrap();
+        }
+        assert_eq!(
+            read_session_meta(&mine).unwrap().id.as_deref(),
+            Some("019e32aa-014a-7ff0-9a3f-7ae773961a37")
+        );
+
         // Default codex originator stays distinct.
         let other = tmp.join("rollout-other.jsonl");
         std::fs::write(
@@ -1702,6 +1844,144 @@ mod tests {
         let blank = tmp.join("rollout-blank.jsonl");
         std::fs::write(&blank, "").unwrap();
         assert!(read_session_meta(&blank).is_none());
+
+        let partial = tmp.join("rollout-partial.jsonl");
+        std::fs::write(
+            &partial,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"partial\"}}",
+        )
+        .unwrap();
+        assert!(read_session_meta(&partial).is_none());
+        {
+            use std::io::Write as _;
+            writeln!(std::fs::OpenOptions::new()
+                .append(true)
+                .open(&partial)
+                .unwrap())
+            .unwrap();
+        }
+        assert_eq!(
+            read_session_meta(&partial).unwrap().id.as_deref(),
+            Some("partial")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn jsonl_cursor_reads_only_appended_complete_records() {
+        let tmp = std::env::temp_dir().join(format!(
+            "construct-codex-jsonl-cursor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&tmp, "{\"n\":1}\n{\"n\":2}\n").unwrap();
+
+        let mut cursor = JsonlCursor::default();
+        let first = read_new_jsonl_records(&tmp, &mut cursor).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].1.as_ref().unwrap()["n"], 1);
+        assert_eq!(first[1].1.as_ref().unwrap()["n"], 2);
+        let offset_after_first = cursor.offset;
+        assert!(read_new_jsonl_records(&tmp, &mut cursor)
+            .unwrap()
+            .is_empty());
+        assert_eq!(cursor.offset, offset_after_first);
+
+        {
+            use std::io::Write as _;
+            write!(
+                std::fs::OpenOptions::new().append(true).open(&tmp).unwrap(),
+                "{{\"n\":3"
+            )
+            .unwrap();
+        }
+        assert!(read_new_jsonl_records(&tmp, &mut cursor)
+            .unwrap()
+            .is_empty());
+        assert_eq!(cursor.offset, offset_after_first);
+
+        {
+            use std::io::Write as _;
+            write!(
+                std::fs::OpenOptions::new().append(true).open(&tmp).unwrap(),
+                "}}\n{{\"n\":4}}\n"
+            )
+            .unwrap();
+        }
+        let appended = read_new_jsonl_records(&tmp, &mut cursor).unwrap();
+        assert_eq!(appended.len(), 2);
+        assert_eq!(appended[0].1.as_ref().unwrap()["n"], 3);
+        assert_eq!(appended[1].1.as_ref().unwrap()["n"], 4);
+
+        std::fs::write(&tmp, "{\"n\":5}\n").unwrap();
+        let rewritten = read_new_jsonl_records(&tmp, &mut cursor).unwrap();
+        assert_eq!(rewritten.len(), 1);
+        assert_eq!(rewritten[0].1.as_ref().unwrap()["n"], 5);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn rollout_discovery_enumerates_only_new_directory_entries() {
+        let tmp = std::env::temp_dir().join(format!(
+            "construct-codex-discovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let day = tmp.join("2026/08/03");
+        std::fs::create_dir_all(&day).unwrap();
+        let first = day.join("rollout-first.jsonl");
+        std::fs::write(&first, "{}\n").unwrap();
+
+        let mut discovery = RolloutDiscovery::new(tmp.clone());
+        assert_eq!(discovery.poll().len(), 1);
+        assert!(discovery.poll().is_empty());
+
+        {
+            use std::io::Write as _;
+            writeln!(
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&first)
+                    .unwrap(),
+                "{{}}"
+            )
+            .unwrap();
+        }
+        assert!(discovery.poll().is_empty());
+
+        let second = day.join("rollout-second.jsonl");
+        std::fs::write(&second, "{}\n").unwrap();
+        let found = discovery.poll();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "rollout-second.jsonl");
+
+        let next_day = tmp.join("2026/08/04");
+        std::fs::create_dir_all(&next_day).unwrap();
+        std::fs::write(next_day.join("rollout-third.jsonl"), "{}\n").unwrap();
+        let found = discovery.poll();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "rollout-third.jsonl");
+
+        // The periodic backstop finds an entry even when a filesystem reports
+        // the same/coalesced directory timestamp across its creation.
+        let hidden = next_day.join("rollout-hidden.jsonl");
+        std::fs::write(&hidden, "{}\n").unwrap();
+        let current_mtime = directory_mtime(&next_day);
+        discovery
+            .directories
+            .insert(next_day.clone(), current_mtime);
+        discovery.polls_since_full_scan = ROLLOUT_FULL_SCAN_TICKS - 1;
+        let found = discovery.poll();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "rollout-hidden.jsonl");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1746,8 +2026,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut not_ours = HashSet::new();
-        let best = find_best_matching_rollout(&tmp, originator, None, None, &mut not_ours)
+        let known = load_test_rollout_metadata(&tmp);
+        let best = find_best_matching_rollout(&known, originator, None, None)
             .expect("should find a match");
         assert_eq!(best.0, new_name);
         assert_eq!(best.2, "019e32bb-014a-7ff0-9a3f-7ae773961a99");
@@ -1795,22 +2075,15 @@ mod tests {
         .unwrap();
 
         // Parent's view: the fork rollout is newer but must NOT win.
-        let mut not_ours = HashSet::new();
-        let best = find_best_matching_rollout(&tmp, originator, None, None, &mut not_ours)
+        let known = load_test_rollout_metadata(&tmp);
+        let best = find_best_matching_rollout(&known, originator, None, None)
             .expect("parent still matches its own rollout");
         assert_eq!(best.2, parent_uuid);
 
         // Fork's view: its originator tag was copied from the parent, so it
         // identifies its rollout by the fork linkage.
-        let mut not_ours = HashSet::new();
-        let best = find_best_matching_rollout(
-            &tmp,
-            "agentd:fork-sess",
-            None,
-            Some(parent_uuid),
-            &mut not_ours,
-        )
-        .expect("fork matches via forked_from_id");
+        let best = find_best_matching_rollout(&known, "agentd:fork-sess", None, Some(parent_uuid))
+            .expect("fork matches via forked_from_id");
         assert_eq!(best.2, fork_uuid);
 
         let _ = std::fs::remove_dir_all(&tmp);
