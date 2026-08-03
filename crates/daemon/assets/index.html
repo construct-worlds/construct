@@ -2472,16 +2472,7 @@
     line-height: 1.3;
   }
   /* Lineage graph — HTML/CSS cards + rails, visual semantics from TUI
-     (render_lineage_row / specs 0080–0081 / 0103):
-     - Box: bordered session; status glyph alone carries state color
-     - Selection: interior highlight fill + bright border
-     - Hover: bright border only; demotes selection when hovering another
-     - Lane: dim │ under the box; turn-info sits ON the lane
-     - Segment: • mid-timeline (or live spinner); ✓ good / ✗ warn on end
-     - Edges: ⑂ fork / ▸ subagent / ↺ reset (glyph on the branch, not a chip)
-     - Discarded: struck-through name
-     - Subagent toggle: muted disclosure, not italic content
-  */
+     (render_lineage_row / specs 0080–0081 / 0103). */
   .lineage-graph {
     display: flex;
     flex-direction: column;
@@ -2496,16 +2487,19 @@
     --ln-hi-fg: var(--fg);
     --ln-border: color-mix(in srgb, var(--fg) 16%, transparent);
     --ln-border-hot: color-mix(in srgb, var(--fg) 55%, transparent);
+    --ln-rail-x: 14px;
   }
+  .lineage-graph.is-compact { --ln-rail-x: 12px; }
   .ln-node {
     position: relative;
     display: flex;
     flex-direction: column;
     gap: 0;
   }
-  /* Session box (TUI bordered box). Rectangular, quiet rest state. */
+  /* Session box. Rest is quiet; only the status glyph carries state color. */
   .ln-card {
     position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 7px;
@@ -2519,7 +2513,7 @@
   }
   .ln-card .ln-title {
     color: var(--ln-text);
-    opacity: 0.78; /* recessed rest — TUI DIM on unselected names */
+    opacity: 0.78;
     font-weight: 500;
     font-size: 12px;
     overflow: hidden;
@@ -2533,15 +2527,18 @@
     flex: 0 0 auto;
     white-space: nowrap;
   }
-  /* Hover: bright border only, bold name — no fill (TUI border_highlight). */
-  .ln-node:hover > .ln-card {
+  /*
+   * Hover isolation: a parent is also :hover when a nested child is hovered.
+   * Only light the card of a node that is hovered AND has no hovered descendant
+   * (the leaf-most hovered node). Selection demotion uses the same rule.
+   */
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-card {
     border-color: var(--ln-border-hot);
   }
-  .ln-node:hover > .ln-card .ln-title {
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-card .ln-title {
     opacity: 1;
     font-weight: 700;
   }
-  /* Selection: interior highlight + bright border (TUI interior_highlight). */
   .ln-card.is-selected {
     border-color: var(--ln-border-hot);
     background: var(--ln-hi-bg);
@@ -2551,26 +2548,34 @@
     font-weight: 700;
     color: var(--ln-hi-fg);
   }
-  /* Hovering a different node demotes the selected box (TUI: hover wins). */
-  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover) > .ln-card.is-selected {
+  /* Hover on a different node demotes selection (TUI: hover wins). */
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover) > .ln-card.is-selected,
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover) > .ln-card.is-selected {
     background: transparent;
     border-color: var(--ln-border);
   }
-  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover) > .ln-card.is-selected .ln-title {
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover) > .ln-card.is-selected .ln-title,
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover) > .ln-card.is-selected .ln-title {
     opacity: 0.78;
     font-weight: 500;
   }
-  /* Focus session (lineage detail root) — quiet accent ring when not selected. */
+  /* Keep selected style when the selected node itself is the hot leaf. */
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-card.is-selected {
+    border-color: var(--ln-border-hot);
+    background: var(--ln-hi-bg);
+  }
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-card.is-selected .ln-title {
+    opacity: 1;
+    font-weight: 700;
+    color: var(--ln-hi-fg);
+  }
   .ln-card.is-focus:not(.is-selected) {
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
   }
+  /* TUI strikes the name only — not the whole row. */
   .ln-card.is-discarded .ln-title {
     text-decoration: line-through;
   }
-  .ln-card.is-discarded {
-    opacity: 0.7;
-  }
-  /* Status glyph ONLY carries live-state color (mirrors session list). */
   .ln-status {
     flex: 0 0 auto;
     width: 1.1em;
@@ -2592,14 +2597,14 @@
     align-items: baseline;
     gap: 5px;
   }
-  /* Vertical lane under the box (TUI │ hanging from the box). */
+  /* Lane under the box — flush against the card bottom. */
   .ln-lane {
-    --ln-rail-x: 14px;
     position: relative;
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    min-height: 10px;
+    min-height: 8px;
+    margin: 0;
     padding: 0 0 2px;
   }
   .ln-lane::before {
@@ -2614,36 +2619,37 @@
     pointer-events: none;
     transition: background 80ms ease;
   }
-  .ln-node:hover > .ln-lane::before,
-  .ln-node:has(> .ln-card.is-selected) > .ln-lane::before {
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-lane::before,
+  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-lane::before,
+  .ln-node:hover:not(:has(.ln-node:hover)):has(> .ln-card.is-selected) > .ln-lane::before {
     background: var(--ln-rail-hot);
   }
-  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane::before {
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane::before,
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-lane::before {
     background: var(--ln-rail);
   }
   .ln-node:has(> .ln-children) > .ln-lane {
     padding-bottom: 0;
   }
   .ln-node:has(> .ln-children) > .ln-lane::before {
-    bottom: -6px;
+    bottom: -4px;
   }
-  /* Turn-info ON the lane: marker where the bar is, text to its right.
-     Plain (no chip) — TUI Segment / SegmentBullet / SegmentOutcome. */
+  /* Turn-info on the lane: marker on the bar, text to the right. */
   .ln-segment {
     position: relative;
     z-index: 1;
     display: flex;
     align-items: center;
-    gap: 0;
-    margin: 5px 0 4px 0;
-    padding: 1px 4px 1px calc(var(--ln-rail-x) + 12px);
+    margin: 4px 0 2px 0;
+    padding: 0 4px 0 calc(var(--ln-rail-x) + 12px);
     width: fit-content;
-    max-width: 100%;
+    max-width: calc(100% - 4px);
     color: var(--ln-dim);
     font-size: 11px;
     font-variant-numeric: tabular-nums;
+    line-height: 1.35;
     white-space: nowrap;
-    cursor: default;
+    cursor: pointer; /* TUI: any owned cell jumps to the session */
     user-select: none;
     background: transparent;
     border: none;
@@ -2659,9 +2665,9 @@
     color: var(--ln-dim);
     font-size: 11px;
     line-height: 1;
+    /* Punch a hole in the rail under the bullet without a visible plate. */
     background: var(--bg-elev);
   }
-  /* Terminal outcome palette (TUI checklist marks): done glows, fail warns. */
   .ln-segment.is-ok .ln-seg-mark { color: var(--ok); }
   .ln-segment.is-bad .ln-seg-mark { color: var(--warn); }
   .ln-segment .ln-seg-text {
@@ -2669,19 +2675,21 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .ln-node:hover > .ln-lane .ln-segment,
-  .ln-node:has(> .ln-card.is-selected) > .ln-lane .ln-segment {
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-lane .ln-segment,
+  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-lane .ln-segment {
     color: var(--ln-text);
   }
-  .ln-node:hover > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome),
-  .ln-node:has(> .ln-card.is-selected) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome) {
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome),
+  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome) {
     color: var(--ln-text);
     font-weight: 700;
   }
-  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment {
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment,
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment {
     color: var(--ln-dim);
   }
-  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome) {
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome),
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome) {
     color: var(--ln-dim);
     font-weight: 400;
   }
@@ -2690,20 +2698,19 @@
   .ln-node:not(:has(> .ln-children)) > .ln-lane:has(.ln-segment.is-empty) {
     display: none;
   }
-  .lineage-graph.is-compact .ln-lane { --ln-rail-x: 12px; min-height: 8px; }
+  .lineage-graph.is-compact .ln-lane { min-height: 6px; }
   .lineage-graph.is-compact .ln-segment {
     margin: 3px 0 2px 0;
     font-size: 10px;
-    padding-left: calc(var(--ln-rail-x) + 10px);
   }
   .lineage-graph.is-compact .ln-card { padding: 4px 7px; }
   .lineage-graph.is-compact .ln-harness { display: none; }
 
-  /* Child stack: continuous parent rail, branch stubs into each child. */
+  /* Child stack: continuous parent rail + branch stubs. */
   .ln-children {
     position: relative;
-    margin: 0 0 0 14px;
-    padding: 4px 0 2px 16px;
+    margin: 0 0 0 var(--ln-rail-x);
+    padding: 2px 0 2px 16px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -2713,13 +2720,16 @@
     position: absolute;
     left: 0;
     top: 0;
-    bottom: 10px;
+    bottom: 12px;
     width: 2px;
     border-radius: 1px;
     background: var(--ln-rail);
   }
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-children::before,
+  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-children::before {
+    background: var(--ln-rail-hot);
+  }
   .lineage-graph.is-compact .ln-children {
-    margin-left: 10px;
     padding-left: 12px;
     gap: 5px;
   }
@@ -2729,27 +2739,26 @@
     flex-direction: column;
     gap: 0;
   }
-  /* Horizontal stub from parent rail into the child (TUI ├─ ─▸). */
   .ln-branch::before {
     content: "";
     position: absolute;
     left: -16px;
-    top: 14px;
-    width: 10px;
+    top: 13px;
+    width: 14px;
     height: 2px;
     border-radius: 1px;
     background: var(--ln-rail);
   }
   .lineage-graph.is-compact .ln-branch::before {
     left: -12px;
-    width: 8px;
-    top: 12px;
+    width: 10px;
+    top: 11px;
   }
-  /* Edge glyph sits on the branch stub (TUI Edge span: ⑂ / ▸ / ↺). */
+  /* Edge glyph on the branch (TUI Edge: ⑂ / ▸ / ↺). */
   .ln-edge {
     position: absolute;
-    left: -18px;
-    top: 6px;
+    left: -15px;
+    top: 5px;
     z-index: 1;
     font-size: 11px;
     line-height: 1;
@@ -2759,21 +2768,25 @@
     pointer-events: none;
     user-select: none;
   }
-  .ln-node:hover > .ln-children > .ln-branch > .ln-edge,
-  .ln-branch:has(.ln-card.is-selected) > .ln-edge {
+  .lineage-graph.is-compact .ln-edge {
+    left: -12px;
+    top: 4px;
+    font-size: 10px;
+  }
+  /* Light only the edge of the hot leaf branch / selected descendant. */
+  .ln-branch:has(> .ln-node:hover:not(:has(.ln-node:hover))) > .ln-edge,
+  .ln-branch:has(.ln-card.is-selected):not(:has(.ln-node:hover .ln-card.is-selected)) > .ln-edge,
+  .ln-branch:has(> .ln-node:hover:not(:has(.ln-node:hover)) > .ln-card.is-selected) > .ln-edge {
     color: var(--ln-text);
     font-weight: 700;
   }
-  .lineage-graph:has(.ln-node:hover) .ln-branch:not(:has(.ln-node:hover)) > .ln-edge {
-    color: var(--ln-dim);
-    font-weight: 400;
+  .ln-branch:has(> .ln-node:hover:not(:has(.ln-node:hover)))::before,
+  .ln-branch:has(.ln-card.is-selected):not(:has(.ln-node:hover .ln-card.is-selected))::before {
+    background: var(--ln-rail-hot);
   }
-  .ln-edge.edge-fork { color: var(--ln-dim); }
-  .ln-edge.edge-subagent { color: var(--ln-dim); }
   .ln-edge.edge-reset { color: var(--warn); }
 
-  /* Subagent-group toggle: muted affordance like the session-list disclosure
-     (TUI SubagentsToggle — not italic content). */
+  /* Subagent toggle: muted disclosure. +N more: muted italic. */
   .ln-toggle,
   .ln-more {
     display: flex;
@@ -2792,8 +2805,7 @@
     width: 100%;
     font-family: inherit;
   }
-  .ln-toggle:hover,
-  .ln-more:hover {
+  .ln-toggle:hover {
     color: var(--ln-text);
     background: color-mix(in srgb, var(--fg) 6%, transparent);
   }
@@ -2803,8 +2815,12 @@
     color: var(--ln-dim);
   }
   .ln-more {
-    font-style: italic; /* TUI More is muted+italic */
+    font-style: italic;
     cursor: default;
+  }
+  .ln-more:hover {
+    color: var(--ln-muted);
+    background: transparent;
   }
 
   .lineage-empty {
@@ -5692,11 +5708,42 @@ function buildLineageCardEl(node, byId, focusId) {
   return wrap;
 }
 
+function lineageTreeSignature(node, byId) {
+  // Structural + selection/title/state signature — excludes spinner frame so
+  // the shared activity loop can animate without a full DOM rebuild.
+  if (!node) return "";
+  const s = byId.get(node.session_id);
+  const parts = [
+    node.session_id,
+    node.edge || "",
+    s ? String(s.state || "") : "",
+    s ? String(s.title || "") : "",
+    s ? String(s.harness || "") : "",
+    s ? String(s.message_count || 0) : "0",
+    s ? String((s.tokens && (s.tokens.input || 0) + (s.tokens.output || 0)) || 0) : "0",
+    // Omit live busy_ms — it ticks every second on Running sessions and
+    // would force a full DOM rebuild; duration text refreshes with state/tok.
+    s ? String(s.merge && s.merge.mode || "") : "",
+    node.session_id === state.currentId ? "1" : "0",
+  ];
+  for (const ch of node.children || []) {
+    if (ch.kind === "subagents") {
+      parts.push(`S${ch.count}:${ch.running}:${ch.expanded ? 1 : 0}`);
+    } else if (ch.kind === "more") {
+      parts.push(`M${ch.count}`);
+    } else if (ch.session_id) {
+      parts.push(lineageTreeSignature(ch, byId));
+    }
+  }
+  return parts.join("|");
+}
+
 function renderLineageSection() {
   if (!lineageSectionEl || !lineageBodyEl) return;
   const focusId = lineageSectionSessionId();
   if (!focusId) {
     lineageSectionEl.hidden = true;
+    lineageBodyEl.__lineageSig = "";
     return;
   }
   lineageSectionEl.hidden = false;
@@ -5717,20 +5764,36 @@ function renderLineageSection() {
   }
   if (state.lineageCollapsed) {
     lineageBodyEl.replaceChildren();
+    lineageBodyEl.__lineageSig = "collapsed";
     return;
   }
   const tree = buildLineageTree(focusId, state.sessions, state.lineageSubagentsExpanded);
   if (!tree) {
     lineageBodyEl.innerHTML = `<div class="lineage-empty">no lineage</div>`;
+    lineageBodyEl.__lineageSig = "empty";
     return;
   }
   const byId = new Map(state.sessions.map((s) => [s.id, s]));
+  const sig = [
+    focusId,
+    state.lineageMode,
+    state.currentId || "",
+    [...state.lineageSubagentsExpanded].sort().join(","),
+    lineageTreeSignature(tree, byId),
+  ].join("::");
+  if (lineageBodyEl.__lineageSig === sig && lineageBodyEl.querySelector(".lineage-graph")) {
+    // Structure unchanged — spinner loop owns live glyphs.
+    return;
+  }
+  const scrollTop = lineageBodyEl.scrollTop;
   const graph = document.createElement("div");
   graph.className = "lineage-graph" + (state.lineageMode === "rails" ? " is-compact" : "");
   graph.setAttribute("role", "tree");
   graph.setAttribute("aria-label", "session lineage");
   graph.appendChild(buildLineageCardEl(tree, byId, focusId));
   lineageBodyEl.replaceChildren(graph);
+  lineageBodyEl.__lineageSig = sig;
+  lineageBodyEl.scrollTop = scrollTop;
 }
 
 function bindLineageSection() {
@@ -5761,13 +5824,20 @@ function bindLineageSection() {
         const pid = toggle.dataset.parentId;
         if (state.lineageSubagentsExpanded.has(pid)) state.lineageSubagentsExpanded.delete(pid);
         else state.lineageSubagentsExpanded.add(pid);
+        // Force rebuild after expansion change.
+        lineageBodyEl.__lineageSig = "";
         renderLineageSection();
         return;
       }
-      const card = e.target.closest(".ln-card[data-session-id]");
-      if (card && card.dataset.sessionId) {
-        selectSession(card.dataset.sessionId);
-      }
+      // TUI: any cell a session owns (box, lane, segment) jumps to it.
+      const hit = e.target.closest(".ln-card[data-session-id], .ln-segment[data-session-id], .ln-node[data-session-id]");
+      if (!hit) return;
+      // Don't treat the outer parent node as the target when a child was clicked.
+      const node = e.target.closest(".ln-node[data-session-id]");
+      const sid = (hit.classList.contains("ln-card") || hit.classList.contains("ln-segment"))
+        ? hit.dataset.sessionId
+        : (node && node.dataset.sessionId);
+      if (sid) selectSession(sid);
     });
   }
   bindVerticalResize(lineageResizeEl, {
@@ -7459,18 +7529,22 @@ function refreshLineageActivityGlyphs(now = Date.now()) {
   for (const el of lineageBodyEl.querySelectorAll(".ln-status[data-session-id], .ln-seg-mark[data-session-id]")) {
     const s = byId.get(el.dataset.sessionId);
     if (!s) continue;
-    // Outcome marks (✓/✗) stay fixed; only live bullets/status spin.
+    // Outcome marks (✓/✗) stay fixed.
     if (el.classList.contains("is-outcome")) continue;
     const active = sessionShouldAnimateStatus(s, now);
+    if (el.classList.contains("ln-seg-mark")) {
+      // Mid-timeline: • when idle, shared spinner only while working (TUI).
+      const glyph = active ? sessionStatusGlyph(s, now) : "•";
+      if (el.textContent !== glyph) el.textContent = glyph;
+      el.classList.toggle("is-active", active);
+      continue;
+    }
     const glyph = sessionStatusGlyph(s, now);
     if (el.textContent !== glyph) el.textContent = glyph;
     el.classList.toggle("is-active", active);
-    // Status column keeps the state-* class for color; bullets stay dim-green when live.
-    if (el.classList.contains("ln-status")) {
-      const status = sessionStatusLabel(s);
-      const next = `ln-status state state-${status}` + (active ? " is-active" : "");
-      if (el.className !== next) el.className = next;
-    }
+    const status = sessionStatusLabel(s);
+    const next = `ln-status state state-${status}` + (active ? " is-active" : "");
+    if (el.className !== next) el.className = next;
   }
 }
 
