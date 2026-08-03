@@ -2355,6 +2355,15 @@ pub struct App {
     pub frame_text: Vec<String>,
     /// In-app text selection driven by left-drag while mouse capture is on.
     pub text_selection: Option<TextSelection>,
+    /// A left-drag is in flight that we handed to a mouse-grabbing child.
+    /// Set on the forwarded drag, read on the forwarded release, to tell a
+    /// user who just tried to select text that Shift is how they do it.
+    child_swallowed_drag: bool,
+    /// Whether that hint has already been shown. Shown once per run: it
+    /// teaches a gesture, and repeating it would nag users whose children
+    /// legitimately use drag (vim visual mode, draggable scrollbars), whose
+    /// drags are indistinguishable from a failed selection attempt.
+    shift_select_hint_shown: bool,
     /// Copied selection text. After mouse release we re-find this text in
     /// the latest rendered frame so the highlight follows content shifts.
     pub selected_text: Option<String>,
@@ -5454,6 +5463,8 @@ async fn run_with_socket_initial_selection(
         hide_pane_side_borders: persisted.hide_pane_side_borders,
         frame_text: Vec::new(),
         text_selection: None,
+        child_swallowed_drag: false,
+        shift_select_hint_shown: false,
         selected_text: None,
         selected_text_bounds: None,
         selected_text_range: None,
@@ -10404,6 +10415,55 @@ impl App {
         }
     }
 
+    /// A Shift-held left-button gesture — the user asking for construct's own
+    /// text selection instead of the child's mouse handling.
+    ///
+    /// Terminals disagree about whether Shift-drag reaches the application
+    /// while mouse reporting is on: xterm and its imitators intercept it to
+    /// run their *native* selection. Either outcome serves the user, which is
+    /// why Shift is the right modifier to spend on this — if the terminal
+    /// keeps the gesture there is a native selection to copy, and if it
+    /// forwards the gesture construct makes the selection itself.
+    fn is_shift_select_gesture(ev: &MouseEvent) -> bool {
+        use crossterm::event::MouseButton;
+        ev.modifiers.contains(KeyModifiers::SHIFT)
+            && matches!(
+                ev.kind,
+                MouseEventKind::Down(MouseButton::Left)
+                    | MouseEventKind::Drag(MouseButton::Left)
+                    | MouseEventKind::Up(MouseButton::Left)
+            )
+    }
+
+    /// Tell a user who just tried to drag-select over a mouse-grabbing pane
+    /// how to actually do it.
+    ///
+    /// Without this the Shift override is undiscoverable: the failure is
+    /// silent — the drag goes to the child, no selection appears, and nothing
+    /// explains why the gesture that works everywhere else in the TUI did
+    /// nothing here. A completed left-drag that we forwarded is the one signal
+    /// that distinguishes "tried to select" from ordinary clicking, so the
+    /// hint rides the release rather than firing on every motion event.
+    ///
+    /// It cannot be a *reliable* signal — a child that uses drag itself (vim
+    /// visual mode, a draggable scrollbar) produces exactly the same events
+    /// from a user who wanted the drag forwarded. That ambiguity is why this
+    /// shows once per run and then stays quiet.
+    fn note_drag_forwarded_to_child(&mut self, ev: &MouseEvent) {
+        let (drag_in_flight, show_hint) = drag_hint_transition(
+            ev.kind,
+            self.child_swallowed_drag,
+            self.shift_select_hint_shown,
+        );
+        self.child_swallowed_drag = drag_in_flight;
+        if show_hint {
+            self.shift_select_hint_shown = true;
+            self.set_status(
+                "this pane's harness handles the mouse — hold Shift and drag to select text".into(),
+            );
+        }
+    }
+
     async fn on_mouse(&mut self, ev: MouseEvent) {
         if !self.mouse_capture_enabled {
             return;
@@ -10616,8 +10676,19 @@ impl App {
             && self.layout.modal_area.is_none()
             && !suggest_owns_event
             && !suggest_deck_owns_event
+            // Shift-drag is the user's override for "I want to select this
+            // text myself". Without it, a pane whose child grabbed the mouse
+            // (Claude Code enables tracking and never releases it) has *no*
+            // reachable copy gesture: every press, drag and release is
+            // forwarded to the child, so construct never builds a selection
+            // and the copy path is dead over exactly the panes worth copying
+            // from. Only the opening press needs the modifier — once a
+            // selection exists, `text_selection.is_none()` above keeps the
+            // rest of the drag with construct even if Shift is released.
+            && !Self::is_shift_select_gesture(&ev)
             && self.forward_mouse_to_child(&ev)
         {
+            self.note_drag_forwarded_to_child(&ev);
             return;
         }
         match ev.kind {
@@ -10976,6 +11047,15 @@ impl App {
                     };
                     if sel.dragged {
                         let text = self.selected_frame_text(&sel);
+                        // A drag across blank cells selects nothing. Copying
+                        // that through would *clear* the clipboard — pbcopy
+                        // with empty input wipes the pasteboard — so a stray
+                        // drag would silently destroy whatever the user had
+                        // copied earlier. Nothing selected, nothing written.
+                        if text.is_empty() {
+                            self.text_selection = None;
+                            return;
+                        }
                         match copy_to_clipboard(&text) {
                             Ok(outcome) => {
                                 let n = text.chars().count();
@@ -10998,67 +11078,11 @@ impl App {
     }
 
     fn selected_frame_text(&self, sel: &TextSelection) -> String {
-        let Some(range) = self.selected_frame_range(sel) else {
-            return String::new();
-        };
-        let bounds = sel.bounds;
-        let bound_left = bounds.map(|b| b.left()).unwrap_or(0);
-        let bound_right = bounds.map(|b| b.right().saturating_sub(1));
-        let mut lines = Vec::new();
-        for row in range.start.row..=range.end.row {
-            let Some(line) = self.frame_text.get(row as usize) else {
-                continue;
-            };
-            let start_col = if row == range.start.row {
-                range.start.col
-            } else {
-                bound_left
-            };
-            let end_col = if row == range.end.row {
-                range.end.col
-            } else {
-                bound_right.unwrap_or_else(|| line.chars().count().saturating_sub(1) as u16)
-            };
-            lines.push(slice_line(line, start_col, end_col).trim_end().to_string());
-        }
-        lines.join("\n").trim_end().to_string()
+        frame_selection_text(&self.frame_text, sel)
     }
 
     fn selected_frame_range(&self, sel: &TextSelection) -> Option<TextSelectionRange> {
-        let (start, end) = normalized_points(sel.anchor, sel.head);
-        let bounds = sel.bounds;
-        let row_start = bounds.map(|b| b.top()).unwrap_or(0).max(start.row);
-        let row_end = bounds
-            .map(|b| b.bottom().saturating_sub(1))
-            .unwrap_or(u16::MAX)
-            .min(end.row);
-        if row_start > row_end {
-            return None;
-        }
-        let bound_left = bounds.map(|b| b.left()).unwrap_or(0);
-        let bound_right = bounds.map(|b| b.right().saturating_sub(1));
-        let start_col = if row_start == start.row {
-            start.col
-        } else {
-            bound_left
-        }
-        .max(bound_left);
-        let end_col = if row_end == end.row {
-            end.col
-        } else {
-            bound_right.unwrap_or(u16::MAX)
-        }
-        .min(bound_right.unwrap_or(u16::MAX));
-        Some(TextSelectionRange {
-            start: ScreenPoint {
-                col: start_col,
-                row: row_start,
-            },
-            end: ScreenPoint {
-                col: end_col,
-                row: row_end,
-            },
-        })
+        frame_selection_range(sel)
     }
 
     async fn handle_left_click(&mut self, col: u16, row: u16) {
@@ -14754,6 +14778,101 @@ fn normalized_points(a: ScreenPoint, b: ScreenPoint) -> (ScreenPoint, ScreenPoin
     }
 }
 
+/// Pure half of the Shift-select hint (see `note_drag_forwarded_to_child`),
+/// split out so the state machine is testable without a live `App`.
+///
+/// Takes the forwarded event's kind plus the two current flags, and returns
+/// `(drag_still_in_flight, show_the_hint_now)`. The hint fires on the release
+/// that ends a forwarded drag, and only while it has never been shown.
+fn drag_hint_transition(
+    kind: MouseEventKind,
+    drag_in_flight: bool,
+    already_shown: bool,
+) -> (bool, bool) {
+    use crossterm::event::MouseButton;
+    match kind {
+        // A fresh press starts a new gesture: nothing dragged yet.
+        MouseEventKind::Down(MouseButton::Left) => (false, false),
+        MouseEventKind::Drag(MouseButton::Left) => (true, false),
+        MouseEventKind::Up(MouseButton::Left) => (false, drag_in_flight && !already_shown),
+        // Wheel, other buttons and bare motion leave the gesture untouched —
+        // a wheel tick mid-drag must not cancel the pending hint.
+        _ => (drag_in_flight, false),
+    }
+}
+
+/// The frame rows and columns a drag covers, clipped to the surface it
+/// started on. `None` when the selection falls entirely outside those
+/// bounds and therefore covers no cell at all.
+fn frame_selection_range(sel: &TextSelection) -> Option<TextSelectionRange> {
+    let (start, end) = normalized_points(sel.anchor, sel.head);
+    let bounds = sel.bounds;
+    let row_start = bounds.map(|b| b.top()).unwrap_or(0).max(start.row);
+    let row_end = bounds
+        .map(|b| b.bottom().saturating_sub(1))
+        .unwrap_or(u16::MAX)
+        .min(end.row);
+    if row_start > row_end {
+        return None;
+    }
+    let bound_left = bounds.map(|b| b.left()).unwrap_or(0);
+    let bound_right = bounds.map(|b| b.right().saturating_sub(1));
+    let start_col = if row_start == start.row {
+        start.col
+    } else {
+        bound_left
+    }
+    .max(bound_left);
+    let end_col = if row_end == end.row {
+        end.col
+    } else {
+        bound_right.unwrap_or(u16::MAX)
+    }
+    .min(bound_right.unwrap_or(u16::MAX));
+    Some(TextSelectionRange {
+        start: ScreenPoint {
+            col: start_col,
+            row: row_start,
+        },
+        end: ScreenPoint {
+            col: end_col,
+            row: row_end,
+        },
+    })
+}
+
+/// The text a drag selected, read out of the rendered frame snapshot.
+///
+/// Returns empty when the drag covered only blank cells — a real outcome, not
+/// an error: the frame is padded with spaces, so any drag across empty chrome
+/// lands on nothing. Callers must not treat that as text to copy.
+fn frame_selection_text(frame_text: &[String], sel: &TextSelection) -> String {
+    let Some(range) = frame_selection_range(sel) else {
+        return String::new();
+    };
+    let bounds = sel.bounds;
+    let bound_left = bounds.map(|b| b.left()).unwrap_or(0);
+    let bound_right = bounds.map(|b| b.right().saturating_sub(1));
+    let mut lines = Vec::new();
+    for row in range.start.row..=range.end.row {
+        let Some(line) = frame_text.get(row as usize) else {
+            continue;
+        };
+        let start_col = if row == range.start.row {
+            range.start.col
+        } else {
+            bound_left
+        };
+        let end_col = if row == range.end.row {
+            range.end.col
+        } else {
+            bound_right.unwrap_or_else(|| line.chars().count().saturating_sub(1) as u16)
+        };
+        lines.push(slice_line(line, start_col, end_col).trim_end().to_string());
+    }
+    lines.join("\n").trim_end().to_string()
+}
+
 fn slice_line(line: &str, start_col: u16, end_col: u16) -> String {
     if end_col < start_col {
         return String::new();
@@ -16501,6 +16620,8 @@ mod tests {
             hide_pane_side_borders: true,
             frame_text: Vec::new(),
             text_selection: None,
+            child_swallowed_drag: false,
+            shift_select_hint_shown: false,
             selected_text: None,
             selected_text_bounds: None,
             selected_text_range: None,
@@ -46105,6 +46226,114 @@ mod tests {
             panels.get("other").map(|p| p.markdown.as_str()),
             Some("keep")
         );
+    }
+
+    /// Shift-drag is the only copy gesture that survives over a pane whose
+    /// child has grabbed the mouse, so it must be recognized for the whole
+    /// press/drag/release trio — and must not steal the wheel, which stays
+    /// the child's (and, with Shift, the lineage pane's horizontal scroll).
+    #[test]
+    fn shift_left_drag_is_a_selection_gesture_but_the_wheel_is_not() {
+        use crossterm::event::MouseButton;
+
+        let shifted = |kind| MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::SHIFT,
+        };
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            assert!(
+                App::is_shift_select_gesture(&shifted(kind)),
+                "shift + {kind:?} must reach construct's own text selection"
+            );
+        }
+
+        assert!(
+            !App::is_shift_select_gesture(&shifted(MouseEventKind::ScrollUp)),
+            "shift + wheel must keep scrolling, not start a selection"
+        );
+        assert!(
+            !App::is_shift_select_gesture(&shifted(MouseEventKind::Down(MouseButton::Right))),
+            "only the left button selects"
+        );
+        assert!(
+            !App::is_shift_select_gesture(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::empty(),
+            }),
+            "an unmodified press still belongs to the child"
+        );
+    }
+
+    /// A drag across blank chrome selects nothing. That empty string used to
+    /// be handed to the clipboard, and copying empty *clears* the pasteboard —
+    /// a stray drag would destroy whatever the user had copied. The copy path
+    /// keys on this emptiness to refuse the write, so it has to stay empty
+    /// rather than degrade into a string of spaces.
+    #[test]
+    fn a_drag_over_blank_cells_selects_no_text() {
+        let blank = vec![" ".repeat(40), " ".repeat(40), " ".repeat(40)];
+        let sel = TextSelection {
+            anchor: ScreenPoint { col: 2, row: 0 },
+            head: ScreenPoint { col: 30, row: 2 },
+            dragged: true,
+            bounds: Some(Rect::new(0, 0, 40, 3)),
+        };
+
+        assert_eq!(frame_selection_text(&blank, &sel), "");
+
+        // Same drag over rendered text still yields that text — the guard
+        // keys on "nothing there", not on drags in general.
+        let filled = vec![
+            format!("{:<40}", "  hello"),
+            format!("{:<40}", "  world"),
+            format!("{:<40}", "  again"),
+        ];
+        assert_eq!(
+            frame_selection_text(&filled, &sel),
+            "hello\n  world\n  again"
+        );
+    }
+
+    #[test]
+    fn a_swallowed_drag_hints_once_at_the_release() {
+        use crossterm::event::MouseButton;
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let drag = MouseEventKind::Drag(MouseButton::Left);
+        let up = MouseEventKind::Up(MouseButton::Left);
+
+        // Press, drag, release: the hint lands on the release, not before.
+        let (in_flight, hint) = drag_hint_transition(down, false, false);
+        assert!(!in_flight && !hint, "a press alone is not a drag");
+        let (in_flight, hint) = drag_hint_transition(drag, in_flight, false);
+        assert!(in_flight, "the drag is now in flight");
+        assert!(!hint, "but the gesture has not finished yet");
+        let (in_flight, hint) = drag_hint_transition(up, in_flight, false);
+        assert!(hint, "the completed drag is what earns the hint");
+        assert!(!in_flight, "and it clears the gesture");
+
+        // A plain click — press then release, no motion — stays silent, so
+        // clicking inside a harness never nags.
+        let (in_flight, _) = drag_hint_transition(down, false, false);
+        let (_, hint) = drag_hint_transition(up, in_flight, false);
+        assert!(!hint, "a click is not an attempted selection");
+
+        // Once shown, it stays quiet: a child that uses drag itself produces
+        // these same events from a user who wanted them forwarded.
+        let (_, hint) = drag_hint_transition(up, true, true);
+        assert!(!hint, "the hint is shown once per run");
+
+        // A wheel tick mid-drag must not swallow the pending hint.
+        let (in_flight, _) = drag_hint_transition(MouseEventKind::ScrollUp, true, false);
+        assert!(in_flight, "the wheel leaves the gesture in flight");
     }
 
     #[test]

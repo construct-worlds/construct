@@ -11,6 +11,8 @@ When TUI text selection is copied, the clipboard target is the user's controllin
 
 In an SSH session, the client cannot reliably see terminal multiplexers that run on the user's local machine outside the SSH connection. Remote OSC 52 output must therefore remain conservative: emit plain OSC 52 unless the visible terminal context indicates tmux/screen, such as `TMUX`, `STY`, or a tmux/screen `TERM`. Users may force a mode with `CONSTRUCT_OSC52_MODE=direct|tmux|screen` when their terminal path is unusual.
 
+A selection that contains no text must not reach any clipboard transport. Writing an empty payload does not leave the clipboard unchanged — it clears it — so a gesture that selected nothing would silently destroy whatever the user copied earlier. Nothing selected, nothing written.
+
 The UI must not claim that OSC 52 definitely changed the clipboard, because the process can only know that it wrote the request. It may report a sent copy request, including the OSC 52 mode it used; it may report copied only when a local pasteboard command succeeds.
 
 ## Reason
@@ -21,6 +23,7 @@ Over SSH, host-local clipboard tools target the remote machine, which is not whe
 
 - Remote clipboard behavior depends on the user's terminal and multiplexer allowing clipboard writes; the client cannot confirm acceptance.
 - The copy status distinguishes a confirmed local pasteboard write from a terminal clipboard request.
+- The emptiness check belongs to the copy path, ahead of every transport, rather than to each transport separately — the frame the selection reads from is padded with blanks, so a drag over empty chrome is an ordinary outcome and not an error to report.
 - The copy status should include the OSC 52 mode used for a terminal request so users can diagnose terminal/multiplexer policy.
 - Clipboard escape generation is part of terminal fidelity and should be tested as bytes, independent of the developer's current terminal emulator.
 - Remote OSC 52 output should not contain tmux/screen passthrough wrappers unless the client has a reason to believe that multiplexer is in the terminal path, or the user explicitly forces it.

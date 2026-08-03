@@ -157,59 +157,59 @@ where
 
     let mut handle = tokio::spawn(tool_runner);
 
-    let outcome = loop {
-        let elapsed = started_at.elapsed();
-        let remaining = bg_after.saturating_sub(elapsed);
-        let sleep_fut = tokio::time::sleep(remaining);
+    // Every arm below settles the call, so this waits exactly once rather
+    // than looping: the first of completion, control message, or background
+    // deadline decides the outcome.
+    let remaining = bg_after.saturating_sub(started_at.elapsed());
+    let sleep_fut = tokio::time::sleep(remaining);
 
-        tokio::select! {
-            biased;
-            res = &mut handle => {
-                break match res {
-                    Ok(r) => SupervisorOutcome::Done(r),
-                    Err(e) if e.is_cancelled() => SupervisorOutcome::Killed,
-                    Err(e) => SupervisorOutcome::Done(Err(format!("join error: {e}"))),
-                };
+    let outcome = tokio::select! {
+        biased;
+        res = &mut handle => {
+            match res {
+                Ok(r) => SupervisorOutcome::Done(r),
+                Err(e) if e.is_cancelled() => SupervisorOutcome::Killed,
+                Err(e) => SupervisorOutcome::Done(Err(format!("join error: {e}"))),
             }
-            ctrl = control_rx.recv() => {
-                match ctrl {
-                    Some(ToolControl::Kill) | None => {
-                        handle.abort();
-                        // Wait for the abort to land so we can
-                        // report Killed deterministically.
-                        let _ = (&mut handle).await;
-                        break SupervisorOutcome::Killed;
-                    }
-                    Some(ToolControl::Background) => {
-                        let entry = BackgroundEntry {
-                            name: name.clone(),
-                            started_at,
-                            call_id: call_id.clone(),
-                        };
-                        spawn_background_watcher(
-                            handle,
-                            tasks.clone(),
-                            entry,
-                            completion_tx.clone(),
-                        );
-                        break SupervisorOutcome::Backgrounded;
-                    }
+        }
+        ctrl = control_rx.recv() => {
+            match ctrl {
+                Some(ToolControl::Kill) | None => {
+                    handle.abort();
+                    // Wait for the abort to land so we can
+                    // report Killed deterministically.
+                    let _ = (&mut handle).await;
+                    SupervisorOutcome::Killed
+                }
+                Some(ToolControl::Background) => {
+                    let entry = BackgroundEntry {
+                        name: name.clone(),
+                        started_at,
+                        call_id: call_id.clone(),
+                    };
+                    spawn_background_watcher(
+                        handle,
+                        tasks.clone(),
+                        entry,
+                        completion_tx.clone(),
+                    );
+                    SupervisorOutcome::Backgrounded
                 }
             }
-            _ = sleep_fut => {
-                let entry = BackgroundEntry {
-                    name: name.clone(),
-                    started_at,
-                    call_id: call_id.clone(),
-                };
-                spawn_background_watcher(
-                    handle,
-                    tasks.clone(),
-                    entry,
-                    completion_tx.clone(),
-                );
-                break SupervisorOutcome::Backgrounded;
-            }
+        }
+        _ = sleep_fut => {
+            let entry = BackgroundEntry {
+                name: name.clone(),
+                started_at,
+                call_id: call_id.clone(),
+            };
+            spawn_background_watcher(
+                handle,
+                tasks.clone(),
+                entry,
+                completion_tx.clone(),
+            );
+            SupervisorOutcome::Backgrounded
         }
     };
 
