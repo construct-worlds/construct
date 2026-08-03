@@ -720,6 +720,14 @@ fn socket_nonce() -> String {
     format!("{:x}", nanos ^ ((std::process::id() as u64) << 32))
 }
 
+/// Default client keepalives for long-lived TUI sessions. Idle Wi‑Fi / NAT
+/// paths otherwise drop the TCP connection; the remote TUI then vanishes
+/// with a "Connection reset by peer" / "Broken pipe" and no Construct
+/// panic — pure SSH loss. Only injected when the user did not already set
+/// the option (OpenSSH keeps the first value for a given keyword).
+const DEFAULT_SERVER_ALIVE_INTERVAL: &str = "ServerAliveInterval=30";
+const DEFAULT_SERVER_ALIVE_COUNT_MAX: &str = "ServerAliveCountMax=6";
+
 /// Assemble the ssh argv: the transport command's own args first (e.g. the
 /// `ssh` in `tsh ssh`), then our forward + tty flags, the user's args
 /// verbatim, then the remote command as the final argument. `env` (not a
@@ -743,10 +751,70 @@ fn build_ssh_argv(
         // Passing a remote command disables tty allocation; the TUI needs one.
         "-t".into(),
     ]);
+    // Only inject when the user did not already pass the keyword; OpenSSH
+    // keeps the first command-line value per option, so we must not add a
+    // default *before* a user `-o` of the same name.
+    push_default_keepalive_if_unset(
+        &mut argv,
+        user_args,
+        "ServerAliveInterval",
+        DEFAULT_SERVER_ALIVE_INTERVAL,
+    );
+    push_default_keepalive_if_unset(
+        &mut argv,
+        user_args,
+        "ServerAliveCountMax",
+        DEFAULT_SERVER_ALIVE_COUNT_MAX,
+    );
     argv.extend(user_args.iter().cloned());
     let cmd = remote_cmd.unwrap_or("construct");
     argv.push(format!("env {ENV_SOCK}={remote_sock} {cmd}").into());
     argv
+}
+
+/// Append `-o KEY=…` unless `user_args` already set that ssh_config keyword
+/// (any case, `-oKey=…` or `-o Key=…`).
+fn push_default_keepalive_if_unset(
+    argv: &mut Vec<OsString>,
+    user_args: &[OsString],
+    keyword: &str,
+    option: &str,
+) {
+    if ssh_args_set_option(user_args, keyword) {
+        return;
+    }
+    argv.push("-o".into());
+    argv.push(option.into());
+}
+
+/// Whether `args` contains an OpenSSH `-o` setting for `keyword`.
+fn ssh_args_set_option(args: &[OsString], keyword: &str) -> bool {
+    let needle = keyword.to_ascii_lowercase();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].to_string_lossy();
+        if let Some(rest) = arg.strip_prefix("-o") {
+            let value = if rest.is_empty() {
+                i += 1;
+                args.get(i).map(|a| a.to_string_lossy().into_owned())
+            } else {
+                Some(rest.to_string())
+            };
+            if let Some(value) = value {
+                let key = value
+                    .split_once('=')
+                    .map(|(k, _)| k)
+                    .unwrap_or(value.as_str())
+                    .trim()
+                    .to_ascii_lowercase();
+                if key == needle {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -796,12 +864,59 @@ mod tests {
                 "-R",
                 "/tmp/construct-clip-abc.sock:/tmp/x/clip.sock",
                 "-t",
+                "-o",
+                "ServerAliveInterval=30",
+                "-o",
+                "ServerAliveCountMax=6",
                 "-p",
                 "2222",
                 "devbox",
                 "env CONSTRUCT_CLIPBOARD_SOCK=/tmp/construct-clip-abc.sock construct",
             ]
         );
+    }
+
+    #[test]
+    fn ssh_argv_injects_keepalives_unless_user_set_them() {
+        // User sets interval only — we still supply count-max.
+        let argv = build_ssh_argv(
+            &[],
+            &[
+                "-o".into(),
+                "ServerAliveInterval=60".into(),
+                "devbox".into(),
+            ],
+            Path::new("/l.sock"),
+            "/r.sock",
+            None,
+        );
+        let argv: Vec<String> = argv
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !argv.iter().any(|a| a == "ServerAliveInterval=30"),
+            "must not override the user's interval: {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|a| a == "ServerAliveInterval=60"),
+            "user interval must remain: {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|a| a == "ServerAliveCountMax=6"),
+            "default count-max still applies: {argv:?}"
+        );
+
+        // Compact `-oKey=value` and case-insensitive keyword.
+        assert!(ssh_args_set_option(
+            &["-oserveraliveinterval=15".into()],
+            "ServerAliveInterval"
+        ));
+        assert!(ssh_args_set_option(
+            &["-o".into(), "ServerAliveCountMax=3".into()],
+            "ServerAliveCountMax"
+        ));
+        assert!(!ssh_args_set_option(&["-p".into(), "22".into()], "ServerAliveInterval"));
     }
 
     #[test]
@@ -860,6 +975,10 @@ mod tests {
                 "-R",
                 "/r.sock:/l.sock",
                 "-t",
+                "-o",
+                "ServerAliveInterval=30",
+                "-o",
+                "ServerAliveCountMax=6",
                 "devbox",
                 "env CONSTRUCT_CLIPBOARD_SOCK=/r.sock construct",
             ]

@@ -15,7 +15,11 @@ construct provides a first-party clipboard bridge for SSH use:
   socket forward plus a remote command that launches `construct` with an
   environment variable pointing at the forwarded socket. All user-supplied
   arguments are passed to `ssh` verbatim so existing SSH configuration
-  (ports, jump hosts, aliases) keeps working.
+  (ports, jump hosts, aliases) keeps working. The wrapper also enables
+  modest client keepalives by default (`ServerAliveInterval` /
+  `ServerAliveCountMax`) so idle Wi‑Fi or NAT paths do not silently kill
+  a long-lived TUI session; if the user already set either option, that
+  value is left alone.
 - Both ends of the invocation are user-overridable, by flag or persistent
   environment variable: the transport command replacing `ssh` (for
   OpenSSH-compatible wrappers like Teleport's `tsh ssh` or Eternal
