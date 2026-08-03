@@ -19,6 +19,7 @@ mod adapter;
 mod availability;
 mod channel_publication;
 mod config;
+mod console;
 mod cost_history;
 mod daemon_env;
 pub mod doctor;

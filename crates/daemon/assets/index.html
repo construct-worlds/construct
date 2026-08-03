@@ -2993,6 +2993,51 @@
     background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
 
+  /* ---- Console overlay ---------------------------------------------------
+     A full-viewport xterm running the construct TUI. It covers the app
+     rather than docking beside it: the TUI draws its own session list,
+     panes and modeline, so anything of ours left on screen would be a
+     second, disagreeing copy of the same chrome. */
+  .console-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+  }
+  .console-overlay[hidden] { display: none; }
+  .console-host {
+    flex: 1;
+    min-height: 0;
+    padding: 6px 8px 0;
+  }
+  .console-host .xterm { height: 100%; }
+  /* One thin strip of web chrome. The TUI swallows Escape, ctrl-chords and
+     everything else a page would normally close on, so the exit affordance
+     has to be pointable. */
+  .console-bar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 10px;
+    border-top: 1px solid var(--border);
+    font: 11px/1.4 var(--mono);
+    color: var(--fg-faint);
+  }
+  .console-bar button {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--fg-dim);
+    padding: 3px 8px;
+    cursor: pointer;
+    font: inherit;
+  }
+  .console-bar button:hover { color: var(--fg); border-color: var(--accent); }
+
   /* ---- Matrix theme: the full CRT construct ------------------------------
      Everything below reinstates the phosphor look for the opt-in "Matrix"
      theme only: monospace chrome, scanlines, glow, CRT terminal. The
@@ -3548,6 +3593,17 @@
           <option value="matrix">Matrix</option>
         </select>
       </label>
+      <!--
+        Console: run the daemon's own TUI in an xterm covering the page.
+        Hidden on narrow viewports — a full-screen TUI with no modifier
+        keys is worse than this web UI at everything a phone does.
+      -->
+      <div class="ns-row" id="consoleSettingsRow" hidden>
+        <span class="ns-label">console</span>
+        <button type="button" class="ns-input" id="openConsoleBtn"
+                style="cursor: pointer; text-align: left;"
+                title="Run the construct TUI in this browser">Open TUI console</button>
+      </div>
       <div class="approval-actions single">
         <button type="button" class="btn-approve" id="settingsClose">Done</button>
       </div>
@@ -3593,6 +3649,22 @@
         <button type="button" class="btn-deny" id="closeSessionDelete">Delete</button>
         <button type="button" class="btn-approve" id="closeSessionArchive">Archive</button>
       </div>
+    </div>
+  </div>
+
+  <!--
+    Console overlay: one xterm rendering the whole construct TUI, backed by
+    a PTY the daemon spawns for this websocket connection. Deliberately a
+    plain full-page surface rather than a pane in the web UI's own layout —
+    the TUI owns the entire grid, draws its own chrome, and every key it
+    sees must be its own. The only web chrome is the exit affordance, since
+    the TUI consumes the keystrokes a page would otherwise close on.
+  -->
+  <div id="consoleOverlay" class="console-overlay" hidden>
+    <div class="console-host" id="consoleHost"></div>
+    <div class="console-bar">
+      <span class="console-status" id="consoleStatus">console</span>
+      <button type="button" id="consoleCloseBtn" title="Close console">✕ close</button>
     </div>
   </div>
 
@@ -4571,6 +4643,12 @@ function connect() {
   ws.addEventListener("close", () => {
     setConnState("closed", "disconnected");
     state.ws = null;
+    // A console is owned by the socket that opened it, so this one is
+    // already dead daemon-side. Reconnecting gets a new connection, not the
+    // old console — so close ours rather than reattach to nothing.
+    if (typeof consoleUi !== "undefined" && consoleUi.open) {
+      closeConsole({ notifyDaemon: false });
+    }
     // Reject any in-flight calls so promises don't hang.
     for (const { reject } of state.pending.values()) {
       reject(new Error("ws closed"));
@@ -12933,6 +13011,21 @@ setInterval(() => {
 }, 3000);
 
 function handleNotification(method, params) {
+  if (method === "console/output") {
+    // Per-connection, so there is no session id to route on and no other
+    // client that could be showing this stream.
+    if (consoleUi.open && consoleUi.term) {
+      consoleUi.term.write(decodeBase64ToBytes(params.data || ""));
+    }
+    return;
+  }
+  if (method === "console/exit") {
+    // The TUI client exited — the user quit it, or it died. Either way the
+    // daemon has nothing left to stream, so drop the overlay rather than
+    // leave a frozen last frame that still takes keystrokes.
+    if (consoleUi.open) closeConsole({ notifyDaemon: false });
+    return;
+  }
   if (method === "service/channel-publication-state") {
     applyChannelPublicationState(params);
     return;
@@ -15780,6 +15873,160 @@ settingsSheetEl.addEventListener("click", (ev) => {
   if (ev.target === settingsSheetEl) closeSettingsSheet();
 });
 
+// --- Console: the construct TUI, rendered here ---------------------------
+//
+// The daemon spawns a PTY running its own TUI client for this websocket
+// connection and streams the bytes back; we paint them in an xterm and send
+// keystrokes the other way. That makes every TUI surface reachable from a
+// browser without this web UI having reimplemented it.
+//
+// A console belongs to one connection and has exactly one viewer, so none of
+// the shared-PTY geometry arbitration that session terminals need applies:
+// our fit is simply the size, and the daemon reaps the client when the socket
+// closes.
+const consoleOverlayEl = $("consoleOverlay");
+const consoleHostEl = $("consoleHost");
+const consoleStatusEl = $("consoleStatus");
+const consoleSettingsRowEl = $("consoleSettingsRow");
+
+const consoleUi = {
+  term: null,
+  fit: null,
+  resizeObserver: null,
+  open: false,
+  lastSize: { cols: 0, rows: 0 },
+};
+
+/** Desktop-only. A full-screen TUI on a phone has no modifier keys, no room
+ *  for the grid it wants, and is worse than this web UI at everything a
+ *  phone is actually used for — so the entry point isn't offered there. */
+function consoleAvailable() {
+  return window.matchMedia("(min-width: 760px)").matches;
+}
+
+function syncConsoleAvailability() {
+  if (consoleSettingsRowEl) consoleSettingsRowEl.hidden = !consoleAvailable();
+}
+
+function setConsoleStatus(text) {
+  if (consoleStatusEl) consoleStatusEl.textContent = text;
+}
+
+async function openConsole() {
+  if (consoleUi.open) return;
+  closeSettingsSheet();
+  if (!window.Terminal || !window.FitAddon) {
+    const ok = await waitForXterm(5000);
+    if (!ok) {
+      alert("terminal engine failed to load");
+      return;
+    }
+  }
+  consoleOverlayEl.hidden = false;
+  consoleUi.open = true;
+  setConsoleStatus("starting…");
+
+  const term = new window.Terminal({
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    fontSize: 13,
+    convertEol: false,
+    cursorBlink: true,
+    // The TUI lives on the alternate screen and repaints itself; scrollback
+    // would only ever hold torn frames from before it took the screen.
+    scrollback: 0,
+    // Alt-chords are a first-class part of the keymap, and on macOS the
+    // browser would otherwise hand xterm composed characters instead.
+    macOptionIsMeta: true,
+    theme: xtermThemeFor(),
+  });
+  const fit = new window.FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(consoleHostEl);
+  consoleUi.term = term;
+  consoleUi.fit = fit;
+
+  // The TUI owns the keyboard. Only combos the browser must keep for the
+  // page to remain usable — copy, paste, devtools — are declined here;
+  // everything else, chords included, is forwarded and preventDefault'd by
+  // xterm so the browser doesn't also act on it.
+  term.attachCustomKeyEventHandler((ev) => {
+    const browserReserved =
+      (ev.metaKey && !ev.ctrlKey && ["KeyC", "KeyV", "KeyX", "KeyA", "KeyR"].includes(ev.code)) ||
+      (ev.ctrlKey && ev.shiftKey && ["KeyC", "KeyV", "KeyI", "KeyJ"].includes(ev.code)) ||
+      ev.code === "F5" ||
+      ev.code === "F12";
+    return !browserReserved;
+  });
+
+  term.onData((data) => {
+    if (!consoleUi.open) return;
+    rpc("console.input", { data: encodeBase64Utf8(data) }).catch(() => {});
+  });
+
+  fit.fit();
+  const { cols, rows } = term;
+  consoleUi.lastSize = { cols, rows };
+  try {
+    await rpc("console.open", { cols, rows });
+    setConsoleStatus(`console · ${cols}×${rows}`);
+  } catch (e) {
+    setConsoleStatus(`failed: ${e.message}`);
+    term.write(`\r\n\x1b[31mconsole failed to start: ${e.message}\x1b[0m\r\n`);
+    return;
+  }
+
+  consoleUi.resizeObserver = new ResizeObserver(() => refitConsole());
+  consoleUi.resizeObserver.observe(consoleHostEl);
+  term.focus();
+}
+
+function refitConsole() {
+  if (!consoleUi.open || !consoleUi.fit || !consoleUi.term) return;
+  consoleUi.fit.fit();
+  const { cols, rows } = consoleUi.term;
+  if (cols === consoleUi.lastSize.cols && rows === consoleUi.lastSize.rows) return;
+  consoleUi.lastSize = { cols, rows };
+  setConsoleStatus(`console · ${cols}×${rows}`);
+  rpc("console.resize", { cols, rows }).catch(() => {});
+}
+
+/** Tear the console down. `notifyDaemon` is false when the console is
+ *  already gone daemon-side (its client exited, or the socket dropped and
+ *  took the console with it). */
+function closeConsole({ notifyDaemon = true } = {}) {
+  if (!consoleUi.open) return;
+  consoleUi.open = false;
+  if (notifyDaemon) rpc("console.close", null).catch(() => {});
+  if (consoleUi.resizeObserver) {
+    consoleUi.resizeObserver.disconnect();
+    consoleUi.resizeObserver = null;
+  }
+  if (consoleUi.term) {
+    consoleUi.term.dispose();
+    consoleUi.term = null;
+  }
+  consoleUi.fit = null;
+  consoleUi.lastSize = { cols: 0, rows: 0 };
+  consoleHostEl.innerHTML = "";
+  consoleOverlayEl.hidden = true;
+}
+
+if ($("openConsoleBtn")) $("openConsoleBtn").addEventListener("click", openConsole);
+if ($("consoleCloseBtn")) {
+  $("consoleCloseBtn").addEventListener("click", () => closeConsole());
+}
+// While the console is up the web keymap stands down, so anything that takes
+// focus off the terminal — the bar, the padding around the grid — leaves
+// keystrokes with no consumer at all. Hand focus straight back.
+consoleOverlayEl.addEventListener("mouseup", (ev) => {
+  if (!consoleUi.open || !consoleUi.term) return;
+  if (ev.target.closest("#consoleCloseBtn")) return;
+  if (consoleUi.term.hasSelection && consoleUi.term.hasSelection()) return;
+  consoleUi.term.focus();
+});
+window.addEventListener("resize", syncConsoleAvailability);
+syncConsoleAvailability();
+
 // --- Mobile keyboard awareness ------------------------------------------
 //
 // When the OS soft keyboard slides up on a phone, `visualViewport`
@@ -16554,6 +16801,11 @@ document.addEventListener(
   "keydown",
   (ev) => {
     if (ev.isComposing) return;
+    // The console renders a real TUI, which implements this exact keymap
+    // itself. Two consumers of one vocabulary means `C-x` opens a web dialog
+    // over a terminal that never saw the prefix — so while the console is up,
+    // the web keymap stands down and every key goes to the child.
+    if (typeof consoleUi !== "undefined" && consoleUi.open) return;
     if (handleChordKey(ev) || handleGlobalKey(ev)) {
       ev.preventDefault();
       ev.stopPropagation();

@@ -808,6 +808,7 @@ dependencies = [
  "httparse",
  "libc",
  "nix 0.29.0",
+ "portable-pty",
  "qrcode",
  "rcgen",
  "reqwest",
