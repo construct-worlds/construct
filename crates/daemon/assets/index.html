@@ -2412,10 +2412,13 @@
     background: var(--bg-elev);
   }
   .lineage-section[hidden] { display: none !important; }
-  .lineage-section.is-collapsed .lineage-body,
-  .lineage-section.is-collapsed .lineage-resize { display: none; }
+  .lineage-section.is-collapsed .lineage-body { display: none; }
   .lineage-section.is-collapsed {
     flex: 0 0 auto;
+  }
+  .lineage-section,
+  .operator-panel {
+    position: relative;
   }
   .lineage-header,
   .operator-header {
@@ -2673,9 +2676,15 @@
     font-size: 11px;
     font-style: italic;
   }
+  /* Drag handle sits on the TOP border of the title bar (not under it). */
   .lineage-resize,
   .operator-resize {
-    flex: 0 0 4px;
+    position: absolute;
+    top: -3px;
+    left: 0;
+    right: 0;
+    height: 7px;
+    z-index: 4;
     cursor: row-resize;
     background: transparent;
   }
@@ -2695,8 +2704,7 @@
     border-top: 1px solid var(--border);
     background: var(--bg);
   }
-  .operator-panel.is-collapsed .operator-body,
-  .operator-panel.is-collapsed .operator-resize {
+  .operator-panel.is-collapsed .operator-body {
     display: none;
   }
   .operator-body {
@@ -3631,6 +3639,9 @@
         Hidden until the selection has messages or lineage to show.
       -->
       <section class="lineage-section" id="lineageSection" hidden>
+        <!-- Resize handle on the TOP border of the title bar (TUI parity). -->
+        <div class="lineage-resize" id="lineageResize" role="separator"
+             aria-orientation="horizontal" aria-label="resize lineage"></div>
         <div class="lineage-header" id="lineageHeader">
           <span class="section-title">⑂ lineage</span>
           <button type="button" id="lineageModeBtn" aria-label="toggle lineage view mode"
@@ -3638,8 +3649,6 @@
           <button type="button" id="lineageCollapseBtn" aria-label="collapse lineage"
                   title="Collapse">−</button>
         </div>
-        <div class="lineage-resize" id="lineageResize" role="separator"
-             aria-orientation="horizontal" aria-label="resize lineage"></div>
         <div class="lineage-body" id="lineageBody" role="tree" aria-label="session lineage"></div>
       </section>
       <!--
@@ -3648,6 +3657,9 @@
         sidebar like the TUI matrix-rain region.
       -->
       <section class="operator-panel" id="operatorPanel">
+        <!-- Resize handle on the TOP border of the title bar (TUI parity). -->
+        <div class="operator-resize" id="operatorResize" role="separator"
+             aria-orientation="horizontal" aria-label="resize operator panel"></div>
         <div class="operator-header" id="operatorHeader">
           <span class="section-title" id="operatorTitle">operator</span>
           <button type="button" id="operatorModeBtn" aria-label="toggle operator panel mode"
@@ -3655,8 +3667,6 @@
           <button type="button" id="operatorCollapseBtn" aria-label="collapse operator panel"
                   title="Collapse">−</button>
         </div>
-        <div class="operator-resize" id="operatorResize" role="separator"
-             aria-orientation="horizontal" aria-label="resize operator panel"></div>
         <div class="operator-body" id="operatorBody">
           <div class="operator-meter" id="operatorMeter">
             <canvas class="operator-meter-graph" id="operatorMeterGraph" width="260" height="90"
