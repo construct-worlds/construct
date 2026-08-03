@@ -2478,6 +2478,7 @@
     flex-direction: column;
     gap: 0;
     min-width: min(100%, 280px);
+    padding: 4px 2px 8px; /* TUI keeps one blank row above/below the diagram */
     --ln-rail: color-mix(in srgb, var(--fg) 22%, transparent);
     --ln-rail-hot: color-mix(in srgb, var(--fg) 55%, transparent);
     --ln-dim: var(--fg-dim);
@@ -2568,9 +2569,6 @@
     opacity: 1;
     font-weight: 700;
     color: var(--ln-hi-fg);
-  }
-  .ln-card.is-focus:not(.is-selected) {
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
   }
   /* TUI strikes the name only — not the whole row. */
   .ln-card.is-discarded .ln-title {
@@ -2665,8 +2663,8 @@
     color: var(--ln-dim);
     font-size: 11px;
     line-height: 1;
-    /* Punch a hole in the rail under the bullet without a visible plate. */
-    background: var(--bg-elev);
+    /* Cover the rail under the glyph; match section surface. */
+    background: var(--bg-elev, var(--bg));
   }
   .ln-segment.is-ok .ln-seg-mark { color: var(--ok); }
   .ln-segment.is-bad .ln-seg-mark { color: var(--warn); }
@@ -2720,10 +2718,16 @@
     position: absolute;
     left: 0;
     top: 0;
-    bottom: 12px;
+    /* Stop at the last branch's connector height (~card midline), not past
+       the stack — a hanging rail below the last child looks unfinished. */
+    bottom: auto;
+    height: calc(100% - 14px);
     width: 2px;
     border-radius: 1px;
     background: var(--ln-rail);
+  }
+  .ln-children:has(> :only-child)::before {
+    height: 14px; /* single child: just the stub height */
   }
   .ln-node:hover:not(:has(.ln-node:hover)) > .ln-children::before,
   .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-children::before {
@@ -2763,7 +2767,7 @@
     font-size: 11px;
     line-height: 1;
     color: var(--ln-dim);
-    background: var(--bg-elev);
+    background: var(--bg-elev, var(--bg));
     padding: 0 1px;
     pointer-events: none;
     user-select: none;
@@ -2773,15 +2777,15 @@
     top: 4px;
     font-size: 10px;
   }
-  /* Light only the edge of the hot leaf branch / selected descendant. */
+  /* Light only the edge for the hot leaf or the branch into a selected child
+     (not the whole path of ancestors — TUI only brightens the owned session). */
   .ln-branch:has(> .ln-node:hover:not(:has(.ln-node:hover))) > .ln-edge,
-  .ln-branch:has(.ln-card.is-selected):not(:has(.ln-node:hover .ln-card.is-selected)) > .ln-edge,
-  .ln-branch:has(> .ln-node:hover:not(:has(.ln-node:hover)) > .ln-card.is-selected) > .ln-edge {
+  .ln-branch:has(> .ln-node > .ln-card.is-selected) > .ln-edge {
     color: var(--ln-text);
     font-weight: 700;
   }
   .ln-branch:has(> .ln-node:hover:not(:has(.ln-node:hover)))::before,
-  .ln-branch:has(.ln-card.is-selected):not(:has(.ln-node:hover .ln-card.is-selected))::before {
+  .ln-branch:has(> .ln-node > .ln-card.is-selected)::before {
     background: var(--ln-rail-hot);
   }
   .ln-edge.edge-reset { color: var(--warn); }
@@ -2821,6 +2825,14 @@
   .ln-more:hover {
     color: var(--ln-muted);
     background: transparent;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ln-card,
+    .ln-lane::before,
+    .ln-segment,
+    .ln-children::before {
+      transition: none !important;
+    }
   }
 
   .lineage-empty {
@@ -5338,35 +5350,6 @@ function sessionTimeMs(v) {
   return Number.isFinite(t) ? t : 0;
 }
 
-function tokenTallyOf(v) {
-  if (!v || typeof v !== "object") return { input: 0, output: 0, cached: 0 };
-  return {
-    input: Number(v.input || 0),
-    output: Number(v.output || 0),
-    cached: Number(v.cached || 0),
-  };
-}
-function tokenTallyZero(t) {
-  return !t || (t.input === 0 && t.output === 0 && t.cached === 0);
-}
-function tokenTallyTotal(t) {
-  return (t.input || 0) + (t.output || 0);
-}
-function tokenTallySub(a, b) {
-  return {
-    input: Math.max(0, (a.input || 0) - (b.input || 0)),
-    output: Math.max(0, (a.output || 0) - (b.output || 0)),
-    cached: Math.max(0, (a.cached || 0) - (b.cached || 0)),
-  };
-}
-function tokenTallyMax(a, b) {
-  return {
-    input: Math.max(a.input || 0, b.input || 0),
-    output: Math.max(a.output || 0, b.output || 0),
-    cached: Math.max(a.cached || 0, b.cached || 0),
-  };
-}
-
 function buildLineageTree(focusId, sessions, expanded) {
   const byId = new Map(sessions.map((s) => [s.id, s]));
   if (!byId.has(focusId)) return null;
@@ -5596,7 +5579,7 @@ function buildLineageSegmentEl(summary, sessionId) {
   return el;
 }
 
-function buildLineageCardEl(node, byId, focusId) {
+function buildLineageCardEl(node, byId, depth = 0) {
   const wrap = document.createElement("div");
   wrap.className = "ln-node";
   wrap.dataset.sessionId = node.session_id;
@@ -5614,10 +5597,10 @@ function buildLineageCardEl(node, byId, focusId) {
   const card = document.createElement("div");
   card.className = "ln-card"
     + (node.session_id === state.currentId ? " is-selected" : "")
-    + (node.session_id === focusId ? " is-focus" : "")
     + (forkStatusOf(summary) === "discarded" ? " is-discarded" : "");
   card.dataset.sessionId = node.session_id;
   card.setAttribute("role", "treeitem");
+  card.setAttribute("aria-level", String(depth + 1));
   card.setAttribute("aria-selected", node.session_id === state.currentId ? "true" : "false");
 
   const statusEl = document.createElement("span");
@@ -5664,9 +5647,11 @@ function buildLineageCardEl(node, byId, focusId) {
       btn.className = "ln-toggle";
       btn.dataset.role = "subagents-toggle";
       btn.dataset.parentId = node.session_id;
+      btn.setAttribute("aria-expanded", child.expanded ? "true" : "false");
       const chev = document.createElement("span");
       chev.className = "ln-chevron";
       chev.textContent = child.expanded ? "▾" : "▸";
+      chev.setAttribute("aria-hidden", "true");
       btn.appendChild(chev);
       const label = document.createElement("span");
       // TUI: "▸ N subagents · M running" / "▾ N subagents"
@@ -5701,7 +5686,7 @@ function buildLineageCardEl(node, byId, focusId) {
         : cEdge === "subagent" ? "subagent" : "";
       branch.appendChild(edge);
     }
-    branch.appendChild(buildLineageCardEl(child, byId, focusId));
+    branch.appendChild(buildLineageCardEl(child, byId, depth + 1));
     children.appendChild(branch);
   }
   wrap.appendChild(children);
@@ -5724,6 +5709,7 @@ function lineageTreeSignature(node, byId) {
     // Omit live busy_ms — it ticks every second on Running sessions and
     // would force a full DOM rebuild; duration text refreshes with state/tok.
     s ? String(s.merge && s.merge.mode || "") : "",
+    s && s.archived ? "A" : "",
     node.session_id === state.currentId ? "1" : "0",
   ];
   for (const ch of node.children || []) {
@@ -5790,10 +5776,19 @@ function renderLineageSection() {
   graph.className = "lineage-graph" + (state.lineageMode === "rails" ? " is-compact" : "");
   graph.setAttribute("role", "tree");
   graph.setAttribute("aria-label", "session lineage");
-  graph.appendChild(buildLineageCardEl(tree, byId, focusId));
+  graph.appendChild(buildLineageCardEl(tree, byId, 0));
   lineageBodyEl.replaceChildren(graph);
   lineageBodyEl.__lineageSig = sig;
   lineageBodyEl.scrollTop = scrollTop;
+  // Keep the selected session's box in view after a jump from the list.
+  const selectedCard = lineageBodyEl.querySelector(".ln-card.is-selected");
+  if (selectedCard) {
+    const bodyRect = lineageBodyEl.getBoundingClientRect();
+    const cardRect = selectedCard.getBoundingClientRect();
+    if (cardRect.top < bodyRect.top || cardRect.bottom > bodyRect.bottom) {
+      selectedCard.scrollIntoView({ block: "nearest", behavior: "auto" });
+    }
+  }
 }
 
 function bindLineageSection() {
@@ -5829,15 +5824,13 @@ function bindLineageSection() {
         renderLineageSection();
         return;
       }
-      // TUI: any cell a session owns (box, lane, segment) jumps to it.
-      const hit = e.target.closest(".ln-card[data-session-id], .ln-segment[data-session-id], .ln-node[data-session-id]");
-      if (!hit) return;
-      // Don't treat the outer parent node as the target when a child was clicked.
-      const node = e.target.closest(".ln-node[data-session-id]");
-      const sid = (hit.classList.contains("ln-card") || hit.classList.contains("ln-segment"))
-        ? hit.dataset.sessionId
-        : (node && node.dataset.sessionId);
-      if (sid) selectSession(sid);
+      // TUI: any cell a session owns (box, lane bar area, segment) jumps to it.
+      // Prefer the innermost card/segment so a nested click doesn't select a parent.
+      const owned = e.target.closest(".ln-card[data-session-id], .ln-segment[data-session-id]");
+      if (owned && owned.dataset.sessionId) {
+        selectSession(owned.dataset.sessionId);
+        return;
+      }
     });
   }
   bindVerticalResize(lineageResizeEl, {
@@ -7545,6 +7538,27 @@ function refreshLineageActivityGlyphs(now = Date.now()) {
     const status = sessionStatusLabel(s);
     const next = `ln-status state state-${status}` + (active ? " is-active" : "");
     if (el.className !== next) el.className = next;
+  }
+  // Refresh turn-info text (busy duration ticks) without a full rebuild.
+  for (const seg of lineageBodyEl.querySelectorAll(".ln-segment[data-session-id]")) {
+    if (seg.classList.contains("is-empty")) continue;
+    const s = byId.get(seg.dataset.sessionId);
+    if (!s) continue;
+    const info = lineageSegmentInfo(s);
+    if (!info) continue;
+    const textEl = seg.querySelector(".ln-seg-text");
+    if (textEl && textEl.textContent !== info.text) textEl.textContent = info.text;
+    // Promote/demote outcome class if the session just finished.
+    const wantOk = info.outcome === "ok";
+    const wantBad = info.outcome === "bad";
+    if (seg.classList.contains("is-ok") !== wantOk) seg.classList.toggle("is-ok", wantOk);
+    if (seg.classList.contains("is-bad") !== wantBad) seg.classList.toggle("is-bad", wantBad);
+    const mark = seg.querySelector(".ln-seg-mark");
+    if (mark && info.outcome) {
+      if (!mark.classList.contains("is-outcome")) mark.classList.add("is-outcome");
+      if (mark.textContent !== info.mark) mark.textContent = info.mark;
+      mark.removeAttribute("data-session-id"); // stop spinner on terminal
+    }
   }
 }
 
