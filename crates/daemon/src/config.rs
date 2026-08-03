@@ -216,14 +216,28 @@ enabled = true
 #
 # These profiles are ALSO the route targets used by [router] below: with
 # routing enabled, each one appears in the TUI's route picker for any
-# route-capable session. `openai` / `grok` / `anthropic` profiles are
-# selectable from a `claude` session (the first two via translation);
-# `meta` / `ollama` are shown with the reason they are not.
+# route-capable session. `anthropic` / `openai` / `grok` / `meta` / `gemini`
+# profiles are all selectable from a `claude` session (every one but
+# `anthropic` via translation); `ollama`'s native API is shown with the
+# reason it is not.
+#
+# Every direct-API-key provider below is BUILT IN: export its key and it is
+# already a route target, with nothing to declare here (spec 0179).
+#
+#   ANTHROPIC_API_KEY              -> anthropic  (claude-opus-4-8)
+#   OPENAI_API_KEY                 -> openai     (gpt-5)
+#   GEMINI_API_KEY / GOOGLE_API_KEY-> gemini     (gemini-2.5-pro)
+#   META_API_KEY / MODEL_API_KEY   -> meta       (muse-spark-1.1)
+#   GROK_API_KEY / XAI_API_KEY     -> grok       (grok-4.5)
+#   DEEPSEEK_API_KEY               -> deepseek   (deepseek-v4-pro)
+#
+# The key must be in the DAEMON's environment (or [daemon.env] below), and a
+# restart picks it up. Declare a profile with one of those names only to
+# override the endpoint, key, or default model — a declared profile replaces
+# the built-in entirely rather than adding a second entry.
 
-# DeepSeek is built in: export DEEPSEEK_API_KEY and it is already a route
-# target and a `deepseek:<model>` prefix for smith — no profile needed.
-# Declare one only to override the endpoint, key, or default model; a profile
-# named `deepseek` replaces the built-in entirely.
+# The built-in DeepSeek target, written out. Identical to what DEEPSEEK_API_KEY
+# gives you for free; shown here as the shape to copy when overriding one.
 # [smith.models.deepseek]
 # provider    = "deepseek"
 # base_url    = "https://api.deepseek.com/v1"
@@ -289,8 +303,8 @@ enabled = true
 # applies only where that variable is not already set to a non-empty value, so
 # whatever you export for a given run always wins.
 #
-# It covers the credentials the daemon itself resolves — built-in route targets
-# (e.g. DeepSeek), `[smith.models.*]` profiles that name no key, and what
+# It covers the credentials the daemon itself resolves — the built-in route
+# targets listed above, `[smith.models.*]` profiles that name no key, and what
 # /configure and `construct doctor` report — and is passed down as the base
 # environment of every process the daemon spawns: session adapters, title
 # generation, suggestions.
@@ -405,13 +419,14 @@ enabled = true
 # gateway is loopback-only and capability-scoped to the session; Construct
 # leaves an existing ANTHROPIC_BASE_URL untouched.
 #
-# Route targets are the [smith.models.*] profiles below — declare an
-# endpoint once and it is reachable from both smith and a routed session.
+# Route targets are the built-in API-key providers listed above plus the
+# [smith.models.*] profiles — declare an endpoint once and it is reachable
+# from both smith and a routed session.
 # When the target's dialect differs from the harness's, the router
 # translates through a canonical form. Anthropic Messages, OpenAI Chat
-# Completions, OpenAI Responses (including Azure), and Google Gemini are
-# supported. Providers with no translator — meta and Ollama's native API —
-# are listed in the picker with that reason and cannot be selected. An
+# Completions, OpenAI Responses (including Azure and Meta), and Google Gemini
+# are supported. Providers with no translator — Ollama's native API — are
+# listed in the picker with that reason and cannot be selected. An
 # OpenAI-compatible server (including Ollama's own /v1
 # endpoint) can be reached by declaring it as `provider = "openai"` with
 # its base_url.
@@ -648,6 +663,82 @@ pub const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 /// [`SmithConfig::route_profiles`]).
 pub const DEEPSEEK_ROUTE_NAME: &str = "deepseek";
 
+/// One built-in API-key route target (spec 0179): a provider with a single
+/// well-known public endpoint, which becomes a route target the moment its
+/// key is present in the daemon's environment — no config block required.
+pub struct BuiltinTarget {
+    /// Route name the built-in claims. A user-declared `[smith.models.*]`
+    /// profile of the same name replaces the built-in entirely.
+    pub route: &'static str,
+    /// Wire provider, which the router maps to a dialect. A provider with no
+    /// translator must never be listed here: it would appear in the picker
+    /// only to report that it cannot be selected, which is exactly what a
+    /// built-in is meant to avoid.
+    pub provider: &'static str,
+    /// Public endpoint. Asserting one here is asserting the vendor has
+    /// exactly one — anything region-, tenant-, or deployment-specific stays
+    /// declaration-only.
+    pub base_url: &'static str,
+    /// Env vars carrying the credential, in the order they are consulted.
+    /// The target exists when any of them resolves.
+    pub key_envs: &'static [&'static str],
+    /// Model the target sends when none is chosen. The picker's remaining
+    /// models come from the shared catalog via `models_for_provider`.
+    pub default_model: &'static str,
+}
+
+/// Every built-in API-key route target (spec 0179).
+///
+/// Each entry is a deliberate per-provider decision, not a sweep: the
+/// endpoint must be the vendor's only one, and the router must have a
+/// translator for the wire provider. The default models mirror smith's own
+/// auto-detect ladder, so a route's default is the same model an unpinned
+/// smith session would pick from the same key.
+pub const BUILTIN_TARGETS: &[BuiltinTarget] = &[
+    BuiltinTarget {
+        route: "anthropic",
+        provider: "anthropic",
+        base_url: "https://api.anthropic.com/v1",
+        key_envs: &["ANTHROPIC_API_KEY"],
+        default_model: "claude-opus-4-8",
+    },
+    BuiltinTarget {
+        route: "openai",
+        provider: "openai",
+        base_url: "https://api.openai.com/v1",
+        key_envs: &["OPENAI_API_KEY"],
+        default_model: "gpt-5",
+    },
+    BuiltinTarget {
+        route: "gemini",
+        provider: "gemini",
+        base_url: "https://generativelanguage.googleapis.com/v1beta",
+        key_envs: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        default_model: "gemini-2.5-pro",
+    },
+    BuiltinTarget {
+        route: "meta",
+        provider: "meta",
+        base_url: "https://api.meta.ai/v1",
+        key_envs: &["META_API_KEY", "MODEL_API_KEY"],
+        default_model: "muse-spark-1.1",
+    },
+    BuiltinTarget {
+        route: "grok",
+        provider: "grok",
+        base_url: "https://api.x.ai/v1",
+        key_envs: &["GROK_API_KEY", "XAI_API_KEY"],
+        default_model: "grok-4.5",
+    },
+    BuiltinTarget {
+        route: DEEPSEEK_ROUTE_NAME,
+        provider: DEEPSEEK_ROUTE_NAME,
+        base_url: DEEPSEEK_BASE_URL,
+        key_envs: &[DEEPSEEK_API_KEY_ENV],
+        default_model: "deepseek-v4-pro",
+    },
+];
+
 /// `[smith]` — only the `models` table is read by the daemon. Smith parses
 /// this same section itself for its own `/model @<name>` switching; the
 /// daemon reads it so the router can offer the same endpoints as route
@@ -666,20 +757,29 @@ impl SmithConfig {
     /// A built-in exists so a provider with one well-known endpoint costs the
     /// user an env var rather than a config block. It is *only* a default: a
     /// declared profile of the same name always wins, so pinning a different
-    /// base URL, key, or model for `deepseek` still works.
+    /// base URL, key, or model for any of them still works.
     pub fn route_profiles(&self) -> BTreeMap<String, ModelProfile> {
         let mut profiles = self.models.clone();
-        if !profiles.contains_key(DEEPSEEK_ROUTE_NAME) && env_var_present(DEEPSEEK_API_KEY_ENV) {
+        for target in BUILTIN_TARGETS {
+            if profiles.contains_key(target.route) {
+                continue;
+            }
+            // The first var that actually resolves becomes the profile's
+            // `api_key_env`, so the picker's blocker names the variable the
+            // credential really came from.
+            let Some(key_env) = target.key_envs.iter().find(|v| env_var_present(v)) else {
+                continue;
+            };
             profiles.insert(
-                DEEPSEEK_ROUTE_NAME.to_string(),
+                target.route.to_string(),
                 ModelProfile {
-                    provider: DEEPSEEK_ROUTE_NAME.to_string(),
-                    base_url: Some(DEEPSEEK_BASE_URL.to_string()),
-                    api_key_env: Some(DEEPSEEK_API_KEY_ENV.to_string()),
+                    provider: target.provider.to_string(),
+                    base_url: Some(target.base_url.to_string()),
+                    api_key_env: Some((*key_env).to_string()),
                     api_key: None,
                     // The picker's remaining models come from the shared
                     // catalog via `models_for_provider`; this is the default.
-                    model: Some("deepseek-v4-pro".to_string()),
+                    model: Some(target.default_model.to_string()),
                 },
             );
         }
@@ -1376,26 +1476,49 @@ mod tests {
         );
     }
 
-    /// Run `f` with `DEEPSEEK_API_KEY` set to `value` (or unset for `None`),
-    /// restoring whatever the environment had before.
+    /// Run `f` with *every* built-in key env cleared except the pairs in
+    /// `set`, restoring whatever the environment had before.
     ///
-    /// Takes the crate-wide env guard, not a lock private to this module: the
-    /// variable is process-global, and `smith_auth_methods` in `availability`
-    /// reads it too. A private lock would let this test's `set_var` window
-    /// overlap that test's read.
-    fn with_deepseek_key<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+    /// Clearing all of them is what makes these tests describe the fixture
+    /// rather than the developer's shell: now that every direct-API-key
+    /// provider is a built-in, an exported `ANTHROPIC_API_KEY` would add a
+    /// route target no test asked for, and the counts below would pass or
+    /// fail depending on whose machine ran them.
+    ///
+    /// Takes the crate-wide env guard, not a lock private to this module:
+    /// these variables are process-global, and `smith_auth_methods` in
+    /// `availability` reads them too. A private lock would let this test's
+    /// `set_var` window overlap that test's read.
+    fn with_builtin_keys<T>(set: &[(&str, &str)], f: impl FnOnce() -> T) -> T {
         let _lock = crate::router::oauth::test_env_guard();
-        let saved = std::env::var(DEEPSEEK_API_KEY_ENV).ok();
-        match value {
-            Some(v) => std::env::set_var(DEEPSEEK_API_KEY_ENV, v),
-            None => std::env::remove_var(DEEPSEEK_API_KEY_ENV),
+        let all: Vec<&str> = BUILTIN_TARGETS
+            .iter()
+            .flat_map(|t| t.key_envs.iter().copied())
+            .collect();
+        let saved: Vec<(&str, Option<String>)> =
+            all.iter().map(|v| (*v, std::env::var(v).ok())).collect();
+        for v in &all {
+            std::env::remove_var(v);
+        }
+        for (k, v) in set {
+            std::env::set_var(k, v);
         }
         let out = f();
-        match saved {
-            Some(v) => std::env::set_var(DEEPSEEK_API_KEY_ENV, v),
-            None => std::env::remove_var(DEEPSEEK_API_KEY_ENV),
+        for (v, prior) in saved {
+            match prior {
+                Some(prior) => std::env::set_var(v, prior),
+                None => std::env::remove_var(v),
+            }
         }
         out
+    }
+
+    /// The common case: only DeepSeek's key is set.
+    fn with_deepseek_key<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        match value {
+            Some(v) => with_builtin_keys(&[(DEEPSEEK_API_KEY_ENV, v)], f),
+            None => with_builtin_keys(&[], f),
+        }
     }
 
     /// A `deepseek` provider resolves to the same endpoint and credential
@@ -1424,6 +1547,162 @@ mod tests {
             Some(crate::router::Dialect::OpenAiChat),
             "a built-in target that no dialect can serve would be listed but unusable"
         );
+    }
+
+    /// Every built-in must be usable the moment it is listed. A route whose
+    /// provider no dialect can serve, or whose endpoint disagrees with what
+    /// the same profile would resolve on its own, is a target the picker
+    /// offers and then refuses — the failure mode spec 0179 exists to
+    /// prevent. This is the guard for adding a new entry to the table.
+    #[test]
+    fn every_builtin_target_is_routable_and_self_consistent() {
+        for target in BUILTIN_TARGETS {
+            assert!(
+                crate::router::provider_dialect(target.provider).is_some(),
+                "built-in {:?} has no translator for provider {:?}: it would be \
+                 listed but never selectable",
+                target.route,
+                target.provider
+            );
+            assert!(
+                !target.key_envs.is_empty(),
+                "built-in {:?} has no credential to detect",
+                target.route
+            );
+            // A built-in resolves to the same place whether it reaches the
+            // router synthesized here or declared by hand as `provider =
+            // "<provider>"` with no base_url.
+            let bare = ModelProfile {
+                provider: target.provider.to_string(),
+                base_url: None,
+                api_key_env: None,
+                api_key: None,
+                model: None,
+            };
+            assert_eq!(
+                bare.resolved_base_url().as_deref(),
+                Some(target.base_url),
+                "built-in {:?} points somewhere its own provider default does not",
+                target.route
+            );
+            assert_eq!(
+                bare.default_key_envs(),
+                target.key_envs,
+                "built-in {:?} detects a different key than the profile would resolve",
+                target.route
+            );
+            assert!(
+                !target.default_model.trim().is_empty(),
+                "built-in {:?} sets no model, so it could never be armed",
+                target.route
+            );
+        }
+    }
+
+    /// Route names are a shared namespace, so two built-ins claiming one name
+    /// would make which endpoint you get depend on table order.
+    #[test]
+    fn builtin_route_names_are_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for target in BUILTIN_TARGETS {
+            assert!(
+                seen.insert(target.route),
+                "duplicate built-in route name {:?}",
+                target.route
+            );
+        }
+    }
+
+    /// The generalization (spec 0179's retrofit clause): a key alone makes
+    /// each of these a route target, with no config block anywhere.
+    #[test]
+    fn every_direct_api_key_provider_is_a_builtin_target() {
+        let cfg: Config = toml::from_str("").expect("parse");
+        for target in BUILTIN_TARGETS {
+            // Every assertion runs inside the closure: the guard restores the
+            // real environment on the way out, and `resolve_api_key` reads it
+            // live rather than off the profile.
+            with_builtin_keys(&[(target.key_envs[0], "sk-test")], || {
+                let profiles = cfg.smith.route_profiles();
+                let built = profiles
+                    .get(target.route)
+                    .unwrap_or_else(|| panic!("{:?} should be a built-in target", target.route));
+                assert_eq!(built.provider, target.provider);
+                assert_eq!(built.resolved_base_url().as_deref(), Some(target.base_url));
+                assert_eq!(built.model.as_deref(), Some(target.default_model));
+                assert_eq!(built.resolve_api_key().as_deref(), Ok("sk-test"));
+                assert_eq!(
+                    profiles.len(),
+                    1,
+                    "only {:?}'s key was set, so it must be the only target",
+                    target.route
+                );
+            });
+        }
+    }
+
+    /// A provider with two accepted key vars is reachable through either —
+    /// the second is not a decorative alias.
+    #[test]
+    fn an_alternate_key_env_also_creates_the_target() {
+        let cfg: Config = toml::from_str("").expect("parse");
+        for target in BUILTIN_TARGETS.iter().filter(|t| t.key_envs.len() > 1) {
+            for key_env in target.key_envs {
+                with_builtin_keys(&[(key_env, "sk-alt")], || {
+                    let profiles = cfg.smith.route_profiles();
+                    let built = profiles.get(target.route).unwrap_or_else(|| {
+                        panic!("{:?} should be reachable via {key_env}", target.route)
+                    });
+                    // The profile names the var the credential really came
+                    // from, so a blocker later names the one the user set.
+                    assert_eq!(built.api_key_env.as_deref(), Some(*key_env));
+                    assert_eq!(built.resolve_api_key().as_deref(), Ok("sk-alt"));
+                });
+            }
+        }
+    }
+
+    /// Built-ins are independent: one key does not conjure the others, and
+    /// several keys produce several targets.
+    #[test]
+    fn builtin_targets_appear_only_for_the_keys_that_are_set() {
+        let cfg: Config = toml::from_str("").expect("parse");
+        let profiles = with_builtin_keys(
+            &[("ANTHROPIC_API_KEY", "sk-ant"), ("GROK_API_KEY", "xai-key")],
+            || cfg.smith.route_profiles(),
+        );
+        assert!(profiles.contains_key("anthropic"));
+        assert!(profiles.contains_key("grok"));
+        assert!(!profiles.contains_key("openai"));
+        assert!(!profiles.contains_key("gemini"));
+        assert!(!profiles.contains_key(DEEPSEEK_ROUTE_NAME));
+        assert_eq!(profiles.len(), 2);
+    }
+
+    /// The collision rule holds for every built-in, not just DeepSeek: a
+    /// declared profile of the same name replaces it entirely, so pointing
+    /// `openai` at an internal gateway keeps working after this change.
+    #[test]
+    fn a_declared_profile_beats_every_builtin() {
+        let toml = r#"
+            [smith.models.openai]
+            provider = "openai"
+            base_url = "https://gateway.internal/v1"
+            api_key_env = "WORK_OPENAI_KEY"
+            model = "gpt-5-mini"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        let profiles = with_builtin_keys(&[("OPENAI_API_KEY", "sk-public")], || {
+            cfg.smith.route_profiles()
+        });
+        let openai = profiles.get("openai").expect("declared profile");
+        assert_eq!(
+            openai.resolved_base_url().as_deref(),
+            Some("https://gateway.internal/v1")
+        );
+        assert_eq!(openai.api_key_env.as_deref(), Some("WORK_OPENAI_KEY"));
+        assert_eq!(openai.model.as_deref(), Some("gpt-5-mini"));
+        assert_eq!(profiles.len(), 1, "the built-in must not be added alongside");
     }
 
     /// No key, no target: the picker must not advertise an endpoint that

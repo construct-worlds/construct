@@ -28,10 +28,27 @@ A target is somewhere the router can send a model request:
   reads those credentials from the owning CLI's store and never refreshes
   them; an expired login is reported with the command to renew it.
 - **Built-in API-key providers** are offered as soon as their key is in the
-  daemon's environment, with nothing to declare. `DEEPSEEK_API_KEY` alone
-  makes DeepSeek a route target (spec 0179). Declaring a profile under the
-  same name replaces the built-in, so a private gateway or second account
-  still overrides it.
+  daemon's environment, with nothing to declare (spec 0179). Every
+  direct-API-key provider Construct speaks to is built in:
+
+  | Key | Route | Default model |
+  | :--- | :--- | :--- |
+  | `ANTHROPIC_API_KEY` | `anthropic` | `claude-opus-4-8` |
+  | `OPENAI_API_KEY` | `openai` | `gpt-5` |
+  | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `gemini` | `gemini-2.5-pro` |
+  | `META_API_KEY` / `MODEL_API_KEY` | `meta` | `muse-spark-1.1` |
+  | `GROK_API_KEY` / `XAI_API_KEY` | `grok` | `grok-4.5` |
+  | `DEEPSEEK_API_KEY` | `deepseek` | `deepseek-v4-pro` |
+
+  The default model is only the default — the picker offers the rest of that
+  provider's catalog too. Declaring a profile under the same name replaces
+  the built-in, so a private gateway or second account still overrides it.
+  The key has to be in the *daemon's* environment (or `[daemon.env]`), so a
+  key exported after the daemon started needs a restart to take effect.
+
+  Providers with both an API key and a subscription login (Claude, Codex,
+  Grok) show both, side by side — they are different billing paths, not
+  duplicates.
 
   DeepSeek's reasoning effort is offered per model: `deepseek-v4-flash`
   exposes `low` / `high` / `max` (default `high`), and `deepseek-v4-pro`
@@ -52,9 +69,11 @@ A target is somewhere the router can send a model request:
 
 When the target speaks a different wire dialect than the harness, the
 router translates through a canonical form: Anthropic Messages, OpenAI
-Chat Completions, OpenAI Responses (including Azure), and Google Gemini
-are supported. Targets with no translator are still listed in the picker,
-with the reason they can't be selected.
+Chat Completions, OpenAI Responses (including Azure and Meta), and Google
+Gemini are supported. Targets with no translator — Ollama's native API — are
+still listed in the picker, with the reason they can't be selected. Ollama's
+own OpenAI-compatible `/v1` endpoint is routable: declare it as
+`provider = "openai"`.
 
 A target appears only when it is actually usable — a credential the router
 can read, or a configured endpoint with its key present. A fresh machine
@@ -69,8 +88,13 @@ offer, so pickers stay native-only until one of those exists.
 | `codex-oauth` | Subscription Login | OpenAI Responses | `https://chatgpt.com/backend-api/codex/responses` | Auto-discovered from Codex CLI store (read-only token) |
 | `grok-oauth` | Subscription Login | OpenAI Chat Completions | `https://api.x.ai/v1/chat/completions` | Auto-discovered from Grok CLI store (read-only token) |
 | `kimi-oauth` | Subscription Login | Anthropic Messages | `https://api.kimi.com/coding/v1/messages` | Auto-discovered from Kimi CLI store (read-only token) |
+| `anthropic` | Built-in API Key | Anthropic Messages | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` in the daemon's environment |
+| `openai` | Built-in API Key | OpenAI Chat Completions | `https://api.openai.com/v1` | `OPENAI_API_KEY` in the daemon's environment |
+| `gemini` | Built-in API Key | Google Gemini | `https://generativelanguage.googleapis.com/v1beta` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` in the daemon's environment |
+| `meta` | Built-in API Key | OpenAI Responses | `https://api.meta.ai/v1` | `META_API_KEY` / `MODEL_API_KEY` in the daemon's environment |
+| `grok` | Built-in API Key | OpenAI Chat Completions | `https://api.x.ai/v1` | `GROK_API_KEY` / `XAI_API_KEY` in the daemon's environment |
 | `deepseek` | Built-in API Key | OpenAI Chat Completions | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY` in the daemon's environment |
-| `[smith.models.<name>]` | Declared Endpoint | Configured (`openai`, `anthropic`, `responses`, `gemini`, `azure`, `deepseek`) | Configured `base_url` | Declared in `config.toml` (`api_key_env` / `api_key`) |
+| `[smith.models.<name>]` | Declared Endpoint | Configured (`openai`, `anthropic`, `responses`, `gemini`, `azure`, `meta`, `grok`, `deepseek`) | Configured `base_url` | Declared in `config.toml` (`api_key_env` / `api_key`) |
 
 *Note: Antigravity OAuth logins are not offered as route targets because their backend uses a Gemini-shaped protocol with no proxy translator.*
 

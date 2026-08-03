@@ -116,9 +116,11 @@ Each `[smith.models.<name>]` entry sets:
   standard key env var is used (`OPENAI_API_KEY`, etc.).
 - `model` — default model name; override per call with `@<name>:<model>`.
 
-DeepSeek needs no profile — `DEEPSEEK_API_KEY` plus the `deepseek:` prefix
-already reaches its public endpoint. Declare one only for an endpoint
-Construct can't know: a private gateway, a reseller, a second account.
+None of the direct-API-key providers needs a profile — the key plus the
+`<provider>:` prefix already reaches its public endpoint, and the same key
+makes it a route target for other harnesses (spec 0179). Declare one only
+for an endpoint Construct can't know: a private gateway, a reseller, a
+second account.
 
 ```toml
 [smith.models.work-gateway]
@@ -243,8 +245,12 @@ notice in the status bar that opens `/configure`.
   accepted).
 - `GROK_API_KEY` / `XAI_API_KEY` — xAI Grok API credentials (either is
   accepted).
-- `DEEPSEEK_API_KEY` — DeepSeek platform credentials. Also makes DeepSeek a
-  route target for other harnesses with no further config (spec 0179).
+- `DEEPSEEK_API_KEY` — DeepSeek platform credentials.
+
+  Each of the keys above also makes its provider a **route target** for other
+  harnesses with no further config, when it is set in the daemon's
+  environment (spec 0179) — see
+  [Model routing](model-routing.md#route-targets).
 - `GROK_HOME` — override the base directory used by `grok-oauth:` token lookup;
   Smith reads `$GROK_HOME/.grok/auth.json` instead of `~/.grok/auth.json`.
 - `KIMI_CODE_HOME` — override the base directory used by `kimi-oauth:`

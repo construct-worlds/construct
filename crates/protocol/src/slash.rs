@@ -420,6 +420,10 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     // Local Ollama examples.
     "ollama:llama3.1",
     "ollama:qwen3-coder",
+    // xAI platform API path. Same models as the OAuth path below, billed
+    // against an API key instead of a Grok subscription.
+    "grok:grok-4.5",
+    "grok:grok-4.3",
     // Grok / xAI OAuth path.
     "grok-oauth:grok-4.5",
     "grok-oauth:grok-4.3",

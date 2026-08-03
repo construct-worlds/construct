@@ -23,9 +23,24 @@ A built-in is a *default*, never an override:
   present-but-blocked, because there is nothing the user declared that a
   blocker would be explaining.
 
+Every direct-API-key provider Construct speaks to qualifies, and all of them
+are built in: Anthropic, OpenAI, Gemini, Meta, Grok, and DeepSeek. A provider
+is admitted only when both hold:
+
+- its public endpoint is the vendor's *only* one, and
+- the router has a translator for its wire dialect, so the target is
+  selectable and not merely listed.
+
+The second is a hard gate, not a nicety. A built-in that cannot be routed to
+is strictly worse than no built-in: it occupies a route name and spends the
+picker's space to say "unavailable".
+
 This does not extend to OAuth/subscription targets, which are discovered from
 a local CLI's credential store and already appear automatically, nor to
 providers whose endpoint genuinely varies per user — those must be declared.
+A provider reachable through both an API key and a subscription login has two
+targets, and that is correct: they are different billing paths, and the user
+picks which one to spend.
 
 ## Reason
 
@@ -57,10 +72,15 @@ signal explaining why.
 - Because a built-in is materialized as a profile, none of the router's
   downstream machinery (dialect translation, published-model ids, effort
   levels, picker blockers) needs to know built-ins exist.
-- Retrofitting built-ins onto providers that today require a profile is
-  allowed but is a behavior change for existing machines: pickers that were
-  empty would start listing entries. Such a change should be made deliberately
-  per provider, not as a sweep.
+- Retrofitting built-ins onto providers that previously required a profile is
+  a behavior change for existing machines: pickers that were empty start
+  listing entries. Each provider is admitted deliberately against the two
+  criteria above, never because it resembles one already admitted.
+- Because the credential check is the only thing gating a built-in, exporting
+  a key now has one meaning everywhere: smith can use it *and* every routable
+  harness can be pointed at it. A key that works in one place and silently
+  not the other is the failure this decision exists to remove, so a new
+  direct-API-key provider added to smith should arrive with its built-in.
 
 ## Non-Goals
 

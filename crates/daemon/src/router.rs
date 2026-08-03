@@ -119,7 +119,10 @@ pub fn provider_dialect(provider: &str) -> Option<Dialect> {
         "openai" | "grok" | "deepseek" => Some(Dialect::OpenAiChat),
         // Azure's current v1 API uses Responses on the wire; its adapter
         // difference is the `api-key` header, not a separate JSON dialect.
-        "openai-responses" | "azure" | "azure-openai" => {
+        // Meta serves Muse Spark over the same Responses surface — smith's
+        // own Meta client posts to `/v1/responses` and decodes the standard
+        // `response.*` event vocabulary, which is what this translator emits.
+        "openai-responses" | "azure" | "azure-openai" | "meta" => {
             Some(Dialect::OpenAiResponses)
         }
         _ => None,
@@ -2148,25 +2151,69 @@ mod tests {
     }
 
     /// A provider with no translator is offered but not selectable, with
-    /// the reason attached rather than hidden (spec 0115).
+    /// the reason attached rather than hidden (spec 0115). Ollama's native
+    /// API is the example: its `/api/chat` shape is nobody else's, and the
+    /// way to route to it is to declare its OpenAI-compatible `/v1` endpoint
+    /// as `provider = "openai"` instead.
     #[tokio::test]
     async fn untranslatable_providers_are_listed_unavailable() {
         let dir = tempfile::tempdir().unwrap();
         let r = started_with(
             &dir,
             cfg_with(true),
-            profiles(vec![("meta-model", profile("meta", Some("X")))]),
+            profiles(vec![("local", profile("ollama", None))]),
         )
         .await;
         r.attach_session("s1", "claude", None).unwrap();
         let listed = r.list_routes("claude", true, None, false);
         assert!(listed.unavailable_reason.is_none());
-        let reason = route_named(&listed, "meta-model")
+        let reason = route_named(&listed, "local")
             .unavailable_reason
             .as_deref()
             .unwrap();
         assert!(reason.contains("no translator"), "{reason}");
-        assert!(r.set_route("s1", "claude", Some("meta-model"), None, None, None).is_err());
+        assert!(r.set_route("s1", "claude", Some("local"), None, None, None).is_err());
+    }
+
+    /// Meta's Model API is the Responses wire format, not a dialect of its
+    /// own — smith's own Meta client posts to `/v1/responses` and reads the
+    /// standard `response.*` events. Before this was mapped, Meta was the
+    /// one built-in-eligible provider that would have been listed as
+    /// permanently unusable.
+    #[tokio::test]
+    async fn meta_profiles_speak_responses_and_are_selectable() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = started_with(
+            &dir,
+            cfg_with(true),
+            profiles(vec![(
+                "meta",
+                ModelProfile {
+                    provider: "meta".to_string(),
+                    base_url: None,
+                    api_key_env: None,
+                    api_key: Some("meta-key".to_string()),
+                    model: Some("muse-spark-1.1".to_string()),
+                },
+            )]),
+        )
+        .await;
+        r.attach_session("s1", "claude", None).unwrap();
+
+        let listed = r.list_routes("claude", true, None, false);
+        let meta = route_named(&listed, "meta");
+        assert_eq!(meta.unavailable_reason, None);
+        assert_eq!(meta.dialect, "openai-responses");
+        assert_eq!(meta.base_url, "https://api.meta.ai/v1");
+
+        r.set_route("s1", "claude", Some("meta"), None, None, None)
+            .unwrap();
+        let armed = r.sessions.read().unwrap()["s1"].armed_route().unwrap();
+        assert_eq!(armed.target_dialect, Dialect::OpenAiResponses);
+        // Meta takes a bearer, not the Anthropic key header, even though the
+        // harness on this side of the route is an Anthropic one.
+        assert_eq!(armed.auth, TargetAuth::Bearer);
+        assert_eq!(armed.endpoint, "https://api.meta.ai/v1/responses");
     }
 
     #[tokio::test]
