@@ -324,15 +324,15 @@ impl TokenMeter {
         }
     }
 
-    /// Roll the history forward to `now`, appending empty buckets    /// Roll the history forward to `now`, appending empty buckets for the
-    /// time that passed. Called every frame so idle time scrolls as a gap
-    /// rather than compressing away.
-    pub fn advance_to(&mut self, now: Instant) {
+    /// Roll the history forward to `now`, appending empty buckets for the time
+    /// that passed. Called by timer maintenance as well as rendering so
+    /// idle time scrolls as a gap without requiring continuous paints.
+    pub fn advance_to(&mut self, now: Instant) -> bool {
         self.advance_recent(now);
         let elapsed = now.saturating_duration_since(self.current_start);
         let steps = (elapsed.as_millis() / BUCKET.as_millis()) as usize;
         if steps == 0 {
-            return;
+            return false;
         }
         for _ in 0..steps.min(MAX_BUCKETS) {
             self.buckets.push_back(Bucket::default());
@@ -345,6 +345,7 @@ impl TokenMeter {
         // *falls* — `scale` re-floors against what is actually on screen, so
         // decay can never shrink the graph below a column it must draw.
         self.peak *= PEAK_DECAY.powi(steps.min(1_000) as i32);
+        true
     }
 
     fn advance_recent(&mut self, now: Instant) {
@@ -436,6 +437,14 @@ impl TokenMeter {
             }
         }
         any.then_some(total)
+    }
+
+    /// Whether the one-minute throughput window still contains data whose
+    /// displayed rate can change as one-second slots age out.
+    pub fn has_recent_activity(&self) -> bool {
+        self.recent
+            .iter()
+            .any(|slot| !slot.tokens.is_empty() || !slot.busy_ms.is_empty())
     }
 
     /// Record one usage sample. `model` is the label to group under —
@@ -650,6 +659,15 @@ mod tests {
     /// width is retuned again.
     fn buckets_after(base: Instant, n: u64) -> Instant {
         base + BUCKET * n as u32
+    }
+
+    #[test]
+    fn advance_reports_only_visible_bucket_rollovers() {
+        let t0 = Instant::now();
+        let mut m = TokenMeter::new(t0);
+        assert!(!m.advance_to(t0 + Duration::from_secs(1)));
+        assert!(m.advance_to(buckets_after(t0, 1)));
+        assert!(!m.advance_to(buckets_after(t0, 1) + Duration::from_secs(1)));
     }
 
     #[test]

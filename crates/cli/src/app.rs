@@ -20,6 +20,7 @@ use crossterm::terminal::{
 use futures::{FutureExt, StreamExt};
 use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{Stdout, Write};
@@ -1964,21 +1965,25 @@ pub struct App {
     /// canonical case being a keystroke forwarded straight to a PTY,
     /// whose visible effect arrives later as PTY output (which
     /// triggers its own redraw). The run loop honors this to skip a
-    /// wasted `terminal.draw()` per repeated keystroke; the 120ms
-    /// tick is a safety net so nothing can stay stale for long.
+    /// wasted `terminal.draw()` per repeated keystroke; PTY output and the
+    /// low-frequency heartbeat are the repaint backstops.
     /// Reset to false every loop iteration.
     pub skip_redraw_after_event: bool,
+    /// Set by renderers when a visible wall-clock animation needs another
+    /// frame. The 120 ms timer still drives animation and maintenance, but a
+    /// static frame can leave its tick unpainted instead of rebuilding the TUI.
+    tick_redraw_requested: Cell<bool>,
     /// Set by `on_notification` to report whether the just-handled
     /// notification changed something currently *visible* (a focused /
     /// split pane, the orchestrator panel, or any structural /
     /// status change shown in the list). The run loop reads it to avoid a
     /// full-frame `terminal.draw()` for the high-frequency background
     /// `Pty` chunks of off-screen sessions — those only warm history /
-    /// feed the spinner + matrix rain, which animate on the 120ms tick
-    /// anyway. Defaults to `true` (every notification kind except an
+    /// feed animation state without necessarily changing this frame.
+    /// Defaults to `true` (every notification kind except an
     /// off-screen `Pty` forces a redraw), so the gate can never *miss* a
-    /// needed repaint. A heartbeat in the loop still forces a draw at
-    /// least every tick under sustained background load.
+    /// needed repaint. Visible animations explicitly keep the frame timer
+    /// painting while static frames remain asleep.
     pub notification_dirtied_view: bool,
     /// Sessions whose visible terminal history is being rehydrated in
     /// the background. Renderers use this to show a loading placeholder while
@@ -4323,6 +4328,12 @@ impl MainSlideState {
             .clamp(0.0, 1.0);
         self.from + (target - self.from) * progress
     }
+
+    pub fn is_animating(&self, now: Instant) -> bool {
+        self.changed_at.is_some_and(|changed_at| {
+            now.saturating_duration_since(changed_at) < Duration::from_millis(MAIN_SLIDE_MS)
+        })
+    }
 }
 
 /// Vertical translation applied to the main block's recorded geometry once the
@@ -5045,6 +5056,14 @@ fn should_continue_notification_drain(
             < NOTIFICATION_DRAIN_BUDGET
 }
 
+fn should_skip_idle_tick_redraw(
+    tick_dirtied_view: bool,
+    tick_redraw_requested: bool,
+    reconnecting: bool,
+) -> bool {
+    !tick_dirtied_view && !tick_redraw_requested && !reconnecting
+}
+
 #[allow(dead_code)]
 pub async fn run(client: Arc<Client>) -> Result<()> {
     run_with_socket(client.socket_path().to_path_buf()).await
@@ -5385,6 +5404,7 @@ async fn run_with_socket_initial_selection(
         terminal_scrollbar_visible_until: HashMap::new(),
         service_view_scroll: 0,
         skip_redraw_after_event: false,
+        tick_redraw_requested: Cell::new(false),
         notification_dirtied_view: true,
         hydrating_sessions: HashSet::new(),
         orchestrator_scrollback: 0,
@@ -5752,7 +5772,8 @@ async fn run_loop(
     let (harness_usage_tx, mut harness_usage_rx) =
         mpsc::unbounded_channel::<(String, anyhow::Result<construct_protocol::UsageQueryResult>)>();
     let mut reconnect: Option<ReconnectState> = None;
-    // Tick at the spinner frame boundary so each frame gets one redraw.
+    // Tick at the spinner frame boundary. Visible animations request paints;
+    // static frames use the same wakeup only for maintenance.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
     // Lineage preview, keyboard-focused mode (spec 0080; supersedes the old
     // `C-x q` / `q` popup, spec 0139): its per-node elapsed-time/cost stats
@@ -5774,11 +5795,8 @@ async fn run_loop(
     // IPC round trip every 5s for no visible benefit.
     let mut harness_refresh = tokio::time::interval(Duration::from_secs(5));
     harness_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Wall-clock of the last actual `terminal.draw`. The notification arm uses
-    // it as a heartbeat: a burst that touched nothing visible skips its repaint
-    // only while a draw happened within the last tick, so sustained background
-    // output still repaints (spinner / rain / list) at ~8fps and can never
-    // freeze the foreground.
+    // Wall-clock of the last actual `terminal.draw`. It bounds redraws under
+    // sustained background output and drives the one-minute quiet heartbeat.
     let mut last_draw = Instant::now();
 
     // Debounce window for resize events. Terminal-app drags and
@@ -5799,6 +5817,10 @@ async fn run_loop(
     let mut background_hydration_task: Option<tokio::task::JoinHandle<Result<SessionHydration>>> =
         None;
     let mut background_hydration_session: Option<String> = None;
+    // Unlike `skip_redraw_after_event`, this only suppresses the next paint.
+    // Tick-driven idle frames must still run debounce, hydration, and search
+    // housekeeping below the draw.
+    let mut skip_idle_tick_draw = false;
     while !app.should_quit {
         while let Ok(msg) = app.pty_input_errors.try_recv() {
             app.set_status(msg);
@@ -5851,8 +5873,13 @@ async fn run_loop(
         // after every mouse event, so a hovered tally opens its panel on
         // the very next frame instead of waiting out a tick. The tick is
         // what expires it once the pointer leaves.
+        let fleet_panel_was_visible = app.fleet_panel.is_some();
         app.update_fleet_tally_panel(Instant::now());
-        let skip_draw = std::mem::take(&mut app.skip_redraw_after_event);
+        if fleet_panel_was_visible != app.fleet_panel.is_some() {
+            skip_idle_tick_draw = false;
+        }
+        let skip_event_draw = std::mem::take(&mut app.skip_redraw_after_event);
+        let skip_draw = skip_event_draw || std::mem::take(&mut skip_idle_tick_draw);
         if !skip_draw {
             // Repair palette collisions before painting, and again whenever the
             // theme changes underneath us (spec 0111). A no-op on a truecolor
@@ -5862,6 +5889,7 @@ async fn run_loop(
                 pairs.extend(crate::token_meter::contrast_pairs());
                 pairs
             });
+            app.tick_redraw_requested.set(false);
             terminal.draw(|f| ui::render(f, app))?;
             last_draw = Instant::now();
         }
@@ -5871,7 +5899,7 @@ async fn run_loop(
         // fast path focused on input/output readiness: the visible update is
         // the child PTY echo, so do not spend this iteration walking hydration
         // queues or resize debounce state before polling notifications again.
-        if !skip_draw {
+        if !skip_event_draw {
             // A session switch should stay interactive while history-sized
             // work runs. Selection handlers only mark the transcript as
             // stale; after the frame above has painted the new list highlight
@@ -6272,10 +6300,9 @@ async fn run_loop(
                         // state (the common case with a large mostly-idle
                         // fleet — background `Pty` chunks warming history /
                         // spinner / rain), skip this iteration's full-frame
-                        // render. The heartbeat still forces a draw once a tick
-                        // has elapsed since the last one, so the list + rain
-                        // keep animating and the foreground never freezes under
-                        // sustained background output.
+                        // render. If that activity makes a visible spinner or
+                        // rain effect live, the next painted frame requests the
+                        // animation cadence from then on.
                         if !dirtied_view
                             && last_draw.elapsed()
                                 < Duration::from_millis(SPINNER_FRAME_MS as u64)
@@ -6435,15 +6462,68 @@ async fn run_loop(
                 }
             }
             _ = tick.tick() => {
+                let mut tick_dirtied_view = false;
                 if let Some((_, at)) = &app.status {
                     if at.elapsed() > Duration::from_secs(5) {
                         app.status = None;
+                        tick_dirtied_view = true;
                     }
                 }
+                let preview_count = app.browser_previews.len();
                 app.update_browser_preview_hover_and_expiry();
-                app.expire_playbook_runs(Instant::now());
-                app.tutorial_tick(Instant::now());
-                app.sample_compute_time(Instant::now());
+                tick_dirtied_view |= app.browser_previews.len() != preview_count;
+                let now = Instant::now();
+                let temporary_widget_count = app.dynamic_ui_temporary_until.len();
+                app.dynamic_ui_temporary_until.retain(|_, until| *until > now);
+                tick_dirtied_view |=
+                    app.dynamic_ui_temporary_until.len() != temporary_widget_count;
+                if app.dynamic_ui_hover.as_ref().is_some_and(|hover| hover.until <= now) {
+                    app.dynamic_ui_hover = None;
+                    tick_dirtied_view = true;
+                }
+                if app.matrix_widget_hover.as_ref().is_some_and(|hover| hover.until <= now) {
+                    app.matrix_widget_hover = None;
+                    tick_dirtied_view = true;
+                }
+                let collaborator_count = app.playbook_collaborators.len();
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                app.playbook_collaborators.retain(|_, cursor| {
+                    let ttl = if cursor.kind == "agent" {
+                        PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS
+                    } else {
+                        PLAYBOOK_COLLAB_CURSOR_TTL_MS
+                    };
+                    now_ms.saturating_sub(cursor.updated_at_ms) <= ttl
+                });
+                tick_dirtied_view |= app.playbook_collaborators.len() != collaborator_count;
+                let scrollbar_count = app.terminal_scrollbar_visible_until.len();
+                app.terminal_scrollbar_visible_until.retain(|_, until| *until > now);
+                tick_dirtied_view |=
+                    app.terminal_scrollbar_visible_until.len() != scrollbar_count;
+                let playbook_run_count = app.playbook_runs.len();
+                let flourish_count = app.playbook_settle_flourishes.len();
+                app.expire_playbook_runs(now);
+                tick_dirtied_view |= app.playbook_runs.len() != playbook_run_count
+                    || app.playbook_settle_flourishes.len() != flourish_count;
+                app.tutorial_tick(now);
+                let token_bucket_advanced = app.token_meter.advance_to(now);
+                app.sample_compute_time(now);
+                let token_panel_visible = !app.matrix_rain_hidden
+                    && app.matrix_panel_mode == MatrixPanelMode::Tokens;
+                tick_dirtied_view |= token_panel_visible
+                    && (token_bucket_advanced
+                        || (app.token_meter.has_recent_activity()
+                            && last_draw.elapsed() >= Duration::from_secs(1)));
+                // Keep low-frequency wall-clock labels (idle ages, rotating
+                // hints) current without restoring the old 8 fps idle loop.
+                tick_dirtied_view |= last_draw.elapsed() >= Duration::from_secs(60);
+                if should_skip_idle_tick_redraw(
+                    tick_dirtied_view,
+                    app.tick_redraw_requested.get(),
+                    reconnect.is_some(),
+                ) {
+                    skip_idle_tick_draw = true;
+                }
             }
             _ = harness_refresh.tick(), if app.connected
                 && (app.selected_id().is_none() || app.configure_popup.is_some()) => {
@@ -9707,8 +9787,8 @@ impl App {
                             // session is currently rendered. For off-screen
                             // sessions we've still warmed history / spinner /
                             // rain above, but the visible frame is unchanged —
-                            // let the loop skip the immediate repaint (the tick
-                            // still animates the list + rain at ~8fps).
+                            // let the loop skip the immediate repaint. Any
+                            // visible list/rain animation requests its own tick.
                             self.notification_dirtied_view =
                                 self.session_visible_on_screen(&payload.session_id);
                             return;
@@ -10614,6 +10694,12 @@ impl App {
         let idx = (self.start_instant.elapsed().as_millis() / SPINNER_FRAME_MS) as usize
             % SPINNER_FRAMES.len();
         SPINNER_FRAMES[idx]
+    }
+
+    /// Ask the run loop to paint on the next animation tick. Renderers call
+    /// this only while a visible time-based effect is in flight.
+    pub(crate) fn request_tick_redraw(&self) {
+        self.tick_redraw_requested.set(true);
     }
 
     async fn on_group_state(&mut self, g: GroupSummary) {
@@ -16452,10 +16538,18 @@ mod tests {
     }
 
     #[test]
+    fn idle_tick_skips_only_static_clean_frames() {
+        assert!(should_skip_idle_tick_redraw(false, false, false));
+        assert!(!should_skip_idle_tick_redraw(true, false, false));
+        assert!(!should_skip_idle_tick_redraw(false, true, false));
+        assert!(!should_skip_idle_tick_redraw(false, false, true));
+    }
+
+    #[test]
     fn pty_skip_redraw_path_skips_housekeeping_before_select() {
         let src = include_str!("app.rs");
         let skip_at = src
-            .find("let skip_draw = std::mem::take(&mut app.skip_redraw_after_event);")
+            .find("let skip_event_draw = std::mem::take(&mut app.skip_redraw_after_event);")
             .expect("run_loop should consume skip_redraw_after_event");
         let select_at = src[skip_at..]
             .find("tokio::select! {")
@@ -16463,8 +16557,8 @@ mod tests {
             .expect("run_loop should select after draw/maintenance");
         let body = &src[skip_at..select_at];
         let guard_at = body
-            .find("if !skip_draw {")
-            .expect("maintenance must be gated by skip_draw");
+            .find("if !skip_event_draw {")
+            .expect("maintenance must be gated by the event skip only");
         let hydration_at = body
             .find("app.selected_needs_hydration()")
             .expect("selected hydration maintenance should remain in run_loop");
@@ -16476,6 +16570,21 @@ mod tests {
             "PTY passthrough skip-redraw should return to select! before \
              hydration/resize housekeeping can delay PTY echo handling"
         );
+    }
+
+    #[test]
+    fn idle_tick_skip_does_not_skip_housekeeping() {
+        let src = include_str!("app.rs");
+        let skip_at = src
+            .find("let skip_draw = skip_event_draw || std::mem::take(&mut skip_idle_tick_draw);")
+            .expect("run_loop should keep idle-tick paint suppression separate");
+        let select_at = src[skip_at..]
+            .find("tokio::select! {")
+            .map(|idx| skip_at + idx)
+            .expect("run_loop should select after housekeeping");
+        let body = &src[skip_at..select_at];
+        assert!(body.contains("if !skip_event_draw {"));
+        assert!(body.contains("app.selected_needs_hydration()"));
     }
 
     fn test_layout() -> LayoutSnapshot {
@@ -16760,6 +16869,7 @@ mod tests {
             terminal_scrollbar_visible_until: HashMap::new(),
             service_view_scroll: 0,
             skip_redraw_after_event: false,
+            tick_redraw_requested: Cell::new(false),
             notification_dirtied_view: true,
             hydrating_sessions: HashSet::new(),
             orchestrator_scrollback: 0,
