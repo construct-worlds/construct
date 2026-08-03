@@ -2554,6 +2554,50 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Turn-info segment sits OUTSIDE the session card, as its own graph node
+     on the lane (TUI: `• 12 tok · 8m12s` below the box, not inside it). */
+  .ln-segment {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 4px 0 2px 2px;
+    padding: 3px 8px 3px 6px;
+    border-radius: 999px;
+    width: fit-content;
+    max-width: 100%;
+    color: var(--fg-dim);
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    background: color-mix(in srgb, var(--fg) 5%, transparent);
+    border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
+    white-space: nowrap;
+    cursor: default;
+    user-select: none;
+  }
+  .ln-segment .ln-seg-mark {
+    flex: 0 0 auto;
+    width: 1em;
+    text-align: center;
+    color: var(--fg-faint);
+    font-size: 11px;
+    line-height: 1;
+  }
+  .ln-segment.is-ok .ln-seg-mark { color: var(--ok); }
+  .ln-segment.is-bad .ln-seg-mark { color: var(--err); }
+  .ln-segment .ln-seg-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ln-segment.is-empty {
+    display: none;
+  }
+  .lineage-graph.is-compact .ln-segment {
+    margin: 2px 0 1px 2px;
+    padding: 1px 6px 1px 4px;
+    font-size: 10px;
+  }
   .ln-badge {
     flex: 0 0 auto;
     align-self: center;
@@ -2660,6 +2704,7 @@
   }
   .lineage-graph.is-compact .ln-meta { display: none; }
   .lineage-graph.is-compact .ln-badge { display: none; }
+  /* Segments stay visible in compact mode — they are graph nodes, not card chrome. */
   .lineage-graph.is-compact .ln-children {
     margin-left: 10px;
     padding-left: 10px;
@@ -5347,23 +5392,84 @@ function lineageEdgeBadge(edgeKind, summary) {
   return null;
 }
 
-function lineageNodeMeta(summary) {
+function lineageNodeHarness(summary) {
   if (!summary) return "gone";
-  const parts = [];
-  if (summary.harness) parts.push(String(summary.harness));
-  const msgs = Number(summary.message_count || 0);
-  if (msgs > 0) parts.push(`${msgs} ${msgs === 1 ? "msg" : "msgs"}`);
+  const harness = String(summary.harness || "").trim();
+  const st = String(summary.state || "").toLowerCase();
+  if (harness && st && st !== "running" && st !== "awaiting_input") {
+    return `${harness} · ${st}`;
+  }
+  return harness || st || "session";
+}
+
+function lineageFormatDuration(ms) {
+  const secs = Math.floor(Math.max(0, Number(ms) || 0) / 1000);
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return m > 0 ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`;
+}
+
+/** Volume + elapsed for a session's lane segment (outside the card). */
+function lineageSegmentInfo(summary) {
+  if (!summary) return null;
   const tokens = summary.tokens || {};
   const tok = Number(tokens.input || 0) + Number(tokens.output || 0);
-  if (tok > 0) parts.push(`${formatTokenCount(tok)} tok`);
-  const busy = sessionBusyMsAt(summary);
-  if (busy > 0) {
-    const secs = Math.floor(busy / 1000);
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    parts.push(m > 0 ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`);
+  const msgs = Number(summary.message_count || 0);
+  // Prefer token volume when the harness reports it; otherwise message count
+  // (same choice the TUI segment labels make — spec 0103).
+  let countLabel = "";
+  if (tok > 0) countLabel = `${formatTokenCount(tok)} tok`;
+  else if (msgs > 0) countLabel = `${msgs} ${msgs === 1 ? "msg" : "msgs"}`;
+  else return null;
+
+  let durationMs = sessionBusyMsAt(summary);
+  if (!(durationMs > 0)) {
+    const start = sessionTimeMs(summary.created_at);
+    const end = summary.last_event_at != null
+      ? sessionTimeMs(summary.last_event_at)
+      : Date.now();
+    if (start > 0 && end >= start) durationMs = end - start;
   }
-  return parts.join(" · ") || String(summary.state || "pending");
+  const timeLabel = durationMs > 0 ? lineageFormatDuration(durationMs) : null;
+  const text = timeLabel ? `${countLabel} · ${timeLabel}` : countLabel;
+
+  const st = String(summary.state || "").toLowerCase();
+  const forkSt = forkStatusOf(summary);
+  let mark = "•";
+  let outcome = null; // "ok" | "bad" | null
+  if (forkSt === "merged" || st === "done") {
+    mark = "✓";
+    outcome = "ok";
+  } else if (forkSt === "discarded" || st === "errored") {
+    mark = "✗";
+    outcome = "bad";
+  }
+  return { text, mark, outcome };
+}
+
+function buildLineageSegmentEl(summary, sessionId) {
+  const info = lineageSegmentInfo(summary);
+  const el = document.createElement("div");
+  el.className = "ln-segment" + (info ? "" : " is-empty")
+    + (info && info.outcome === "ok" ? " is-ok" : "")
+    + (info && info.outcome === "bad" ? " is-bad" : "");
+  el.dataset.sessionId = sessionId || "";
+  el.setAttribute("role", "note");
+  if (!info) {
+    el.setAttribute("aria-hidden", "true");
+    return el;
+  }
+  el.title = info.text;
+  const mark = document.createElement("span");
+  mark.className = "ln-seg-mark";
+  mark.textContent = info.mark;
+  mark.setAttribute("aria-hidden", "true");
+  const text = document.createElement("span");
+  text.className = "ln-seg-text";
+  text.textContent = info.text;
+  el.appendChild(mark);
+  el.appendChild(text);
+  return el;
 }
 
 function buildLineageCardEl(node, byId, focusId) {
@@ -5396,9 +5502,10 @@ function buildLineageCardEl(node, byId, focusId) {
   titleEl.textContent = title;
   titleEl.title = title;
   main.appendChild(titleEl);
+  // Harness only inside the card — volume/elapsed live in the segment node.
   const metaEl = document.createElement("div");
   metaEl.className = "ln-meta";
-  metaEl.textContent = lineageNodeMeta(summary);
+  metaEl.textContent = lineageNodeHarness(summary);
   main.appendChild(metaEl);
   card.appendChild(main);
 
@@ -5410,6 +5517,10 @@ function buildLineageCardEl(node, byId, focusId) {
     card.appendChild(b);
   }
   wrap.appendChild(card);
+
+  // Turn-info is a separate graph node on the lane, outside the session box
+  // (TUI: `• 12.4k tok · 8m12s` below the bordered box).
+  wrap.appendChild(buildLineageSegmentEl(summary, node.session_id));
 
   const kids = node.children || [];
   if (!kids.length) return wrap;
