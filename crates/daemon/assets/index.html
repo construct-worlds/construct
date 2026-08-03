@@ -9938,6 +9938,36 @@ function initTerminalScrollButtons() {
   window.__agentdTerminalScrollButtons = true;
 }
 
+// Session xterm font: keep the larger size on phone-width layouts for
+// readability; desktop uses a denser grid so more columns fit. Matches
+// `isNarrowLayout()` (max-width: 720px). Console / hover previews keep
+// their own fixed sizes.
+const SESSION_TERM_FONT_SIZE_MOBILE = 13;
+const SESSION_TERM_FONT_SIZE_DESKTOP = 12;
+
+function sessionTerminalFontSize() {
+  return isNarrowLayout() ? SESSION_TERM_FONT_SIZE_MOBILE : SESSION_TERM_FONT_SIZE_DESKTOP;
+}
+
+function applySessionTerminalFontSize(term) {
+  if (!term) return false;
+  const size = sessionTerminalFontSize();
+  if (term.options.fontSize === size) return false;
+  term.options.fontSize = size;
+  return true;
+}
+
+function syncAllSessionTerminalFontSizes() {
+  let changed = false;
+  for (const handle of state.terminalById.values()) {
+    if (applySessionTerminalFontSize(handle.term)) changed = true;
+  }
+  for (const handle of state.duplicateTerminalMirrorByPaneId.values()) {
+    if (applySessionTerminalFontSize(handle.term)) changed = true;
+  }
+  return changed;
+}
+
 function createTerminalHandle(id) {
   const host = document.createElement("div");
   host.className = "terminal-host";
@@ -9947,10 +9977,10 @@ function createTerminalHandle(id) {
 
   const term = new window.Terminal({
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-    fontSize: 13,
+    fontSize: sessionTerminalFontSize(),
     convertEol: false,
     cursorBlink: true,
-    // Mobile-friendly defaults; the daemon controls actual PTY size
+    // Layout-aware font size above; the daemon controls actual PTY size
     // via `session.pty_resize` after we report the fit.
     scrollback: 4000,
     theme: xtermThemeFor(),
@@ -10308,6 +10338,9 @@ function webPtyRecentlyEngaged() {
 function refitTerminal(options = {}) {
   if (!state.term || !state.fitAddon) return;
   if (state.mode !== "terminal") return;
+  // Crossing the mobile/desktop breakpoint changes cell metrics; apply
+  // before proposeDimensions so the new fit matches the new font size.
+  syncAllSessionTerminalFontSizes();
   let claim = !!options.claim;
   let immediate = !!options.immediate;
   // Set after a history replay rebuilt the grid from PTY deltas. See
@@ -11875,7 +11908,7 @@ function createDuplicateTerminalMirror(paneId, sessionId) {
   host.dataset.paneId = String(paneId);
   const term = new window.Terminal({
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-    fontSize: 13,
+    fontSize: sessionTerminalFontSize(),
     convertEol: false,
     cursorBlink: false,
     disableStdin: true,
@@ -12013,6 +12046,7 @@ function followDuplicateTerminalGeometry(handle) {
 }
 
 function refitDuplicateTerminalMirrors() {
+  syncAllSessionTerminalFontSizes();
   for (const handle of state.duplicateTerminalMirrorByPaneId.values()) {
     followDuplicateTerminalGeometry(handle);
   }
