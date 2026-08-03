@@ -1272,7 +1272,7 @@ where
     // as DSML inside content deltas; hold and lift those into structured
     // tool events before the harness encoder sees them.
     let mut dsml_lift = (route.target_dialect == Dialect::OpenAiChat)
-        .then(translate::dsml::StreamLift::new);
+        .then(|| translate::dsml::StreamLift::with_offered_tools(&context.offered_tools));
     let mut upstream = response.bytes_stream();
     let mut pending = Vec::<u8>::new();
     let mut saw_frame = false;
