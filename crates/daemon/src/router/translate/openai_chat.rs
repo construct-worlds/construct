@@ -9,7 +9,7 @@ use serde_json::{json, Map, Value};
 
 use super::{
     CanonBlock, CanonEvent, CanonMessage, CanonRequest, CanonRole, CanonStop, CanonTool,
-    CanonToolChoice,
+    CanonToolChoice, TranslationContext,
 };
 
 pub fn parse_request(body: &Value) -> CanonRequest {
@@ -377,7 +377,7 @@ pub fn decode_event(data: &Value) -> Vec<CanonEvent> {
     out
 }
 
-pub fn decode_full_response(body: &Value) -> Vec<CanonEvent> {
+pub fn decode_full_response(body: &Value, context: &TranslationContext) -> Vec<CanonEvent> {
     let mut events = vec![CanonEvent::Start {
         id: body
             .get("id")
@@ -459,7 +459,7 @@ pub fn decode_full_response(body: &Value) -> Vec<CanonEvent> {
     // DeepSeek V4 may put tool intent in content as DSML markup rather
     // than structured tool_calls — lift it so Codex (and any other
     // Responses harness) sees real function_call items (session s8e4420fd3).
-    super::dsml::lift_events(events)
+    super::dsml::lift_events(events, &context.offered_tools)
 }
 
 /// Re-encode canonical events as a Chat Completions SSE stream.
@@ -806,11 +806,14 @@ mod tests {
             decode_event(&json!({"choices":[{"delta":{"reasoning_content":"weighing"}}]})),
             vec![CanonEvent::ThinkingDelta("weighing".into())]
         );
-        let whole = decode_full_response(&json!({
-            "id":"cmpl_1",
-            "choices":[{"message":{"role":"assistant","reasoning_content":"weighing","content":"ok"},
-                        "finish_reason":"stop"}]
-        }));
+        let whole = decode_full_response(
+            &json!({
+                "id":"cmpl_1",
+                "choices":[{"message":{"role":"assistant","reasoning_content":"weighing","content":"ok"},
+                            "finish_reason":"stop"}]
+            }),
+            &TranslationContext::default(),
+        );
         assert!(whole.contains(&CanonEvent::ThinkingDelta("weighing".into())));
         assert!(whole.contains(&CanonEvent::TextDelta("ok".into())));
     }
@@ -922,14 +925,17 @@ mod tests {
         let content = format!(
             "Let me look.\n\n<{fw}{fw}DSML{fw}{fw}_command>\n  <cmd>ls -la /Users/moon</{fw}{fw}DSML{fw}{fw}_param>\n</{fw}{fw}DSML{fw}{fw}_command>"
         );
-        let events = decode_full_response(&json!({
-            "id": "cmpl_dsml",
-            "choices": [{
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 20}
-        }));
+        let events = decode_full_response(
+            &json!({
+                "id": "cmpl_dsml",
+                "choices": [{
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20}
+            }),
+            &TranslationContext::default(),
+        );
         assert!(
             events.iter().any(|e| matches!(
                 e,

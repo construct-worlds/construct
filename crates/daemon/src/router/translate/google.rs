@@ -325,6 +325,8 @@ pub fn emit_request(req: &CanonRequest, _model: &str) -> (Value, TranslationCont
         Value::Object(body),
         TranslationContext {
             tool_names: codec.reverse,
+            // Filled in by `emit_request_with_context` for every dialect.
+            ..TranslationContext::default()
         },
     )
 }

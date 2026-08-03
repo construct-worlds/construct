@@ -102,6 +102,12 @@ pub struct CanonTool {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TranslationContext {
     pub(crate) tool_names: BTreeMap<String, String>,
+    /// Tool names this request actually offered, in request order. DSML
+    /// recovery uses them to resolve a name the model invented (it names
+    /// `shell` where the harness offers `exec_command`) onto one the
+    /// harness can dispatch. Empty means "no information" — never a
+    /// signal that the request offered no tools.
+    pub(crate) offered_tools: Vec<String>,
 }
 
 /// A translated body plus the request-scoped state its response decoder
@@ -237,6 +243,10 @@ pub fn emit_request_with_context(
             TranslationContext::default(),
         ),
     };
+    let mut context = context;
+    // Recorded for every dialect: the decoder cannot see the request, and
+    // a name the model invented is only checkable against what was offered.
+    context.offered_tools = req.tools.iter().map(|t| t.name.clone()).collect();
     EmittedRequest { body, context }
 }
 
@@ -479,7 +489,7 @@ pub fn decode_full_response_with_context(
         Dialect::AnthropicMessages => anthropic::decode_full_response(body),
         Dialect::GoogleGemini => google::decode_full_response(body, context),
         Dialect::OpenAiResponses => responses::decode_full_response(body),
-        Dialect::OpenAiChat => openai_chat::decode_full_response(body),
+        Dialect::OpenAiChat => openai_chat::decode_full_response(body, context),
     }
 }
 

@@ -106,6 +106,59 @@ pub fn lift_content(text: &str) -> LiftedContent {
     }
 }
 
+/// Shell-ish tool names, in the spelling different harnesses use. DSML
+/// command markup carries no tool name at all, so the lift has to guess
+/// one; this is the set it is allowed to guess within.
+const SHELL_TOOL_ALIASES: &[&str] = &[
+    "shell",
+    "exec_command",
+    "bash",
+    "run_command",
+    "run_terminal_cmd",
+    "execute_command",
+];
+
+/// Map a name recovered from DSML onto a tool the harness actually offered.
+///
+/// DeepSeek names a tool the request never advertised — the loose command
+/// form lifts to `shell` while Codex offers `exec_command` — and a
+/// `function_call` naming an unknown tool is dropped by the harness just as
+/// silently as unlifted markup was. Resolution is deliberately conservative:
+/// with no offered list, or no unambiguous candidate, the recovered name is
+/// left alone rather than guessed at.
+fn resolve_tool_name(recovered: &str, offered: &[String]) -> String {
+    if offered.is_empty() || offered.iter().any(|t| t == recovered) {
+        return recovered.to_string();
+    }
+    let ci: Vec<&String> = offered
+        .iter()
+        .filter(|t| t.eq_ignore_ascii_case(recovered))
+        .collect();
+    if let [only] = ci.as_slice() {
+        return (*only).clone();
+    }
+    // A shell-ish guess resolves onto the one shell-ish tool on offer.
+    if SHELL_TOOL_ALIASES.contains(&recovered) {
+        let shells: Vec<&String> = offered
+            .iter()
+            .filter(|t| SHELL_TOOL_ALIASES.contains(&t.as_str()))
+            .collect();
+        if let [only] = shells.as_slice() {
+            return (*only).clone();
+        }
+    }
+    // Otherwise accept a single substring match in either direction
+    // (`exec` → `exec_command`), and nothing more.
+    let near: Vec<&String> = offered
+        .iter()
+        .filter(|t| t.contains(recovered) || recovered.contains(t.as_str()))
+        .collect();
+    match near.as_slice() {
+        [only] => (*only).clone(),
+        _ => recovered.to_string(),
+    }
+}
+
 /// Streaming filter: hold text once a DSML open appears, then emit tools on
 /// [`CanonEvent::Stop`] (or when a complete block closes mid-stream).
 #[derive(Debug, Default)]
@@ -117,11 +170,22 @@ pub struct StreamLift {
     next_index: usize,
     /// Tools emitted this turn — used to upgrade stop reason.
     tools_emitted: usize,
+    /// Tool names the request offered, for [`resolve_tool_name`].
+    offered_tools: Vec<String>,
 }
 
 impl StreamLift {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Lift against the tools the request actually offered, so a recovered
+    /// name the harness cannot dispatch is resolved onto one it can.
+    pub fn with_offered_tools(offered: &[String]) -> Self {
+        Self {
+            offered_tools: offered.to_vec(),
+            ..Self::default()
+        }
     }
 
     pub fn push(&mut self, event: CanonEvent) -> Vec<CanonEvent> {
@@ -231,7 +295,7 @@ impl StreamLift {
             out.push(CanonEvent::ToolStart {
                 index,
                 id,
-                name: tool.name,
+                name: resolve_tool_name(&tool.name, &self.offered_tools),
             });
             out.push(CanonEvent::ToolArgsDelta { index, json: args });
         }
@@ -241,8 +305,8 @@ impl StreamLift {
 
 /// Rewrite a finished list of events (non-streaming decode) so DSML in
 /// text becomes tool events and the stop reason is upgraded when needed.
-pub fn lift_events(events: Vec<CanonEvent>) -> Vec<CanonEvent> {
-    let mut lift = StreamLift::new();
+pub fn lift_events(events: Vec<CanonEvent>, offered_tools: &[String]) -> Vec<CanonEvent> {
+    let mut lift = StreamLift::with_offered_tools(offered_tools);
     let mut out = Vec::new();
     let mut saw_stop = false;
     for event in events {
@@ -890,6 +954,83 @@ mod tests {
         );
     }
 
+    fn offered(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// The live mismatch: the loose command form lifts to `shell`, but Codex
+    /// offers `exec_command`. A `function_call` naming a tool the harness
+    /// never advertised is dropped, so the turn fails exactly as it did when
+    /// the markup was never lifted at all.
+    #[test]
+    fn resolves_a_shell_guess_onto_the_offered_shell_tool() {
+        assert_eq!(
+            resolve_tool_name("shell", &offered(&["exec_command", "apply_patch"])),
+            "exec_command"
+        );
+    }
+
+    #[test]
+    fn keeps_a_name_the_request_actually_offered() {
+        assert_eq!(
+            resolve_tool_name("shell", &offered(&["shell", "exec_command"])),
+            "shell"
+        );
+    }
+
+    /// No offered list means no information — not "the request had no tools".
+    #[test]
+    fn keeps_the_recovered_name_without_an_offered_list() {
+        assert_eq!(resolve_tool_name("shell", &[]), "shell");
+    }
+
+    /// Two equally plausible candidates is not a resolution. Guessing here
+    /// would dispatch the model's command into the wrong tool, which is
+    /// worse than the harness rejecting an unknown name.
+    #[test]
+    fn refuses_to_guess_between_ambiguous_candidates() {
+        assert_eq!(
+            resolve_tool_name("shell", &offered(&["bash", "run_command"])),
+            "shell"
+        );
+    }
+
+    #[test]
+    fn resolves_a_unique_substring_match() {
+        assert_eq!(
+            resolve_tool_name("exec", &offered(&["exec_command", "read_file"])),
+            "exec_command"
+        );
+    }
+
+    #[test]
+    fn leaves_an_unrelated_name_alone() {
+        assert_eq!(
+            resolve_tool_name("get_weather", &offered(&["exec_command", "read_file"])),
+            "get_weather"
+        );
+    }
+
+    /// End to end: loose command markup reaches the harness as the tool the
+    /// harness can actually dispatch.
+    #[test]
+    fn streams_loose_command_markup_as_the_offered_shell_tool() {
+        let d = format!("{FW}{FW}DSML{FW}{FW}");
+        let markup = format!("<{d}_command>\n  <cmd>ls -la</{d}_param>\n</{d}_command>");
+        let mut lift = StreamLift::with_offered_tools(&offered(&["exec_command", "apply_patch"]));
+        let mut out = lift.push(CanonEvent::TextDelta(markup));
+        out.extend(lift.push(CanonEvent::Stop {
+            reason: CanonStop::EndTurn,
+        }));
+        assert!(
+            out.iter().any(|e| matches!(
+                e,
+                CanonEvent::ToolStart { name, .. } if name == "exec_command"
+            )),
+            "expected the offered shell tool, got {out:?}"
+        );
+    }
+
     #[test]
     fn lifts_official_invoke_parameters() {
         let text = format!(
@@ -1015,7 +1156,7 @@ mod tests {
             CanonEvent::Stop {
                 reason: CanonStop::EndTurn,
             },
-        ]);
+        ], &[]);
         assert!(events.iter().any(|e| matches!(
             e,
             CanonEvent::ToolStart { name, .. } if name == "shell"
