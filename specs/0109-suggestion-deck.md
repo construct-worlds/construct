@@ -107,6 +107,26 @@ from burning tokens.
   same on-demand rule: its suggestion control opens a fan containing
   History and Generate (Regenerate when a hand is cached), and only the
   explicit Generate action calls for a new hand.
+- **A deliberately opened deck owns the keyboard.** Suggestion chrome
+  never takes keys or focus on its own — but opening the deck through
+  an explicit gesture (the chord, or activating the suggestion control)
+  is an unambiguous request to work with suggestions, so from that
+  moment the open deck routes keystrokes until it is dismissed. From
+  any surface inside it, printable characters go to the history
+  type-ahead: "start typing" always means "search my prompts", which is
+  the surface the deck defaults to. Motion keys walk the rows of
+  whichever surface is showing, accepting a row stages it as an ordinary
+  pick, and Escape or `C-g` dismisses. Accepting or dismissing hands the
+  keyboard back with no further gesture.
+  Two things this must not disturb: the caret never actually moves —
+  the deck routes keys while DOM focus stays wherever the user was
+  typing, which is what makes handing the keyboard back a no-op rather
+  than a restore — and the chord prefix keeps working while the deck is
+  open, so the same chord that opened it can close it. On viewports
+  narrow enough that a composer and virtual keyboard are the primary
+  input surface, the deck does not claim typing: a pick there is a tap,
+  and diverting characters out of a half-written message would cost
+  more than the recall saves.
   When the keyboard chord (`C-x .`) opens the TUI deck while the
   session's visible prompt contains a non-blank draft, the deck opens
   directly on Generate with that draft prefilled as keyword guidance.

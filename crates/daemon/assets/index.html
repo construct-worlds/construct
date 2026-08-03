@@ -1550,6 +1550,13 @@
     font-weight: 600;
   }
   .suggest-chip:hover { border-color: var(--accent); }
+  /* Keyboard cursor. The deck owns keys once deliberately opened, so the
+     highlighted row has to be visible without a hover or DOM focus ring —
+     focus itself never leaves the terminal/composer. */
+  .suggest-chip.is-active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 6px 18px rgba(0, 0, 0, 0.35);
+  }
   @keyframes suggest-pop {
     from { opacity: 0; transform: translate(12px, 12px) scale(0.6); }
   }
@@ -1600,7 +1607,33 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Type-ahead field for the history surface. Underlined with placeholder
+     copy so typing is visibly an input surface, mirroring the TUI deck. */
+  .suggest-query {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 7px 14px 8px;
+    font: 400 13px var(--font-ui);
+    color: var(--fg);
+    border-bottom: 1px solid var(--border-faint);
+  }
+  .suggest-query-mark { color: var(--fg-dim); }
+  .suggest-query-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border-bottom: 1px solid color-mix(in srgb, var(--accent-alt) 55%, transparent);
+  }
+  .suggest-query-text.is-empty { color: var(--fg-dim); }
   .suggest-cards { overflow-y: auto; display: flex; flex-direction: column; }
+  .suggest-empty {
+    padding: 12px 14px;
+    font: 400 13px var(--font-ui);
+    color: var(--fg-dim);
+  }
   .suggest-card {
     /* Block, not the UA button flex layout — keeps multi-line history
        previews at a real 1.45 line-height instead of collapsing. */
@@ -1621,6 +1654,12 @@
   }
   .suggest-card:last-child { border-bottom: none; }
   .suggest-card:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  /* Keyboard cursor, same weight as hover plus an edge marker so which row
+     Enter would take is readable without a pointer or a focus ring. */
+  .suggest-card.is-active {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
   /* History cards recall verbatim past prompts, which can run long —
      clamp the preview on an inner span. Applying -webkit-box line-clamp
      directly to the <button> collapses its line box (~0.5lh) so rows
@@ -4094,6 +4133,10 @@
           <div class="suggest-stack-head">
             <button id="suggestBack" class="suggest-back" type="button" tabindex="-1">‹ back</button>
             <span id="suggestStackTitle" class="suggest-stack-title"></span>
+          </div>
+          <div id="suggestQuery" class="suggest-query" hidden>
+            <span class="suggest-query-mark">/</span>
+            <span id="suggestQueryText" class="suggest-query-text"></span>
           </div>
           <div id="suggestCards" class="suggest-cards"></div>
         </div>
@@ -14480,6 +14523,8 @@ const suggestFanEl = $("suggestFan");
 const suggestStackEl = $("suggestStack");
 const suggestCardsEl = $("suggestCards");
 const suggestStackTitleEl = $("suggestStackTitle");
+const suggestQueryEl = $("suggestQuery");
+const suggestQueryTextEl = $("suggestQueryText");
 const suggestBackEl = $("suggestBack");
 const suggestOrbEl = $("suggestOrb");
 const suggestOrbIconEl = $("suggestOrbIcon");
@@ -14521,6 +14566,104 @@ function suggestDeckIsOpen() {
 }
 function suggestDeckIsAvailable() {
   return suggestDeckEl.classList.contains("is-available");
+}
+/**
+ * Keyboard ownership of the deck (specs 0109/0155).
+ *
+ * The standing rule is that typing belongs to the terminal or composer and
+ * suggestion chrome never takes it. Deliberately opening the deck — the
+ * `C-x .` chord, or a click on the orb — is the one unambiguous statement
+ * that the user wants to work with suggestions, so while it is open the
+ * deck claims plain keystrokes and gives them back on Escape / `C-g` or on
+ * accepting a card.
+ *
+ * DOM focus still never moves: the caret stays in xterm or the composer the
+ * entire time and the deck merely routes keys, which is why dismissing it
+ * needs no focus restoration and why chips remain `tabindex="-1"`.
+ */
+const suggestNav = {
+  /** Which surface the cursor is on: "fan" | "history" | "cards". */
+  surface: "fan",
+  /** Highlighted row within that surface; -1 while nothing is picked. */
+  index: -1,
+  /** Fuzzy type-ahead text. Only meaningful on the history surface. */
+  query: "",
+};
+/**
+ * Port of the TUI deck's history scorer so both clients rank recall the
+ * same way: exact, then prefix, then substring, then a loose subsequence
+ * whose score decays with how far apart the matched characters landed.
+ * `null` means no match. Equal scores keep the history's newest-first order.
+ */
+function fuzzyHistoryScore(rawQuery, rawText) {
+  const query = (rawQuery || "").trim().toLowerCase();
+  if (!query) return 0;
+  const text = (rawText || "").toLowerCase();
+  if (text === query) return 400;
+  if (text.startsWith(query)) return 300;
+  if (text.includes(query)) return 200;
+  let cursor = 0;
+  let first = -1;
+  let last = 0;
+  for (const needle of query) {
+    if (!needle.trim()) continue;
+    const found = text.indexOf(needle, cursor);
+    if (found < 0) return null;
+    if (first < 0) first = found;
+    last = found;
+    cursor = found + needle.length;
+  }
+  return 100 - Math.min(first < 0 ? 0 : last - first, 80);
+}
+/** Prompt-history texts matching the current type-ahead, best match first. */
+function suggestHistoryMatches(query) {
+  return (state.promptHistory || [])
+    .map((entry, index) => ({
+      index,
+      text: (entry && entry.text) || "",
+      score: fuzzyHistoryScore(query, (entry && entry.text) || ""),
+    }))
+    .filter((m) => m.text && m.score !== null)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((m) => m.text);
+}
+/** The rows the keyboard cursor walks on whichever surface is showing. */
+function suggestCursorItems() {
+  const root = suggestNav.surface === "fan" ? suggestFanEl : suggestCardsEl;
+  const selector = suggestNav.surface === "fan" ? ".suggest-chip" : ".suggest-card";
+  return Array.from(root.querySelectorAll(selector));
+}
+function syncSuggestCursor() {
+  const items = suggestCursorItems();
+  if (!items.length) {
+    suggestNav.index = -1;
+    return;
+  }
+  if (suggestNav.index >= items.length) suggestNav.index = items.length - 1;
+  items.forEach((el, i) => el.classList.toggle("is-active", i === suggestNav.index));
+  const active = items[suggestNav.index];
+  // Keep the highlighted card in view by scrolling its own container.
+  // `scrollIntoView` would be free to scroll the page behind the deck.
+  if (!active || suggestNav.surface === "fan") return;
+  const top = active.offsetTop;
+  const bottom = top + active.offsetHeight;
+  const viewTop = suggestCardsEl.scrollTop;
+  const viewBottom = viewTop + suggestCardsEl.clientHeight;
+  if (top < viewTop) suggestCardsEl.scrollTop = top;
+  else if (bottom > viewBottom) suggestCardsEl.scrollTop = bottom - suggestCardsEl.clientHeight;
+}
+function moveSuggestCursor(delta) {
+  const items = suggestCursorItems();
+  if (!items.length) return;
+  const next =
+    suggestNav.index < 0 ? (delta > 0 ? 0 : items.length - 1) : suggestNav.index + delta;
+  suggestNav.index = Math.max(0, Math.min(items.length - 1, next));
+  syncSuggestCursor();
+}
+/** Accept the highlighted row by running the handler its click already has. */
+function activateSuggestCursor() {
+  const el = suggestCursorItems()[suggestNav.index];
+  if (el) el.click();
 }
 /**
  * Snapshot of wherever the user is typing. Used to put the caret back
@@ -14694,6 +14837,11 @@ function closeSuggestDeck() {
   withPreservedTypingFocus(() => {
     setSuggestFanOpen(false);
     setSuggestStackOpen(false);
+    // Dropping the keyboard state here is what makes the next open a fresh
+    // surface rather than a resumed search.
+    suggestNav.surface = "fan";
+    suggestNav.index = -1;
+    suggestNav.query = "";
     setSuggestOrbCountVisible(!!state.suggestionsById.get(state.currentId));
   });
 }
@@ -14768,10 +14916,19 @@ function renderSuggestFan() {
     // Close any card stack — the fan is the parent surface — without a
     // second entrance animation on the way out.
     setSuggestStackOpen(false);
+    // Returning from a card stack lands the cursor back on the fan with no
+    // row picked, and abandons any history search that got us there.
+    if (suggestNav.surface !== "fan") {
+      suggestNav.surface = "fan";
+      suggestNav.index = -1;
+      suggestNav.query = "";
+    }
+    suggestQueryEl.hidden = true;
     // Mid-generation re-deals (history → hand) refresh labels in place.
     // Skip a full rebuild when nothing changed so the pop-in does not
     // re-fire 2–4 times as events arrive.
     if (wasOpen && suggestFanEl.dataset.signature === signature) {
+      syncSuggestCursor();
       updateSuggestOrb();
       return;
     }
@@ -14825,6 +14982,7 @@ function renderSuggestFan() {
       suggestFanEl.classList.remove("is-entering");
     }
     setSuggestFanOpen(true);
+    syncSuggestCursor();
     updateSuggestOrb();
   });
 }
@@ -14853,29 +15011,53 @@ function openSuggestStack(i) {
   withPreservedTypingFocus(() => {
     setSuggestFanOpen(false);
     suggestStackTitleEl.textContent = verb.label;
+    suggestQueryEl.hidden = true;
+    suggestNav.surface = "cards";
+    suggestNav.index = -1;
     suggestCardsEl.innerHTML = "";
     for (const card of verb.cards || []) {
       appendSuggestCard(card.text);
     }
     setSuggestStackOpen(true, { animate: true });
+    syncSuggestCursor();
     updateSuggestOrb();
   });
 }
 // Global prompt history stack (spec 0155): verbatim past prompts,
 // newest first, selectable exactly like generated cards.
-function openHistoryStack() {
-  const history = state.promptHistory || [];
-  if (!history.length) return;
+// Opening with an empty history is deliberate: the surface still has to
+// appear so the first typed character has somewhere to land and can say
+// "nothing to recall yet" instead of silently doing nothing.
+function openHistoryStack({ seed = "" } = {}) {
   withPreservedTypingFocus(() => {
     setSuggestFanOpen(false);
     suggestStackTitleEl.textContent = "history";
-    suggestCardsEl.innerHTML = "";
-    for (const e of history) {
-      appendSuggestCard(e.text || "", { history: true });
-    }
+    suggestNav.surface = "history";
+    suggestNav.index = -1;
+    suggestNav.query = seed;
+    renderHistoryCards();
     setSuggestStackOpen(true, { animate: true });
     updateSuggestOrb();
   });
+}
+/** Repaint the history surface for the current type-ahead query. */
+function renderHistoryCards() {
+  suggestQueryEl.hidden = false;
+  suggestQueryTextEl.textContent = suggestNav.query || "type to search prompts";
+  suggestQueryTextEl.classList.toggle("is-empty", !suggestNav.query);
+  suggestCardsEl.innerHTML = "";
+  const matches = suggestHistoryMatches(suggestNav.query);
+  if (matches.length) {
+    for (const text of matches) appendSuggestCard(text, { history: true });
+  } else {
+    const empty = document.createElement("div");
+    empty.className = "suggest-empty";
+    empty.textContent = (state.promptHistory || []).length
+      ? "no matching prompts"
+      : "no prompt history yet";
+    suggestCardsEl.appendChild(empty);
+  }
+  syncSuggestCursor();
 }
 // Refresh the cached global prompt history; if the fan is open (and
 // not covered by a card stack) re-deal it so the history chip appears
@@ -14886,6 +15068,12 @@ function refreshPromptHistory() {
     .then((r) => {
       state.promptHistory = (r && r.entries) || [];
       if (suggestFanIsOpen()) renderSuggestFan();
+      // The user can be typing a search before the entries land — repaint
+      // the matches under the query they already have rather than leaving
+      // the surface on its "no prompt history yet" empty state.
+      else if (suggestNav.surface === "history" && suggestStackIsOpen()) {
+        withPreservedTypingFocus(() => renderHistoryCards());
+      }
     })
     .catch((e) => console.debug("prompt_history.list failed", e));
 }
@@ -14965,6 +15153,110 @@ document.addEventListener("pointerdown", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && suggestDeckIsOpen()) closeSuggestDeck();
 });
+/**
+ * Deck key routing while it is open. Capture phase on `document`, like the
+ * chord handler, so it is claimed before xterm's textarea listener or the
+ * composer sees it.
+ *
+ * What is deliberately NOT claimed:
+ * - anything with Meta/Alt, and every Ctrl key except the `C-g` abort and
+ *   `C-n`/`C-p` motion the TUI deck also honors. `C-x` chords keep working
+ *   while the deck is open, including `C-x .` to toggle it shut.
+ * - Escape, which belongs to the overlay stack that already closes the deck
+ *   innermost-first.
+ * - keys typed while a chord is half-entered; that chord owns the next key.
+ *
+ * Everything printable goes to the history type-ahead from whichever
+ * surface is showing, so "just start typing" always means "search my
+ * prompts" — the same default the TUI deck opens on.
+ */
+document.addEventListener(
+  "keydown",
+  (ev) => {
+    if (!suggestDeckIsOpen()) return;
+    if (typeof chordState !== "undefined" && chordState.pending.length) return;
+    // Phones keep the old rule: the composer and its virtual keyboard are
+    // the whole point of that layout, and tapping the orb must not divert
+    // the next character out of a message being written.
+    if (isNarrowLayout()) return;
+    if (ev.metaKey || ev.altKey) return;
+    const stop = () => {
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+    if (ev.ctrlKey) {
+      if (ev.key === "g") {
+        closeSuggestDeck();
+        stop();
+      } else if (ev.key === "n") {
+        moveSuggestCursor(1);
+        stop();
+      } else if (ev.key === "p") {
+        moveSuggestCursor(-1);
+        stop();
+      }
+      return;
+    }
+    switch (ev.key) {
+      case "ArrowDown":
+        moveSuggestCursor(1);
+        stop();
+        return;
+      case "ArrowUp":
+        moveSuggestCursor(-1);
+        stop();
+        return;
+      case "Enter":
+        // With nothing highlighted the deck has no opinion; let the key
+        // reach the terminal or composer as it normally would.
+        if (suggestNav.index >= 0) {
+          activateSuggestCursor();
+          stop();
+        }
+        return;
+      case "ArrowRight":
+        if (suggestNav.surface === "fan" && suggestNav.index >= 0) {
+          activateSuggestCursor();
+          stop();
+        }
+        return;
+      case "ArrowLeft":
+        if (suggestNav.surface !== "fan") {
+          renderSuggestFan();
+          stop();
+        }
+        return;
+      case "Backspace":
+        // Trims the search, then leaves the surface, then closes — the
+        // TUI's unwind order, so Backspace never strands the user.
+        if (suggestNav.surface === "history" && suggestNav.query) {
+          suggestNav.query = suggestNav.query.slice(0, -1);
+          suggestNav.index = -1;
+          withPreservedTypingFocus(() => renderHistoryCards());
+        } else if (suggestNav.surface !== "fan") {
+          renderSuggestFan();
+        } else {
+          closeSuggestDeck();
+        }
+        stop();
+        return;
+      case "Tab":
+        return;
+      default:
+        break;
+    }
+    if (ev.key.length !== 1) return;
+    if (suggestNav.surface === "history") {
+      suggestNav.query += ev.key;
+      suggestNav.index = -1;
+      withPreservedTypingFocus(() => renderHistoryCards());
+    } else {
+      openHistoryStack({ seed: ev.key });
+    }
+    stop();
+  },
+  true,
+);
 // Refresh the pending spinner label so a timed-out generation falls
 // back to the idle orb without requiring another event.
 setInterval(() => {
