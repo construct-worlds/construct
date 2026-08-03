@@ -1357,6 +1357,11 @@ where
                     "assistant" => HeadlessOutputSection::Assistant,
                     _ => HeadlessOutputSection::Other,
                 };
+            } else if output_section == HeadlessOutputSection::User && trimmed == "codex" {
+                // Real `codex exec` output starts the agent section with this
+                // bare marker, without another `--------` separator.
+                output_section = HeadlessOutputSection::Assistant;
+                continue;
             }
 
             // Stateful token-footer parse, BEFORE any emit, so the footer
@@ -1459,31 +1464,29 @@ fn parse_token_count(line: &str) -> Option<u64> {
 /// Try to pull structured fields out of a codex JSON event. Returns `true` if
 /// the value was recognized; otherwise the caller falls back to emitting raw.
 fn try_emit_structured(emit: &EventEmitter, v: &Value) -> bool {
-    let ty = match v.get("type").and_then(|t| t.as_str()) {
+    let item = structured_item(v);
+    let ty = match item.get("type").and_then(|t| t.as_str()) {
         Some(t) => t,
         None => return false,
     };
     match ty {
         "message" | "assistant" => {
-            if let Some(text) = assistant_text_from_structured(v) {
+            if let Some((role, text)) = structured_message(item) {
                 if !text.is_empty() {
-                    emit.emit(SessionEvent::Message {
-                        role: MessageRole::Assistant,
-                        text,
-                    });
-                    return true;
+                    emit.emit(SessionEvent::Message { role, text });
                 }
+                return true;
             }
             false
         }
         "tool_use" => {
-            let name = v
+            let name = item
                 .get("name")
                 .and_then(|n| n.as_str())
                 .unwrap_or("?")
                 .to_string();
-            let args = v.get("input").cloned().unwrap_or(Value::Null);
-            let call_id = v.get("id").and_then(|n| n.as_str()).map(str::to_string);
+            let args = item.get("input").cloned().unwrap_or(Value::Null);
+            let call_id = item.get("id").and_then(|n| n.as_str()).map(str::to_string);
             emit.emit(SessionEvent::ToolUse {
                 tool: name,
                 args,
@@ -1492,14 +1495,17 @@ fn try_emit_structured(emit: &EventEmitter, v: &Value) -> bool {
             true
         }
         "tool_result" => {
-            let tool = v
+            let tool = item
                 .get("tool_use_id")
-                .or_else(|| v.get("name"))
+                .or_else(|| item.get("name"))
                 .and_then(|n| n.as_str())
                 .unwrap_or("?")
                 .to_string();
-            let ok = !v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
-            let output = match v.get("output").or_else(|| v.get("content")) {
+            let ok = !item
+                .get("is_error")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let output = match item.get("output").or_else(|| item.get("content")) {
                 Some(Value::String(s)) => s.clone(),
                 Some(other) => serde_json::to_string(other).unwrap_or_default(),
                 None => String::new(),
@@ -1519,23 +1525,38 @@ fn try_emit_structured(emit: &EventEmitter, v: &Value) -> bool {
     }
 }
 
-fn assistant_text_from_structured(v: &Value) -> Option<String> {
-    let is_assistant = match v.get("type").and_then(|ty| ty.as_str()) {
-        Some("assistant") => true,
-        Some("message") => matches!(
-            v.get("role").and_then(|role| role.as_str()),
-            None | Some("assistant")
-        ),
-        _ => false,
-    };
-    if !is_assistant {
-        return None;
+fn structured_item(v: &Value) -> &Value {
+    if v.get("type").and_then(Value::as_str) == Some("response_item") {
+        v.get("payload").unwrap_or(v)
+    } else {
+        v
     }
+}
 
-    v.get("content")
-        .and_then(|content| content.as_str())
+fn structured_message(v: &Value) -> Option<(MessageRole, String)> {
+    let ty = v.get("type").and_then(Value::as_str)?;
+    let role = match ty {
+        "assistant" => MessageRole::Assistant,
+        "message" => match v.get("role").and_then(Value::as_str) {
+            None | Some("assistant") => MessageRole::Assistant,
+            Some("user") => MessageRole::User,
+            Some("system" | "developer") => MessageRole::System,
+            Some("tool") => MessageRole::Tool,
+            Some(_) => return None,
+        },
+        _ => return None,
+    };
+    let text = v
+        .get("content")
+        .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| extract_text_from_blocks(v.get("content")))
+        .or_else(|| extract_text_from_blocks(v.get("content")))?;
+    Some((role, text))
+}
+
+fn assistant_text_from_structured(v: &Value) -> Option<String> {
+    let (role, text) = structured_message(structured_item(v))?;
+    (role == MessageRole::Assistant).then_some(text)
 }
 
 fn extract_text_from_blocks(v: Option<&Value>) -> Option<String> {
@@ -1645,6 +1666,64 @@ mod tests {
             diagnostics.lock().unwrap().blocked_write.as_deref(),
             Some(ASSISTANT_BLOCK)
         );
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_records_real_plain_codex_section_block() {
+        const ASSISTANT_BLOCK: &str =
+            "Blocked: the workspace is read-only, so index.html could not be written";
+        // Real `codex exec` output starts the agent section with `codex`
+        // directly after the echoed user prompt, without another separator.
+        const OUTPUT: &[u8] = b"OpenAI Codex v0.146.0\n--------\nuser\nPlease write index.html\ncodex\nBlocked: the workspace is read-only, so index.html could not be written\ntokens used\n123\n";
+        let (emit, _rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(OUTPUT, emit, diagnostics.clone())
+            .await
+            .expect("stdout task should finish");
+
+        assert_eq!(
+            diagnostics.lock().unwrap().blocked_write.as_deref(),
+            Some(ASSISTANT_BLOCK)
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_unwraps_response_item_and_preserves_message_roles() {
+        const ASSISTANT_BLOCK: &str = "Blocked: assistant could not write index.html";
+        const OUTPUT: &[u8] = b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Blocked: prompt asks for a write\"}]}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Blocked: assistant could not write index.html\"}]}}\n";
+        let (emit, mut rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(OUTPUT, emit, diagnostics.clone())
+            .await
+            .expect("stdout task should finish");
+
+        assert_eq!(
+            diagnostics.lock().unwrap().blocked_write.as_deref(),
+            Some(ASSISTANT_BLOCK)
+        );
+
+        let events: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|notification| notification.pointer("/params/event").cloned())
+            .collect();
+        assert!(events.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message")
+                && event.get("role").and_then(Value::as_str) == Some("user")
+                && event.get("text").and_then(Value::as_str)
+                    == Some("Blocked: prompt asks for a write")
+        }));
+        assert!(events.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message")
+                && event.get("role").and_then(Value::as_str) == Some("assistant")
+                && event.get("text").and_then(Value::as_str) == Some(ASSISTANT_BLOCK)
+        }));
+        assert!(events.iter().all(|event| {
+            !event
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains("response_item"))
+        }));
     }
 
     #[test]
