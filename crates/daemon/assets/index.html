@@ -2554,34 +2554,70 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Vertical lane under a session card. Connects the card to its turn-info
+     segment (and on into the child stack) the way the TUI draws │ bars. */
+  .ln-lane {
+    --ln-rail-x: 14px;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    min-height: 10px;
+    padding: 0 0 2px;
+  }
+  .ln-lane::before {
+    content: "";
+    position: absolute;
+    left: var(--ln-rail-x);
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    border-radius: 1px;
+    background: color-mix(in srgb, var(--fg) 18%, transparent);
+    pointer-events: none;
+  }
+  /* When the node has children, the lane rail continues into the child rail
+     without a visual break. */
+  .ln-node:has(> .ln-children) > .ln-lane {
+    padding-bottom: 0;
+  }
+  .ln-node:has(> .ln-children) > .ln-lane::before {
+    bottom: -6px;
+  }
   /* Turn-info segment sits OUTSIDE the session card, as its own graph node
      on the lane (TUI: `• 12 tok · 8m12s` below the box, not inside it). */
   .ln-segment {
     position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 6px;
-    margin: 4px 0 2px 2px;
-    padding: 3px 8px 3px 6px;
-    border-radius: 999px;
+    margin: 6px 0 4px 0;
+    padding: 2px 8px 2px calc(var(--ln-rail-x) + 10px);
     width: fit-content;
     max-width: 100%;
     color: var(--fg-dim);
     font-size: 10.5px;
     font-variant-numeric: tabular-nums;
-    background: color-mix(in srgb, var(--fg) 5%, transparent);
-    border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
     white-space: nowrap;
     cursor: default;
     user-select: none;
+    background: transparent;
+    border: none;
   }
   .ln-segment .ln-seg-mark {
+    position: absolute;
+    left: calc(var(--ln-rail-x) - 5px);
+    top: 50%;
+    transform: translateY(-50%);
     flex: 0 0 auto;
-    width: 1em;
+    width: 12px;
     text-align: center;
     color: var(--fg-faint);
     font-size: 11px;
     line-height: 1;
+    /* Sit on top of the rail so the bullet reads as the lane marker. */
+    background: var(--bg-elev);
   }
   .ln-segment.is-ok .ln-seg-mark { color: var(--ok); }
   .ln-segment.is-bad .ln-seg-mark { color: var(--err); }
@@ -2589,14 +2625,30 @@
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-elev) 88%, var(--bg));
+    border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
   }
   .ln-segment.is-empty {
     display: none;
   }
+  /* Empty segment (no stats): keep a short stem when the node has children
+     so the card still connects into the child rail; hide entirely on leaves. */
+  .ln-lane:has(.ln-segment.is-empty) {
+    min-height: 8px;
+  }
+  .ln-node:not(:has(> .ln-children)) > .ln-lane:has(.ln-segment.is-empty) {
+    display: none;
+  }
+  .lineage-graph.is-compact .ln-lane {
+    --ln-rail-x: 12px;
+    min-height: 8px;
+  }
   .lineage-graph.is-compact .ln-segment {
-    margin: 2px 0 1px 2px;
-    padding: 1px 6px 1px 4px;
+    margin: 4px 0 2px 0;
     font-size: 10px;
+    padding-left: calc(var(--ln-rail-x) + 8px);
   }
   .ln-badge {
     flex: 0 0 auto;
@@ -5518,9 +5570,12 @@ function buildLineageCardEl(node, byId, focusId) {
   }
   wrap.appendChild(card);
 
-  // Turn-info is a separate graph node on the lane, outside the session box
-  // (TUI: `• 12.4k tok · 8m12s` below the bordered box).
-  wrap.appendChild(buildLineageSegmentEl(summary, node.session_id));
+  // Lane under the card: vertical rail + turn-info segment sitting on it
+  // (TUI draws │ from the box down through `• 12.4k tok · 8m12s`).
+  const lane = document.createElement("div");
+  lane.className = "ln-lane";
+  lane.appendChild(buildLineageSegmentEl(summary, node.session_id));
+  wrap.appendChild(lane);
 
   const kids = node.children || [];
   if (!kids.length) return wrap;
