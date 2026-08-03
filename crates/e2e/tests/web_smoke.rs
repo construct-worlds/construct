@@ -912,17 +912,37 @@ async fn web_client_loads_and_websocket_connects() {
     assert_eq!(lazy_playbook_surface["firstTerminalHidden"], true);
     assert_eq!(lazy_playbook_surface["mode"], "playbook");
 
-    // Connection state is rendered as a tiny matrix canvas rather than
-    // a static "connected" text label. The accessible label remains
-    // for screen readers.
-    let mini_matrix: serde_json::Value = page
+    // Fleet usage is rendered as a compact header graph rather than the
+    // old Matrix animation. Connection state remains accessible and a
+    // disconnected badge gains both a red frame and an in-badge icon.
+    let mini_usage: serde_json::Value = page
         .evaluate(
             r#"
             (() => {
-              const canvas = document.getElementById('miniMatrix');
+              const canvas = document.getElementById('miniUsageGraph');
               const headerTitle = document.querySelector('header .title');
               const conn = document.getElementById('conn');
+              const icon = document.getElementById('connStateIcon');
               const rect = canvas ? canvas.getBoundingClientRect() : null;
+              const connectedBorder = canvas ? getComputedStyle(canvas).borderTopColor : null;
+              if (conn) conn.dataset.state = 'closed';
+              const disconnectedBorder = canvas ? getComputedStyle(canvas).borderTopColor : null;
+              const disconnectedIconVisible = icon ? getComputedStyle(icon).display !== 'none' : false;
+              const disconnectedIconColor = icon ? getComputedStyle(icon).color : null;
+              if (conn) conn.dataset.state = 'open';
+              const probe = createTokenMeter(Date.now());
+              tokenObserve(probe, 'test-model', 120000, 30000, Date.now());
+              paintTokenBars(canvas, probe, { columnWidth: 4, minWidth: 24, minHeight: 24 });
+              const probePixels = canvas
+                ? Array.from(canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data)
+                : [];
+              const hasUsageColor = probePixels.some((v, i) => {
+                if ((i % 4) !== 0) return false;
+                const g = probePixels[i + 1] || 0;
+                const b = probePixels[i + 2] || 0;
+                return v > 60 || g > 60 || b > 60;
+              });
+              paintMiniUsageGraph();
               return {
                 tag: canvas ? canvas.tagName : null,
                 label: canvas ? canvas.getAttribute('aria-label') : null,
@@ -932,6 +952,11 @@ async fn web_client_loads_and_websocket_connects() {
                 visibleConnText: conn ? conn.textContent.trim() : null,
                 width: rect ? rect.width : 0,
                 height: rect ? rect.height : 0,
+                connectedBorder,
+                disconnectedBorder,
+                disconnectedIconVisible,
+                disconnectedIconColor,
+                hasUsageColor,
                 hasStaticTitle: !!headerTitle,
                 painted: canvas
                   ? Array.from(canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data)
@@ -942,24 +967,37 @@ async fn web_client_loads_and_websocket_connects() {
             "#,
         )
         .await
-        .expect("evaluate mini matrix")
+        .expect("evaluate mini usage graph")
         .into_value()
         .expect("json");
-    assert_eq!(mini_matrix["tag"], "CANVAS");
-    assert_eq!(mini_matrix["label"], "construct connected");
+    assert_eq!(mini_usage["tag"], "CANVAS");
+    assert_eq!(
+        mini_usage["label"],
+        "fleet token usage · connected · Settings"
+    );
     // The badge doubles as the settings button (click opens the
     // settings sheet), so it exposes a button role and stays focusable.
-    assert_eq!(mini_matrix["role"], "button");
-    assert_eq!(mini_matrix["connState"], "open");
-    assert_eq!(mini_matrix["connLabel"], "connected");
-    assert_eq!(mini_matrix["visibleConnText"], "");
-    assert_eq!(mini_matrix["hasStaticTitle"], false);
-    assert!(
-        mini_matrix["width"].as_f64().unwrap_or_default() >= 40.0
-            && mini_matrix["height"].as_f64().unwrap_or_default() >= 16.0,
-        "mini matrix should have visible dimensions, got {mini_matrix:?}"
+    assert_eq!(mini_usage["role"], "button");
+    assert_eq!(mini_usage["connState"], "open");
+    assert_eq!(mini_usage["connLabel"], "connected");
+    assert_eq!(mini_usage["visibleConnText"], "");
+    assert_eq!(mini_usage["hasStaticTitle"], false);
+    assert_ne!(
+        mini_usage["connectedBorder"],
+        mini_usage["disconnectedBorder"]
     );
-    assert_eq!(mini_matrix["painted"], true);
+    assert_eq!(mini_usage["disconnectedIconVisible"], true);
+    assert_eq!(
+        mini_usage["disconnectedBorder"],
+        mini_usage["disconnectedIconColor"]
+    );
+    assert_eq!(mini_usage["hasUsageColor"], true);
+    assert!(
+        mini_usage["width"].as_f64().unwrap_or_default() >= 40.0
+            && mini_usage["height"].as_f64().unwrap_or_default() >= 16.0,
+        "mini usage graph should have visible dimensions, got {mini_usage:?}"
+    );
+    assert_eq!(mini_usage["painted"], true);
 
     // Page-level sanity: the bundled xterm.js was loaded (i.e.
     // the embedded `/t/<token>/static/xterm.js` request
