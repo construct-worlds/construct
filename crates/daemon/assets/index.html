@@ -15938,6 +15938,15 @@ if ($("openConsoleBtn")) $("openConsoleBtn").addEventListener("click", openConso
 if ($("consoleCloseBtn")) {
   $("consoleCloseBtn").addEventListener("click", () => closeConsole());
 }
+// While the console is up the web keymap stands down, so anything that takes
+// focus off the terminal — the bar, the padding around the grid — leaves
+// keystrokes with no consumer at all. Hand focus straight back.
+consoleOverlayEl.addEventListener("mouseup", (ev) => {
+  if (!consoleUi.open || !consoleUi.term) return;
+  if (ev.target.closest("#consoleCloseBtn")) return;
+  if (consoleUi.term.hasSelection && consoleUi.term.hasSelection()) return;
+  consoleUi.term.focus();
+});
 window.addEventListener("resize", syncConsoleAvailability);
 syncConsoleAvailability();
 
