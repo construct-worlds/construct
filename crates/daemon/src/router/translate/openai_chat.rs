@@ -141,6 +141,7 @@ pub fn parse_request(body: &Value) -> CanonRequest {
                                 .get("parameters")
                                 .cloned()
                                 .unwrap_or_else(|| json!({"type":"object","properties":{}})),
+                            freeform: None,
                         })
                     })
                     .collect()
@@ -273,9 +274,15 @@ pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
             json!(req
                 .tools
                 .iter()
+                // `schema_for_json_target` gives a freeform tool a callable
+                // shape; its real schema is `None` and would otherwise emit
+                // as a function taking no arguments.
                 .map(|t| json!({
                     "type":"function",
-                    "function":{"name":t.name,"description":t.description,"parameters":t.schema}
+                    "function":{
+                        "name":t.name,"description":t.description,
+                        "parameters":t.schema_for_json_target()
+                    }
                 }))
                 .collect::<Vec<_>>()),
         );

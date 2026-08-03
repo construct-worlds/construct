@@ -1255,8 +1255,13 @@ where
         if let Some((ids, reasoning)) = capture.take() {
             ctx.remember_reasoning(&ids, &reasoning);
         }
-        let body =
-            translate::encode_full_response(client_dialect, &events, &route.model).to_string();
+        let body = translate::encode_full_response_with_context(
+            client_dialect,
+            &events,
+            &route.model,
+            context,
+        )
+        .to_string();
         return write_simple(stream, 200, &body).await;
     }
 
@@ -1267,7 +1272,7 @@ where
         .await
         .context("write response head")?;
 
-    let mut encoder = translate::ClientEncoder::new(client_dialect, &route.model);
+    let mut encoder = translate::ClientEncoder::with_context(client_dialect, &route.model, context);
     // Chat-completions targets (DeepSeek among them) may stream tool intent
     // as DSML inside content deltas; hold and lift those into structured
     // tool events before the harness encoder sees them.

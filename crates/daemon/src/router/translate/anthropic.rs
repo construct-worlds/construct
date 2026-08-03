@@ -68,6 +68,7 @@ pub fn parse_request(body: &Value) -> CanonRequest {
                                 .get("input_schema")
                                 .cloned()
                                 .unwrap_or_else(|| json!({"type":"object","properties":{}})),
+                            freeform: None,
                         })
                     })
                     .collect()
@@ -253,7 +254,7 @@ pub fn emit_request(req: &CanonRequest, model: &str) -> Value {
                 .map(|t| json!({
                     "name": t.name,
                     "description": t.description,
-                    "input_schema": t.schema,
+                    "input_schema": t.schema_for_json_target(),
                 }))
                 .collect::<Vec<_>>()),
         );

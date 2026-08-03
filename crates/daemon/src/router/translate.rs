@@ -27,7 +27,7 @@ pub mod responses;
 
 use std::collections::BTreeMap;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::Dialect;
 
@@ -92,6 +92,53 @@ pub struct CanonTool {
     pub name: String,
     pub description: String,
     pub schema: Value,
+    /// A freeform (grammar-constrained) tool: the harness takes raw text
+    /// as the call input, not JSON arguments, and declares no JSON schema.
+    /// Codex's `exec` is one. Carries the dialect's own `format` object so
+    /// a target that understands freeform tools gets it back verbatim;
+    /// targets that do not are given a synthesized schema instead. `None`
+    /// for an ordinary function tool.
+    pub freeform: Option<Value>,
+}
+
+/// Property name of the synthesized single argument a freeform tool is
+/// given when the target speaks only JSON-schema functions. Matches the
+/// field Responses itself uses on `custom_tool_call`, so the value maps
+/// straight back with no renaming.
+pub const FREEFORM_INPUT_PROPERTY: &str = "input";
+
+impl CanonTool {
+    /// Schema to advertise to a target that has no freeform tool concept.
+    ///
+    /// A freeform tool has no JSON schema, and emitting it as a function
+    /// with an empty property set tells the model it takes no arguments —
+    /// leaving it no way to express the call and pushing it into writing
+    /// prose instead. Synthesizing a single required string restores a
+    /// callable shape.
+    pub fn schema_for_json_target(&self) -> Value {
+        let Some(format) = self.freeform.as_ref() else {
+            return self.schema.clone();
+        };
+        let mut description =
+            "Raw text input for this tool. Send the body verbatim, not JSON.".to_string();
+        if let Some(grammar) = format.get("definition").and_then(Value::as_str) {
+            let syntax = format
+                .get("syntax")
+                .and_then(Value::as_str)
+                .unwrap_or("grammar");
+            description.push_str(&format!(
+                " It must parse against this {syntax} grammar:\n{grammar}"
+            ));
+        }
+        json!({
+            "type": "object",
+            "properties": {
+                FREEFORM_INPUT_PROPERTY: {"type": "string", "description": description}
+            },
+            "required": [FREEFORM_INPUT_PROPERTY],
+            "additionalProperties": false,
+        })
+    }
 }
 
 /// Request-scoped state needed to reverse a target's wire restrictions.
@@ -108,6 +155,10 @@ pub struct TranslationContext {
     /// harness can dispatch. Empty means "no information" — never a
     /// signal that the request offered no tools.
     pub(crate) offered_tools: Vec<String>,
+    /// Names of the offered tools that are freeform. A call to one of
+    /// these has to go back to the harness as its dialect's freeform call
+    /// item carrying raw text, not as a JSON function call.
+    pub(crate) freeform_tools: Vec<String>,
 }
 
 /// A translated body plus the request-scoped state its response decoder
@@ -247,6 +298,12 @@ pub fn emit_request_with_context(
     // Recorded for every dialect: the decoder cannot see the request, and
     // a name the model invented is only checkable against what was offered.
     context.offered_tools = req.tools.iter().map(|t| t.name.clone()).collect();
+    context.freeform_tools = req
+        .tools
+        .iter()
+        .filter(|t| t.freeform.is_some())
+        .map(|t| t.name.clone())
+        .collect();
     EmittedRequest { body, context }
 }
 
@@ -439,11 +496,17 @@ pub enum ClientEncoder {
 
 impl ClientEncoder {
     pub fn new(dialect: Dialect, model: &str) -> Self {
+        Self::with_context(dialect, model, &TranslationContext::default())
+    }
+
+    /// Encoder that knows the request's freeform tools, so a call to one
+    /// goes back in the item shape the harness declared it with.
+    pub fn with_context(dialect: Dialect, model: &str, context: &TranslationContext) -> Self {
         match dialect {
             Dialect::OpenAiChat => ClientEncoder::Chat(openai_chat::StreamEncoder::new(model)),
-            Dialect::OpenAiResponses => {
-                ClientEncoder::Responses(responses::StreamEncoder::new(model))
-            }
+            Dialect::OpenAiResponses => ClientEncoder::Responses(
+                responses::StreamEncoder::with_freeform_tools(model, &context.freeform_tools),
+            ),
             // No route-capable harness currently speaks Gemini. Anthropic
             // remains the established client framing for Claude.
             _ => ClientEncoder::Anthropic(anthropic::StreamEncoder::new(model)),
@@ -495,9 +558,21 @@ pub fn decode_full_response_with_context(
 
 /// Re-encode decoded events as a non-streaming body in `dialect`.
 pub fn encode_full_response(dialect: Dialect, events: &[CanonEvent], model: &str) -> Value {
+    encode_full_response_with_context(dialect, events, model, &TranslationContext::default())
+}
+
+/// As [`encode_full_response`], but aware of the request's freeform tools.
+pub fn encode_full_response_with_context(
+    dialect: Dialect,
+    events: &[CanonEvent],
+    model: &str,
+    context: &TranslationContext,
+) -> Value {
     match dialect {
         Dialect::OpenAiChat => openai_chat::encode_full(events, model),
-        Dialect::OpenAiResponses => responses::encode_full(events, model),
+        Dialect::OpenAiResponses => {
+            responses::encode_full_with_freeform(events, model, &context.freeform_tools)
+        }
         _ => anthropic::encode_full(events, model),
     }
 }
@@ -512,7 +587,7 @@ pub fn encode_response_with_context(
     context: &TranslationContext,
 ) -> Value {
     let events = decode_full_response_with_context(target, body, context);
-    encode_full_response(dialect, &events, model)
+    encode_full_response_with_context(dialect, &events, model, context)
 }
 
 /// Rough token estimate for endpoints a target cannot answer.
@@ -668,6 +743,55 @@ mod tests {
     /// The captured shapes from the real harnesses must classify
     /// correctly — this is the check that keeps detection honest against
     /// what was actually observed on the wire.
+    /// The live Codex→DeepSeek failure, end to end. Codex's only execution
+    /// tool is `exec`, a `custom` grammar tool with no `parameters`. Routed
+    /// to a chat-completions target it used to arrive as a function taking
+    /// no arguments, leaving the model no way to express a call — so it
+    /// wrote DSML prose instead and no tool ever ran, every single turn.
+    #[test]
+    fn codex_exec_tool_reaches_a_chat_target_callable() {
+        let codex = json!({
+            "model": "deepseek-v4", "stream": true,
+            "instructions": "You are a coding assistant",
+            "input": [{"role":"user","content":[{"type":"input_text","text":"count the files"}]}],
+            "tools": [
+                {"type":"custom","name":"exec","description":"Run JavaScript",
+                 "format":{"type":"grammar","syntax":"lark","definition":"start: SOURCE\n"}},
+                {"type":"function","name":"wait","description":"wait",
+                 "parameters":{"type":"object","properties":{"ms":{"type":"number"}}}}
+            ]
+        });
+        assert_eq!(detect_dialect(&codex), Some(Dialect::OpenAiResponses));
+        let req = parse_request(Dialect::OpenAiResponses, &codex);
+        let emitted = emit_request_with_context(Dialect::OpenAiChat, &req, "deepseek-v4");
+
+        let tools = emitted.body["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), 2, "no tool may be dropped: {tools:?}");
+        let exec = tools
+            .iter()
+            .find(|t| t["function"]["name"] == "exec")
+            .expect("exec must survive");
+        let params = &exec["function"]["parameters"];
+        assert_eq!(params["required"], json!([FREEFORM_INPUT_PROPERTY]));
+        assert_eq!(
+            params["properties"][FREEFORM_INPUT_PROPERTY]["type"],
+            "string"
+        );
+
+        // And the response side knows to send a call back as freeform.
+        assert_eq!(emitted.context.freeform_tools, vec!["exec".to_string()]);
+
+        // The ordinary function tool keeps its own schema.
+        let wait = tools
+            .iter()
+            .find(|t| t["function"]["name"] == "wait")
+            .expect("wait");
+        assert_eq!(
+            wait["function"]["parameters"]["properties"]["ms"]["type"],
+            "number"
+        );
+    }
+
     #[test]
     fn classifies_captured_harness_requests() {
         // codex / pi (chatgpt.com /backend-api/codex/responses)

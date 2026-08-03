@@ -139,6 +139,7 @@ pub fn parse_request(body: &Value) -> CanonRequest {
                         .get("parameters")
                         .cloned()
                         .unwrap_or_else(empty_object_schema),
+                    freeform: None,
                 })
             })
             .collect(),
@@ -266,7 +267,7 @@ pub fn emit_request(req: &CanonRequest, _model: &str) -> (Value, TranslationCont
                 "functionDeclarations": req.tools.iter().map(|tool| json!({
                     "name": codec.encode(&tool.name),
                     "description": tool.description,
-                    "parameters": sanitize_tool_schema(&tool.schema),
+                    "parameters": sanitize_tool_schema(&tool.schema_for_json_target()),
                 })).collect::<Vec<_>>()
             }]),
         );
@@ -783,6 +784,7 @@ mod tests {
                     "properties":{"path":{"type":"string","x-mcp-header":"secret"}},
                     "additionalProperties":false
                 }),
+                freeform: None,
             }],
             tool_choice: Some(CanonToolChoice::Named("9 invalid.tool name".into())),
             max_tokens: Some(100),
