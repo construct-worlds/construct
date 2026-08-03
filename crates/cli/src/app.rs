@@ -17851,7 +17851,18 @@ mod tests {
         // 240k tokens produced over 60s of compute → 4k/s.
         app.token_meter
             .observe_busy(Some("claude-opus-5"), 60_000, Instant::now());
-        let out = rendered(&mut app, 120, 30);
+        let backend = ratatui::backend::TestBackend::new(120, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let buf = term.backend().buffer().clone();
+        let out = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             out.contains("claude-opus-5"),
             "legend missing the model:\n{out}"
@@ -17861,10 +17872,19 @@ mod tests {
             out.contains('●'),
             "legend missing model dot:\n{out}"
         );
-        assert!(
-            out.contains('█') || out.chars().any(|c| "▁▂▃▄▅▆▇".contains(c)),
-            "no bar drawn:\n{out}"
-        );
+        // A bar cell one band fills carries its color as a *background*, so
+        // the bar leaves no mark on the text layer at all. Look at the paint.
+        let graph = app
+            .layout
+            .matrix_token_graph_area
+            .expect("the meter drew a graph area");
+        let painted = (graph.y..graph.y + graph.height)
+            .flat_map(|y| (graph.x..graph.x + graph.width).map(move |x| (x, y)))
+            .any(|(x, y)| {
+                let cell = &buf[(x, y)];
+                cell.bg != ratatui::style::Color::Reset || "▁▂▃▄▅▆▇".contains(cell.symbol())
+            });
+        assert!(painted, "no bar drawn:\n{out}");
     }
 
     /// Tokens with no measured compute time read as `idle`, not as `0/s`:

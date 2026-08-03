@@ -4571,12 +4571,7 @@ fn column_cells<K: BandPaint>(
         let upper = owner[top - 1];
         let cell = if bottom_run == fill {
             // One band owns everything filled here.
-            ColumnCell {
-                row: row as u16,
-                glyph: full_cell_glyph(fill),
-                fg: bottom_series,
-                bg: None,
-            }
+            band_cell(row, bottom_series, fill)
         } else if fill == 8 && bottom_series.paint() != upper.paint() {
             // A boundary between two colors inside a full cell: lower band as
             // the glyph's filled part, whatever tops the cell as its
@@ -4597,26 +4592,42 @@ fn column_cells<K: BandPaint>(
             } else {
                 bottom_series
             };
-            ColumnCell {
-                row: row as u16,
-                glyph: full_cell_glyph(fill),
-                fg: winner,
-                bg: None,
-            }
+            band_cell(row, winner, fill)
         };
         out.push(cell);
     }
     out
 }
 
-/// The glyph for a cell one band owns outright. Cached and fresh are both
-/// solid; their model-related tonal pair, not glyph density, distinguishes
-/// them.
-fn full_cell_glyph(fill: usize) -> &'static str {
+/// A cell filled by a single band, `fill` eighths deep.
+///
+/// A cell the band fills outright is painted as a *background* rather than a
+/// `█` glyph. A foreground glyph only colors the pixels the font draws, and
+/// plenty of fonts draw FULL BLOCK shorter than the terminal's line box —
+/// the leading is left transparent, so every row boundary shows a hairline
+/// of panel background and a solid bar reads as a stack of bricks. A
+/// background color fills the whole cell whatever the font does, so the bar
+/// is solid on every terminal. Nothing else can be painted into a cell that
+/// one band fills, so spending its background on that band costs nothing.
+///
+/// A partially-filled cell still needs a glyph — its empty part has to stay
+/// panel background — and keeps the eighth block. The same short-glyph
+/// leading applies there, but it falls at the top of a column against
+/// background that is empty anyway.
+fn band_cell<K: BandPaint>(row: usize, band: K, fill: usize) -> ColumnCell<K> {
     if fill == 8 {
-        "█"
-    } else {
-        METER_PARTIALS[fill]
+        return ColumnCell {
+            row: row as u16,
+            glyph: " ",
+            fg: band,
+            bg: Some(band),
+        };
+    }
+    ColumnCell {
+        row: row as u16,
+        glyph: METER_PARTIALS[fill],
+        fg: band,
+        bg: None,
     }
 }
 
@@ -24422,13 +24433,19 @@ mod tests {
         );
     }
 
-    /// A cell wholly owned by one series is a plain full block with no
-    /// background — a background there would tint the panel behind the bar.
+    /// A cell wholly owned by one series is painted as that series'
+    /// background, not as a `█` glyph. Fonts whose FULL BLOCK is shorter than
+    /// the terminal's line box leave the leading transparent, which drew a
+    /// hairline of panel background at every row boundary and made a solid
+    /// bar read as a stack of bricks.
     #[test]
-    fn column_cells_leave_single_series_cells_unblended() {
+    fn column_cells_paint_whole_cells_as_background() {
         let cells = column_cells(&[(2, 16)], 16, 4);
         assert_eq!(cells.len(), 2);
-        assert!(cells.iter().all(|c| c.glyph == "█" && c.bg.is_none()));
+        assert!(
+            cells.iter().all(|c| c.glyph == " " && c.bg == Some(2)),
+            "a full cell must carry its color as background: {cells:?}"
+        );
         assert!(cells.iter().all(|c| c.fg == 2));
     }
 
@@ -24457,14 +24474,24 @@ mod tests {
             (0u16, Part::New).paint(),
             "the renderer must preserve the two tones"
         );
-        assert_eq!(full_cell_glyph(8), "█");
+        let cached = band_cell(0, (0u16, Part::Cached), 8);
+        let fresh = band_cell(0, (0u16, Part::New), 8);
+        assert_eq!(cached.bg, Some((0, Part::Cached)));
+        assert_eq!(fresh.bg, Some((0, Part::New)));
+        assert_ne!(cached.bg, fresh.bg, "each tone fills its own cells");
     }
 
     /// Partial cells retain the eighth-block geometry whichever tone owns
     /// them; lightness carries cache state without changing their height.
+    /// They keep a foreground glyph because the empty part of the cell has to
+    /// stay panel background — a background fill there would paint the gap
+    /// above the bar.
     #[test]
     fn a_partial_cell_keeps_its_eighth_block() {
-        assert_eq!(full_cell_glyph(5), METER_PARTIALS[5]);
+        let cell = band_cell(0, 3u16, 5);
+        assert_eq!(cell.glyph, METER_PARTIALS[5]);
+        assert_eq!(cell.fg, 3);
+        assert_eq!(cell.bg, None, "the unfilled part must stay panel background");
     }
 
     /// A model's two tones can occupy one cell exactly: the lower cached tone
