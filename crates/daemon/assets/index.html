@@ -2400,6 +2400,561 @@
     border-right: none;
     background: transparent;
   }
+
+  /* Sidebar lineage section (spec 0081 / web parity): master–detail tree
+     for the selected session, between the list and the operator panel. */
+  .lineage-section {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg-elev);
+  }
+  .lineage-section[hidden] { display: none !important; }
+  .lineage-section.is-collapsed .lineage-body { display: none; }
+  .lineage-section.is-collapsed {
+    flex: 0 0 auto;
+  }
+  .lineage-section,
+  .operator-panel {
+    position: relative;
+  }
+  .lineage-header,
+  .operator-header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+    padding: 4px 8px;
+    color: var(--fg-dim);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    user-select: none;
+    cursor: default;
+  }
+  .lineage-header .section-title,
+  .operator-header .section-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lineage-header button,
+  .operator-header button {
+    appearance: none;
+    flex: 0 0 auto;
+    border: none;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .lineage-header button:hover,
+  .operator-header button:hover {
+    color: var(--fg);
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+  }
+  .lineage-body {
+    flex: 0 0 auto;
+    height: var(--lineage-h, 220px);
+    min-height: 48px;
+    overflow: auto;
+    padding: 8px 10px 12px;
+    font-size: 12px;
+    line-height: 1.3;
+  }
+  /* Lineage graph — HTML/CSS cards + rails, visual semantics from TUI
+     (render_lineage_row / specs 0080–0081 / 0103). */
+  .lineage-graph {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    min-width: min(100%, 280px);
+    padding: 4px 2px 8px; /* TUI keeps one blank row above/below the diagram */
+    --ln-rail: color-mix(in srgb, var(--fg) 22%, transparent);
+    --ln-rail-hot: color-mix(in srgb, var(--fg) 55%, transparent);
+    --ln-dim: var(--fg-dim);
+    --ln-muted: var(--fg-faint);
+    --ln-text: var(--fg);
+    --ln-hi-bg: color-mix(in srgb, var(--accent) 18%, var(--bg-elev));
+    --ln-hi-fg: var(--fg);
+    --ln-border: color-mix(in srgb, var(--fg) 16%, transparent);
+    --ln-border-hot: color-mix(in srgb, var(--fg) 55%, transparent);
+    --ln-rail-x: 14px;
+  }
+  .lineage-graph.is-compact { --ln-rail-x: 12px; }
+  .ln-node {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  /* Session box. Rest is quiet; only the status glyph carries state color. */
+  .ln-card {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 9px;
+    border-radius: 4px;
+    border: 1px solid var(--ln-border);
+    background: transparent;
+    cursor: pointer;
+    transition: border-color 80ms ease, background 80ms ease, color 80ms ease;
+    min-width: 0;
+  }
+  .ln-card .ln-title {
+    color: var(--ln-text);
+    opacity: 0.78;
+    font-weight: 500;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ln-card .ln-harness {
+    color: var(--ln-muted);
+    font-weight: 400;
+    font-size: 12px;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  /*
+   * Hover isolation: a parent is also :hover when a nested child is hovered.
+   * Only light the card of a node that is hovered AND has no hovered descendant
+   * (the leaf-most hovered node). Selection demotion uses the same rule.
+   */
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-card {
+    border-color: var(--ln-border-hot);
+  }
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-card .ln-title {
+    opacity: 1;
+    font-weight: 700;
+  }
+  .ln-card.is-selected {
+    border-color: var(--ln-border-hot);
+    background: var(--ln-hi-bg);
+  }
+  .ln-card.is-selected .ln-title {
+    opacity: 1;
+    font-weight: 700;
+    color: var(--ln-hi-fg);
+  }
+  /* Hover on a different node demotes selection (TUI: hover wins). */
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover) > .ln-card.is-selected,
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover) > .ln-card.is-selected {
+    background: transparent;
+    border-color: var(--ln-border);
+  }
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover) > .ln-card.is-selected .ln-title,
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover) > .ln-card.is-selected .ln-title {
+    opacity: 0.78;
+    font-weight: 500;
+  }
+  /* Keep selected style when the selected node itself is the hot leaf. */
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-card.is-selected {
+    border-color: var(--ln-border-hot);
+    background: var(--ln-hi-bg);
+  }
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-card.is-selected .ln-title {
+    opacity: 1;
+    font-weight: 700;
+    color: var(--ln-hi-fg);
+  }
+  /* TUI strikes the name only — not the whole row. */
+  .ln-card.is-discarded .ln-title {
+    text-decoration: line-through;
+  }
+  .ln-status {
+    flex: 0 0 auto;
+    width: 1.1em;
+    text-align: center;
+    font-size: 12px;
+    line-height: 1.3;
+    color: var(--ln-muted);
+  }
+  .ln-status.state-running,
+  .ln-status.state-awaiting_input { color: var(--ok); }
+  .ln-status.state-done { color: var(--accent); }
+  .ln-status.state-errored { color: var(--err); }
+  .ln-status.state-paused { color: var(--warn); }
+  .ln-status.is-active { color: var(--ok); }
+  .ln-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+  }
+  /*
+   * Timeline under the session box (event order, top → bottom):
+   *   card
+   *   children  (subagent spawns / forks — earlier events)
+   *   segment   (turn-info / tok · time — later window on this lane)
+   * A continuous parent spine (│) runs through children + segment.
+   */
+  .ln-timeline {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    min-height: 0;
+  }
+  .ln-timeline::before {
+    content: "";
+    position: absolute;
+    left: var(--ln-rail-x);
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--ln-rail);
+    pointer-events: none;
+    transition: background 80ms ease;
+  }
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-timeline::before,
+  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-timeline::before,
+  .ln-node:hover:not(:has(.ln-node:hover)):has(> .ln-card.is-selected) > .ln-timeline::before {
+    background: var(--ln-rail-hot);
+  }
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-timeline::before,
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-timeline::before {
+    background: var(--ln-rail);
+  }
+
+  /* Turn-info sits ON the spine after child events (final/open window). */
+  .ln-lane {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    min-height: 0;
+    margin: 0;
+    padding: 0 0 2px;
+  }
+  .ln-segment {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    margin: 4px 0 2px 0;
+    padding: 0 4px 0 calc(var(--ln-rail-x) + 12px);
+    width: fit-content;
+    max-width: calc(100% - 4px);
+    color: var(--ln-dim);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.35;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    background: transparent;
+    border: none;
+    transition: color 80ms ease;
+  }
+  .ln-segment .ln-seg-mark {
+    position: absolute;
+    left: calc(var(--ln-rail-x) - 5px);
+    top: 50%;
+    transform: translateY(-50%);
+    width: 12px;
+    text-align: center;
+    color: var(--ln-dim);
+    font-size: 11px;
+    line-height: 1;
+    background: var(--bg-elev, var(--bg));
+  }
+  .ln-segment.is-ok .ln-seg-mark { color: var(--ok); }
+  .ln-segment.is-bad .ln-seg-mark { color: var(--warn); }
+  .ln-segment .ln-seg-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-timeline .ln-segment,
+  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-timeline .ln-segment {
+    color: var(--ln-text);
+  }
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-timeline .ln-segment .ln-seg-mark:not(.is-outcome),
+  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-timeline .ln-segment .ln-seg-mark:not(.is-outcome) {
+    color: var(--ln-text);
+    font-weight: 700;
+  }
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-timeline .ln-segment,
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-timeline .ln-segment {
+    color: var(--ln-dim);
+  }
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-timeline .ln-segment .ln-seg-mark:not(.is-outcome),
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-timeline .ln-segment .ln-seg-mark:not(.is-outcome) {
+    color: var(--ln-dim);
+    font-weight: 400;
+  }
+  .ln-segment.is-empty { display: none; }
+  /* Empty segment with no children: hide the timeline spine entirely. */
+  .ln-timeline:not(:has(.ln-children)):has(> .ln-lane .ln-segment.is-empty) {
+    display: none;
+  }
+  /* Empty segment but has children: keep a short stem under the last child. */
+  .ln-timeline:has(.ln-children) > .ln-lane:has(.ln-segment.is-empty) {
+    min-height: 6px;
+  }
+  .lineage-graph.is-compact .ln-segment {
+    margin: 3px 0 2px 0;
+    font-size: 10px;
+  }
+  .lineage-graph.is-compact .ln-card { padding: 4px 7px; }
+  .lineage-graph.is-compact .ln-harness { display: none; }
+
+  /* Child events on the parent spine (before the parent's turn-info). */
+  .ln-children {
+    position: relative;
+    margin: 0;
+    padding: 2px 0 4px calc(var(--ln-rail-x) + 16px);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .lineage-graph.is-compact .ln-children {
+    padding-left: calc(var(--ln-rail-x) + 12px);
+    gap: 5px;
+  }
+  .ln-branch {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  /* Horizontal stub from parent spine into the child (TUI ├─). */
+  .ln-branch::before {
+    content: "";
+    position: absolute;
+    left: calc(-1 * 16px);
+    top: 13px;
+    width: 14px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--ln-rail);
+  }
+  .lineage-graph.is-compact .ln-branch::before {
+    left: calc(-1 * 12px);
+    width: 10px;
+    top: 11px;
+  }
+  .ln-edge {
+    position: absolute;
+    left: calc(-1 * 15px);
+    top: 5px;
+    z-index: 1;
+    font-size: 11px;
+    line-height: 1;
+    color: var(--ln-dim);
+    background: var(--bg-elev, var(--bg));
+    padding: 0 1px;
+    pointer-events: none;
+    user-select: none;
+  }
+  .lineage-graph.is-compact .ln-edge {
+    left: calc(-1 * 12px);
+    top: 4px;
+    font-size: 10px;
+  }
+  .ln-branch:has(> .ln-node:hover:not(:has(.ln-node:hover))) > .ln-edge,
+  .ln-branch:has(> .ln-node > .ln-card.is-selected) > .ln-edge {
+    color: var(--ln-text);
+    font-weight: 700;
+  }
+  .ln-branch:has(> .ln-node:hover:not(:has(.ln-node:hover)))::before,
+  .ln-branch:has(> .ln-node > .ln-card.is-selected)::before {
+    background: var(--ln-rail-hot);
+  }
+  .ln-edge.edge-reset { color: var(--warn); }
+
+  /* Subagent toggle: muted disclosure. +N more: muted italic. */
+  .ln-toggle,
+  .ln-more {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    padding: 4px 6px;
+    border-radius: 4px;
+    border: none;
+    color: var(--ln-muted);
+    font-size: 11px;
+    font-style: normal;
+    cursor: pointer;
+    background: transparent;
+    text-align: left;
+    width: 100%;
+    font-family: inherit;
+  }
+  .ln-toggle:hover {
+    color: var(--ln-text);
+    background: color-mix(in srgb, var(--fg) 6%, transparent);
+  }
+  .ln-toggle .ln-chevron {
+    flex: 0 0 auto;
+    width: 1em;
+    color: var(--ln-dim);
+  }
+  .ln-more {
+    font-style: italic;
+    cursor: default;
+  }
+  .ln-more:hover {
+    color: var(--ln-muted);
+    background: transparent;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ln-card,
+    .ln-lane::before,
+    .ln-segment,
+    .ln-children::before {
+      transition: none !important;
+    }
+  }
+
+  .lineage-empty {
+    padding: 10px 8px;
+    color: var(--fg-faint);
+    font-size: 11px;
+    font-style: italic;
+  }
+  /* Drag handle sits on the TOP border of the title bar (not under it). */
+  .lineage-resize,
+  .operator-resize {
+    position: absolute;
+    top: -3px;
+    left: 0;
+    right: 0;
+    height: 7px;
+    z-index: 4;
+    cursor: row-resize;
+    background: transparent;
+  }
+  .lineage-resize:hover,
+  .operator-resize:hover,
+  .lineage-resize.is-dragging,
+  .operator-resize.is-dragging {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+
+  /* Operator ambient panel (spec 0019 / 0167): fleet token meter by default. */
+  .operator-panel {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .operator-panel.is-collapsed .operator-body {
+    display: none;
+  }
+  .operator-body {
+    flex: 0 0 auto;
+    height: var(--operator-h, 148px);
+    min-height: 72px;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .operator-meter {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 4px 6px 6px;
+    gap: 4px;
+  }
+  .operator-meter[hidden],
+  .operator-rain[hidden] { display: none !important; }
+  .operator-meter-graph {
+    flex: 1 1 auto;
+    min-height: 40px;
+    width: 100%;
+    display: block;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+  }
+  /* `display: block` above must not defeat the HTML `hidden` attribute —
+     otherwise the empty-state message and the canvas show together. */
+  .operator-meter-graph[hidden],
+  .operator-meter-empty[hidden],
+  .operator-meter-legend[hidden] {
+    display: none !important;
+  }
+  .operator-meter-empty {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-faint);
+    font-size: 11px;
+    font-style: italic;
+    text-align: center;
+    padding: 8px;
+  }
+  .operator-meter-legend {
+    flex: 0 0 auto;
+    display: grid;
+    gap: 2px 8px;
+    font-size: 10px;
+    line-height: 1.25;
+    color: var(--fg-dim);
+    max-height: 4.8em;
+    overflow: hidden;
+  }
+  .operator-meter-legend .leg-row {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    min-width: 0;
+  }
+  .operator-meter-legend .leg-dot {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-top: 2px;
+  }
+  .operator-meter-legend .leg-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .operator-meter-legend .leg-rate {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg-faint);
+  }
+  .operator-meter-legend .leg-rate.is-active {
+    color: inherit;
+    font-weight: 600;
+  }
+  .operator-rain {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    display: block;
+  }
+  @media (max-width: 720px) {
+    .lineage-body { height: var(--lineage-h, 120px); }
+    .operator-body { height: var(--operator-h, 120px); }
+  }
+
   /* New-session form rows reuse the approval-sheet shell. */
   .ns-row {
     display: flex;
@@ -3232,6 +3787,52 @@
       <aside class="session-list" id="sessionList">
         <div class="empty">connecting…</div>
       </aside>
+      <!--
+        Lineage section (spec 0081): selected session's fork/subagent tree.
+        Hidden until the selection has messages or lineage to show.
+      -->
+      <section class="lineage-section" id="lineageSection" hidden>
+        <!-- Resize handle on the TOP border of the title bar (TUI parity). -->
+        <div class="lineage-resize" id="lineageResize" role="separator"
+             aria-orientation="horizontal" aria-label="resize lineage"></div>
+        <div class="lineage-header" id="lineageHeader">
+          <span class="section-title">⑂ lineage</span>
+          <button type="button" id="lineageModeBtn" aria-label="toggle lineage view mode"
+                  title="Toggle full / compact">full ⇄</button>
+          <button type="button" id="lineageCollapseBtn" aria-label="collapse lineage"
+                  title="Collapse">−</button>
+        </div>
+        <div class="lineage-body" id="lineageBody" role="tree" aria-label="session lineage"></div>
+      </section>
+      <!--
+        Operator ambient panel (specs 0019 / 0167): fleet token meter by
+        default, with a rain mode toggle. Anchored at the bottom of the
+        sidebar like the TUI matrix-rain region.
+      -->
+      <section class="operator-panel" id="operatorPanel">
+        <!-- Resize handle on the TOP border of the title bar (TUI parity). -->
+        <div class="operator-resize" id="operatorResize" role="separator"
+             aria-orientation="horizontal" aria-label="resize operator panel"></div>
+        <div class="operator-header" id="operatorHeader">
+          <span class="section-title" id="operatorTitle">operator</span>
+          <button type="button" id="operatorModeBtn" aria-label="toggle operator panel mode"
+                  title="Toggle rain / tokens">tokens ⇄</button>
+          <button type="button" id="operatorCollapseBtn" aria-label="collapse operator panel"
+                  title="Collapse">−</button>
+        </div>
+        <div class="operator-body" id="operatorBody">
+          <div class="operator-meter" id="operatorMeter">
+            <canvas class="operator-meter-graph" id="operatorMeterGraph" width="260" height="90"
+                    aria-label="fleet token usage"></canvas>
+            <div class="operator-meter-empty" id="operatorMeterEmpty" hidden>
+              no token usage reported yet
+            </div>
+            <div class="operator-meter-legend" id="operatorMeterLegend"></div>
+          </div>
+          <canvas class="operator-rain" id="operatorRain" width="260" height="120" hidden
+                  aria-label="matrix rain"></canvas>
+        </div>
+      </section>
       <!--
         The old shared action toolbar is gone: reorder is drag-and-drop
         on the rows themselves, pin/rename live in the title bar, and
@@ -4203,6 +4804,22 @@ const state = {
   // responsive CSS classes because narrow-screen auto-hide after
   // selecting a session is intentionally not persisted to storage.
   sessionListVisible: true,
+  // Sidebar lineage section (spec 0081 web parity).
+  lineageCollapsed: false,
+  // "boxes" (full, default) | "rails" (compact) — matches TUI LineageViewMode.
+  lineageMode: "boxes",
+  lineageSubagentsExpanded: new Set(),
+  // Operator ambient panel (specs 0019 / 0167 web parity).
+  operatorCollapsed: false,
+  // "tokens" | "rain" — default tokens (spec 0019).
+  operatorPanelMode: "tokens",
+  // Fleet token meter state (JS port of crates/cli/src/token_meter.rs).
+  tokenMeter: null,
+  // Last observed busy_ms per session id, for rate denominators.
+  tokenMeterBusy: new Map(),
+  tokenMeterSeeded: false,
+  tokenMeterRaf: 0,
+  rainLoopRaf: 0,
   // Playbook view (per-session Markdown playbook surface, spec 0059).
   playbook: {
     // Last daemon snapshot per session id: { version, templateId, saved }.
@@ -4590,6 +5207,1261 @@ function setComposerEnabled(on) {
   attachBtn.disabled = !on || blocked;
 }
 
+// ---------------------------------------------------------------------------
+// Sidebar lineage + operator token meter (web parity for specs 0081 / 0019 / 0167)
+// ---------------------------------------------------------------------------
+
+const LINEAGE_COLLAPSED_KEY = "agentd.web.lineageCollapsed";
+const LINEAGE_MODE_KEY = "agentd.web.lineageMode";
+const LINEAGE_H_KEY = "agentd.web.lineageH";
+const OPERATOR_COLLAPSED_KEY = "agentd.web.operatorCollapsed";
+const OPERATOR_H_KEY = "agentd.web.operatorH";
+const OPERATOR_MODE_KEY = "agentd.web.operatorPanelMode";
+const LINEAGE_H_MIN = 64;
+const LINEAGE_H_MAX = 360;
+const OPERATOR_H_MIN = 72;
+const OPERATOR_H_MAX = 320;
+const TOKEN_BUCKET_SECS = 60;
+const TOKEN_MAX_BUCKETS = 600;
+const TOKEN_PEAK_DECAY = 0.8;
+const TOKEN_MIN_SCALE = 1000 * TOKEN_BUCKET_SECS;
+const TOKEN_RECENT_SLOT_SECS = 1;
+const TOKEN_RECENT_SLOTS = 60;
+const TOKEN_UNATTRIBUTED = "unattributed";
+const TOKEN_SERIES_PALETTE = [
+  [250, 179, 135], [137, 180, 250], [249, 226, 175], [203, 166, 247],
+  [148, 226, 213], [245, 194, 231], [166, 227, 161], [243, 139, 168],
+  [137, 220, 235], [180, 190, 254],
+];
+const TOKEN_CACHED_PALETTE = [
+  [195, 134, 96], [97, 133, 193], [198, 178, 134], [154, 122, 191],
+  [108, 176, 165], [193, 149, 181], [124, 177, 120], [186, 98, 123],
+  [98, 170, 183], [135, 144, 198],
+];
+const TOKEN_OTHER_COLOR = [127, 132, 156];
+const TOKEN_CACHED_OTHER = [85, 89, 109];
+const LINEAGE_MAX_DEPTH = 6;
+const LINEAGE_MAX_SIBLINGS = 12;
+
+const lineageSectionEl = $("lineageSection");
+const lineageBodyEl = $("lineageBody");
+const lineageCollapseBtn = $("lineageCollapseBtn");
+const lineageResizeEl = $("lineageResize");
+const operatorPanelEl = $("operatorPanel");
+const operatorBodyEl = $("operatorBody");
+const operatorCollapseBtn = $("operatorCollapseBtn");
+const operatorModeBtn = $("operatorModeBtn");
+const operatorResizeEl = $("operatorResize");
+const operatorMeterEl = $("operatorMeter");
+const operatorMeterGraphEl = $("operatorMeterGraph");
+const operatorMeterEmptyEl = $("operatorMeterEmpty");
+const operatorMeterLegendEl = $("operatorMeterLegend");
+const operatorRainEl = $("operatorRain");
+
+function loadSidebarPanelPrefs() {
+  state.lineageCollapsed = localStorage.getItem(LINEAGE_COLLAPSED_KEY) === "1";
+  state.lineageMode = localStorage.getItem(LINEAGE_MODE_KEY) === "rails" ? "rails" : "boxes";
+  state.operatorCollapsed = localStorage.getItem(OPERATOR_COLLAPSED_KEY) === "1";
+  const mode = localStorage.getItem(OPERATOR_MODE_KEY);
+  state.operatorPanelMode = mode === "rain" ? "rain" : "tokens";
+  const lh = Number(localStorage.getItem(LINEAGE_H_KEY));
+  const oh = Number(localStorage.getItem(OPERATOR_H_KEY));
+  if (Number.isFinite(lh) && lh > 0) {
+    document.documentElement.style.setProperty(
+      "--lineage-h",
+      `${Math.min(LINEAGE_H_MAX, Math.max(LINEAGE_H_MIN, lh))}px`,
+    );
+  }
+  if (Number.isFinite(oh) && oh > 0) {
+    document.documentElement.style.setProperty(
+      "--operator-h",
+      `${Math.min(OPERATOR_H_MAX, Math.max(OPERATOR_H_MIN, oh))}px`,
+    );
+  }
+}
+
+function sessionBusyMsAt(session, nowMs = Date.now()) {
+  if (!session) return 0;
+  let busy = Number(session.busy_ms || 0);
+  const since = session.busy_running_since_ms;
+  if (since != null && Number.isFinite(Number(since))) {
+    busy += Math.max(0, nowMs - Number(since));
+  }
+  return busy;
+}
+
+function sessionDisplayTitle(s) {
+  if (!s) return "";
+  if (s.kind === "orchestrator") return "operator";
+  const title = String(s.title || "").trim();
+  if (title) return title;
+  return String(s.harness || s.id || "session");
+}
+
+function hasLineage(sessionId, sessions) {
+  return sessions.some((s) => {
+    if (s.id === sessionId) {
+      return !!(s.forked_from
+        || ((s.kind === "subagent") && s.parent_session_id));
+    }
+    return (s.kind === "subagent" && s.parent_session_id === sessionId)
+      || (s.forked_from && s.forked_from.session_id === sessionId);
+  });
+}
+
+function lineageParentOf(s) {
+  if (s.forked_from && s.forked_from.session_id) return s.forked_from.session_id;
+  if (s.parent_session_id) return s.parent_session_id;
+  return null;
+}
+
+function lineageRootOf(focusId, byId) {
+  let current = focusId;
+  const seen = new Set();
+  while (seen.add(current)) {
+    const s = byId.get(current);
+    if (!s) break;
+    const p = lineageParentOf(s);
+    if (!p || !byId.has(p)) break;
+    current = p;
+  }
+  return current;
+}
+
+function sessionTimeMs(v) {
+  if (v == null) return 0;
+  if (typeof v === "number" && Number.isFinite(v)) {
+    // Daemon may send seconds or ms; treat small values as seconds.
+    return v < 1e12 ? v * 1000 : v;
+  }
+  const t = Date.parse(String(v));
+  return Number.isFinite(t) ? t : 0;
+}
+
+function buildLineageTree(focusId, sessions, expanded) {
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  if (!byId.has(focusId)) return null;
+  const effective = new Set(expanded || []);
+  let cur = focusId;
+  const seenAnc = new Set();
+  while (seenAnc.add(cur)) {
+    const s = byId.get(cur);
+    if (!s) break;
+    if (s.kind === "subagent" && s.parent_session_id) effective.add(s.parent_session_id);
+    const p = lineageParentOf(s);
+    if (!p || !byId.has(p)) break;
+    cur = p;
+  }
+  const rootId = lineageRootOf(focusId, byId);
+  const visited = new Set();
+
+  function childrenOf(id) {
+    const forks = [];
+    const subagents = [];
+    for (const s of sessions) {
+      if (s.id === id) continue;
+      if (s.kind === "subagent" && s.parent_session_id === id) subagents.push(s);
+      else if (s.forked_from && s.forked_from.session_id === id) forks.push(s);
+    }
+    const byPos = (a, b) => (a.position ?? 0) - (b.position ?? 0)
+      || sessionTimeMs(a.created_at) - sessionTimeMs(b.created_at)
+      || String(a.id).localeCompare(String(b.id));
+    forks.sort(byPos);
+    subagents.sort(byPos);
+    return { forks, subagents };
+  }
+
+  function build(id, edge, depth) {
+    if (visited.has(id) || !byId.has(id)) return null;
+    visited.add(id);
+    const node = { session_id: id, edge, children: [] };
+    if (depth >= LINEAGE_MAX_DEPTH) {
+      const { forks, subagents } = childrenOf(id);
+      const n = forks.length + subagents.length;
+      if (n > 0) node.children.push({ kind: "more", count: n });
+      return node;
+    }
+    const { forks, subagents } = childrenOf(id);
+    if (subagents.length > 0) {
+      const running = subagents.filter((s) => {
+        const st = String(s.state || "").toLowerCase();
+        return st === "running";
+      }).length;
+      const isExpanded = effective.has(id);
+      node.children.push({
+        kind: "subagents",
+        count: subagents.length,
+        running,
+        expanded: isExpanded,
+      });
+      if (isExpanded) {
+        const list = subagents.slice(0, LINEAGE_MAX_SIBLINGS);
+        for (const s of list) {
+          const child = build(s.id, "subagent", depth + 1);
+          if (child) node.children.push(child);
+        }
+        if (subagents.length > LINEAGE_MAX_SIBLINGS) {
+          node.children.push({ kind: "more", count: subagents.length - LINEAGE_MAX_SIBLINGS });
+        }
+      }
+    }
+    const forkList = forks.slice(0, LINEAGE_MAX_SIBLINGS);
+    for (const s of forkList) {
+      const child = build(s.id, "fork", depth + 1);
+      if (child) node.children.push(child);
+    }
+    if (forks.length > LINEAGE_MAX_SIBLINGS) {
+      node.children.push({ kind: "more", count: forks.length - LINEAGE_MAX_SIBLINGS });
+    }
+    return node;
+  }
+
+  return build(rootId, "root", 0);
+}
+
+function forkStatusOf(summary) {
+  const mode = summary && summary.merge && summary.merge.mode;
+  if (mode === "result") return "merged";
+  if (mode === "discard") return "discarded";
+  return "open";
+}
+
+function lineageSectionSessionId() {
+  const id = state.currentId;
+  if (!id) return null;
+  const sessions = state.sessions || [];
+  const sel = sessions.find((s) => s.id === id);
+  if (!sel) return null;
+  if (Number(sel.message_count || 0) > 0) return id;
+  if (!hasLineage(id, sessions)) return null;
+  const tree = buildLineageTree(id, sessions, state.lineageSubagentsExpanded);
+  if (!tree) return null;
+  // More than a lone node, or a collapsed subagent group to expand.
+  function countNodes(n) {
+    if (!n) return 0;
+    let c = 1;
+    for (const ch of n.children || []) {
+      if (ch.session_id) c += countNodes(ch);
+      else if (ch.kind === "subagents") c += 1;
+      else if (ch.kind === "more") c += 1;
+    }
+    return c;
+  }
+  return countNodes(tree) > 1 ? id : null;
+}
+
+// --- Rich HTML lineage graph (cards + CSS rails) ---
+
+function lineageEdgeKind(node, summary) {
+  if (node.edge === "fork" && summary && summary.forked_from && summary.forked_from.is_reset_snapshot) {
+    return "reset";
+  }
+  return node.edge || "root";
+}
+
+/** TUI edge glyph on the branch arrow (lineage.rs). */
+function lineageEdgeGlyph(edgeKind) {
+  if (edgeKind === "reset") return "↺";
+  if (edgeKind === "fork") return "⑂";
+  if (edgeKind === "subagent") return "▸";
+  return "";
+}
+
+function lineageFormatDuration(ms) {
+  const secs = Math.floor(Math.max(0, Number(ms) || 0) / 1000);
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return m > 0 ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`;
+}
+
+/**
+ * Turn-info for a lane window (TUI segment_label / segment_label_busy).
+ * Prefer token volume when tracked; else message count (spec 0103).
+ * Duration prefers busy_ms (compute time), else wall-clock span.
+ */
+function lineageSegmentInfo(summary) {
+  if (!summary) return null;
+  const tokens = summary.tokens || {};
+  const tok = Number(tokens.input || 0) + Number(tokens.output || 0);
+  const msgs = Number(summary.message_count || 0);
+  let countLabel = "";
+  if (tok > 0) countLabel = `${formatTokenCount(tok)} tok`;
+  else if (msgs > 0) countLabel = `${msgs} ${msgs === 1 ? "msg" : "msgs"}`;
+  else return null;
+
+  let durationMs = sessionBusyMsAt(summary);
+  if (!(durationMs > 0)) {
+    const start = sessionTimeMs(summary.created_at);
+    const end = summary.last_event_at != null
+      ? sessionTimeMs(summary.last_event_at)
+      : Date.now();
+    if (start > 0 && end >= start) durationMs = end - start;
+  }
+  const timeLabel = durationMs > 0 ? lineageFormatDuration(durationMs) : null;
+  const text = timeLabel ? `${countLabel} · ${timeLabel}` : countLabel;
+
+  // Final-window outcome glyph (TUI SegmentOutcome): ✓ good, ✗ fail.
+  const st = String(summary.state || "").toLowerCase();
+  const forkSt = forkStatusOf(summary);
+  let mark = "•";
+  let outcome = null; // "ok" | "bad" | null
+  if (forkSt === "merged" || st === "done") {
+    mark = "✓";
+    outcome = "ok";
+  } else if (forkSt === "discarded" || st === "errored") {
+    mark = "✗";
+    outcome = "bad";
+  } else if (sessionShouldAnimateStatus(summary)) {
+    // Live mid-timeline bullet spins with the status glyph (TUI).
+    mark = sessionStatusGlyph(summary);
+  }
+  return { text, mark, outcome };
+}
+
+function buildLineageSegmentEl(summary, sessionId) {
+  const info = lineageSegmentInfo(summary);
+  const el = document.createElement("div");
+  el.className = "ln-segment" + (info ? "" : " is-empty")
+    + (info && info.outcome === "ok" ? " is-ok" : "")
+    + (info && info.outcome === "bad" ? " is-bad" : "");
+  el.dataset.sessionId = sessionId || "";
+  el.setAttribute("role", "note");
+  if (!info) {
+    el.setAttribute("aria-hidden", "true");
+    return el;
+  }
+  // Hover detail mirrors TUI segment_tooltip_label when tokens exist.
+  const tokens = summary && summary.tokens ? summary.tokens : null;
+  const msgs = summary ? Number(summary.message_count || 0) : 0;
+  if (tokens && (Number(tokens.input || 0) + Number(tokens.output || 0)) > 0) {
+    const parts = [`${msgs} ${msgs === 1 ? "msg" : "msgs"}`];
+    if (!Number(tokens.output || 0)) {
+      parts.push(`${formatTokenCount(Number(tokens.input || 0) + Number(tokens.output || 0))} tok total`);
+    } else {
+      parts.push(`in ${formatTokenCount(tokens.input || 0)}`);
+      parts.push(`out ${formatTokenCount(tokens.output || 0)}`);
+    }
+    if (Number(tokens.cached || 0) > 0) {
+      parts.push(`cached ${formatTokenCount(tokens.cached || 0)}`);
+    }
+    el.title = parts.join(" · ");
+  } else {
+    el.title = info.text;
+  }
+  const mark = document.createElement("span");
+  mark.className = "ln-seg-mark" + (info.outcome ? " is-outcome" : "");
+  mark.textContent = info.mark;
+  mark.setAttribute("aria-hidden", "true");
+  if (summary) {
+    mark.dataset.sessionId = sessionId;
+    // Keep live bullets in the shared status-glyph animation loop.
+    if (!info.outcome && sessionShouldAnimateStatus(summary)) {
+      mark.classList.add("state", "state-running", "is-active");
+    }
+  }
+  const text = document.createElement("span");
+  text.className = "ln-seg-text";
+  text.textContent = info.text;
+  el.appendChild(mark);
+  el.appendChild(text);
+  return el;
+}
+
+function buildLineageCardEl(node, byId, depth = 0) {
+  const wrap = document.createElement("div");
+  wrap.className = "ln-node";
+  wrap.dataset.sessionId = node.session_id;
+
+  const summary = byId.get(node.session_id) || null;
+  const status = summary ? String(summary.state || "pending").toLowerCase() : "pending";
+  // TUI box label: "● title (harness)" — title primary, harness parenthetical.
+  const rawTitle = summary
+    ? (String(summary.title || "").trim() || String(summary.harness || node.session_id).trim())
+    : String(node.session_id).slice(0, 8);
+  const harness = summary ? String(summary.harness || "").trim() : "";
+  const showHarness = !!(harness && String(summary.title || "").trim());
+
+  const card = document.createElement("div");
+  card.className = "ln-card"
+    + (node.session_id === state.currentId ? " is-selected" : "")
+    + (forkStatusOf(summary) === "discarded" ? " is-discarded" : "");
+  card.dataset.sessionId = node.session_id;
+  card.setAttribute("role", "treeitem");
+  card.setAttribute("aria-level", String(depth + 1));
+  card.setAttribute("aria-selected", node.session_id === state.currentId ? "true" : "false");
+
+  const statusEl = document.createElement("span");
+  statusEl.className = `ln-status state state-${status}`
+    + (summary && sessionShouldAnimateStatus(summary) ? " is-active" : "");
+  statusEl.dataset.sessionId = node.session_id;
+  statusEl.textContent = summary ? sessionStatusGlyph(summary) : "○";
+  card.appendChild(statusEl);
+
+  const main = document.createElement("div");
+  main.className = "ln-main";
+  const titleEl = document.createElement("span");
+  titleEl.className = "ln-title";
+  titleEl.textContent = rawTitle;
+  titleEl.title = showHarness ? `${rawTitle} (${harness})` : rawTitle;
+  main.appendChild(titleEl);
+  if (showHarness) {
+    const h = document.createElement("span");
+    h.className = "ln-harness";
+    h.textContent = `(${harness})`;
+    main.appendChild(h);
+  }
+  card.appendChild(main);
+  wrap.appendChild(card);
+
+  // Timeline under the box — event order top→bottom (TUI global timeline):
+  //   1. child events (subagent spawn / fork branch) first
+  //   2. this lane's turn-info (tok · time) after those events
+  // Parent work that produced tokens after spawning helpers therefore
+  // renders below the subagent/fork nodes, not above them.
+  const kids = node.children || [];
+  const hasKids = kids.length > 0;
+  const timeline = document.createElement("div");
+  timeline.className = "ln-timeline";
+
+  if (hasKids) {
+    const children = document.createElement("div");
+    children.className = "ln-children";
+    children.setAttribute("role", "group");
+
+    for (const child of kids) {
+      if (child.kind === "subagents") {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ln-toggle";
+        btn.dataset.role = "subagents-toggle";
+        btn.dataset.parentId = node.session_id;
+        btn.setAttribute("aria-expanded", child.expanded ? "true" : "false");
+        const chev = document.createElement("span");
+        chev.className = "ln-chevron";
+        chev.textContent = child.expanded ? "▾" : "▸";
+        chev.setAttribute("aria-hidden", "true");
+        btn.appendChild(chev);
+        const label = document.createElement("span");
+        const noun = child.count === 1 ? "subagent" : "subagents";
+        let text = `${child.count} ${noun}`;
+        if (!child.expanded && child.running > 0) text += ` · ${child.running} running`;
+        label.textContent = text;
+        btn.appendChild(label);
+        children.appendChild(btn);
+        continue;
+      }
+      if (child.kind === "more") {
+        const more = document.createElement("div");
+        more.className = "ln-more";
+        more.textContent = `+${child.count} more`;
+        children.appendChild(more);
+        continue;
+      }
+      if (!child.session_id) continue;
+      const branch = document.createElement("div");
+      const cSum = byId.get(child.session_id);
+      const cEdge = lineageEdgeKind(child, cSum);
+      branch.className = `ln-branch edge-${cEdge}`;
+      const glyph = lineageEdgeGlyph(cEdge);
+      if (glyph) {
+        const edge = document.createElement("span");
+        edge.className = `ln-edge edge-${cEdge}`;
+        edge.textContent = glyph;
+        edge.setAttribute("aria-hidden", "true");
+        edge.title = cEdge === "reset" ? "reset snapshot"
+          : cEdge === "fork" ? "fork"
+          : cEdge === "subagent" ? "subagent" : "";
+        branch.appendChild(edge);
+      }
+      branch.appendChild(buildLineageCardEl(child, byId, depth + 1));
+      children.appendChild(branch);
+    }
+    timeline.appendChild(children);
+  }
+
+  // Turn-info last on this lane — after child spawn events.
+  const lane = document.createElement("div");
+  lane.className = "ln-lane";
+  lane.appendChild(buildLineageSegmentEl(summary, node.session_id));
+  timeline.appendChild(lane);
+  wrap.appendChild(timeline);
+  return wrap;
+}
+
+function lineageTreeSignature(node, byId) {
+  // Structural + selection/title/state signature — excludes spinner frame so
+  // the shared activity loop can animate without a full DOM rebuild.
+  if (!node) return "";
+  const s = byId.get(node.session_id);
+  const parts = [
+    node.session_id,
+    node.edge || "",
+    s ? String(s.state || "") : "",
+    s ? String(s.title || "") : "",
+    s ? String(s.harness || "") : "",
+    s ? String(s.message_count || 0) : "0",
+    s ? String((s.tokens && (s.tokens.input || 0) + (s.tokens.output || 0)) || 0) : "0",
+    // Omit live busy_ms — it ticks every second on Running sessions and
+    // would force a full DOM rebuild; duration text refreshes with state/tok.
+    s ? String(s.merge && s.merge.mode || "") : "",
+    s && s.archived ? "A" : "",
+    node.session_id === state.currentId ? "1" : "0",
+  ];
+  for (const ch of node.children || []) {
+    if (ch.kind === "subagents") {
+      parts.push(`S${ch.count}:${ch.running}:${ch.expanded ? 1 : 0}`);
+    } else if (ch.kind === "more") {
+      parts.push(`M${ch.count}`);
+    } else if (ch.session_id) {
+      parts.push(lineageTreeSignature(ch, byId));
+    }
+  }
+  return parts.join("|");
+}
+
+function renderLineageSection() {
+  if (!lineageSectionEl || !lineageBodyEl) return;
+  const focusId = lineageSectionSessionId();
+  if (!focusId) {
+    lineageSectionEl.hidden = true;
+    lineageBodyEl.__lineageSig = "";
+    return;
+  }
+  lineageSectionEl.hidden = false;
+  lineageSectionEl.classList.toggle("is-collapsed", !!state.lineageCollapsed);
+  if (lineageCollapseBtn) {
+    lineageCollapseBtn.textContent = state.lineageCollapsed ? "+" : "−";
+    lineageCollapseBtn.setAttribute(
+      "aria-label",
+      state.lineageCollapsed ? "expand lineage" : "collapse lineage",
+    );
+  }
+  const modeBtn = $("lineageModeBtn");
+  if (modeBtn) {
+    const compact = state.lineageMode === "rails";
+    modeBtn.textContent = compact ? "compact ⇄" : "full ⇄";
+    modeBtn.title = compact ? "Show full cards" : "Show compact cards";
+    modeBtn.hidden = !!state.lineageCollapsed;
+  }
+  if (state.lineageCollapsed) {
+    lineageBodyEl.replaceChildren();
+    lineageBodyEl.__lineageSig = "collapsed";
+    return;
+  }
+  const tree = buildLineageTree(focusId, state.sessions, state.lineageSubagentsExpanded);
+  if (!tree) {
+    lineageBodyEl.innerHTML = `<div class="lineage-empty">no lineage</div>`;
+    lineageBodyEl.__lineageSig = "empty";
+    return;
+  }
+  const byId = new Map(state.sessions.map((s) => [s.id, s]));
+  const sig = [
+    focusId,
+    state.lineageMode,
+    state.currentId || "",
+    [...state.lineageSubagentsExpanded].sort().join(","),
+    lineageTreeSignature(tree, byId),
+  ].join("::");
+  if (lineageBodyEl.__lineageSig === sig && lineageBodyEl.querySelector(".lineage-graph")) {
+    // Structure unchanged — spinner loop owns live glyphs.
+    return;
+  }
+  const scrollTop = lineageBodyEl.scrollTop;
+  const graph = document.createElement("div");
+  graph.className = "lineage-graph" + (state.lineageMode === "rails" ? " is-compact" : "");
+  graph.setAttribute("role", "tree");
+  graph.setAttribute("aria-label", "session lineage");
+  graph.appendChild(buildLineageCardEl(tree, byId, 0));
+  lineageBodyEl.replaceChildren(graph);
+  lineageBodyEl.__lineageSig = sig;
+  lineageBodyEl.scrollTop = scrollTop;
+  // Keep the selected session's box in view after a jump from the list.
+  const selectedCard = lineageBodyEl.querySelector(".ln-card.is-selected");
+  if (selectedCard) {
+    const bodyRect = lineageBodyEl.getBoundingClientRect();
+    const cardRect = selectedCard.getBoundingClientRect();
+    if (cardRect.top < bodyRect.top || cardRect.bottom > bodyRect.bottom) {
+      selectedCard.scrollIntoView({ block: "nearest", behavior: "auto" });
+    }
+  }
+}
+
+function bindLineageSection() {
+  if (!lineageSectionEl || lineageSectionEl.__bound) return;
+  lineageSectionEl.__bound = true;
+  if (lineageCollapseBtn) {
+    lineageCollapseBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.lineageCollapsed = !state.lineageCollapsed;
+      localStorage.setItem(LINEAGE_COLLAPSED_KEY, state.lineageCollapsed ? "1" : "0");
+      renderLineageSection();
+    });
+  }
+  const modeBtn = $("lineageModeBtn");
+  if (modeBtn) {
+    modeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.lineageMode = state.lineageMode === "rails" ? "boxes" : "rails";
+      localStorage.setItem(LINEAGE_MODE_KEY, state.lineageMode);
+      renderLineageSection();
+    });
+  }
+  if (lineageBodyEl) {
+    lineageBodyEl.addEventListener("click", (e) => {
+      const toggle = e.target.closest("[data-role='subagents-toggle']");
+      if (toggle && toggle.dataset.parentId) {
+        e.preventDefault();
+        const pid = toggle.dataset.parentId;
+        if (state.lineageSubagentsExpanded.has(pid)) state.lineageSubagentsExpanded.delete(pid);
+        else state.lineageSubagentsExpanded.add(pid);
+        // Force rebuild after expansion change.
+        lineageBodyEl.__lineageSig = "";
+        renderLineageSection();
+        return;
+      }
+      // TUI: any cell a session owns (box, lane bar area, segment) jumps to it.
+      // Prefer the innermost card/segment so a nested click doesn't select a parent.
+      const owned = e.target.closest(".ln-card[data-session-id], .ln-segment[data-session-id]");
+      if (owned && owned.dataset.sessionId) {
+        selectSession(owned.dataset.sessionId);
+        return;
+      }
+    });
+  }
+  bindVerticalResize(lineageResizeEl, {
+    min: LINEAGE_H_MIN,
+    max: LINEAGE_H_MAX,
+    cssVar: "--lineage-h",
+    storageKey: LINEAGE_H_KEY,
+    getHeight: () => (lineageBodyEl ? lineageBodyEl.clientHeight : 160),
+  });
+}
+
+function bindVerticalResize(handle, { min, max, cssVar, storageKey, getHeight }) {
+  if (!handle || handle.__bound) return;
+  handle.__bound = true;
+  let drag = null;
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    drag = { startY: e.clientY, startH: getHeight() };
+    handle.classList.add("is-dragging");
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    // Dragging the top edge up grows the section (negative dy → larger h).
+    const next = Math.min(max, Math.max(min, drag.startH - (e.clientY - drag.startY)));
+    document.documentElement.style.setProperty(cssVar, `${Math.round(next)}px`);
+  });
+  const end = (e) => {
+    if (!drag) return;
+    handle.classList.remove("is-dragging");
+    const h = Math.min(max, Math.max(min, drag.startH - (e.clientY - drag.startY)));
+    localStorage.setItem(storageKey, String(Math.round(h)));
+    drag = null;
+  };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
+}
+
+// --- Token meter (port of crates/cli/src/token_meter.rs) ---
+
+function createTokenMeter(nowMs = Date.now()) {
+  return {
+    models: [],
+    buckets: [{}], // sparse maps: modelIdx -> {tokens, cached}
+    currentStart: nowMs,
+    peak: 0,
+    recent: [{ tokens: {}, busy_ms: {} }],
+    recentStart: nowMs,
+  };
+}
+
+function tokenIntern(meter, model) {
+  const label = model || TOKEN_UNATTRIBUTED;
+  let idx = meter.models.indexOf(label);
+  if (idx >= 0) return idx;
+  if (meter.models.length >= 0xffff) return meter.models.length - 1;
+  meter.models.push(label);
+  return meter.models.length - 1;
+}
+
+function tokenBucketAdd(bucket, idx, tokens, cached) {
+  const key = String(idx);
+  const slot = bucket[key] || (bucket[key] = { tokens: 0, cached: 0 });
+  slot.tokens += tokens;
+  slot.cached += cached;
+}
+
+function tokenBucketTotal(bucket) {
+  let t = 0;
+  for (const k of Object.keys(bucket)) t += bucket[k].tokens || 0;
+  return t;
+}
+
+function tokenBucketStacked(bucket) {
+  const idxs = Object.keys(bucket).map(Number).sort((a, b) => a - b);
+  const out = [];
+  for (const idx of idxs) {
+    const slice = bucket[String(idx)];
+    const tokens = slice.tokens || 0;
+    const cached = Math.min(slice.cached || 0, tokens);
+    const fresh = tokens - cached;
+    if (cached > 0) out.push({ model: idx, part: "cached", tokens: cached });
+    if (fresh > 0) out.push({ model: idx, part: "new", tokens: fresh });
+  }
+  return out;
+}
+
+function tokenAdvanceRecent(meter, nowMs) {
+  const slotMs = TOKEN_RECENT_SLOT_SECS * 1000;
+  const steps = Math.floor(Math.max(0, nowMs - meter.recentStart) / slotMs);
+  if (steps <= 0) return;
+  for (let i = 0; i < Math.min(steps, TOKEN_RECENT_SLOTS); i++) {
+    meter.recent.push({ tokens: {}, busy_ms: {} });
+  }
+  while (meter.recent.length > TOKEN_RECENT_SLOTS) meter.recent.shift();
+  meter.recentStart += steps * slotMs;
+}
+
+function tokenAdvanceTo(meter, nowMs) {
+  tokenAdvanceRecent(meter, nowMs);
+  const bucketMs = TOKEN_BUCKET_SECS * 1000;
+  const steps = Math.floor(Math.max(0, nowMs - meter.currentStart) / bucketMs);
+  if (steps <= 0) return;
+  for (let i = 0; i < Math.min(steps, TOKEN_MAX_BUCKETS); i++) {
+    meter.buckets.push({});
+  }
+  while (meter.buckets.length > TOKEN_MAX_BUCKETS) meter.buckets.shift();
+  meter.currentStart += steps * bucketMs;
+  meter.peak *= Math.pow(TOKEN_PEAK_DECAY, Math.min(steps, 1000));
+}
+
+function tokenReserveHistory(meter, secs) {
+  const want = Math.min(TOKEN_MAX_BUCKETS, Math.floor(secs / TOKEN_BUCKET_SECS) + 1);
+  while (meter.buckets.length < want) meter.buckets.unshift({});
+}
+
+function tokenSeed(meter, samples) {
+  // samples: [{age_ms, model, tokens, cached}]
+  for (const s of samples) {
+    if (!s.tokens || s.age_ms < 0) continue;
+    const back = Math.floor(s.age_ms / (TOKEN_BUCKET_SECS * 1000));
+    const index = meter.buckets.length - back - 1;
+    if (index < 0 || index >= meter.buckets.length) continue;
+    const idx = tokenIntern(meter, s.model);
+    tokenBucketAdd(meter.buckets[index], idx, s.tokens, s.cached || 0);
+    const total = tokenBucketTotal(meter.buckets[index]);
+    if (total > meter.peak) meter.peak = total;
+  }
+}
+
+function tokenObserve(meter, model, tokens, cached, nowMs) {
+  if (!tokens) return;
+  tokenAdvanceTo(meter, nowMs);
+  const idx = tokenIntern(meter, model);
+  const bucket = meter.buckets[meter.buckets.length - 1];
+  tokenBucketAdd(bucket, idx, tokens, cached || 0);
+  const total = tokenBucketTotal(bucket);
+  if (total > meter.peak) meter.peak = total;
+  const slot = meter.recent[meter.recent.length - 1];
+  slot.tokens[String(idx)] = (slot.tokens[String(idx)] || 0) + tokens;
+}
+
+function tokenObserveBusy(meter, model, deltaMs, nowMs) {
+  if (!deltaMs) return;
+  tokenAdvanceRecent(meter, nowMs);
+  const idx = tokenIntern(meter, model);
+  const slot = meter.recent[meter.recent.length - 1];
+  slot.busy_ms[String(idx)] = (slot.busy_ms[String(idx)] || 0) + deltaMs;
+}
+
+function tokenRecentRate(meter, modelIdx) {
+  let tokens = 0;
+  let busy = 0;
+  const key = String(modelIdx);
+  for (const slot of meter.recent) {
+    tokens += slot.tokens[key] || 0;
+    busy += slot.busy_ms[key] || 0;
+  }
+  if (busy <= 0) return null;
+  return (tokens * 1000) / busy;
+}
+
+function tokenWindow(meter, width) {
+  const skip = Math.max(0, meter.buckets.length - width);
+  return meter.buckets.slice(skip);
+}
+
+function tokenScale(meter, width) {
+  let max = 0;
+  for (const b of tokenWindow(meter, width)) {
+    max = Math.max(max, tokenBucketTotal(b));
+  }
+  return Math.ceil(Math.max(meter.peak, max, TOKEN_MIN_SCALE));
+}
+
+function tokenColor(idx, part) {
+  const palette = part === "cached" ? TOKEN_CACHED_PALETTE : TOKEN_SERIES_PALETTE;
+  const other = part === "cached" ? TOKEN_CACHED_OTHER : TOKEN_OTHER_COLOR;
+  const rgb = palette[idx] || other;
+  return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+}
+
+function tokenLegend(meter, width) {
+  const totals = new Array(meter.models.length).fill(0);
+  for (const b of tokenWindow(meter, width)) {
+    for (const k of Object.keys(b)) {
+      const i = Number(k);
+      if (i < totals.length) totals[i] += b[k].tokens || 0;
+    }
+  }
+  const named = [];
+  for (let i = 0; i < Math.min(totals.length, TOKEN_SERIES_PALETTE.length); i++) {
+    if (totals[i] <= 0) continue;
+    named.push({
+      label: meter.models[i],
+      tokens: totals[i],
+      color: tokenColor(i, "new"),
+      dot: tokenColor(i, "cached"),
+      rate: tokenRecentRate(meter, i),
+    });
+  }
+  named.sort((a, b) => b.tokens - a.tokens || a.label.localeCompare(b.label));
+  let other = 0;
+  let otherCount = 0;
+  let otherRate = 0;
+  let otherAny = false;
+  for (let i = TOKEN_SERIES_PALETTE.length; i < totals.length; i++) {
+    if (totals[i] <= 0) continue;
+    other += totals[i];
+    otherCount++;
+    const r = tokenRecentRate(meter, i);
+    if (r != null) {
+      otherRate += r;
+      otherAny = true;
+    }
+  }
+  if (other > 0) {
+    named.push({
+      label: `other (${otherCount})`,
+      tokens: other,
+      color: tokenColor(999, "new"),
+      dot: tokenColor(999, "cached"),
+      rate: otherAny ? otherRate : null,
+    });
+  }
+  return named;
+}
+
+function formatTokenRate(rate) {
+  if (rate == null) return "idle";
+  if (rate < 1) return "<1/s";
+  if (rate < 1000) return `${Math.round(rate)}/s`;
+  if (rate < 10000) return `${(rate / 1000).toFixed(1)}k/s`;
+  return `${Math.round(rate / 1000)}k/s`;
+}
+
+function ensureTokenMeter() {
+  if (!state.tokenMeter) state.tokenMeter = createTokenMeter(Date.now());
+  return state.tokenMeter;
+}
+
+function observeCostForMeter(sessionId, event) {
+  if (!event || event.type !== "cost") return;
+  // Wait for the history seed so a live sample isn't wiped when the
+  // daemon window arrives a beat later.
+  if (!state.tokenMeterSeeded) return;
+  const tokensIn = Number(event.tokens_in || 0);
+  const tokensOut = Number(event.tokens_out || 0);
+  const tokensCached = Number(event.tokens_cached || 0);
+  const tokens = tokensIn + tokensOut;
+  if (!tokens) return;
+  const session = state.sessions.find((s) => s.id === sessionId);
+  const model = event.model || (session && session.model) || null;
+  tokenObserve(ensureTokenMeter(), model, tokens, tokensCached, Date.now());
+  scheduleOperatorPanelPaint();
+}
+
+function sampleComputeTimeForMeter() {
+  const meter = ensureTokenMeter();
+  const nowMs = Date.now();
+  const live = new Set();
+  for (const session of state.sessions) {
+    if (!session.model) continue;
+    live.add(session.id);
+    const busy = sessionBusyMsAt(session, nowMs);
+    const previous = state.tokenMeterBusy.get(session.id);
+    if (previous != null) {
+      const delta = Math.max(0, busy - previous);
+      if (delta > 0) tokenObserveBusy(meter, session.model, delta, nowMs);
+    }
+    state.tokenMeterBusy.set(session.id, busy);
+  }
+  for (const id of Array.from(state.tokenMeterBusy.keys())) {
+    if (!live.has(id)) state.tokenMeterBusy.delete(id);
+  }
+}
+
+async function seedTokenMeterFromDaemon() {
+  try {
+    const result = await rpc("usage.token_history", {
+      window_secs: 12 * 60 * 60,
+      max_samples: 20000,
+    });
+    const samples = (result && result.samples) || [];
+    const nowMs = Number((result && result.now_ms) || Date.now());
+    const meter = createTokenMeter(nowMs);
+    tokenReserveHistory(meter, 12 * 60 * 60);
+    tokenSeed(
+      meter,
+      samples.map((s) => ({
+        age_ms: Math.max(0, nowMs - Number(s.at_ms || 0)),
+        model: s.model || null,
+        tokens: Number(s.tokens || 0),
+        cached: Number(s.cached || 0),
+      })),
+    );
+    state.tokenMeter = meter;
+    state.tokenMeterSeeded = true;
+    // Establish busy baselines without counting pre-attach compute as a delta.
+    const t = Date.now();
+    for (const session of state.sessions) {
+      if (!session.model) continue;
+      state.tokenMeterBusy.set(session.id, sessionBusyMsAt(session, t));
+    }
+    scheduleOperatorPanelPaint();
+  } catch (_) {
+    // Older daemon without usage.token_history — live Cost events still work.
+    state.tokenMeter = createTokenMeter(Date.now());
+    state.tokenMeterSeeded = true;
+    scheduleOperatorPanelPaint();
+  }
+}
+
+function tokenIsIdle(meter) {
+  // Models can be interned by busy-time sampling alone; idle means no
+  // token volume has ever been binned (matches "no usage reported yet").
+  for (const b of meter.buckets) {
+    if (tokenBucketTotal(b) > 0) return false;
+  }
+  return true;
+}
+
+function paintTokenMeter() {
+  if (!operatorMeterEl || !operatorMeterGraphEl) return;
+  const meter = ensureTokenMeter();
+  const nowMs = Date.now();
+  tokenAdvanceTo(meter, nowMs);
+  sampleComputeTimeForMeter();
+
+  const idle = tokenIsIdle(meter);
+  if (operatorMeterEmptyEl) operatorMeterEmptyEl.hidden = !idle;
+  operatorMeterGraphEl.hidden = idle;
+  if (operatorMeterLegendEl) operatorMeterLegendEl.hidden = idle;
+  if (idle) {
+    if (operatorMeterLegendEl) operatorMeterLegendEl.replaceChildren();
+    return;
+  }
+
+  const canvas = operatorMeterGraphEl;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = Math.max(40, canvas.clientWidth || operatorMeterEl.clientWidth || 200);
+  const cssH = Math.max(32, canvas.clientHeight || 80);
+  const w = Math.round(cssW * dpr);
+  const h = Math.round(cssH * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  // TUI paints one terminal cell per 1-minute bucket. Use a monospaced
+  // cell width so columns read like the TUI bars, not hairline pixels.
+  ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  const colW = Math.max(7, Math.ceil(ctx.measureText("█").width));
+  const cols = Math.max(1, Math.floor(cssW / colW));
+  const buckets = tokenWindow(meter, cols);
+  const history = buckets.length;
+  const scale = tokenScale(meter, cols);
+  // Right-align history; leave a 1px gutter between cells like terminal gaps.
+  const barW = Math.max(1, colW - 1);
+
+  for (let i = 0; i < history; i++) {
+    const bucket = buckets[i];
+    const total = tokenBucketTotal(bucket);
+    if (!total) continue;
+    const col = cols - history + i;
+    const x = col * colW;
+    const filled = Math.max(1, Math.round((total / scale) * cssH));
+    const stacked = tokenBucketStacked(bucket);
+    let y = cssH;
+    let remaining = filled;
+    for (const band of stacked) {
+      if (remaining <= 0) break;
+      // Proportional height; keep at least 1px when a part has volume.
+      let bandH = Math.round((band.tokens / total) * filled);
+      if (band.tokens > 0) bandH = Math.max(1, bandH);
+      bandH = Math.min(bandH, remaining);
+      remaining -= bandH;
+      y -= bandH;
+      ctx.fillStyle = tokenColor(band.model, band.part);
+      ctx.fillRect(x, y, barW, bandH);
+    }
+  }
+
+  const entries = tokenLegend(meter, cols);
+  if (operatorMeterLegendEl) {
+    const colsN = Math.max(1, Math.min(3, Math.floor(cssW / 110)));
+    operatorMeterLegendEl.style.gridTemplateColumns = `repeat(${colsN}, minmax(0, 1fr))`;
+    operatorMeterLegendEl.innerHTML = entries.map((e) => {
+      const rate = formatTokenRate(e.rate);
+      const active = e.rate != null;
+      return `<div class="leg-row" title="${attr(e.label)} · ${attr(formatTokenCount(e.tokens))} tokens / ${TOKEN_BUCKET_SECS}s column">` +
+        `<span class="leg-dot" style="background:${attr(e.dot)}"></span>` +
+        `<span class="leg-name" style="color:${attr(e.color)}">${escape(e.label)}</span>` +
+        `<span class="leg-rate${active ? " is-active" : ""}" style="color:${attr(e.color)}">${escape(rate)}</span>` +
+        `</div>`;
+    }).join("");
+  }
+}
+
+function rainGlyph() {
+  // Katakana + digits + a few symbols — classic matrix rain set.
+  const r = Math.random();
+  if (r < 0.12) return String(Math.floor(Math.random() * 10));
+  if (r < 0.18) return ':·"=*+<>'[Math.floor(Math.random() * 8)];
+  return String.fromCharCode(0x30a0 + Math.floor(Math.random() * 96));
+}
+
+function ensureRainDrops(cssW, cssH) {
+  const colW = 12;
+  const cols = Math.max(6, Math.floor(cssW / colW));
+  if (!paintOperatorRain.drops) paintOperatorRain.drops = [];
+  const drops = paintOperatorRain.drops;
+  // Rebuild columns when width changes enough that the count drifts.
+  if (drops.length !== cols || paintOperatorRain.colsW !== colW) {
+    paintOperatorRain.colsW = colW;
+    drops.length = 0;
+    for (let i = 0; i < cols; i++) {
+      drops.push({
+        x: i * colW + 2,
+        y: Math.random() * cssH,
+        // px per second — much faster than the old 1.5–4 px/frame@1Hz.
+        speed: 90 + Math.random() * 160,
+        len: 10 + Math.floor(Math.random() * 16),
+        glyphs: [],
+        headBright: 0.7 + Math.random() * 0.3,
+      });
+    }
+  }
+  for (const d of drops) {
+    while (d.glyphs.length < d.len) d.glyphs.push(rainGlyph());
+  }
+  return drops;
+}
+
+function paintOperatorRain(dtMs = 16) {
+  if (!operatorRainEl || operatorRainEl.hidden) return;
+  const canvas = operatorRainEl;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = Math.max(40, canvas.clientWidth || (operatorBodyEl && operatorBodyEl.clientWidth) || 200);
+  const cssH = Math.max(40, canvas.clientHeight || 100);
+  const w = Math.round(cssW * dpr);
+  const h = Math.round(cssH * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+    // Fresh field on resize so trails don't smear at the wrong scale.
+    paintOperatorRain.drops = null;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // Fade previous frame so trails persist briefly (head stays sharp).
+  ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  let active = 0;
+  for (const s of state.sessions) {
+    if (sessionShouldAnimateStatus(s)) active++;
+  }
+  const intensity = Math.min(1, 0.35 + active * 0.12);
+  const dt = Math.min(0.05, Math.max(0.008, (dtMs || 16) / 1000));
+  const cellH = 12;
+  const drops = ensureRainDrops(cssW, cssH);
+  ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  ctx.textBaseline = "top";
+
+  for (const d of drops) {
+    d.y += d.speed * dt * (0.85 + intensity * 0.45);
+    // Occasionally re-roll a mid-tail glyph so the cascade feels alive.
+    if (Math.random() < 0.08 && d.glyphs.length) {
+      const idx = 1 + Math.floor(Math.random() * Math.max(1, d.glyphs.length - 1));
+      d.glyphs[idx] = rainGlyph();
+    }
+    if (d.y - d.len * cellH > cssH) {
+      d.y = -Math.random() * cssH * 0.4;
+      d.speed = 90 + Math.random() * 160;
+      d.len = 10 + Math.floor(Math.random() * 16);
+      d.glyphs = Array.from({ length: d.len }, rainGlyph);
+      d.headBright = 0.7 + Math.random() * 0.3;
+    }
+    // i=0 is the head (leading tip); higher i is the fading tail above it.
+    for (let i = 0; i < d.len; i++) {
+      const gy = d.y - i * cellH;
+      if (gy < -cellH || gy > cssH) continue;
+      const ch = d.glyphs[i] || rainGlyph();
+      if (i === 0) {
+        // Bright white/cyan head — distinct from the green body.
+        ctx.globalAlpha = Math.min(1, d.headBright * (0.85 + intensity * 0.2));
+        ctx.fillStyle = "rgb(220, 255, 240)";
+        ctx.shadowColor = "rgba(160, 255, 210, 0.9)";
+        ctx.shadowBlur = 8;
+        ctx.fillText(ch, d.x, gy);
+        ctx.shadowBlur = 0;
+      } else if (i === 1) {
+        // Near-head: bright green.
+        const t = 1 - i / d.len;
+        ctx.globalAlpha = (0.55 + t * 0.4) * intensity;
+        ctx.fillStyle = "rgb(140, 255, 190)";
+        ctx.fillText(ch, d.x, gy);
+      } else {
+        // Tail: darker green, alpha falls off with distance from head.
+        const t = 1 - i / d.len;
+        ctx.globalAlpha = Math.max(0.04, t * t * 0.7) * intensity;
+        const g = Math.floor(70 + t * 140);
+        ctx.fillStyle = `rgb(30, ${g}, 80)`;
+        ctx.fillText(ch, d.x, gy);
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
+}
+
+function applyOperatorPanelMode() {
+  if (!operatorPanelEl) return;
+  operatorPanelEl.classList.toggle("is-collapsed", !!state.operatorCollapsed);
+  if (operatorCollapseBtn) {
+    operatorCollapseBtn.textContent = state.operatorCollapsed ? "+" : "−";
+    operatorCollapseBtn.setAttribute(
+      "aria-label",
+      state.operatorCollapsed ? "expand operator panel" : "collapse operator panel",
+    );
+  }
+  const tokens = state.operatorPanelMode !== "rain";
+  if (operatorMeterEl) operatorMeterEl.hidden = !tokens;
+  if (operatorRainEl) operatorRainEl.hidden = tokens;
+  if (operatorModeBtn) {
+    operatorModeBtn.textContent = tokens ? "tokens ⇄" : "rain ⇄";
+    operatorModeBtn.title = tokens ? "Show matrix rain" : "Show token usage";
+  }
+  // Rain needs a continuous rAF loop; tokens only need a slow tick.
+  if (!tokens && !state.operatorCollapsed) startRainLoop();
+  else stopRainLoop();
+  scheduleOperatorPanelPaint();
+}
+
+function scheduleOperatorPanelPaint() {
+  if (state.tokenMeterRaf) return;
+  state.tokenMeterRaf = requestAnimationFrame(() => {
+    state.tokenMeterRaf = 0;
+    if (!operatorPanelEl || state.operatorCollapsed) return;
+    if (state.operatorPanelMode === "rain") {
+      // Rain is driven by startRainLoop; a one-shot is still useful on
+      // mode switches / resize before the loop's next frame.
+      paintOperatorRain(16);
+    } else {
+      paintTokenMeter();
+    }
+  });
+}
+
+function startRainLoop() {
+  if (state.rainLoopRaf) return;
+  let last = performance.now();
+  const tick = (now) => {
+    state.rainLoopRaf = 0;
+    if (!operatorPanelEl || state.operatorCollapsed || state.operatorPanelMode !== "rain") {
+      return;
+    }
+    const dt = now - last;
+    last = now;
+    paintOperatorRain(dt);
+    state.rainLoopRaf = requestAnimationFrame(tick);
+  };
+  state.rainLoopRaf = requestAnimationFrame(tick);
+}
+
+function stopRainLoop() {
+  if (state.rainLoopRaf) {
+    cancelAnimationFrame(state.rainLoopRaf);
+    state.rainLoopRaf = 0;
+  }
+}
+
+function startOperatorPanelLoop() {
+  if (startOperatorPanelLoop.timer) return;
+  // Token meter: refresh once a second. Rain runs on its own rAF loop.
+  startOperatorPanelLoop.timer = setInterval(() => {
+    if (!state.ws || state.ws.readyState !== 1) return;
+    if (state.operatorCollapsed) return;
+    if (state.operatorPanelMode === "rain") {
+      if (!state.rainLoopRaf) startRainLoop();
+      return;
+    }
+    scheduleOperatorPanelPaint();
+  }, 1000);
+  if (state.operatorPanelMode === "rain" && !state.operatorCollapsed) startRainLoop();
+}
+
+function bindOperatorPanel() {
+  if (!operatorPanelEl || operatorPanelEl.__bound) return;
+  operatorPanelEl.__bound = true;
+  if (operatorCollapseBtn) {
+    operatorCollapseBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.operatorCollapsed = !state.operatorCollapsed;
+      localStorage.setItem(OPERATOR_COLLAPSED_KEY, state.operatorCollapsed ? "1" : "0");
+      applyOperatorPanelMode();
+    });
+  }
+  if (operatorModeBtn) {
+    operatorModeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.operatorPanelMode = state.operatorPanelMode === "rain" ? "tokens" : "rain";
+      localStorage.setItem(OPERATOR_MODE_KEY, state.operatorPanelMode);
+      applyOperatorPanelMode();
+    });
+  }
+  bindVerticalResize(operatorResizeEl, {
+    min: OPERATOR_H_MIN,
+    max: OPERATOR_H_MAX,
+    cssVar: "--operator-h",
+    storageKey: OPERATOR_H_KEY,
+    getHeight: () => (operatorBodyEl ? operatorBodyEl.clientHeight : 148),
+  });
+  // Redraw on sidebar width changes.
+  if (typeof ResizeObserver !== "undefined" && operatorBodyEl) {
+    const ro = new ResizeObserver(() => scheduleOperatorPanelPaint());
+    ro.observe(operatorBodyEl);
+  }
+}
+
+function initSidebarAmbientPanels() {
+  loadSidebarPanelPrefs();
+  bindLineageSection();
+  bindOperatorPanel();
+  applyOperatorPanelMode();
+  startOperatorPanelLoop();
+}
+
 function connect() {
   setConnState("connecting", "connecting…");
   const url = websocketUrlForLocation();
@@ -4635,6 +6507,10 @@ function connect() {
       .catch(() => null) // older daemon with no shared layout — stay single-pane
       .then(async (doc) => {
         await refreshSessions(doc && doc.tree);
+        // Fleet token-meter history accrued while this client was closed
+        // (spec 0167). Seed after the session list so model attribution
+        // baselines for busy_ms are available.
+        seedTokenMeterFromDaemon();
         if (doc) applySharedLayout(doc);
       });
     refreshCurrentSessionAfterReconnect();
@@ -5633,10 +7509,59 @@ function refreshSessionListActivityGlyphs(now = Date.now()) {
   }
 }
 
+/** Keep lineage status glyphs + live mid-timeline bullets in phase with
+ *  the session list spinner (TUI: shared spinner gate on status + SegmentBullet). */
+function refreshLineageActivityGlyphs(now = Date.now()) {
+  if (!lineageBodyEl || lineageBodyEl.hidden) return;
+  const byId = new Map(state.sessions.map((s) => [s.id, s]));
+  for (const el of lineageBodyEl.querySelectorAll(".ln-status[data-session-id], .ln-seg-mark[data-session-id]")) {
+    const s = byId.get(el.dataset.sessionId);
+    if (!s) continue;
+    // Outcome marks (✓/✗) stay fixed.
+    if (el.classList.contains("is-outcome")) continue;
+    const active = sessionShouldAnimateStatus(s, now);
+    if (el.classList.contains("ln-seg-mark")) {
+      // Mid-timeline: • when idle, shared spinner only while working (TUI).
+      const glyph = active ? sessionStatusGlyph(s, now) : "•";
+      if (el.textContent !== glyph) el.textContent = glyph;
+      el.classList.toggle("is-active", active);
+      continue;
+    }
+    const glyph = sessionStatusGlyph(s, now);
+    if (el.textContent !== glyph) el.textContent = glyph;
+    el.classList.toggle("is-active", active);
+    const status = sessionStatusLabel(s);
+    const next = `ln-status state state-${status}` + (active ? " is-active" : "");
+    if (el.className !== next) el.className = next;
+  }
+  // Refresh turn-info text (busy duration ticks) without a full rebuild.
+  for (const seg of lineageBodyEl.querySelectorAll(".ln-segment[data-session-id]")) {
+    if (seg.classList.contains("is-empty")) continue;
+    const s = byId.get(seg.dataset.sessionId);
+    if (!s) continue;
+    const info = lineageSegmentInfo(s);
+    if (!info) continue;
+    const textEl = seg.querySelector(".ln-seg-text");
+    if (textEl && textEl.textContent !== info.text) textEl.textContent = info.text;
+    // Promote/demote outcome class if the session just finished.
+    const wantOk = info.outcome === "ok";
+    const wantBad = info.outcome === "bad";
+    if (seg.classList.contains("is-ok") !== wantOk) seg.classList.toggle("is-ok", wantOk);
+    if (seg.classList.contains("is-bad") !== wantBad) seg.classList.toggle("is-bad", wantBad);
+    const mark = seg.querySelector(".ln-seg-mark");
+    if (mark && info.outcome) {
+      if (!mark.classList.contains("is-outcome")) mark.classList.add("is-outcome");
+      if (mark.textContent !== info.mark) mark.textContent = info.mark;
+      mark.removeAttribute("data-session-id"); // stop spinner on terminal
+    }
+  }
+}
+
 function refreshSessionActivityGlyphs(now = Date.now()) {
   refreshSessionListActivityGlyphs(now);
   refreshSessionListDetailLive(now);
   refreshPlaybookSessionClipGlyphs(now);
+  refreshLineageActivityGlyphs(now);
 }
 
 function initSessionActivitySpinner() {
@@ -6207,6 +8132,8 @@ function renderSessions() {
   for (const node of existing.values()) node.remove();
   if (state.currentServiceName) renderServiceView();
   refreshSessionActions();
+  renderLineageSection();
+  scheduleOperatorPanelPaint();
 }
 
 /** Recompute the per-session action affordances against the
@@ -13078,6 +15005,11 @@ function handleNotification(method, params) {
   }
   if (method === "session/event") {
     const { session_id, event } = params;
+    // Fleet token meter (spec 0167): every session's Cost reports feed
+    // the ambient panel, not just the focused one.
+    if (event && event.type === "cost") {
+      observeCostForMeter(session_id, event);
+    }
     // Tool-approval requests are interactive and time-sensitive —
     // surface them in the bottom sheet regardless of which session
     // is currently being viewed. The session_id sticks with the
@@ -16866,6 +18798,7 @@ window.addEventListener("popstate", () => {
 initMiniMatrix();
 initSessionActivitySpinner();
 initPullToRefresh();
+initSidebarAmbientPanels();
 connect();
 </script>
 </body>
