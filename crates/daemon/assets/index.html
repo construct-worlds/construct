@@ -2595,17 +2595,21 @@
     align-items: baseline;
     gap: 5px;
   }
-  /* Lane under the box — flush against the card bottom. */
-  .ln-lane {
+  /*
+   * Timeline under the session box (event order, top → bottom):
+   *   card
+   *   children  (subagent spawns / forks — earlier events)
+   *   segment   (turn-info / tok · time — later window on this lane)
+   * A continuous parent spine (│) runs through children + segment.
+   */
+  .ln-timeline {
     position: relative;
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    min-height: 8px;
-    margin: 0;
-    padding: 0 0 2px;
+    min-height: 0;
   }
-  .ln-lane::before {
+  .ln-timeline::before {
     content: "";
     position: absolute;
     left: var(--ln-rail-x);
@@ -2617,22 +2621,26 @@
     pointer-events: none;
     transition: background 80ms ease;
   }
-  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-lane::before,
-  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-lane::before,
-  .ln-node:hover:not(:has(.ln-node:hover)):has(> .ln-card.is-selected) > .ln-lane::before {
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-timeline::before,
+  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-timeline::before,
+  .ln-node:hover:not(:has(.ln-node:hover)):has(> .ln-card.is-selected) > .ln-timeline::before {
     background: var(--ln-rail-hot);
   }
-  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane::before,
-  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-lane::before {
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-timeline::before,
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-timeline::before {
     background: var(--ln-rail);
   }
-  .ln-node:has(> .ln-children) > .ln-lane {
-    padding-bottom: 0;
+
+  /* Turn-info sits ON the spine after child events (final/open window). */
+  .ln-lane {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    min-height: 0;
+    margin: 0;
+    padding: 0 0 2px;
   }
-  .ln-node:has(> .ln-children) > .ln-lane::before {
-    bottom: -4px;
-  }
-  /* Turn-info on the lane: marker on the bar, text to the right. */
   .ln-segment {
     position: relative;
     z-index: 1;
@@ -2647,7 +2655,7 @@
     font-variant-numeric: tabular-nums;
     line-height: 1.35;
     white-space: nowrap;
-    cursor: pointer; /* TUI: any owned cell jumps to the session */
+    cursor: pointer;
     user-select: none;
     background: transparent;
     border: none;
@@ -2663,7 +2671,6 @@
     color: var(--ln-dim);
     font-size: 11px;
     line-height: 1;
-    /* Cover the rail under the glyph; match section surface. */
     background: var(--bg-elev, var(--bg));
   }
   .ln-segment.is-ok .ln-seg-mark { color: var(--ok); }
@@ -2673,30 +2680,33 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-lane .ln-segment,
-  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-lane .ln-segment {
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-timeline .ln-segment,
+  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-timeline .ln-segment {
     color: var(--ln-text);
   }
-  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome),
-  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome) {
+  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-timeline .ln-segment .ln-seg-mark:not(.is-outcome),
+  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-timeline .ln-segment .ln-seg-mark:not(.is-outcome) {
     color: var(--ln-text);
     font-weight: 700;
   }
-  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment,
-  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment {
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-timeline .ln-segment,
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-timeline .ln-segment {
     color: var(--ln-dim);
   }
-  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome),
-  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome) {
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-timeline .ln-segment .ln-seg-mark:not(.is-outcome),
+  .lineage-graph:has(.ln-node:hover) .ln-node:hover:has(.ln-node:hover):has(> .ln-card.is-selected) > .ln-timeline .ln-segment .ln-seg-mark:not(.is-outcome) {
     color: var(--ln-dim);
     font-weight: 400;
   }
   .ln-segment.is-empty { display: none; }
-  .ln-lane:has(.ln-segment.is-empty) { min-height: 8px; }
-  .ln-node:not(:has(> .ln-children)) > .ln-lane:has(.ln-segment.is-empty) {
+  /* Empty segment with no children: hide the timeline spine entirely. */
+  .ln-timeline:not(:has(.ln-children)):has(> .ln-lane .ln-segment.is-empty) {
     display: none;
   }
-  .lineage-graph.is-compact .ln-lane { min-height: 6px; }
+  /* Empty segment but has children: keep a short stem under the last child. */
+  .ln-timeline:has(.ln-children) > .ln-lane:has(.ln-segment.is-empty) {
+    min-height: 6px;
+  }
   .lineage-graph.is-compact .ln-segment {
     margin: 3px 0 2px 0;
     font-size: 10px;
@@ -2704,37 +2714,17 @@
   .lineage-graph.is-compact .ln-card { padding: 4px 7px; }
   .lineage-graph.is-compact .ln-harness { display: none; }
 
-  /* Child stack: continuous parent rail + branch stubs. */
+  /* Child events on the parent spine (before the parent's turn-info). */
   .ln-children {
     position: relative;
-    margin: 0 0 0 var(--ln-rail-x);
-    padding: 2px 0 2px 16px;
+    margin: 0;
+    padding: 2px 0 4px calc(var(--ln-rail-x) + 16px);
     display: flex;
     flex-direction: column;
     gap: 8px;
   }
-  .ln-children::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 0;
-    /* Stop at the last branch's connector height (~card midline), not past
-       the stack — a hanging rail below the last child looks unfinished. */
-    bottom: auto;
-    height: calc(100% - 14px);
-    width: 2px;
-    border-radius: 1px;
-    background: var(--ln-rail);
-  }
-  .ln-children:has(> :only-child)::before {
-    height: 14px; /* single child: just the stub height */
-  }
-  .ln-node:hover:not(:has(.ln-node:hover)) > .ln-children::before,
-  .ln-node:has(> .ln-card.is-selected):not(:has(.ln-node:hover)) > .ln-children::before {
-    background: var(--ln-rail-hot);
-  }
   .lineage-graph.is-compact .ln-children {
-    padding-left: 12px;
+    padding-left: calc(var(--ln-rail-x) + 12px);
     gap: 5px;
   }
   .ln-branch {
@@ -2743,10 +2733,11 @@
     flex-direction: column;
     gap: 0;
   }
+  /* Horizontal stub from parent spine into the child (TUI ├─). */
   .ln-branch::before {
     content: "";
     position: absolute;
-    left: -16px;
+    left: calc(-1 * 16px);
     top: 13px;
     width: 14px;
     height: 2px;
@@ -2754,14 +2745,13 @@
     background: var(--ln-rail);
   }
   .lineage-graph.is-compact .ln-branch::before {
-    left: -12px;
+    left: calc(-1 * 12px);
     width: 10px;
     top: 11px;
   }
-  /* Edge glyph on the branch (TUI Edge: ⑂ / ▸ / ↺). */
   .ln-edge {
     position: absolute;
-    left: -15px;
+    left: calc(-1 * 15px);
     top: 5px;
     z-index: 1;
     font-size: 11px;
@@ -2773,12 +2763,10 @@
     user-select: none;
   }
   .lineage-graph.is-compact .ln-edge {
-    left: -12px;
+    left: calc(-1 * 12px);
     top: 4px;
     font-size: 10px;
   }
-  /* Light only the edge for the hot leaf or the branch into a selected child
-     (not the whole path of ancestors — TUI only brightens the owned session). */
   .ln-branch:has(> .ln-node:hover:not(:has(.ln-node:hover))) > .ln-edge,
   .ln-branch:has(> .ln-node > .ln-card.is-selected) > .ln-edge {
     color: var(--ln-text);
@@ -5585,7 +5573,6 @@ function buildLineageCardEl(node, byId, depth = 0) {
   wrap.dataset.sessionId = node.session_id;
 
   const summary = byId.get(node.session_id) || null;
-  const edgeKind = lineageEdgeKind(node, summary);
   const status = summary ? String(summary.state || "pending").toLowerCase() : "pending";
   // TUI box label: "● title (harness)" — title primary, harness parenthetical.
   const rawTitle = summary
@@ -5604,7 +5591,6 @@ function buildLineageCardEl(node, byId, depth = 0) {
   card.setAttribute("aria-selected", node.session_id === state.currentId ? "true" : "false");
 
   const statusEl = document.createElement("span");
-  // Reuse session-list status classes so the shared spinner loop paints live work.
   statusEl.className = `ln-status state state-${status}`
     + (summary && sessionShouldAnimateStatus(summary) ? " is-active" : "");
   statusEl.dataset.sessionId = node.session_id;
@@ -5627,69 +5613,78 @@ function buildLineageCardEl(node, byId, depth = 0) {
   card.appendChild(main);
   wrap.appendChild(card);
 
-  // Lane: │ + turn-info on the bar (outside the box).
+  // Timeline under the box — event order top→bottom (TUI global timeline):
+  //   1. child events (subagent spawn / fork branch) first
+  //   2. this lane's turn-info (tok · time) after those events
+  // Parent work that produced tokens after spawning helpers therefore
+  // renders below the subagent/fork nodes, not above them.
+  const kids = node.children || [];
+  const hasKids = kids.length > 0;
+  const timeline = document.createElement("div");
+  timeline.className = "ln-timeline";
+
+  if (hasKids) {
+    const children = document.createElement("div");
+    children.className = "ln-children";
+    children.setAttribute("role", "group");
+
+    for (const child of kids) {
+      if (child.kind === "subagents") {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ln-toggle";
+        btn.dataset.role = "subagents-toggle";
+        btn.dataset.parentId = node.session_id;
+        btn.setAttribute("aria-expanded", child.expanded ? "true" : "false");
+        const chev = document.createElement("span");
+        chev.className = "ln-chevron";
+        chev.textContent = child.expanded ? "▾" : "▸";
+        chev.setAttribute("aria-hidden", "true");
+        btn.appendChild(chev);
+        const label = document.createElement("span");
+        const noun = child.count === 1 ? "subagent" : "subagents";
+        let text = `${child.count} ${noun}`;
+        if (!child.expanded && child.running > 0) text += ` · ${child.running} running`;
+        label.textContent = text;
+        btn.appendChild(label);
+        children.appendChild(btn);
+        continue;
+      }
+      if (child.kind === "more") {
+        const more = document.createElement("div");
+        more.className = "ln-more";
+        more.textContent = `+${child.count} more`;
+        children.appendChild(more);
+        continue;
+      }
+      if (!child.session_id) continue;
+      const branch = document.createElement("div");
+      const cSum = byId.get(child.session_id);
+      const cEdge = lineageEdgeKind(child, cSum);
+      branch.className = `ln-branch edge-${cEdge}`;
+      const glyph = lineageEdgeGlyph(cEdge);
+      if (glyph) {
+        const edge = document.createElement("span");
+        edge.className = `ln-edge edge-${cEdge}`;
+        edge.textContent = glyph;
+        edge.setAttribute("aria-hidden", "true");
+        edge.title = cEdge === "reset" ? "reset snapshot"
+          : cEdge === "fork" ? "fork"
+          : cEdge === "subagent" ? "subagent" : "";
+        branch.appendChild(edge);
+      }
+      branch.appendChild(buildLineageCardEl(child, byId, depth + 1));
+      children.appendChild(branch);
+    }
+    timeline.appendChild(children);
+  }
+
+  // Turn-info last on this lane — after child spawn events.
   const lane = document.createElement("div");
   lane.className = "ln-lane";
   lane.appendChild(buildLineageSegmentEl(summary, node.session_id));
-  wrap.appendChild(lane);
-
-  const kids = node.children || [];
-  if (!kids.length) return wrap;
-
-  const children = document.createElement("div");
-  children.className = "ln-children";
-  children.setAttribute("role", "group");
-
-  for (const child of kids) {
-    if (child.kind === "subagents") {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "ln-toggle";
-      btn.dataset.role = "subagents-toggle";
-      btn.dataset.parentId = node.session_id;
-      btn.setAttribute("aria-expanded", child.expanded ? "true" : "false");
-      const chev = document.createElement("span");
-      chev.className = "ln-chevron";
-      chev.textContent = child.expanded ? "▾" : "▸";
-      chev.setAttribute("aria-hidden", "true");
-      btn.appendChild(chev);
-      const label = document.createElement("span");
-      // TUI: "▸ N subagents · M running" / "▾ N subagents"
-      const noun = child.count === 1 ? "subagent" : "subagents";
-      let text = `${child.count} ${noun}`;
-      if (!child.expanded && child.running > 0) text += ` · ${child.running} running`;
-      label.textContent = text;
-      btn.appendChild(label);
-      children.appendChild(btn);
-      continue;
-    }
-    if (child.kind === "more") {
-      const more = document.createElement("div");
-      more.className = "ln-more";
-      more.textContent = `+${child.count} more`;
-      children.appendChild(more);
-      continue;
-    }
-    if (!child.session_id) continue;
-    const branch = document.createElement("div");
-    const cSum = byId.get(child.session_id);
-    const cEdge = lineageEdgeKind(child, cSum);
-    branch.className = `ln-branch edge-${cEdge}`;
-    const glyph = lineageEdgeGlyph(cEdge);
-    if (glyph) {
-      const edge = document.createElement("span");
-      edge.className = `ln-edge edge-${cEdge}`;
-      edge.textContent = glyph;
-      edge.setAttribute("aria-hidden", "true");
-      edge.title = cEdge === "reset" ? "reset snapshot"
-        : cEdge === "fork" ? "fork"
-        : cEdge === "subagent" ? "subagent" : "";
-      branch.appendChild(edge);
-    }
-    branch.appendChild(buildLineageCardEl(child, byId, depth + 1));
-    children.appendChild(branch);
-  }
-  wrap.appendChild(children);
+  timeline.appendChild(lane);
+  wrap.appendChild(timeline);
   return wrap;
 }
 
