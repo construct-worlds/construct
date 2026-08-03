@@ -20,6 +20,7 @@
 //! declaration would be wrong for them by construction.
 
 pub mod anthropic;
+pub mod dsml;
 pub mod google;
 pub mod openai_chat;
 pub mod responses;

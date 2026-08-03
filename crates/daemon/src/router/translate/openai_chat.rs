@@ -456,7 +456,10 @@ pub fn decode_full_response(body: &Value) -> Vec<CanonEvent> {
         )
         .unwrap_or(CanonStop::EndTurn),
     });
-    events
+    // DeepSeek V4 may put tool intent in content as DSML markup rather
+    // than structured tool_calls — lift it so Codex (and any other
+    // Responses harness) sees real function_call items (session s8e4420fd3).
+    super::dsml::lift_events(events)
 }
 
 /// Re-encode canonical events as a Chat Completions SSE stream.
@@ -909,5 +912,47 @@ mod tests {
         assert_eq!(body["choices"][0]["message"]["content"], "done");
         assert_eq!(body["choices"][0]["finish_reason"], "stop");
         assert_eq!(body["usage"]["total_tokens"], 3);
+    }
+
+    /// Live Codex→DeepSeek failure mode: DSML command markup in content
+    /// must become a structured shell tool call, not assistant prose.
+    #[test]
+    fn lifts_deepseek_dsml_command_markup_into_tool_calls() {
+        let fw = '\u{ff5c}';
+        let content = format!(
+            "Let me look.\n\n<{fw}{fw}DSML{fw}{fw}_command>\n  <cmd>ls -la /Users/moon</{fw}{fw}DSML{fw}{fw}_param>\n</{fw}{fw}DSML{fw}{fw}_command>"
+        );
+        let events = decode_full_response(&json!({
+            "id": "cmpl_dsml",
+            "choices": [{
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20}
+        }));
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                CanonEvent::ToolStart { name, .. } if name == "shell"
+            )),
+            "expected shell tool, got {events:?}"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            CanonEvent::ToolArgsDelta { json, .. } if json.contains("ls -la /Users/moon")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            CanonEvent::Stop {
+                reason: CanonStop::ToolUse
+            }
+        )));
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                CanonEvent::TextDelta(t) if t.contains("DSML")
+            )),
+            "DSML markup must not remain as text: {events:?}"
+        );
     }
 }

@@ -1268,6 +1268,11 @@ where
         .context("write response head")?;
 
     let mut encoder = translate::ClientEncoder::new(client_dialect, &route.model);
+    // Chat-completions targets (DeepSeek among them) may stream tool intent
+    // as DSML inside content deltas; hold and lift those into structured
+    // tool events before the harness encoder sees them.
+    let mut dsml_lift = (route.target_dialect == Dialect::OpenAiChat)
+        .then(translate::dsml::StreamLift::new);
     let mut upstream = response.bytes_stream();
     let mut pending = Vec::<u8>::new();
     let mut saw_frame = false;
@@ -1307,6 +1312,7 @@ where
                 data.trim(),
                 context,
                 &mut capture,
+                dsml_lift.as_mut(),
             )
             .await?
             {
@@ -1333,6 +1339,7 @@ where
                 data.trim(),
                 context,
                 &mut capture,
+                dsml_lift.as_mut(),
             )
             .await?
             {
@@ -1432,6 +1439,7 @@ async fn process_target_sse_data<S>(
     data: &str,
     context: &translate::TranslationContext,
     capture: &mut ReasoningCapture,
+    mut dsml_lift: Option<&mut translate::dsml::StreamLift>,
 ) -> Result<SseOutcome>
 where
     S: tokio::io::AsyncWrite + Unpin,
@@ -1460,17 +1468,22 @@ where
         write_chunk(stream, msg.as_bytes()).await?;
         return Ok(SseOutcome::Failed);
     }
-    let events = translate::decode_target_event_with_context(dialect, &value, context);
-    let terminal = events.iter().any(|event| {
-        matches!(event, translate::CanonEvent::Stop { .. })
-            || (dialect == Dialect::GoogleGemini
-                && matches!(event, translate::CanonEvent::Usage { .. }))
-    });
-    for event in events {
-        capture.observe(&event);
-        let out = encoder.push(&event);
-        if !out.is_empty() {
-            write_chunk(stream, out.as_bytes()).await?;
+    let raw_events = translate::decode_target_event_with_context(dialect, &value, context);
+    let mut terminal = false;
+    for event in raw_events {
+        let lifted: Vec<translate::CanonEvent> = match dsml_lift.as_mut() {
+            Some(lift) => lift.push(event),
+            None => vec![event],
+        };
+        for event in lifted {
+            terminal |= matches!(event, translate::CanonEvent::Stop { .. })
+                || (dialect == Dialect::GoogleGemini
+                    && matches!(event, translate::CanonEvent::Usage { .. }));
+            capture.observe(&event);
+            let out = encoder.push(&event);
+            if !out.is_empty() {
+                write_chunk(stream, out.as_bytes()).await?;
+            }
         }
     }
     Ok(SseOutcome::Frame { terminal })
@@ -2016,6 +2029,7 @@ mod tests {
                 payload,
                 &translate::TranslationContext::default(),
                 &mut ReasoningCapture::default(),
+                None,
             )
             .await
             .unwrap();
