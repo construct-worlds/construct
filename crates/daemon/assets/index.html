@@ -2400,6 +2400,248 @@
     border-right: none;
     background: transparent;
   }
+
+  /* Sidebar lineage section (spec 0081 / web parity): master–detail tree
+     for the selected session, between the list and the operator panel. */
+  .lineage-section {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg-elev);
+  }
+  .lineage-section[hidden] { display: none !important; }
+  .lineage-section.is-collapsed .lineage-body,
+  .lineage-section.is-collapsed .lineage-resize { display: none; }
+  .lineage-section.is-collapsed {
+    flex: 0 0 auto;
+  }
+  .lineage-header,
+  .operator-header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+    padding: 4px 8px;
+    color: var(--fg-dim);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    user-select: none;
+    cursor: default;
+  }
+  .lineage-header .section-title,
+  .operator-header .section-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lineage-header button,
+  .operator-header button {
+    appearance: none;
+    flex: 0 0 auto;
+    border: none;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .lineage-header button:hover,
+  .operator-header button:hover {
+    color: var(--fg);
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+  }
+  .lineage-body {
+    flex: 0 0 auto;
+    height: var(--lineage-h, 160px);
+    min-height: 48px;
+    overflow: auto;
+    padding: 4px 6px 8px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .lineage-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 20px;
+    padding: 1px 4px;
+    border-radius: 5px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .lineage-row:hover {
+    color: var(--fg);
+    background: color-mix(in srgb, var(--fg) 6%, transparent);
+  }
+  .lineage-row.is-selected {
+    color: var(--fg);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .lineage-row.is-focus {
+    outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    outline-offset: -1px;
+  }
+  .lineage-row.is-discarded {
+    text-decoration: line-through;
+    opacity: 0.55;
+  }
+  .lineage-row.is-toggle {
+    color: var(--fg-faint);
+    font-style: italic;
+  }
+  .lineage-row .lglyph {
+    flex: 0 0 auto;
+    width: 1.1em;
+    text-align: center;
+    color: var(--fg-faint);
+  }
+  .lineage-row .lstatus {
+    flex: 0 0 auto;
+    width: 1.1em;
+    text-align: center;
+  }
+  .lineage-row .ltitle {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .lineage-row .lmeta {
+    flex: 0 0 auto;
+    color: var(--fg-faint);
+    font-size: 10px;
+  }
+  .lineage-empty {
+    padding: 10px 8px;
+    color: var(--fg-faint);
+    font-size: 11px;
+    font-style: italic;
+  }
+  .lineage-resize,
+  .operator-resize {
+    flex: 0 0 4px;
+    cursor: row-resize;
+    background: transparent;
+  }
+  .lineage-resize:hover,
+  .operator-resize:hover,
+  .lineage-resize.is-dragging,
+  .operator-resize.is-dragging {
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+
+  /* Operator ambient panel (spec 0019 / 0167): fleet token meter by default. */
+  .operator-panel {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .operator-panel.is-collapsed .operator-body,
+  .operator-panel.is-collapsed .operator-resize {
+    display: none;
+  }
+  .operator-body {
+    flex: 0 0 auto;
+    height: var(--operator-h, 148px);
+    min-height: 72px;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .operator-meter {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 4px 6px 6px;
+    gap: 4px;
+  }
+  .operator-meter[hidden],
+  .operator-rain[hidden] { display: none !important; }
+  .operator-meter-graph {
+    flex: 1 1 auto;
+    min-height: 40px;
+    width: 100%;
+    display: block;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+  }
+  .operator-meter-empty {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-faint);
+    font-size: 11px;
+    font-style: italic;
+    text-align: center;
+    padding: 8px;
+  }
+  .operator-meter-legend {
+    flex: 0 0 auto;
+    display: grid;
+    gap: 2px 8px;
+    font-size: 10px;
+    line-height: 1.25;
+    color: var(--fg-dim);
+    max-height: 4.8em;
+    overflow: hidden;
+  }
+  .operator-meter-legend .leg-row {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    min-width: 0;
+  }
+  .operator-meter-legend .leg-dot {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-top: 2px;
+  }
+  .operator-meter-legend .leg-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .operator-meter-legend .leg-rate {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg-faint);
+  }
+  .operator-meter-legend .leg-rate.is-active {
+    color: inherit;
+    font-weight: 600;
+  }
+  .operator-rain {
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    display: block;
+  }
+  @media (max-width: 720px) {
+    .lineage-body { height: var(--lineage-h, 120px); }
+    .operator-body { height: var(--operator-h, 120px); }
+  }
+
   /* New-session form rows reuse the approval-sheet shell. */
   .ns-row {
     display: flex;
@@ -3232,6 +3474,48 @@
       <aside class="session-list" id="sessionList">
         <div class="empty">connecting…</div>
       </aside>
+      <!--
+        Lineage section (spec 0081): selected session's fork/subagent tree.
+        Hidden until the selection has messages or lineage to show.
+      -->
+      <section class="lineage-section" id="lineageSection" hidden>
+        <div class="lineage-header" id="lineageHeader">
+          <span class="section-title">⑂ lineage</span>
+          <button type="button" id="lineageCollapseBtn" aria-label="collapse lineage"
+                  title="Collapse">−</button>
+        </div>
+        <div class="lineage-resize" id="lineageResize" role="separator"
+             aria-orientation="horizontal" aria-label="resize lineage"></div>
+        <div class="lineage-body" id="lineageBody" role="tree" aria-label="session lineage"></div>
+      </section>
+      <!--
+        Operator ambient panel (specs 0019 / 0167): fleet token meter by
+        default, with a rain mode toggle. Anchored at the bottom of the
+        sidebar like the TUI matrix-rain region.
+      -->
+      <section class="operator-panel" id="operatorPanel">
+        <div class="operator-header" id="operatorHeader">
+          <span class="section-title" id="operatorTitle">operator</span>
+          <button type="button" id="operatorModeBtn" aria-label="toggle operator panel mode"
+                  title="Toggle rain / tokens">tokens ⇄</button>
+          <button type="button" id="operatorCollapseBtn" aria-label="collapse operator panel"
+                  title="Collapse">−</button>
+        </div>
+        <div class="operator-resize" id="operatorResize" role="separator"
+             aria-orientation="horizontal" aria-label="resize operator panel"></div>
+        <div class="operator-body" id="operatorBody">
+          <div class="operator-meter" id="operatorMeter">
+            <canvas class="operator-meter-graph" id="operatorMeterGraph" width="260" height="90"
+                    aria-label="fleet token usage"></canvas>
+            <div class="operator-meter-empty" id="operatorMeterEmpty" hidden>
+              no token usage reported yet
+            </div>
+            <div class="operator-meter-legend" id="operatorMeterLegend"></div>
+          </div>
+          <canvas class="operator-rain" id="operatorRain" width="260" height="120" hidden
+                  aria-label="matrix rain"></canvas>
+        </div>
+      </section>
       <!--
         The old shared action toolbar is gone: reorder is drag-and-drop
         on the rows themselves, pin/rename live in the title bar, and
@@ -4203,6 +4487,19 @@ const state = {
   // responsive CSS classes because narrow-screen auto-hide after
   // selecting a session is intentionally not persisted to storage.
   sessionListVisible: true,
+  // Sidebar lineage section (spec 0081 web parity).
+  lineageCollapsed: false,
+  lineageSubagentsExpanded: new Set(),
+  // Operator ambient panel (specs 0019 / 0167 web parity).
+  operatorCollapsed: false,
+  // "tokens" | "rain" — default tokens (spec 0019).
+  operatorPanelMode: "tokens",
+  // Fleet token meter state (JS port of crates/cli/src/token_meter.rs).
+  tokenMeter: null,
+  // Last observed busy_ms per session id, for rate denominators.
+  tokenMeterBusy: new Map(),
+  tokenMeterSeeded: false,
+  tokenMeterRaf: 0,
   // Playbook view (per-session Markdown playbook surface, spec 0059).
   playbook: {
     // Last daemon snapshot per session id: { version, templateId, saved }.
@@ -4590,6 +4887,879 @@ function setComposerEnabled(on) {
   attachBtn.disabled = !on || blocked;
 }
 
+// ---------------------------------------------------------------------------
+// Sidebar lineage + operator token meter (web parity for specs 0081 / 0019 / 0167)
+// ---------------------------------------------------------------------------
+
+const LINEAGE_COLLAPSED_KEY = "agentd.web.lineageCollapsed";
+const LINEAGE_H_KEY = "agentd.web.lineageH";
+const OPERATOR_COLLAPSED_KEY = "agentd.web.operatorCollapsed";
+const OPERATOR_H_KEY = "agentd.web.operatorH";
+const OPERATOR_MODE_KEY = "agentd.web.operatorPanelMode";
+const LINEAGE_H_MIN = 64;
+const LINEAGE_H_MAX = 360;
+const OPERATOR_H_MIN = 72;
+const OPERATOR_H_MAX = 320;
+const TOKEN_BUCKET_SECS = 60;
+const TOKEN_MAX_BUCKETS = 600;
+const TOKEN_PEAK_DECAY = 0.8;
+const TOKEN_MIN_SCALE = 1000 * TOKEN_BUCKET_SECS;
+const TOKEN_RECENT_SLOT_SECS = 1;
+const TOKEN_RECENT_SLOTS = 60;
+const TOKEN_UNATTRIBUTED = "unattributed";
+const TOKEN_SERIES_PALETTE = [
+  [250, 179, 135], [137, 180, 250], [249, 226, 175], [203, 166, 247],
+  [148, 226, 213], [245, 194, 231], [166, 227, 161], [243, 139, 168],
+  [137, 220, 235], [180, 190, 254],
+];
+const TOKEN_CACHED_PALETTE = [
+  [195, 134, 96], [97, 133, 193], [198, 178, 134], [154, 122, 191],
+  [108, 176, 165], [193, 149, 181], [124, 177, 120], [186, 98, 123],
+  [98, 170, 183], [135, 144, 198],
+];
+const TOKEN_OTHER_COLOR = [127, 132, 156];
+const TOKEN_CACHED_OTHER = [85, 89, 109];
+const LINEAGE_MAX_DEPTH = 6;
+const LINEAGE_MAX_SIBLINGS = 12;
+
+const lineageSectionEl = $("lineageSection");
+const lineageBodyEl = $("lineageBody");
+const lineageCollapseBtn = $("lineageCollapseBtn");
+const lineageResizeEl = $("lineageResize");
+const operatorPanelEl = $("operatorPanel");
+const operatorBodyEl = $("operatorBody");
+const operatorCollapseBtn = $("operatorCollapseBtn");
+const operatorModeBtn = $("operatorModeBtn");
+const operatorResizeEl = $("operatorResize");
+const operatorMeterEl = $("operatorMeter");
+const operatorMeterGraphEl = $("operatorMeterGraph");
+const operatorMeterEmptyEl = $("operatorMeterEmpty");
+const operatorMeterLegendEl = $("operatorMeterLegend");
+const operatorRainEl = $("operatorRain");
+
+function loadSidebarPanelPrefs() {
+  state.lineageCollapsed = localStorage.getItem(LINEAGE_COLLAPSED_KEY) === "1";
+  state.operatorCollapsed = localStorage.getItem(OPERATOR_COLLAPSED_KEY) === "1";
+  const mode = localStorage.getItem(OPERATOR_MODE_KEY);
+  state.operatorPanelMode = mode === "rain" ? "rain" : "tokens";
+  const lh = Number(localStorage.getItem(LINEAGE_H_KEY));
+  const oh = Number(localStorage.getItem(OPERATOR_H_KEY));
+  if (Number.isFinite(lh) && lh > 0) {
+    document.documentElement.style.setProperty(
+      "--lineage-h",
+      `${Math.min(LINEAGE_H_MAX, Math.max(LINEAGE_H_MIN, lh))}px`,
+    );
+  }
+  if (Number.isFinite(oh) && oh > 0) {
+    document.documentElement.style.setProperty(
+      "--operator-h",
+      `${Math.min(OPERATOR_H_MAX, Math.max(OPERATOR_H_MIN, oh))}px`,
+    );
+  }
+}
+
+function sessionBusyMsAt(session, nowMs = Date.now()) {
+  if (!session) return 0;
+  let busy = Number(session.busy_ms || 0);
+  const since = session.busy_running_since_ms;
+  if (since != null && Number.isFinite(Number(since))) {
+    busy += Math.max(0, nowMs - Number(since));
+  }
+  return busy;
+}
+
+function sessionDisplayTitle(s) {
+  if (!s) return "";
+  if (s.kind === "orchestrator") return "operator";
+  const title = String(s.title || "").trim();
+  if (title) return title;
+  return String(s.harness || s.id || "session");
+}
+
+function hasLineage(sessionId, sessions) {
+  return sessions.some((s) => {
+    if (s.id === sessionId) {
+      return !!(s.forked_from
+        || ((s.kind === "subagent") && s.parent_session_id));
+    }
+    return (s.kind === "subagent" && s.parent_session_id === sessionId)
+      || (s.forked_from && s.forked_from.session_id === sessionId);
+  });
+}
+
+function lineageParentOf(s) {
+  if (s.forked_from && s.forked_from.session_id) return s.forked_from.session_id;
+  if (s.parent_session_id) return s.parent_session_id;
+  return null;
+}
+
+function lineageRootOf(focusId, byId) {
+  let current = focusId;
+  const seen = new Set();
+  while (seen.add(current)) {
+    const s = byId.get(current);
+    if (!s) break;
+    const p = lineageParentOf(s);
+    if (!p || !byId.has(p)) break;
+    current = p;
+  }
+  return current;
+}
+
+function buildLineageTree(focusId, sessions, expanded) {
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  if (!byId.has(focusId)) return null;
+  const effective = new Set(expanded || []);
+  // Always expand the focus's ancestor chain so it can't hide inside a group.
+  let cur = focusId;
+  const seenAnc = new Set();
+  while (seenAnc.add(cur)) {
+    const s = byId.get(cur);
+    if (!s) break;
+    if (s.kind === "subagent" && s.parent_session_id) effective.add(s.parent_session_id);
+    const p = lineageParentOf(s);
+    if (!p || !byId.has(p)) break;
+    cur = p;
+  }
+  const rootId = lineageRootOf(focusId, byId);
+  const visited = new Set();
+
+  function childrenOf(id) {
+    const forks = [];
+    const subagents = [];
+    for (const s of sessions) {
+      if (s.id === id) continue;
+      if (s.kind === "subagent" && s.parent_session_id === id) subagents.push(s);
+      else if (s.forked_from && s.forked_from.session_id === id) forks.push(s);
+    }
+    const byPos = (a, b) => (a.position ?? 0) - (b.position ?? 0)
+      || String(a.id).localeCompare(String(b.id));
+    forks.sort(byPos);
+    subagents.sort(byPos);
+    return { forks, subagents };
+  }
+
+  function build(id, edge, depth) {
+    if (visited.has(id) || !byId.has(id)) return null;
+    visited.add(id);
+    const node = { session_id: id, edge, children: [] };
+    if (depth >= LINEAGE_MAX_DEPTH) {
+      const { forks, subagents } = childrenOf(id);
+      const n = forks.length + subagents.length;
+      if (n > 0) node.children.push({ kind: "more", count: n });
+      return node;
+    }
+    const { forks, subagents } = childrenOf(id);
+    // Subagents collapse into a toggle group by default (spec 0081).
+    if (subagents.length > 0) {
+      const running = subagents.filter((s) => {
+        const st = String(s.state || "").toLowerCase();
+        return st === "running" || st === "awaiting_input";
+      }).length;
+      const isExpanded = effective.has(id);
+      node.children.push({
+        kind: "subagents",
+        count: subagents.length,
+        running,
+        expanded: isExpanded,
+      });
+      if (isExpanded) {
+        const list = subagents.slice(0, LINEAGE_MAX_SIBLINGS);
+        for (const s of list) {
+          const child = build(s.id, "subagent", depth + 1);
+          if (child) node.children.push(child);
+        }
+        if (subagents.length > LINEAGE_MAX_SIBLINGS) {
+          node.children.push({ kind: "more", count: subagents.length - LINEAGE_MAX_SIBLINGS });
+        }
+      }
+    }
+    const forkList = forks.slice(0, LINEAGE_MAX_SIBLINGS);
+    for (const s of forkList) {
+      const child = build(s.id, "fork", depth + 1);
+      if (child) node.children.push(child);
+    }
+    if (forks.length > LINEAGE_MAX_SIBLINGS) {
+      node.children.push({ kind: "more", count: forks.length - LINEAGE_MAX_SIBLINGS });
+    }
+    return node;
+  }
+
+  return build(rootId, "root", 0);
+}
+
+function flattenLineageTree(node, depth = 0, out = []) {
+  if (!node) return out;
+  out.push({ kind: "node", session_id: node.session_id, edge: node.edge, depth });
+  for (const child of node.children || []) {
+    if (child.kind === "more") {
+      out.push({ kind: "more", count: child.count, depth: depth + 1 });
+    } else if (child.kind === "subagents") {
+      out.push({
+        kind: "subagents",
+        parent_id: node.session_id,
+        count: child.count,
+        running: child.running,
+        expanded: child.expanded,
+        depth: depth + 1,
+      });
+    } else if (child.session_id) {
+      flattenLineageTree(child, depth + 1, out);
+    }
+  }
+  return out;
+}
+
+function forkStatusOf(summary) {
+  const mode = summary && summary.merge && summary.merge.mode;
+  if (mode === "result") return "merged";
+  if (mode === "discard") return "discarded";
+  return "open";
+}
+
+function lineageSectionSessionId() {
+  const id = state.currentId;
+  if (!id) return null;
+  const sessions = state.sessions || [];
+  const sel = sessions.find((s) => s.id === id);
+  if (!sel) return null;
+  if (Number(sel.message_count || 0) > 0) return id;
+  if (!hasLineage(id, sessions)) return null;
+  const tree = buildLineageTree(id, sessions, state.lineageSubagentsExpanded);
+  if (!tree) return null;
+  const rows = flattenLineageTree(tree);
+  const selectable = rows.filter((r) => r.kind === "node").length;
+  const hasToggle = rows.some((r) => r.kind === "subagents");
+  return (selectable > 1 || hasToggle) ? id : null;
+}
+
+function edgeGlyph(edge, summary) {
+  if (edge === "fork") {
+    if (summary && summary.forked_from && summary.forked_from.is_reset_snapshot) return "↺";
+    return "⑂";
+  }
+  if (edge === "subagent") return "▸";
+  return "●";
+}
+
+function renderLineageSection() {
+  if (!lineageSectionEl || !lineageBodyEl) return;
+  const focusId = lineageSectionSessionId();
+  if (!focusId) {
+    lineageSectionEl.hidden = true;
+    return;
+  }
+  lineageSectionEl.hidden = false;
+  lineageSectionEl.classList.toggle("is-collapsed", !!state.lineageCollapsed);
+  if (lineageCollapseBtn) {
+    lineageCollapseBtn.textContent = state.lineageCollapsed ? "+" : "−";
+    lineageCollapseBtn.setAttribute(
+      "aria-label",
+      state.lineageCollapsed ? "expand lineage" : "collapse lineage",
+    );
+  }
+  if (state.lineageCollapsed) {
+    lineageBodyEl.replaceChildren();
+    return;
+  }
+  const tree = buildLineageTree(focusId, state.sessions, state.lineageSubagentsExpanded);
+  const rows = flattenLineageTree(tree);
+  if (!rows.length) {
+    lineageBodyEl.innerHTML = `<div class="lineage-empty">no lineage</div>`;
+    return;
+  }
+  const byId = new Map(state.sessions.map((s) => [s.id, s]));
+  const frag = document.createDocumentFragment();
+  for (const row of rows) {
+    const el = document.createElement("div");
+    if (row.kind === "more") {
+      el.className = "lineage-row is-toggle";
+      el.style.paddingLeft = `${8 + row.depth * 14}px`;
+      el.textContent = `+${row.count} more`;
+      frag.appendChild(el);
+      continue;
+    }
+    if (row.kind === "subagents") {
+      el.className = "lineage-row is-toggle";
+      el.style.paddingLeft = `${8 + row.depth * 14}px`;
+      el.dataset.parentId = row.parent_id;
+      el.dataset.role = "subagents-toggle";
+      const mark = row.expanded ? "▾" : "▸";
+      const run = row.running > 0 ? ` · ${row.running} running` : "";
+      el.innerHTML =
+        `<span class="lglyph">${mark}</span>` +
+        `<span class="ltitle">${escape(row.count)} subagent${row.count === 1 ? "" : "s"}${escape(run)}</span>`;
+      frag.appendChild(el);
+      continue;
+    }
+    const s = byId.get(row.session_id);
+    const status = forkStatusOf(s);
+    el.className = "lineage-row"
+      + (row.session_id === state.currentId ? " is-selected" : "")
+      + (row.session_id === focusId ? " is-focus" : "")
+      + (status === "discarded" ? " is-discarded" : "");
+    el.style.paddingLeft = `${8 + row.depth * 14}px`;
+    el.dataset.sessionId = row.session_id;
+    el.setAttribute("role", "treeitem");
+    const glyph = edgeGlyph(row.edge, s);
+    const title = sessionDisplayTitle(s);
+    const harness = s ? String(s.harness || "") : "";
+    const meta = harness && harness !== title ? harness : "";
+    el.innerHTML =
+      `<span class="lglyph">${escape(glyph)}</span>` +
+      `<span class="lstatus">${s ? sessionStatusGlyph(s) : "○"}</span>` +
+      `<span class="ltitle">${escape(title)}</span>` +
+      (meta ? `<span class="lmeta">${escape(meta)}</span>` : "");
+    el.title = title + (meta ? ` · ${meta}` : "");
+    frag.appendChild(el);
+  }
+  lineageBodyEl.replaceChildren(frag);
+}
+
+function bindLineageSection() {
+  if (!lineageSectionEl || lineageSectionEl.__bound) return;
+  lineageSectionEl.__bound = true;
+  if (lineageCollapseBtn) {
+    lineageCollapseBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.lineageCollapsed = !state.lineageCollapsed;
+      localStorage.setItem(LINEAGE_COLLAPSED_KEY, state.lineageCollapsed ? "1" : "0");
+      renderLineageSection();
+    });
+  }
+  if (lineageBodyEl) {
+    lineageBodyEl.addEventListener("click", (e) => {
+      const row = e.target.closest(".lineage-row");
+      if (!row) return;
+      if (row.dataset.role === "subagents-toggle" && row.dataset.parentId) {
+        const pid = row.dataset.parentId;
+        if (state.lineageSubagentsExpanded.has(pid)) state.lineageSubagentsExpanded.delete(pid);
+        else state.lineageSubagentsExpanded.add(pid);
+        renderLineageSection();
+        return;
+      }
+      if (row.dataset.sessionId) {
+        selectSession(row.dataset.sessionId);
+      }
+    });
+  }
+  bindVerticalResize(lineageResizeEl, {
+    min: LINEAGE_H_MIN,
+    max: LINEAGE_H_MAX,
+    cssVar: "--lineage-h",
+    storageKey: LINEAGE_H_KEY,
+    getHeight: () => (lineageBodyEl ? lineageBodyEl.clientHeight : 160),
+  });
+}
+
+function bindVerticalResize(handle, { min, max, cssVar, storageKey, getHeight }) {
+  if (!handle || handle.__bound) return;
+  handle.__bound = true;
+  let drag = null;
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    drag = { startY: e.clientY, startH: getHeight() };
+    handle.classList.add("is-dragging");
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    // Dragging the top edge up grows the section (negative dy → larger h).
+    const next = Math.min(max, Math.max(min, drag.startH - (e.clientY - drag.startY)));
+    document.documentElement.style.setProperty(cssVar, `${Math.round(next)}px`);
+  });
+  const end = (e) => {
+    if (!drag) return;
+    handle.classList.remove("is-dragging");
+    const h = Math.min(max, Math.max(min, drag.startH - (e.clientY - drag.startY)));
+    localStorage.setItem(storageKey, String(Math.round(h)));
+    drag = null;
+  };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
+}
+
+// --- Token meter (port of crates/cli/src/token_meter.rs) ---
+
+function createTokenMeter(nowMs = Date.now()) {
+  return {
+    models: [],
+    buckets: [{}], // sparse maps: modelIdx -> {tokens, cached}
+    currentStart: nowMs,
+    peak: 0,
+    recent: [{ tokens: {}, busy_ms: {} }],
+    recentStart: nowMs,
+  };
+}
+
+function tokenIntern(meter, model) {
+  const label = model || TOKEN_UNATTRIBUTED;
+  let idx = meter.models.indexOf(label);
+  if (idx >= 0) return idx;
+  if (meter.models.length >= 0xffff) return meter.models.length - 1;
+  meter.models.push(label);
+  return meter.models.length - 1;
+}
+
+function tokenBucketAdd(bucket, idx, tokens, cached) {
+  const key = String(idx);
+  const slot = bucket[key] || (bucket[key] = { tokens: 0, cached: 0 });
+  slot.tokens += tokens;
+  slot.cached += cached;
+}
+
+function tokenBucketTotal(bucket) {
+  let t = 0;
+  for (const k of Object.keys(bucket)) t += bucket[k].tokens || 0;
+  return t;
+}
+
+function tokenBucketStacked(bucket) {
+  const idxs = Object.keys(bucket).map(Number).sort((a, b) => a - b);
+  const out = [];
+  for (const idx of idxs) {
+    const slice = bucket[String(idx)];
+    const tokens = slice.tokens || 0;
+    const cached = Math.min(slice.cached || 0, tokens);
+    const fresh = tokens - cached;
+    if (cached > 0) out.push({ model: idx, part: "cached", tokens: cached });
+    if (fresh > 0) out.push({ model: idx, part: "new", tokens: fresh });
+  }
+  return out;
+}
+
+function tokenAdvanceRecent(meter, nowMs) {
+  const slotMs = TOKEN_RECENT_SLOT_SECS * 1000;
+  const steps = Math.floor(Math.max(0, nowMs - meter.recentStart) / slotMs);
+  if (steps <= 0) return;
+  for (let i = 0; i < Math.min(steps, TOKEN_RECENT_SLOTS); i++) {
+    meter.recent.push({ tokens: {}, busy_ms: {} });
+  }
+  while (meter.recent.length > TOKEN_RECENT_SLOTS) meter.recent.shift();
+  meter.recentStart += steps * slotMs;
+}
+
+function tokenAdvanceTo(meter, nowMs) {
+  tokenAdvanceRecent(meter, nowMs);
+  const bucketMs = TOKEN_BUCKET_SECS * 1000;
+  const steps = Math.floor(Math.max(0, nowMs - meter.currentStart) / bucketMs);
+  if (steps <= 0) return;
+  for (let i = 0; i < Math.min(steps, TOKEN_MAX_BUCKETS); i++) {
+    meter.buckets.push({});
+  }
+  while (meter.buckets.length > TOKEN_MAX_BUCKETS) meter.buckets.shift();
+  meter.currentStart += steps * bucketMs;
+  meter.peak *= Math.pow(TOKEN_PEAK_DECAY, Math.min(steps, 1000));
+}
+
+function tokenReserveHistory(meter, secs) {
+  const want = Math.min(TOKEN_MAX_BUCKETS, Math.floor(secs / TOKEN_BUCKET_SECS) + 1);
+  while (meter.buckets.length < want) meter.buckets.unshift({});
+}
+
+function tokenSeed(meter, samples) {
+  // samples: [{age_ms, model, tokens, cached}]
+  for (const s of samples) {
+    if (!s.tokens || s.age_ms < 0) continue;
+    const back = Math.floor(s.age_ms / (TOKEN_BUCKET_SECS * 1000));
+    const index = meter.buckets.length - back - 1;
+    if (index < 0 || index >= meter.buckets.length) continue;
+    const idx = tokenIntern(meter, s.model);
+    tokenBucketAdd(meter.buckets[index], idx, s.tokens, s.cached || 0);
+    const total = tokenBucketTotal(meter.buckets[index]);
+    if (total > meter.peak) meter.peak = total;
+  }
+}
+
+function tokenObserve(meter, model, tokens, cached, nowMs) {
+  if (!tokens) return;
+  tokenAdvanceTo(meter, nowMs);
+  const idx = tokenIntern(meter, model);
+  const bucket = meter.buckets[meter.buckets.length - 1];
+  tokenBucketAdd(bucket, idx, tokens, cached || 0);
+  const total = tokenBucketTotal(bucket);
+  if (total > meter.peak) meter.peak = total;
+  const slot = meter.recent[meter.recent.length - 1];
+  slot.tokens[String(idx)] = (slot.tokens[String(idx)] || 0) + tokens;
+}
+
+function tokenObserveBusy(meter, model, deltaMs, nowMs) {
+  if (!deltaMs) return;
+  tokenAdvanceRecent(meter, nowMs);
+  const idx = tokenIntern(meter, model);
+  const slot = meter.recent[meter.recent.length - 1];
+  slot.busy_ms[String(idx)] = (slot.busy_ms[String(idx)] || 0) + deltaMs;
+}
+
+function tokenRecentRate(meter, modelIdx) {
+  let tokens = 0;
+  let busy = 0;
+  const key = String(modelIdx);
+  for (const slot of meter.recent) {
+    tokens += slot.tokens[key] || 0;
+    busy += slot.busy_ms[key] || 0;
+  }
+  if (busy <= 0) return null;
+  return (tokens * 1000) / busy;
+}
+
+function tokenWindow(meter, width) {
+  const skip = Math.max(0, meter.buckets.length - width);
+  return meter.buckets.slice(skip);
+}
+
+function tokenScale(meter, width) {
+  let max = 0;
+  for (const b of tokenWindow(meter, width)) {
+    max = Math.max(max, tokenBucketTotal(b));
+  }
+  return Math.ceil(Math.max(meter.peak, max, TOKEN_MIN_SCALE));
+}
+
+function tokenColor(idx, part) {
+  const palette = part === "cached" ? TOKEN_CACHED_PALETTE : TOKEN_SERIES_PALETTE;
+  const other = part === "cached" ? TOKEN_CACHED_OTHER : TOKEN_OTHER_COLOR;
+  const rgb = palette[idx] || other;
+  return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+}
+
+function tokenLegend(meter, width) {
+  const totals = new Array(meter.models.length).fill(0);
+  for (const b of tokenWindow(meter, width)) {
+    for (const k of Object.keys(b)) {
+      const i = Number(k);
+      if (i < totals.length) totals[i] += b[k].tokens || 0;
+    }
+  }
+  const named = [];
+  for (let i = 0; i < Math.min(totals.length, TOKEN_SERIES_PALETTE.length); i++) {
+    if (totals[i] <= 0) continue;
+    named.push({
+      label: meter.models[i],
+      tokens: totals[i],
+      color: tokenColor(i, "new"),
+      dot: tokenColor(i, "cached"),
+      rate: tokenRecentRate(meter, i),
+    });
+  }
+  named.sort((a, b) => b.tokens - a.tokens || a.label.localeCompare(b.label));
+  let other = 0;
+  let otherCount = 0;
+  let otherRate = 0;
+  let otherAny = false;
+  for (let i = TOKEN_SERIES_PALETTE.length; i < totals.length; i++) {
+    if (totals[i] <= 0) continue;
+    other += totals[i];
+    otherCount++;
+    const r = tokenRecentRate(meter, i);
+    if (r != null) {
+      otherRate += r;
+      otherAny = true;
+    }
+  }
+  if (other > 0) {
+    named.push({
+      label: `other (${otherCount})`,
+      tokens: other,
+      color: tokenColor(999, "new"),
+      dot: tokenColor(999, "cached"),
+      rate: otherAny ? otherRate : null,
+    });
+  }
+  return named;
+}
+
+function formatTokenRate(rate) {
+  if (rate == null) return "idle";
+  if (rate < 1) return "<1/s";
+  if (rate < 1000) return `${Math.round(rate)}/s`;
+  if (rate < 10000) return `${(rate / 1000).toFixed(1)}k/s`;
+  return `${Math.round(rate / 1000)}k/s`;
+}
+
+function ensureTokenMeter() {
+  if (!state.tokenMeter) state.tokenMeter = createTokenMeter(Date.now());
+  return state.tokenMeter;
+}
+
+function observeCostForMeter(sessionId, event) {
+  if (!event || event.type !== "cost") return;
+  // Wait for the history seed so a live sample isn't wiped when the
+  // daemon window arrives a beat later.
+  if (!state.tokenMeterSeeded) return;
+  const tokensIn = Number(event.tokens_in || 0);
+  const tokensOut = Number(event.tokens_out || 0);
+  const tokensCached = Number(event.tokens_cached || 0);
+  const tokens = tokensIn + tokensOut;
+  if (!tokens) return;
+  const session = state.sessions.find((s) => s.id === sessionId);
+  const model = event.model || (session && session.model) || null;
+  tokenObserve(ensureTokenMeter(), model, tokens, tokensCached, Date.now());
+  scheduleOperatorPanelPaint();
+}
+
+function sampleComputeTimeForMeter() {
+  const meter = ensureTokenMeter();
+  const nowMs = Date.now();
+  const live = new Set();
+  for (const session of state.sessions) {
+    if (!session.model) continue;
+    live.add(session.id);
+    const busy = sessionBusyMsAt(session, nowMs);
+    const previous = state.tokenMeterBusy.get(session.id);
+    if (previous != null) {
+      const delta = Math.max(0, busy - previous);
+      if (delta > 0) tokenObserveBusy(meter, session.model, delta, nowMs);
+    }
+    state.tokenMeterBusy.set(session.id, busy);
+  }
+  for (const id of Array.from(state.tokenMeterBusy.keys())) {
+    if (!live.has(id)) state.tokenMeterBusy.delete(id);
+  }
+}
+
+async function seedTokenMeterFromDaemon() {
+  try {
+    const result = await rpc("usage.token_history", {
+      window_secs: 12 * 60 * 60,
+      max_samples: 20000,
+    });
+    const samples = (result && result.samples) || [];
+    const nowMs = Number((result && result.now_ms) || Date.now());
+    const meter = createTokenMeter(nowMs);
+    tokenReserveHistory(meter, 12 * 60 * 60);
+    tokenSeed(
+      meter,
+      samples.map((s) => ({
+        age_ms: Math.max(0, nowMs - Number(s.at_ms || 0)),
+        model: s.model || null,
+        tokens: Number(s.tokens || 0),
+        cached: Number(s.cached || 0),
+      })),
+    );
+    state.tokenMeter = meter;
+    state.tokenMeterSeeded = true;
+    // Establish busy baselines without counting pre-attach compute as a delta.
+    const t = Date.now();
+    for (const session of state.sessions) {
+      if (!session.model) continue;
+      state.tokenMeterBusy.set(session.id, sessionBusyMsAt(session, t));
+    }
+    scheduleOperatorPanelPaint();
+  } catch (_) {
+    // Older daemon without usage.token_history — live Cost events still work.
+    state.tokenMeter = createTokenMeter(Date.now());
+    state.tokenMeterSeeded = true;
+    scheduleOperatorPanelPaint();
+  }
+}
+
+function paintTokenMeter() {
+  if (!operatorMeterEl || !operatorMeterGraphEl) return;
+  const meter = ensureTokenMeter();
+  const nowMs = Date.now();
+  tokenAdvanceTo(meter, nowMs);
+  sampleComputeTimeForMeter();
+
+  const idle = meter.models.length === 0;
+  if (operatorMeterEmptyEl) operatorMeterEmptyEl.hidden = !idle;
+  operatorMeterGraphEl.hidden = idle;
+  if (operatorMeterLegendEl) operatorMeterLegendEl.hidden = idle;
+  if (idle) {
+    if (operatorMeterLegendEl) operatorMeterLegendEl.replaceChildren();
+    return;
+  }
+
+  const canvas = operatorMeterGraphEl;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = Math.max(40, canvas.clientWidth || operatorMeterEl.clientWidth || 200);
+  const cssH = Math.max(32, canvas.clientHeight || 80);
+  const w = Math.round(cssW * dpr);
+  const h = Math.round(cssH * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  // One CSS pixel per column — history right-aligned.
+  const cols = Math.max(1, Math.floor(cssW));
+  const buckets = tokenWindow(meter, cols);
+  const history = buckets.length;
+  const scale = tokenScale(meter, cols);
+  const colW = 1;
+
+  for (let i = 0; i < history; i++) {
+    const bucket = buckets[i];
+    const total = tokenBucketTotal(bucket);
+    if (!total) continue;
+    const x = cssW - history + i;
+    const filled = Math.max(1, Math.round((total / scale) * cssH));
+    const stacked = tokenBucketStacked(bucket);
+    let y = cssH;
+    let remaining = filled;
+    for (const band of stacked) {
+      if (remaining <= 0) break;
+      const share = Math.max(1, Math.round((band.tokens / total) * filled));
+      const bandH = Math.min(share, remaining);
+      remaining -= bandH;
+      y -= bandH;
+      ctx.fillStyle = tokenColor(band.model, band.part);
+      ctx.fillRect(x * colW, y, colW, bandH);
+    }
+  }
+
+  const entries = tokenLegend(meter, cols);
+  if (operatorMeterLegendEl) {
+    const colsN = Math.max(1, Math.min(3, Math.floor(cssW / 110)));
+    operatorMeterLegendEl.style.gridTemplateColumns = `repeat(${colsN}, minmax(0, 1fr))`;
+    operatorMeterLegendEl.innerHTML = entries.map((e) => {
+      const rate = formatTokenRate(e.rate);
+      const active = e.rate != null;
+      return `<div class="leg-row" title="${attr(e.label)} · ${attr(formatTokenCount(e.tokens))} tokens">` +
+        `<span class="leg-dot" style="background:${attr(e.dot)}"></span>` +
+        `<span class="leg-name" style="color:${attr(e.color)}">${escape(e.label)}</span>` +
+        `<span class="leg-rate${active ? " is-active" : ""}" style="color:${attr(e.color)}">${escape(rate)}</span>` +
+        `</div>`;
+    }).join("");
+  }
+}
+
+function paintOperatorRain() {
+  if (!operatorRainEl || operatorRainEl.hidden) return;
+  const canvas = operatorRainEl;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = Math.max(40, canvas.clientWidth || operatorBodyEl.clientWidth || 200);
+  const cssH = Math.max(40, canvas.clientHeight || 100);
+  const w = Math.round(cssW * dpr);
+  const h = Math.round(cssH * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // Trail
+  ctx.fillStyle = "rgba(0, 0, 0, 0.12)";
+  ctx.fillRect(0, 0, cssW, cssH);
+  if (!paintOperatorRain.drops) paintOperatorRain.drops = [];
+  const cols = Math.max(8, Math.floor(cssW / 10));
+  while (paintOperatorRain.drops.length < cols) {
+    paintOperatorRain.drops.push({
+      x: paintOperatorRain.drops.length * 10 + 4,
+      y: Math.random() * cssH,
+      speed: 1.5 + Math.random() * 3,
+      len: 6 + Math.random() * 12,
+    });
+  }
+  // Intensity from fleet activity
+  let active = 0;
+  for (const s of state.sessions) {
+    if (sessionShouldAnimateStatus(s)) active++;
+  }
+  const intensity = Math.min(1, 0.25 + active * 0.15);
+  ctx.fillStyle = `rgba(92, 209, 166, ${0.35 + intensity * 0.45})`;
+  ctx.font = "11px ui-monospace, Menlo, monospace";
+  for (const d of paintOperatorRain.drops) {
+    d.y += d.speed * (0.6 + intensity);
+    if (d.y - d.len > cssH) {
+      d.y = -Math.random() * 20;
+      d.speed = 1.5 + Math.random() * 3;
+    }
+    for (let i = 0; i < d.len; i++) {
+      const ch = String.fromCharCode(0x30a0 + Math.floor(Math.random() * 96));
+      ctx.globalAlpha = (1 - i / d.len) * intensity;
+      ctx.fillText(ch, d.x, d.y - i * 10);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function applyOperatorPanelMode() {
+  if (!operatorPanelEl) return;
+  operatorPanelEl.classList.toggle("is-collapsed", !!state.operatorCollapsed);
+  if (operatorCollapseBtn) {
+    operatorCollapseBtn.textContent = state.operatorCollapsed ? "+" : "−";
+    operatorCollapseBtn.setAttribute(
+      "aria-label",
+      state.operatorCollapsed ? "expand operator panel" : "collapse operator panel",
+    );
+  }
+  const tokens = state.operatorPanelMode !== "rain";
+  if (operatorMeterEl) operatorMeterEl.hidden = !tokens;
+  if (operatorRainEl) operatorRainEl.hidden = tokens;
+  if (operatorModeBtn) {
+    operatorModeBtn.textContent = tokens ? "tokens ⇄" : "rain ⇄";
+    operatorModeBtn.title = tokens ? "Show matrix rain" : "Show token usage";
+  }
+  scheduleOperatorPanelPaint();
+}
+
+function scheduleOperatorPanelPaint() {
+  if (state.tokenMeterRaf) return;
+  state.tokenMeterRaf = requestAnimationFrame(() => {
+    state.tokenMeterRaf = 0;
+    if (!operatorPanelEl || state.operatorCollapsed) return;
+    if (state.operatorPanelMode === "rain") paintOperatorRain();
+    else paintTokenMeter();
+  });
+}
+
+function startOperatorPanelLoop() {
+  if (startOperatorPanelLoop.timer) return;
+  startOperatorPanelLoop.timer = setInterval(() => {
+    if (!state.ws || state.ws.readyState !== 1) return;
+    if (state.operatorCollapsed) return;
+    scheduleOperatorPanelPaint();
+  }, 1000);
+}
+
+function bindOperatorPanel() {
+  if (!operatorPanelEl || operatorPanelEl.__bound) return;
+  operatorPanelEl.__bound = true;
+  if (operatorCollapseBtn) {
+    operatorCollapseBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.operatorCollapsed = !state.operatorCollapsed;
+      localStorage.setItem(OPERATOR_COLLAPSED_KEY, state.operatorCollapsed ? "1" : "0");
+      applyOperatorPanelMode();
+    });
+  }
+  if (operatorModeBtn) {
+    operatorModeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      state.operatorPanelMode = state.operatorPanelMode === "rain" ? "tokens" : "rain";
+      localStorage.setItem(OPERATOR_MODE_KEY, state.operatorPanelMode);
+      applyOperatorPanelMode();
+    });
+  }
+  bindVerticalResize(operatorResizeEl, {
+    min: OPERATOR_H_MIN,
+    max: OPERATOR_H_MAX,
+    cssVar: "--operator-h",
+    storageKey: OPERATOR_H_KEY,
+    getHeight: () => (operatorBodyEl ? operatorBodyEl.clientHeight : 148),
+  });
+  // Redraw on sidebar width changes.
+  if (typeof ResizeObserver !== "undefined" && operatorBodyEl) {
+    const ro = new ResizeObserver(() => scheduleOperatorPanelPaint());
+    ro.observe(operatorBodyEl);
+  }
+}
+
+function initSidebarAmbientPanels() {
+  loadSidebarPanelPrefs();
+  bindLineageSection();
+  bindOperatorPanel();
+  applyOperatorPanelMode();
+  startOperatorPanelLoop();
+}
+
 function connect() {
   setConnState("connecting", "connecting…");
   const url = websocketUrlForLocation();
@@ -4635,6 +5805,10 @@ function connect() {
       .catch(() => null) // older daemon with no shared layout — stay single-pane
       .then(async (doc) => {
         await refreshSessions(doc && doc.tree);
+        // Fleet token-meter history accrued while this client was closed
+        // (spec 0167). Seed after the session list so model attribution
+        // baselines for busy_ms are available.
+        seedTokenMeterFromDaemon();
         if (doc) applySharedLayout(doc);
       });
     refreshCurrentSessionAfterReconnect();
@@ -6207,6 +7381,8 @@ function renderSessions() {
   for (const node of existing.values()) node.remove();
   if (state.currentServiceName) renderServiceView();
   refreshSessionActions();
+  renderLineageSection();
+  scheduleOperatorPanelPaint();
 }
 
 /** Recompute the per-session action affordances against the
@@ -13044,6 +14220,11 @@ function handleNotification(method, params) {
   }
   if (method === "session/event") {
     const { session_id, event } = params;
+    // Fleet token meter (spec 0167): every session's Cost reports feed
+    // the ambient panel, not just the focused one.
+    if (event && event.type === "cost") {
+      observeCostForMeter(session_id, event);
+    }
     // Tool-approval requests are interactive and time-sensitive —
     // surface them in the bottom sheet regardless of which session
     // is currently being viewed. The session_id sticks with the
@@ -16832,6 +18013,7 @@ window.addEventListener("popstate", () => {
 initMiniMatrix();
 initSessionActivitySpinner();
 initPullToRefresh();
+initSidebarAmbientPanels();
 connect();
 </script>
 </body>
