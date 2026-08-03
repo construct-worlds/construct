@@ -169,6 +169,9 @@ pub(crate) fn frame_layout(app: &mut App, area: Rect, modeline_h: u16, now: Inst
     } else {
         app.main_slide.retarget(demand.saturating_sub(1), now);
     }
+    if app.main_slide.is_animating(now) {
+        app.request_tick_redraw();
+    }
     let slide = frame_slide_geometry(area, modeline_h, demand, app.main_slide.offset(now));
     // Published before the block renders so anything placing the hardware
     // cursor mid-render knows how far the block will travel.
@@ -3289,6 +3292,9 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     }
                     let scroll = if is_selected && focused {
                         // ~6 chars/sec (was 5; +20% per user feedback).
+                        if raw_name.chars().count() > name_avail {
+                            app.request_tick_redraw();
+                        }
                         Some((app.start_instant.elapsed().as_millis() / 167) as usize)
                     } else {
                         None
@@ -4227,6 +4233,7 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
         render_matrix_widget_viewport(f, rain_area, app, now);
         return;
     }
+    app.request_tick_redraw();
     let elapsed = app.start_instant.elapsed().as_millis() as u64;
     let cycle = rain_area.height + MATRIX_RAIN_TAIL_MAX + 1;
     let charset = b"01:|/\\{}[]<>+$#@*=-zrvshcodxgit";
@@ -4372,6 +4379,7 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
                 })
             });
         if let Some((img, revealed_at, hide_after, hovered)) = &thumb {
+            app.request_tick_redraw();
             let row_frac = preview_reveal_range(*revealed_at, *hide_after, now, *hovered);
             if row_frac.1 > row_frac.0 {
                 let (ow, oh) = blit_scale_dims(img.dimensions(), rain_area, false);
@@ -5009,6 +5017,7 @@ pub(crate) fn render_operator_monolog(
         Some(m) => (m.text.chars().collect::<Vec<char>>(), m.started_at),
         None => return false,
     };
+    app.request_tick_redraw();
     let n = chars.len() as u64;
     let elapsed = now.saturating_duration_since(started_at).as_millis() as u64;
     let type_ms = n.saturating_mul(MONOLOG_MS_PER_CHAR);
@@ -5965,6 +5974,7 @@ fn render_main_transitions(f: &mut Frame, app: &App) {
         let Some(amount) = transition_amount(t.started_at) else {
             continue;
         };
+        app.request_tick_redraw();
         let seed = match app.selection_for_window(pane.id) {
             Some(Selection::Session(id)) => hash_str(&id),
             Some(Selection::Group(id)) => hash_str(&id) ^ 0x67726f7570,
@@ -6260,6 +6270,7 @@ fn render_suggest_affordances(f: &mut Frame, app: &mut App) {
         let core = if let Some(hand) = app.suggestion_hands.get(&session_id) {
             format!("✦{} C-x .", 1 + hand.verbs.len())
         } else if app.suggest_pending_active(&session_id) {
+            app.request_tick_redraw();
             format!("{spinner} C-x . suggesting…")
         } else {
             "✦ C-x .".to_string()
@@ -6366,6 +6377,9 @@ fn render_suggest_deck(f: &mut Frame, app: &mut App) {
         return;
     };
     let categories = app.suggest_categories(&deck);
+    if categories.iter().any(|row| matches!(row, DeckRow::Generating)) {
+        app.request_tick_redraw();
+    }
     let history_selected = matches!(
         categories.get(deck.category_selected),
         Some(DeckRow::History { .. })
@@ -9049,6 +9063,7 @@ fn render_tutorial_card(f: &mut Frame, app: &mut App) {
     let Some(state) = app.tutorial.clone() else {
         return;
     };
+    app.request_tick_redraw();
     let ctx = app.tutorial_card_ctx();
     let body_lines = state.lines(ctx);
     let checklist = state.checklist();
@@ -9482,6 +9497,15 @@ fn render_terminal_for_window(f: &mut Frame, area: Rect, app: &mut App, window_i
     }
     if app.dynamic_ui_popover_open.as_deref() == Some(id.as_str()) && !sticky_panels.is_empty() {
         render_dynamic_ui_dropdown(f, area, app, &sticky_panels);
+    }
+    if preview.as_ref().is_some_and(|state| {
+        let now = Instant::now();
+        now.saturating_duration_since(state.revealed_at).as_secs_f32() < PREVIEW_REVEAL_SECS
+            || (state.hover_started.is_none()
+                && state.hide_after.saturating_duration_since(now).as_secs_f32()
+                    < PREVIEW_REVEAL_SECS)
+    }) {
+        app.request_tick_redraw();
     }
     let (preview_area, preview_close) = render_browser_preview_overlay(
         f,
@@ -14857,6 +14881,7 @@ fn session_mode_glyph(app: &App, s: &SessionSummary, static_glyph: &'static str)
         .map(|st| st.active)
         .unwrap_or(false);
     if session_should_animate_status(s, app.pty_active(&s.id), agent_active) {
+        app.request_tick_redraw();
         app.spinner_frame()
     } else {
         static_glyph
@@ -15694,6 +15719,17 @@ struct PlaybookPopupHoverOverlay {
 
 fn render_playbook_popup(f: &mut Frame, app: &mut App) {
     let now = Instant::now();
+    if app.playbook_popup.as_ref().is_some_and(|popup| {
+        popup.closing
+            || now.saturating_duration_since(popup.revealed_at)
+                < Duration::from_millis(crate::app::PLAYBOOK_REVEAL_MS)
+            || popup.slide_changed_at.is_some_and(|changed_at| {
+                now.saturating_duration_since(changed_at)
+                    < Duration::from_millis(crate::app::PLAYBOOK_REVEAL_MS)
+            })
+    }) {
+        app.request_tick_redraw();
+    }
     app.layout.playbook_title_run_hit = None;
     app.layout.playbook_title_toggle_hit = None;
     app.layout.playbook_title_close_hit = None;
@@ -16923,9 +16959,11 @@ fn render_playbook_popup_at(
     // Run shimmer (spec 0042): while a playbook Run is executing for this session,
     // sweep a highlight through the blocks that have not settled yet.
     if let Some(shimmer) = playbook_run_shimmer(app, popup, now) {
+        app.request_tick_redraw();
         apply_playbook_shimmer(&mut lines, &shimmer, &app.theme);
     }
     if let Some(flourish) = playbook_settle_flourish(app, popup, now) {
+        app.request_tick_redraw();
         apply_playbook_settle_flourish(&mut lines, &flourish, &app.theme, now);
     }
     // Empty playbook: replace the bare body with a richer onboarding placeholder —
@@ -17154,6 +17192,9 @@ fn render_playbook_collab_cursors(
         if is_agent {
             if let Some(elapsed) = app.playbook_agent_reveal_elapsed(&cursor.client_id, now) {
                 let elapsed_ms = elapsed.as_millis() as i64;
+                if elapsed_ms <= PLAYBOOK_AGENT_RECENT_ACTIVITY_MS {
+                    app.request_tick_redraw();
+                }
                 if elapsed_ms <= PLAYBOOK_AGENT_REVEAL_MS {
                     if let (Some(anchor), Some(head)) =
                         (cursor.selection_anchor, cursor.selection_head)
@@ -18277,6 +18318,9 @@ fn playbook_title_line<'a>(
         .get(&popup.playbook.session_id)
         .filter(|run| now < run.deadline && !run.first_output_seen)
         .map(|run| run.started_at);
+    if run_started.is_some() {
+        app.request_tick_redraw();
+    }
     let run_style = if run_hovered {
         Style::default()
             .fg(app.theme.text)
