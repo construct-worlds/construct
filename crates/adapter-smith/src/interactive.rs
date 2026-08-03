@@ -159,7 +159,6 @@ const DIM_LINE_PREFIXES: &[&str] = &["Summary:"];
 /// visual separator above the active `❯`. Right is implemented as
 /// soft-wrap at `width - PAD_RIGHT`.
 const PAD_TOP: usize = 1;
-const PAD_BOTTOM: usize = 0;
 const PAD_RIGHT: usize = 2;
 /// First-line marker for the response. `\xe2\x97\x8f` = `●`.
 const RESPONSE_BULLET: &[u8] = b"\xe2\x97\x8f ";
@@ -343,9 +342,8 @@ impl<'a> PtySink<'a> {
             out.extend_from_slice(b"\x1b[0m");
             self.in_dim_line = false;
         }
-        for _ in 0..PAD_BOTTOM {
-            out.extend_from_slice(b"\r\n");
-        }
+        // No bottom padding is emitted here — see PAD_TOP's note: the TUI's
+        // editor pane already supplies the separator above the active `❯`.
         if self.emit_pty && !out.is_empty() {
             self.emit.emit(SessionEvent::pty(&out));
         }
