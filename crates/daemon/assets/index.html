@@ -2471,12 +2471,31 @@
     font-size: 12px;
     line-height: 1.3;
   }
-  /* Rich HTML lineage graph — cards + CSS rails, not ASCII art. */
+  /* Lineage graph — HTML/CSS cards + rails, visual semantics from TUI
+     (render_lineage_row / specs 0080–0081 / 0103):
+     - Box: bordered session; status glyph alone carries state color
+     - Selection: interior highlight fill + bright border
+     - Hover: bright border only; demotes selection when hovering another
+     - Lane: dim │ under the box; turn-info sits ON the lane
+     - Segment: • mid-timeline (or live spinner); ✓ good / ✗ warn on end
+     - Edges: ⑂ fork / ▸ subagent / ↺ reset (glyph on the branch, not a chip)
+     - Discarded: struck-through name
+     - Subagent toggle: muted disclosure, not italic content
+  */
   .lineage-graph {
     display: flex;
     flex-direction: column;
     gap: 0;
     min-width: min(100%, 280px);
+    --ln-rail: color-mix(in srgb, var(--fg) 22%, transparent);
+    --ln-rail-hot: color-mix(in srgb, var(--fg) 55%, transparent);
+    --ln-dim: var(--fg-dim);
+    --ln-muted: var(--fg-faint);
+    --ln-text: var(--fg);
+    --ln-hi-bg: color-mix(in srgb, var(--accent) 18%, var(--bg-elev));
+    --ln-hi-fg: var(--fg);
+    --ln-border: color-mix(in srgb, var(--fg) 16%, transparent);
+    --ln-border-hot: color-mix(in srgb, var(--fg) 55%, transparent);
   }
   .ln-node {
     position: relative;
@@ -2484,78 +2503,96 @@
     flex-direction: column;
     gap: 0;
   }
-  .ln-node + .ln-node,
-  .ln-children > .ln-node {
-    margin-top: 0;
-  }
+  /* Session box (TUI bordered box). Rectangular, quiet rest state. */
   .ln-card {
     position: relative;
     display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 7px 9px;
-    border-radius: 9px;
-    border: 1px solid var(--border);
-    background: color-mix(in srgb, var(--bg) 70%, var(--bg-elev));
+    align-items: center;
+    gap: 7px;
+    padding: 6px 9px;
+    border-radius: 4px;
+    border: 1px solid var(--ln-border);
+    background: transparent;
     cursor: pointer;
-    transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+    transition: border-color 80ms ease, background 80ms ease, color 80ms ease;
     min-width: 0;
   }
-  .ln-card:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-    background: color-mix(in srgb, var(--accent) 8%, var(--bg-elev));
+  .ln-card .ln-title {
+    color: var(--ln-text);
+    opacity: 0.78; /* recessed rest — TUI DIM on unselected names */
+    font-weight: 500;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
+  .ln-card .ln-harness {
+    color: var(--ln-muted);
+    font-weight: 400;
+    font-size: 12px;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  /* Hover: bright border only, bold name — no fill (TUI border_highlight). */
+  .ln-node:hover > .ln-card {
+    border-color: var(--ln-border-hot);
+  }
+  .ln-node:hover > .ln-card .ln-title {
+    opacity: 1;
+    font-weight: 700;
+  }
+  /* Selection: interior highlight + bright border (TUI interior_highlight). */
   .ln-card.is-selected {
-    border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
-    background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev));
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+    border-color: var(--ln-border-hot);
+    background: var(--ln-hi-bg);
   }
-  .ln-card.is-focus {
-    border-color: var(--accent);
+  .ln-card.is-selected .ln-title {
+    opacity: 1;
+    font-weight: 700;
+    color: var(--ln-hi-fg);
   }
-  .ln-card.is-discarded {
-    opacity: 0.55;
+  /* Hovering a different node demotes the selected box (TUI: hover wins). */
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover) > .ln-card.is-selected {
+    background: transparent;
+    border-color: var(--ln-border);
+  }
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover) > .ln-card.is-selected .ln-title {
+    opacity: 0.78;
+    font-weight: 500;
+  }
+  /* Focus session (lineage detail root) — quiet accent ring when not selected. */
+  .ln-card.is-focus:not(.is-selected) {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
   }
   .ln-card.is-discarded .ln-title {
     text-decoration: line-through;
   }
+  .ln-card.is-discarded {
+    opacity: 0.7;
+  }
+  /* Status glyph ONLY carries live-state color (mirrors session list). */
   .ln-status {
     flex: 0 0 auto;
     width: 1.1em;
     text-align: center;
     font-size: 12px;
-    line-height: 1.4;
-    color: var(--fg-faint);
+    line-height: 1.3;
+    color: var(--ln-muted);
   }
   .ln-status.state-running,
   .ln-status.state-awaiting_input { color: var(--ok); }
   .ln-status.state-done { color: var(--accent); }
   .ln-status.state-errored { color: var(--err); }
   .ln-status.state-paused { color: var(--warn); }
+  .ln-status.is-active { color: var(--ok); }
   .ln-main {
     flex: 1 1 auto;
     min-width: 0;
     display: flex;
-    flex-direction: column;
-    gap: 2px;
+    align-items: baseline;
+    gap: 5px;
   }
-  .ln-title {
-    color: var(--fg);
-    font-weight: 600;
-    font-size: 12px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ln-meta {
-    color: var(--fg-faint);
-    font-size: 10.5px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* Vertical lane under a session card. Connects the card to its turn-info
-     segment (and on into the child stack) the way the TUI draws │ bars. */
+  /* Vertical lane under the box (TUI │ hanging from the box). */
   .ln-lane {
     --ln-rail-x: 14px;
     position: relative;
@@ -2573,165 +2610,182 @@
     bottom: 0;
     width: 2px;
     border-radius: 1px;
-    background: color-mix(in srgb, var(--fg) 18%, transparent);
+    background: var(--ln-rail);
     pointer-events: none;
+    transition: background 80ms ease;
   }
-  /* When the node has children, the lane rail continues into the child rail
-     without a visual break. */
+  .ln-node:hover > .ln-lane::before,
+  .ln-node:has(> .ln-card.is-selected) > .ln-lane::before {
+    background: var(--ln-rail-hot);
+  }
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane::before {
+    background: var(--ln-rail);
+  }
   .ln-node:has(> .ln-children) > .ln-lane {
     padding-bottom: 0;
   }
   .ln-node:has(> .ln-children) > .ln-lane::before {
     bottom: -6px;
   }
-  /* Turn-info segment sits OUTSIDE the session card, as its own graph node
-     on the lane (TUI: `• 12 tok · 8m12s` below the box, not inside it). */
+  /* Turn-info ON the lane: marker where the bar is, text to its right.
+     Plain (no chip) — TUI Segment / SegmentBullet / SegmentOutcome. */
   .ln-segment {
     position: relative;
     z-index: 1;
     display: flex;
     align-items: center;
-    gap: 6px;
-    margin: 6px 0 4px 0;
-    padding: 2px 8px 2px calc(var(--ln-rail-x) + 10px);
+    gap: 0;
+    margin: 5px 0 4px 0;
+    padding: 1px 4px 1px calc(var(--ln-rail-x) + 12px);
     width: fit-content;
     max-width: 100%;
-    color: var(--fg-dim);
-    font-size: 10.5px;
+    color: var(--ln-dim);
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     cursor: default;
     user-select: none;
     background: transparent;
     border: none;
+    transition: color 80ms ease;
   }
   .ln-segment .ln-seg-mark {
     position: absolute;
     left: calc(var(--ln-rail-x) - 5px);
     top: 50%;
     transform: translateY(-50%);
-    flex: 0 0 auto;
     width: 12px;
     text-align: center;
-    color: var(--fg-faint);
+    color: var(--ln-dim);
     font-size: 11px;
     line-height: 1;
-    /* Sit on top of the rail so the bullet reads as the lane marker. */
     background: var(--bg-elev);
   }
+  /* Terminal outcome palette (TUI checklist marks): done glows, fail warns. */
   .ln-segment.is-ok .ln-seg-mark { color: var(--ok); }
-  .ln-segment.is-bad .ln-seg-mark { color: var(--err); }
+  .ln-segment.is-bad .ln-seg-mark { color: var(--warn); }
   .ln-segment .ln-seg-text {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    padding: 1px 6px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-elev) 88%, var(--bg));
-    border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
   }
-  .ln-segment.is-empty {
-    display: none;
+  .ln-node:hover > .ln-lane .ln-segment,
+  .ln-node:has(> .ln-card.is-selected) > .ln-lane .ln-segment {
+    color: var(--ln-text);
   }
-  /* Empty segment (no stats): keep a short stem when the node has children
-     so the card still connects into the child rail; hide entirely on leaves. */
-  .ln-lane:has(.ln-segment.is-empty) {
-    min-height: 8px;
+  .ln-node:hover > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome),
+  .ln-node:has(> .ln-card.is-selected) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome) {
+    color: var(--ln-text);
+    font-weight: 700;
   }
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment {
+    color: var(--ln-dim);
+  }
+  .lineage-graph:has(.ln-node:hover) .ln-node:not(:hover):has(> .ln-card.is-selected) > .ln-lane .ln-segment .ln-seg-mark:not(.is-outcome) {
+    color: var(--ln-dim);
+    font-weight: 400;
+  }
+  .ln-segment.is-empty { display: none; }
+  .ln-lane:has(.ln-segment.is-empty) { min-height: 8px; }
   .ln-node:not(:has(> .ln-children)) > .ln-lane:has(.ln-segment.is-empty) {
     display: none;
   }
-  .lineage-graph.is-compact .ln-lane {
-    --ln-rail-x: 12px;
-    min-height: 8px;
-  }
+  .lineage-graph.is-compact .ln-lane { --ln-rail-x: 12px; min-height: 8px; }
   .lineage-graph.is-compact .ln-segment {
-    margin: 4px 0 2px 0;
+    margin: 3px 0 2px 0;
     font-size: 10px;
-    padding-left: calc(var(--ln-rail-x) + 8px);
+    padding-left: calc(var(--ln-rail-x) + 10px);
   }
-  .ln-badge {
-    flex: 0 0 auto;
-    align-self: center;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    padding: 2px 6px;
-    border-radius: 999px;
-    color: var(--fg-dim);
-    background: color-mix(in srgb, var(--fg) 8%, transparent);
-    white-space: nowrap;
-  }
-  .ln-badge.edge-fork {
-    color: color-mix(in srgb, var(--accent) 80%, var(--fg));
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-  }
-  .ln-badge.edge-subagent {
-    color: color-mix(in srgb, var(--ok) 85%, var(--fg));
-    background: color-mix(in srgb, var(--ok) 12%, transparent);
-  }
-  .ln-badge.edge-reset {
-    color: var(--warn);
-    background: color-mix(in srgb, var(--warn) 14%, transparent);
-  }
-  .ln-badge.edge-merged {
-    color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-  }
+  .lineage-graph.is-compact .ln-card { padding: 4px 7px; }
+  .lineage-graph.is-compact .ln-harness { display: none; }
+
+  /* Child stack: continuous parent rail, branch stubs into each child. */
   .ln-children {
     position: relative;
     margin: 0 0 0 14px;
-    padding: 6px 0 2px 14px;
+    padding: 4px 0 2px 16px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
   }
-  /* Vertical rail down the child stack */
   .ln-children::before {
     content: "";
     position: absolute;
     left: 0;
     top: 0;
-    bottom: 8px;
+    bottom: 10px;
     width: 2px;
     border-radius: 1px;
-    background: color-mix(in srgb, var(--fg) 14%, transparent);
+    background: var(--ln-rail);
+  }
+  .lineage-graph.is-compact .ln-children {
+    margin-left: 10px;
+    padding-left: 12px;
+    gap: 5px;
   }
   .ln-branch {
     position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
   }
-  /* Horizontal stub from rail into child card */
+  /* Horizontal stub from parent rail into the child (TUI ├─ ─▸). */
   .ln-branch::before {
     content: "";
     position: absolute;
-    left: -14px;
-    top: 16px;
-    width: 12px;
+    left: -16px;
+    top: 14px;
+    width: 10px;
     height: 2px;
     border-radius: 1px;
-    background: color-mix(in srgb, var(--fg) 18%, transparent);
+    background: var(--ln-rail);
   }
-  .ln-branch.edge-fork::before {
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  .lineage-graph.is-compact .ln-branch::before {
+    left: -12px;
+    width: 8px;
+    top: 12px;
   }
-  .ln-branch.edge-subagent::before {
-    background: color-mix(in srgb, var(--ok) 45%, transparent);
+  /* Edge glyph sits on the branch stub (TUI Edge span: ⑂ / ▸ / ↺). */
+  .ln-edge {
+    position: absolute;
+    left: -18px;
+    top: 6px;
+    z-index: 1;
+    font-size: 11px;
+    line-height: 1;
+    color: var(--ln-dim);
+    background: var(--bg-elev);
+    padding: 0 1px;
+    pointer-events: none;
+    user-select: none;
   }
-  .ln-branch.edge-reset::before {
-    background: color-mix(in srgb, var(--warn) 50%, transparent);
+  .ln-node:hover > .ln-children > .ln-branch > .ln-edge,
+  .ln-branch:has(.ln-card.is-selected) > .ln-edge {
+    color: var(--ln-text);
+    font-weight: 700;
   }
+  .lineage-graph:has(.ln-node:hover) .ln-branch:not(:has(.ln-node:hover)) > .ln-edge {
+    color: var(--ln-dim);
+    font-weight: 400;
+  }
+  .ln-edge.edge-fork { color: var(--ln-dim); }
+  .ln-edge.edge-subagent { color: var(--ln-dim); }
+  .ln-edge.edge-reset { color: var(--warn); }
+
+  /* Subagent-group toggle: muted affordance like the session-list disclosure
+     (TUI SubagentsToggle — not italic content). */
   .ln-toggle,
   .ln-more {
     display: flex;
     align-items: center;
     gap: 6px;
     margin: 0;
-    padding: 5px 8px;
-    border-radius: 8px;
-    border: 1px dashed color-mix(in srgb, var(--fg) 16%, transparent);
-    color: var(--fg-faint);
+    padding: 4px 6px;
+    border-radius: 4px;
+    border: none;
+    color: var(--ln-muted);
     font-size: 11px;
-    font-style: italic;
+    font-style: normal;
     cursor: pointer;
     background: transparent;
     text-align: left;
@@ -2740,33 +2794,19 @@
   }
   .ln-toggle:hover,
   .ln-more:hover {
-    color: var(--fg);
-    border-color: color-mix(in srgb, var(--fg) 28%, transparent);
-    background: color-mix(in srgb, var(--fg) 5%, transparent);
+    color: var(--ln-text);
+    background: color-mix(in srgb, var(--fg) 6%, transparent);
   }
   .ln-toggle .ln-chevron {
     flex: 0 0 auto;
-    font-style: normal;
-    color: var(--fg-dim);
     width: 1em;
+    color: var(--ln-dim);
   }
-  .lineage-graph.is-compact .ln-card {
-    padding: 4px 7px;
-    border-radius: 7px;
+  .ln-more {
+    font-style: italic; /* TUI More is muted+italic */
+    cursor: default;
   }
-  .lineage-graph.is-compact .ln-meta { display: none; }
-  .lineage-graph.is-compact .ln-badge { display: none; }
-  /* Segments stay visible in compact mode — they are graph nodes, not card chrome. */
-  .lineage-graph.is-compact .ln-children {
-    margin-left: 10px;
-    padding-left: 10px;
-    gap: 4px;
-  }
-  .lineage-graph.is-compact .ln-branch::before {
-    left: -10px;
-    width: 8px;
-    top: 13px;
-  }
+
   .lineage-empty {
     padding: 10px 8px;
     color: var(--fg-faint);
@@ -5432,26 +5472,12 @@ function lineageEdgeKind(node, summary) {
   return node.edge || "root";
 }
 
-function lineageEdgeBadge(edgeKind, summary) {
-  if (edgeKind === "reset") return { label: "reset", cls: "edge-reset" };
-  if (edgeKind === "fork") {
-    const st = forkStatusOf(summary);
-    if (st === "merged") return { label: "merged", cls: "edge-merged" };
-    if (st === "discarded") return { label: "discarded", cls: "edge-fork" };
-    return { label: "fork", cls: "edge-fork" };
-  }
-  if (edgeKind === "subagent") return { label: "subagent", cls: "edge-subagent" };
-  return null;
-}
-
-function lineageNodeHarness(summary) {
-  if (!summary) return "gone";
-  const harness = String(summary.harness || "").trim();
-  const st = String(summary.state || "").toLowerCase();
-  if (harness && st && st !== "running" && st !== "awaiting_input") {
-    return `${harness} · ${st}`;
-  }
-  return harness || st || "session";
+/** TUI edge glyph on the branch arrow (lineage.rs). */
+function lineageEdgeGlyph(edgeKind) {
+  if (edgeKind === "reset") return "↺";
+  if (edgeKind === "fork") return "⑂";
+  if (edgeKind === "subagent") return "▸";
+  return "";
 }
 
 function lineageFormatDuration(ms) {
@@ -5461,14 +5487,16 @@ function lineageFormatDuration(ms) {
   return m > 0 ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`;
 }
 
-/** Volume + elapsed for a session's lane segment (outside the card). */
+/**
+ * Turn-info for a lane window (TUI segment_label / segment_label_busy).
+ * Prefer token volume when tracked; else message count (spec 0103).
+ * Duration prefers busy_ms (compute time), else wall-clock span.
+ */
 function lineageSegmentInfo(summary) {
   if (!summary) return null;
   const tokens = summary.tokens || {};
   const tok = Number(tokens.input || 0) + Number(tokens.output || 0);
   const msgs = Number(summary.message_count || 0);
-  // Prefer token volume when the harness reports it; otherwise message count
-  // (same choice the TUI segment labels make — spec 0103).
   let countLabel = "";
   if (tok > 0) countLabel = `${formatTokenCount(tok)} tok`;
   else if (msgs > 0) countLabel = `${msgs} ${msgs === 1 ? "msg" : "msgs"}`;
@@ -5485,6 +5513,7 @@ function lineageSegmentInfo(summary) {
   const timeLabel = durationMs > 0 ? lineageFormatDuration(durationMs) : null;
   const text = timeLabel ? `${countLabel} · ${timeLabel}` : countLabel;
 
+  // Final-window outcome glyph (TUI SegmentOutcome): ✓ good, ✗ fail.
   const st = String(summary.state || "").toLowerCase();
   const forkSt = forkStatusOf(summary);
   let mark = "•";
@@ -5495,6 +5524,9 @@ function lineageSegmentInfo(summary) {
   } else if (forkSt === "discarded" || st === "errored") {
     mark = "✗";
     outcome = "bad";
+  } else if (sessionShouldAnimateStatus(summary)) {
+    // Live mid-timeline bullet spins with the status glyph (TUI).
+    mark = sessionStatusGlyph(summary);
   }
   return { text, mark, outcome };
 }
@@ -5511,11 +5543,35 @@ function buildLineageSegmentEl(summary, sessionId) {
     el.setAttribute("aria-hidden", "true");
     return el;
   }
-  el.title = info.text;
+  // Hover detail mirrors TUI segment_tooltip_label when tokens exist.
+  const tokens = summary && summary.tokens ? summary.tokens : null;
+  const msgs = summary ? Number(summary.message_count || 0) : 0;
+  if (tokens && (Number(tokens.input || 0) + Number(tokens.output || 0)) > 0) {
+    const parts = [`${msgs} ${msgs === 1 ? "msg" : "msgs"}`];
+    if (!Number(tokens.output || 0)) {
+      parts.push(`${formatTokenCount(Number(tokens.input || 0) + Number(tokens.output || 0))} tok total`);
+    } else {
+      parts.push(`in ${formatTokenCount(tokens.input || 0)}`);
+      parts.push(`out ${formatTokenCount(tokens.output || 0)}`);
+    }
+    if (Number(tokens.cached || 0) > 0) {
+      parts.push(`cached ${formatTokenCount(tokens.cached || 0)}`);
+    }
+    el.title = parts.join(" · ");
+  } else {
+    el.title = info.text;
+  }
   const mark = document.createElement("span");
-  mark.className = "ln-seg-mark";
+  mark.className = "ln-seg-mark" + (info.outcome ? " is-outcome" : "");
   mark.textContent = info.mark;
   mark.setAttribute("aria-hidden", "true");
+  if (summary) {
+    mark.dataset.sessionId = sessionId;
+    // Keep live bullets in the shared status-glyph animation loop.
+    if (!info.outcome && sessionShouldAnimateStatus(summary)) {
+      mark.classList.add("state", "state-running", "is-active");
+    }
+  }
   const text = document.createElement("span");
   text.className = "ln-seg-text";
   text.textContent = info.text;
@@ -5532,7 +5588,13 @@ function buildLineageCardEl(node, byId, focusId) {
   const summary = byId.get(node.session_id) || null;
   const edgeKind = lineageEdgeKind(node, summary);
   const status = summary ? String(summary.state || "pending").toLowerCase() : "pending";
-  const title = sessionDisplayTitle(summary) || String(node.session_id).slice(0, 8);
+  // TUI box label: "● title (harness)" — title primary, harness parenthetical.
+  const rawTitle = summary
+    ? (String(summary.title || "").trim() || String(summary.harness || node.session_id).trim())
+    : String(node.session_id).slice(0, 8);
+  const harness = summary ? String(summary.harness || "").trim() : "";
+  const showHarness = !!(harness && String(summary.title || "").trim());
+
   const card = document.createElement("div");
   card.className = "ln-card"
     + (node.session_id === state.currentId ? " is-selected" : "")
@@ -5543,35 +5605,30 @@ function buildLineageCardEl(node, byId, focusId) {
   card.setAttribute("aria-selected", node.session_id === state.currentId ? "true" : "false");
 
   const statusEl = document.createElement("span");
-  statusEl.className = `ln-status state-${status}`;
+  // Reuse session-list status classes so the shared spinner loop paints live work.
+  statusEl.className = `ln-status state state-${status}`
+    + (summary && sessionShouldAnimateStatus(summary) ? " is-active" : "");
+  statusEl.dataset.sessionId = node.session_id;
   statusEl.textContent = summary ? sessionStatusGlyph(summary) : "○";
   card.appendChild(statusEl);
 
   const main = document.createElement("div");
   main.className = "ln-main";
-  const titleEl = document.createElement("div");
+  const titleEl = document.createElement("span");
   titleEl.className = "ln-title";
-  titleEl.textContent = title;
-  titleEl.title = title;
+  titleEl.textContent = rawTitle;
+  titleEl.title = showHarness ? `${rawTitle} (${harness})` : rawTitle;
   main.appendChild(titleEl);
-  // Harness only inside the card — volume/elapsed live in the segment node.
-  const metaEl = document.createElement("div");
-  metaEl.className = "ln-meta";
-  metaEl.textContent = lineageNodeHarness(summary);
-  main.appendChild(metaEl);
-  card.appendChild(main);
-
-  const badge = lineageEdgeBadge(edgeKind, summary);
-  if (badge) {
-    const b = document.createElement("span");
-    b.className = `ln-badge ${badge.cls}`;
-    b.textContent = badge.label;
-    card.appendChild(b);
+  if (showHarness) {
+    const h = document.createElement("span");
+    h.className = "ln-harness";
+    h.textContent = `(${harness})`;
+    main.appendChild(h);
   }
+  card.appendChild(main);
   wrap.appendChild(card);
 
-  // Lane under the card: vertical rail + turn-info segment sitting on it
-  // (TUI draws │ from the box down through `• 12.4k tok · 8m12s`).
+  // Lane: │ + turn-info on the bar (outside the box).
   const lane = document.createElement("div");
   lane.className = "ln-lane";
   lane.appendChild(buildLineageSegmentEl(summary, node.session_id));
@@ -5596,6 +5653,7 @@ function buildLineageCardEl(node, byId, focusId) {
       chev.textContent = child.expanded ? "▾" : "▸";
       btn.appendChild(chev);
       const label = document.createElement("span");
+      // TUI: "▸ N subagents · M running" / "▾ N subagents"
       const noun = child.count === 1 ? "subagent" : "subagents";
       let text = `${child.count} ${noun}`;
       if (!child.expanded && child.running > 0) text += ` · ${child.running} running`;
@@ -5616,6 +5674,17 @@ function buildLineageCardEl(node, byId, focusId) {
     const cSum = byId.get(child.session_id);
     const cEdge = lineageEdgeKind(child, cSum);
     branch.className = `ln-branch edge-${cEdge}`;
+    const glyph = lineageEdgeGlyph(cEdge);
+    if (glyph) {
+      const edge = document.createElement("span");
+      edge.className = `ln-edge edge-${cEdge}`;
+      edge.textContent = glyph;
+      edge.setAttribute("aria-hidden", "true");
+      edge.title = cEdge === "reset" ? "reset snapshot"
+        : cEdge === "fork" ? "fork"
+        : cEdge === "subagent" ? "subagent" : "";
+      branch.appendChild(edge);
+    }
     branch.appendChild(buildLineageCardEl(child, byId, focusId));
     children.appendChild(branch);
   }
@@ -7382,10 +7451,34 @@ function refreshSessionListActivityGlyphs(now = Date.now()) {
   }
 }
 
+/** Keep lineage status glyphs + live mid-timeline bullets in phase with
+ *  the session list spinner (TUI: shared spinner gate on status + SegmentBullet). */
+function refreshLineageActivityGlyphs(now = Date.now()) {
+  if (!lineageBodyEl || lineageBodyEl.hidden) return;
+  const byId = new Map(state.sessions.map((s) => [s.id, s]));
+  for (const el of lineageBodyEl.querySelectorAll(".ln-status[data-session-id], .ln-seg-mark[data-session-id]")) {
+    const s = byId.get(el.dataset.sessionId);
+    if (!s) continue;
+    // Outcome marks (✓/✗) stay fixed; only live bullets/status spin.
+    if (el.classList.contains("is-outcome")) continue;
+    const active = sessionShouldAnimateStatus(s, now);
+    const glyph = sessionStatusGlyph(s, now);
+    if (el.textContent !== glyph) el.textContent = glyph;
+    el.classList.toggle("is-active", active);
+    // Status column keeps the state-* class for color; bullets stay dim-green when live.
+    if (el.classList.contains("ln-status")) {
+      const status = sessionStatusLabel(s);
+      const next = `ln-status state state-${status}` + (active ? " is-active" : "");
+      if (el.className !== next) el.className = next;
+    }
+  }
+}
+
 function refreshSessionActivityGlyphs(now = Date.now()) {
   refreshSessionListActivityGlyphs(now);
   refreshSessionListDetailLive(now);
   refreshPlaybookSessionClipGlyphs(now);
+  refreshLineageActivityGlyphs(now);
 }
 
 function initSessionActivitySpinner() {
