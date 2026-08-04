@@ -214,6 +214,73 @@ impl Grid {
         }
     }
 
+    // agentd fork addition: write the scrollback buffer (rows that have
+    // scrolled off the top of the visible screen), oldest first, as a
+    // byte stream that reproduces those rows — colors and attributes
+    // included — when written to a reset terminal of the same width.
+    // Rows are emitted flow-style: hard row breaks as CRLF, soft-wrapped
+    // rows left to the terminal's own autowrap so reflow and selection
+    // keep working in the receiving terminal. Unlike
+    // `write_contents_formatted` this never emits absolute cursor
+    // positioning, so the stream is valid at any scroll position; the
+    // intended use is seeding a client terminal's scrollback before
+    // repainting the visible screen on attach. The stream ends on a
+    // fresh line with default attributes. Returns the number of
+    // scrollback rows written.
+    pub fn write_scrollback_contents_formatted(
+        &self,
+        contents: &mut Vec<u8>,
+    ) -> usize {
+        let mut prev_attrs = crate::attrs::Attrs::default();
+        let mut prev_pos = Pos::default();
+        let mut wrapping = false;
+        // Synthetic row index, consistent with the positions passed to the
+        // row writer: 0 for a row starting after a hard break, previous
+        // index + 1 for a soft-wrap continuation. Row-to-row movement is
+        // then only ever expressed as the writer's wrap-continuation
+        // handling or our explicit CRLF, never absolute positioning.
+        let mut row_idx: u16 = 0;
+        for (i, row) in self.scrollback.iter().enumerate() {
+            if i > 0 {
+                if wrapping {
+                    row_idx = row_idx.saturating_add(1);
+                } else {
+                    crate::term::Crlf.write_buf(contents);
+                    row_idx = 0;
+                    prev_pos = Pos { row: 0, col: 0 };
+                }
+            }
+            let (pos, attrs) = row.write_contents_formatted(
+                contents,
+                0,
+                self.size.cols,
+                row_idx,
+                wrapping,
+                Some(prev_pos),
+                Some(prev_attrs),
+            );
+            prev_pos = pos;
+            prev_attrs = attrs;
+            wrapping = row.wrapped();
+        }
+        if !self.scrollback.is_empty() {
+            crate::term::Crlf.write_buf(contents);
+            crate::term::ClearAttrs.write_buf(contents);
+        }
+        self.scrollback.len()
+    }
+
+    // agentd fork addition: expose the scroll region and origin mode so a
+    // consumer serializing terminal state can restore them (the upstream
+    // `contents_formatted` dump does not include either).
+    pub fn scroll_region(&self) -> (u16, u16) {
+        (self.scroll_top, self.scroll_bottom)
+    }
+
+    pub fn origin_mode(&self) -> bool {
+        self.origin_mode
+    }
+
     pub fn write_contents_formatted(
         &self,
         contents: &mut Vec<u8>,

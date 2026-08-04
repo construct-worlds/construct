@@ -11687,6 +11687,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn screen_snapshot_reconstructs_screen_from_disk_history() {
+        use base64::Engine;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let storage_handle = storage.clone();
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        let id = "ssnap";
+        let entry = synthetic_entry(id, construct_protocol::SessionKind::User, 0);
+        mgr.sessions.write().await.insert(id.into(), entry.clone());
+        entry.pty.lock().await.size = Some(PtySize { cols: 40, rows: 5 });
+
+        let mut bytes = Vec::new();
+        for i in 0..50 {
+            bytes.extend(format!("history line {i}\r\n").into_bytes());
+        }
+        bytes.extend_from_slice(b"prompt> ");
+        storage_handle
+            .append_pty_bytes(id, &bytes)
+            .expect("append pty bytes");
+
+        let result = mgr
+            .screen_snapshot(id, false)
+            .await
+            .expect("screen_snapshot");
+        assert_eq!(result.size, PtySize { cols: 40, rows: 5 });
+        assert_eq!(result.start_offset, 0);
+        assert_eq!(result.end_offset, bytes.len() as u64);
+        assert_eq!(result.total_bytes, bytes.len() as u64);
+        assert_eq!(result.scrollback_rows, 46, "51 rendered rows on a 5-row screen");
+        assert!(!result.scrollback_truncated);
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&result.data)
+            .expect("base64 decode");
+        let mut parser = vt100::Parser::new(5, 40, 100);
+        parser.process(&decoded);
+        let contents = parser.screen().contents();
+        assert!(
+            contents.contains("history line 49") && contents.contains("prompt> "),
+            "snapshot must repaint the current screen, got: {contents:?}"
+        );
+        assert_eq!(parser.screen().cursor_position(), (4, 8));
+        parser.screen_mut().set_scrollback(usize::MAX);
+        assert_eq!(parser.screen().scrollback(), 46);
+        assert!(
+            parser.screen().contents().starts_with("history line 0"),
+            "oldest retained row must lead the rebuilt scrollback"
+        );
+    }
+
+    #[tokio::test]
+    async fn screen_snapshot_requires_known_pty_size() {
+        use tempfile::tempdir;
+
+        // Without the child's real geometry a server-side render would
+        // wrap wrongly; the RPC must fail so clients fall back to raw
+        // pty_replay instead of showing a mis-wrapped screen.
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        let id = "ssnapnosize";
+        mgr.sessions.write().await.insert(
+            id.into(),
+            synthetic_entry(id, construct_protocol::SessionKind::User, 0),
+        );
+
+        assert!(mgr.screen_snapshot(id, false).await.is_err());
+    }
+
+    #[tokio::test]
     async fn delete_cascades_to_subagents() {
         use tempfile::tempdir;
 

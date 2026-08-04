@@ -12,6 +12,7 @@ use construct_protocol::{
     PlaybookExecuteParams, PlaybookGetParams, PlaybookUpdateActor, PlaybookUpdateParams,
     PlaybookVerbExecuteParams, ProjectCreateParams, ProjectCreateResult, ProjectDeleteParams,
     ProjectMoveParams, ProjectRenameParams, ProjectSetCollapsedParams, PtyReplayParams, Request,
+    ScreenSnapshotParams,
     Response, RouterListRoutesParams, SearchParams, SessionAttachClipboardParams, SessionIdParams,
     SessionInputParams, SessionMoveParams, SessionPtyInputParams, SessionPtyResizeParams,
     SessionSetApprovalModeParams, SessionSetFocusedParams, SessionSetGroupParams,
@@ -1663,6 +1664,16 @@ pub(crate) async fn dispatch(
         let p = params!(req, PtyReplayParams);
         match manager
             .pty_replay_range(&p.session_id, p.max_bytes, p.before_offset)
+            .await
+        {
+            Ok(r) => ok!(req, &r),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::SESSION_SCREEN_SNAPSHOT, {
+        let p = params!(req, ScreenSnapshotParams);
+        match manager
+            .screen_snapshot(&p.session_id, p.strip_alt_screen)
             .await
         {
             Ok(r) => ok!(req, &r),

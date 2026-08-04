@@ -384,6 +384,144 @@ async fn web_client_loads_and_websocket_connects() {
         "historical terminal queries must not generate live PTY input: {fast_open:?}"
     );
 
+    // When the daemon offers session.screen_snapshot, terminal open hydrates
+    // from the rendered screen without fetching raw history at all; the first
+    // "load older" leaves snapshot mode by re-fetching the rendered span plus
+    // one page of raw bytes.
+    let snapshot_open: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const saved = {
+                sessions: state.sessions,
+                currentId: state.currentId,
+                mode: state.mode,
+                ws: state.ws,
+                terminalById: state.terminalById,
+                term: state.term,
+                fitAddon: state.fitAddon,
+              };
+              const calls = [];
+              const snapText = 'old scrollback A\r\nold scrollback B\r\n' + '\n'.repeat(23) + '\x1b[H\x1b[Jsnapshot screen line';
+              const tick = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              try {
+                state.sessions = [{
+                  id: 's-snap-pty',
+                  cwd: '/tmp',
+                  harness: 'shell',
+                  has_pty: true,
+                  kind: 'user',
+                }];
+                state.currentId = 's-snap-pty';
+                state.terminalById = new Map();
+                state.ws = {
+                  readyState: 1,
+                  send(raw) {
+                    const msg = JSON.parse(raw);
+                    calls.push(msg);
+                    const pending = state.pending.get(msg.id);
+                    state.pending.delete(msg.id);
+                    let result = null;
+                    if (msg.method === 'session.screen_snapshot') {
+                      result = {
+                        data: btoa(snapText),
+                        scrollback_rows: 2,
+                        scrollback_truncated: false,
+                        start_offset: 1048576,
+                        end_offset: 1179648,
+                        total_bytes: 1179648,
+                        size: { cols: 80, rows: 24 },
+                      };
+                    } else if (msg.method === 'session.pty_replay') {
+                      result = {
+                        data: btoa('raw history\r\n'),
+                        start_offset: 0,
+                        end_offset: msg.params.before_offset || 0,
+                        total_bytes: 1179648,
+                        size: { cols: 80, rows: 24 },
+                      };
+                    } else if (msg.method === 'session.pty_resize' || msg.method === 'session.pty_input') {
+                      result = {};
+                    }
+                    queueMicrotask(() => pending.resolve(result));
+                  },
+                };
+                await enterTerminalMode('s-snap-pty', { forceReload: true });
+                const handle = terminalHandleForSession('s-snap-pty');
+                const snapshotCalls = calls.filter((c) => c.method === 'session.screen_snapshot');
+                const replayCallsDuringOpen = calls.filter((c) => c.method === 'session.pty_replay').length;
+                const buffer = handle.term.buffer.active;
+                let text = '';
+                for (let i = 0; i < buffer.length; i++) {
+                  text += buffer.getLine(i).translateToString(true) + '\n';
+                }
+                const historyVisibleAfterOpen = !terminalHistoryBtn.hidden;
+                const snapshotHydratedAfterOpen = !!handle.snapshotHydrated;
+                await maybeLoadOlderPtyReplay('s-snap-pty', { force: true });
+                const olderCalls = calls.filter((c) => c.method === 'session.pty_replay');
+                return {
+                  snapshotCalls: snapshotCalls.map((c) => c.params),
+                  replayCallsDuringOpen,
+                  text,
+                  cols: handle.term.cols,
+                  rows: handle.term.rows,
+                  historyVisibleAfterOpen,
+                  snapshotHydratedAfterOpen,
+                  olderCalls: olderCalls.map((c) => c.params),
+                  snapshotHydratedAfterOlder: !!handle.snapshotHydrated,
+                };
+              } finally {
+                state.sessions = saved.sessions;
+                state.currentId = saved.currentId;
+                state.mode = saved.mode;
+                state.ws = saved.ws;
+                state.terminalById = saved.terminalById;
+                state.term = saved.term;
+                state.fitAddon = saved.fitAddon;
+                terminalHistoryBtn.hidden = true;
+                hideTerminalLoading();
+              }
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate terminal snapshot-open")
+        .into_value()
+        .expect("json value");
+    assert_eq!(
+        snapshot_open["snapshotCalls"][0]["strip_alt_screen"], true,
+        "web client must request an alt-screen-stripped render: {snapshot_open:?}"
+    );
+    assert_eq!(
+        snapshot_open["replayCallsDuringOpen"], 0,
+        "snapshot hydration must not fetch raw history: {snapshot_open:?}"
+    );
+    let text = snapshot_open["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("snapshot screen line") && text.contains("old scrollback A"),
+        "snapshot bytes must paint screen and scrollback: {snapshot_open:?}"
+    );
+    assert_eq!(snapshot_open["cols"], 80, "{snapshot_open:?}");
+    assert_eq!(snapshot_open["rows"], 24, "{snapshot_open:?}");
+    assert_eq!(
+        snapshot_open["historyVisibleAfterOpen"], true,
+        "start_offset > 0 means older history exists: {snapshot_open:?}"
+    );
+    assert_eq!(snapshot_open["snapshotHydratedAfterOpen"], true, "{snapshot_open:?}");
+    assert_eq!(
+        snapshot_open["olderCalls"][0]["before_offset"], 1179648,
+        "leaving snapshot mode must re-fetch from the rendered span's end: {snapshot_open:?}"
+    );
+    assert_eq!(
+        snapshot_open["olderCalls"][0]["max_bytes"],
+        (1179648 - 1048576) + 64 * 1024,
+        "first raw page must cover the rendered span plus one page: {snapshot_open:?}"
+    );
+    assert_eq!(
+        snapshot_open["snapshotHydratedAfterOlder"], false,
+        "load-older must leave snapshot mode: {snapshot_open:?}"
+    );
+
     // Claude Code's full-screen mode enters the terminal alternate screen
     // (`ESC[?1049h`). xterm.js treats that buffer as having no scrollback, so
     // the web client strips those toggles before writing PTY bytes. The live

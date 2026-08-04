@@ -1283,6 +1283,12 @@ pub mod ipc_method {
     pub const SESSION_PTY_INPUT: &str = "session.pty_input";
     pub const SESSION_PTY_RESIZE: &str = "session.pty_resize";
     pub const SESSION_PTY_REPLAY: &str = "session.pty_replay";
+    /// Render the session's current terminal screen server-side and return
+    /// it as a compact escape-sequence stream (scrollback rows + visible
+    /// screen repaint) instead of raw `pty.log` history. Lets a client
+    /// attach in O(screen + retained scrollback) rather than replaying the
+    /// full byte history through its own emulator.
+    pub const SESSION_SCREEN_SNAPSHOT: &str = "session.screen_snapshot";
     pub const SESSION_INTERRUPT: &str = "session.interrupt";
     pub const SESSION_STOP: &str = "session.stop";
     pub const SESSION_KILL: &str = "session.kill";
@@ -3232,6 +3238,52 @@ pub struct PtyReplayParams {
     /// current end of `pty.log`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_offset: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenSnapshotParams {
+    pub session_id: String,
+    /// Strip alternate-screen enter/exit sequences from the PTY history
+    /// before rendering, mirroring clients (the web UI) that filter those
+    /// sequences out of everything they feed their terminal. The rendered
+    /// screen then matches what such a client would have shown after a
+    /// full replay: alternate-screen apps painted onto the primary screen,
+    /// with the pre-alt scrollback intact.
+    #[serde(default)]
+    pub strip_alt_screen: bool,
+}
+
+/// Result of `session.screen_snapshot`: a rendered reconstruction of the
+/// session's terminal, produced by replaying a bounded tail of `pty.log`
+/// through a server-side vt100 parser at the session's PTY size. Written
+/// into a freshly reset client terminal of the same size, `data` first
+/// flows `scrollback_rows` rows of history into the client's scrollback,
+/// then repaints the visible screen and restores cursor, attributes,
+/// scroll region, and input modes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenSnapshotResult {
+    /// Base64-encoded escape-sequence stream reproducing the terminal.
+    pub data: String,
+    /// Rows of scrollback included ahead of the visible-screen repaint.
+    pub scrollback_rows: u64,
+    /// True when the parser's scrollback budget overflowed: rows older
+    /// than the included ones existed in the rendered tail but were
+    /// dropped. Older history is still reachable via `session.pty_replay`.
+    #[serde(default)]
+    pub scrollback_truncated: bool,
+    /// Absolute `pty.log` offset where the rendered tail began. Non-zero
+    /// means older raw history exists beyond what the snapshot rendered.
+    #[serde(default)]
+    pub start_offset: u64,
+    /// Absolute `pty.log` offset where the rendered tail ended.
+    #[serde(default)]
+    pub end_offset: u64,
+    /// Total byte length of `pty.log` at render time.
+    #[serde(default)]
+    pub total_bytes: u64,
+    /// PTY size the snapshot was rendered at. Clients must size their
+    /// terminal to this before writing `data`.
+    pub size: PtySize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
