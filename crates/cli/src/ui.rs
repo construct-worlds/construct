@@ -4417,8 +4417,6 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
 /// Eighth-block glyphs for the partial cell that tops a column, indexed by
 /// how many eighths of that cell are filled (1..=7). They fill from the
 /// bottom of the cell, which is what a bottom-anchored bar needs.
-const METER_PARTIALS: [&str; 8] = ["", "▁", "▂", "▃", "▄", "▅", "▆", "▇"];
-
 /// Fleet-wide realtime token meter (spec 0167): one column per second of
 /// history, stacked by model, autoscaled to the tallest visible column.
 ///
@@ -4426,6 +4424,9 @@ const METER_PARTIALS: [&str; 8] = ["", "▁", "▂", "▃", "▄", "▅", "▆",
 /// to divide by, so the ceiling is whatever the window peaked at and the
 /// label states it — a bar that read "80%" here would be inventing a
 /// denominator.
+///
+/// Column paint lives in [`crate::token_meter`] so the project dashboard
+/// meter shares the same solid-background full cells (#1183).
 fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
     app.layout.matrix_token_graph_area = None;
     app.token_meter.advance_to(now);
@@ -4476,9 +4477,9 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
         // rounding a real sample down to nothing would read as idle.
         let filled = ((total as f64 / scale as f64) * eighths_total as f64).round() as usize;
         let filled = filled.clamp(1, eighths_total);
-        let segments = stacked_eighths(&bucket.stacked(), total, filled);
+        let segments = crate::token_meter::stacked_eighths(&bucket.stacked(), total, filled);
         // Paint bottom-up: each band owns a contiguous run of eighths.
-        for cell in column_cells(&segments, filled, cells) {
+        for cell in crate::token_meter::column_cells(&segments, filled, cells) {
             let y = graph.y + graph.height.saturating_sub(cell.row + 1);
             let mut style = Style::default().fg(app.token_meter.band_color(cell.fg));
             // A terminal cell holds one glyph, so a boundary landing inside
@@ -4496,177 +4497,6 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
     if legend_h > 0 {
         render_token_meter_legend(f, area, app, &entries, &grid, legend_h);
     }
-}
-
-/// How a band identifies its solid paint. Cached and fresh parts of one model
-/// use distinct lightnesses of the same hue, so their boundary can use the
-/// terminal's ordinary foreground/background split without a texture glyph.
-trait BandPaint: Copy + PartialEq {
-    /// Stable key for the exact tone that fills this band.
-    fn paint(self) -> u32;
-}
-
-impl BandPaint for crate::token_meter::Band {
-    fn paint(self) -> u32 {
-        u32::from(self.0) * 2
-            + match self.1 {
-                crate::token_meter::Part::Cached => 0,
-                crate::token_meter::Part::New => 1,
-            }
-    }
-}
-
-/// Plain series indices, for callers that draw one band per model.
-impl BandPaint for u16 {
-    fn paint(self) -> u32 {
-        u32::from(self)
-    }
-}
-
-/// One painted cell of a stacked column: which glyph, in whose color, over
-/// whose color.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ColumnCell<K> {
-    /// Rows up from the bottom of the graph.
-    row: u16,
-    glyph: &'static str,
-    /// Band drawn as the glyph's filled part.
-    fg: K,
-    /// Band filling the rest of the cell, when a boundary lands inside it.
-    bg: Option<K>,
-}
-
-/// Lay a column's stacked segments onto terminal cells.
-///
-/// Cells are 8 eighths tall. A cell wholly owned by one band is a solid full
-/// block; the column's topmost cell is a partial block; a cell where one band
-/// ends and another begins is a partial block of the lower tone drawn *over*
-/// the upper tone as background, which is the only way to get two colors into
-/// one cell.
-///
-/// Only the partially-filled cell topping a column cannot encode a second
-/// boundary: its empty part has to remain panel background. Whichever band
-/// owns more of that cell takes it.
-fn column_cells<K: BandPaint>(
-    segments: &[(K, usize)],
-    filled: usize,
-    cells: usize,
-) -> Vec<ColumnCell<K>> {
-    let mut out = Vec::new();
-    if segments.is_empty() || filled == 0 {
-        return out;
-    }
-    // Which band owns each eighth, bottom-up.
-    let mut owner: Vec<K> = Vec::with_capacity(filled);
-    for (band, eighths) in segments {
-        for _ in 0..*eighths {
-            owner.push(*band);
-        }
-    }
-    for row in 0..cells {
-        let base = row * 8;
-        if base >= filled.min(owner.len()) {
-            break;
-        }
-        let top = ((row + 1) * 8).min(filled).min(owner.len());
-        let fill = top - base;
-        let bottom_series = owner[base];
-        // How far the bottom band reaches within this cell.
-        let bottom_run = owner[base..top]
-            .iter()
-            .take_while(|m| **m == bottom_series)
-            .count();
-        let upper = owner[top - 1];
-        let cell = if bottom_run == fill {
-            // One band owns everything filled here.
-            band_cell(row, bottom_series, fill)
-        } else if fill == 8 && bottom_series.paint() != upper.paint() {
-            // A boundary between two colors inside a full cell: lower band as
-            // the glyph's filled part, whatever tops the cell as its
-            // background.
-            ColumnCell {
-                row: row as u16,
-                glyph: METER_PARTIALS[bottom_run],
-                fg: bottom_series,
-                bg: Some(upper),
-            }
-        } else {
-            // Either a partially-filled top cell, or a boundary between two
-            // bands with the exact same tone. Neither can hold both, so the
-            // larger share takes the cell.
-            let upper_run = fill - bottom_run;
-            let winner = if upper_run > bottom_run {
-                upper
-            } else {
-                bottom_series
-            };
-            band_cell(row, winner, fill)
-        };
-        out.push(cell);
-    }
-    out
-}
-
-/// A cell filled by a single band, `fill` eighths deep.
-///
-/// A cell the band fills outright is painted as a *background* rather than a
-/// `█` glyph. A foreground glyph only colors the pixels the font draws, and
-/// plenty of fonts draw FULL BLOCK shorter than the terminal's line box —
-/// the leading is left transparent, so every row boundary shows a hairline
-/// of panel background and a solid bar reads as a stack of bricks. A
-/// background color fills the whole cell whatever the font does, so the bar
-/// is solid on every terminal. Nothing else can be painted into a cell that
-/// one band fills, so spending its background on that band costs nothing.
-///
-/// A partially-filled cell still needs a glyph — its empty part has to stay
-/// panel background — and keeps the eighth block. The same short-glyph
-/// leading applies there, but it falls at the top of a column against
-/// background that is empty anyway.
-fn band_cell<K: BandPaint>(row: usize, band: K, fill: usize) -> ColumnCell<K> {
-    if fill == 8 {
-        return ColumnCell {
-            row: row as u16,
-            glyph: " ",
-            fg: band,
-            bg: Some(band),
-        };
-    }
-    ColumnCell {
-        row: row as u16,
-        glyph: METER_PARTIALS[fill],
-        fg: band,
-        bg: None,
-    }
-}
-
-/// Split a column's `filled` eighths across its bands in proportion to
-/// their tokens, largest-remainder so the parts sum to exactly `filled` and
-/// no visible band rounds away to nothing.
-fn stacked_eighths<K: Copy>(stacked: &[(K, u64)], total: u64, filled: usize) -> Vec<(K, usize)> {
-    if total == 0 || filled == 0 {
-        return Vec::new();
-    }
-    let mut out: Vec<(K, usize)> = Vec::with_capacity(stacked.len());
-    let mut remainders: Vec<(usize, f64)> = Vec::with_capacity(stacked.len());
-    let mut assigned = 0usize;
-    for (i, (band, tokens)) in stacked.iter().enumerate() {
-        let exact = (*tokens as f64 / total as f64) * filled as f64;
-        let floor = exact.floor() as usize;
-        out.push((*band, floor));
-        remainders.push((i, exact - floor as f64));
-        assigned += floor;
-    }
-    remainders.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let mut leftover = filled.saturating_sub(assigned);
-    for (i, _) in remainders {
-        if leftover == 0 {
-            break;
-        }
-        out[i].1 += 1;
-        leftover -= 1;
-    }
-    out.retain(|(_, e)| *e > 0);
-    out
 }
 
 /// Rows the bars keep no matter how many series need naming. Three is the
@@ -24469,122 +24299,6 @@ mod tests {
         );
     }
 
-    /// Two series sharing one terminal cell must both survive it: the lower
-    /// one as the partial glyph's filled part, the upper one as its
-    /// background. Painting both as foreground glyphs made the second
-    /// overwrite the first, so a dominant model erased everything under it.
-    #[test]
-    fn column_cells_encode_a_boundary_inside_one_cell() {
-        // Series 0 takes 3 eighths, series 1 the next 5 — one full cell.
-        let cells = column_cells(&[(0, 3), (1, 5)], 8, 4);
-        assert_eq!(cells.len(), 1);
-        assert_eq!(
-            cells[0],
-            ColumnCell {
-                row: 0,
-                glyph: METER_PARTIALS[3],
-                fg: 0,
-                bg: Some(1),
-            }
-        );
-    }
-
-    /// A cell wholly owned by one series is painted as that series'
-    /// background, not as a `█` glyph. Fonts whose FULL BLOCK is shorter than
-    /// the terminal's line box leave the leading transparent, which drew a
-    /// hairline of panel background at every row boundary and made a solid
-    /// bar read as a stack of bricks.
-    #[test]
-    fn column_cells_paint_whole_cells_as_background() {
-        let cells = column_cells(&[(2, 16)], 16, 4);
-        assert_eq!(cells.len(), 2);
-        assert!(
-            cells.iter().all(|c| c.glyph == " " && c.bg == Some(2)),
-            "a full cell must carry its color as background: {cells:?}"
-        );
-        assert!(cells.iter().all(|c| c.fg == 2));
-    }
-
-    /// The column's topmost cell is partially filled, so the space above the
-    /// glyph has to stay panel background — there is nowhere to encode a
-    /// second series, and the larger share takes the cell.
-    #[test]
-    fn column_cells_give_the_partial_top_cell_to_the_larger_share() {
-        // Cell 0 full (series 0), cell 1 has 1 eighth of series 0 and 4 of
-        // series 1.
-        let cells = column_cells(&[(0, 9), (1, 4)], 13, 4);
-        let top = cells.last().expect("top cell");
-        assert_eq!(top.row, 1);
-        assert_eq!(top.fg, 1, "series 1 owns 4 of the 5 filled eighths");
-        assert_eq!(top.bg, None);
-    }
-
-    /// Cached and fresh work use solid fills in two lightnesses of one model
-    /// hue. Treating the parts as distinct paints lets their boundary survive
-    /// a shared terminal cell without inventing a third visual section.
-    #[test]
-    fn cached_and_fresh_cells_are_solid_distinct_tones() {
-        use crate::token_meter::Part;
-        assert_ne!(
-            (0u16, Part::Cached).paint(),
-            (0u16, Part::New).paint(),
-            "the renderer must preserve the two tones"
-        );
-        let cached = band_cell(0, (0u16, Part::Cached), 8);
-        let fresh = band_cell(0, (0u16, Part::New), 8);
-        assert_eq!(cached.bg, Some((0, Part::Cached)));
-        assert_eq!(fresh.bg, Some((0, Part::New)));
-        assert_ne!(cached.bg, fresh.bg, "each tone fills its own cells");
-    }
-
-    /// Partial cells retain the eighth-block geometry whichever tone owns
-    /// them; lightness carries cache state without changing their height.
-    /// They keep a foreground glyph because the empty part of the cell has to
-    /// stay panel background — a background fill there would paint the gap
-    /// above the bar.
-    #[test]
-    fn a_partial_cell_keeps_its_eighth_block() {
-        let cell = band_cell(0, 3u16, 5);
-        assert_eq!(cell.glyph, METER_PARTIALS[5]);
-        assert_eq!(cell.fg, 3);
-        assert_eq!(cell.bg, None, "the unfilled part must stay panel background");
-    }
-
-    /// A model's two tones can occupy one cell exactly: the lower cached tone
-    /// is the partial glyph and the upper fresh tone is its background.
-    #[test]
-    fn a_same_model_boundary_in_one_cell_keeps_both_tones() {
-        use crate::token_meter::Part;
-        let cells = column_cells(&[((0u16, Part::Cached), 3), ((0u16, Part::New), 5)], 8, 4);
-        assert_eq!(
-            cells,
-            vec![ColumnCell {
-                row: 0,
-                glyph: METER_PARTIALS[3],
-                fg: (0, Part::Cached),
-                bg: Some((0, Part::New)),
-            }]
-        );
-    }
-
-    /// Bands of *different* models still differ in color, so their shared cell
-    /// keeps the fg-over-bg encoding — the same-color degradation above must
-    /// not leak into the ordinary case.
-    #[test]
-    fn column_cells_still_blend_a_boundary_between_two_models() {
-        use crate::token_meter::Part;
-        let cells = column_cells(&[((0u16, Part::New), 3), ((1u16, Part::New), 5)], 8, 4);
-        assert_eq!(
-            cells,
-            vec![ColumnCell {
-                row: 0,
-                glyph: METER_PARTIALS[3],
-                fg: (0, Part::New),
-                bg: Some((1, Part::New)),
-            }]
-        );
-    }
-
     #[test]
     fn legend_rate_formats_throughput() {
         assert_eq!(legend_rate(Some(100.0)), "100/s");
@@ -24776,45 +24490,6 @@ mod tests {
             "the rest truncate rather than eating the graph: {:?}",
             grid.rows
         );
-    }
-
-    /// A column's segments sum to exactly the column's height — no drift
-    /// from rounding each share independently — and stay ordered by size.
-    #[test]
-    fn stacked_eighths_sums_exactly_to_the_column_height() {
-        let stacked = vec![(0u16, 600u64), (1, 300), (2, 100)];
-        let filled = 24; // three full cells
-        let out = stacked_eighths(&stacked, 1_000, filled);
-        assert_eq!(out.iter().map(|(_, e)| *e).sum::<usize>(), filled);
-        assert_eq!(out.len(), 3, "{out:?}");
-        assert!(out[0].1 > out[1].1 && out[1].1 > out[2].1, "{out:?}");
-    }
-
-    /// A share smaller than one eighth of the column is omitted from the
-    /// stack rather than promoted to a visible slice — inflating 1% into 4%
-    /// would have to take that space from a series that earned it. The
-    /// column's own height still accounts for the tokens, and the legend
-    /// still lists the model, so nothing is lost from the totals.
-    #[test]
-    fn stacked_eighths_drops_sub_quantum_shares_without_losing_height() {
-        let stacked = vec![(0u16, 900u64), (1, 90), (2, 10)];
-        let filled = 24;
-        let out = stacked_eighths(&stacked, 1_000, filled);
-        assert_eq!(out.iter().map(|(_, e)| *e).sum::<usize>(), filled);
-        assert!(!out.iter().any(|(m, _)| *m == 2), "{out:?}");
-    }
-
-    /// A single-eighth column still belongs to whichever series produced it.
-    #[test]
-    fn stacked_eighths_handles_a_one_eighth_column() {
-        let out = stacked_eighths(&[(4u16, 12u64)], 12, 1);
-        assert_eq!(out, vec![(4, 1)]);
-    }
-
-    #[test]
-    fn stacked_eighths_is_empty_without_volume() {
-        assert!(stacked_eighths::<u16>(&[], 0, 8).is_empty());
-        assert!(stacked_eighths(&[(0u16, 5u64)], 5, 0).is_empty());
     }
 
     /// Truncation must mark itself — a clipped model name that looks like a

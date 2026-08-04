@@ -17,7 +17,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Theme;
-use crate::token_meter::TokenMeter;
+use crate::token_meter::{self, TokenMeter};
 
 /// Max activity lines retained per project (client ring buffer).
 pub const ACTIVITY_CAP: usize = 40;
@@ -871,6 +871,9 @@ fn render_project_meter(
     let history: Vec<_> = meter.window(width).collect();
     let hist_len = history.len();
 
+    // Same column paint as the fleet token meter (#1183): full cells as
+    // background fill so fonts whose FULL BLOCK is short of the line box
+    // don't leave hairline seams between rows.
     for (col, bucket) in history.iter().enumerate() {
         let x = graph.x + (width - hist_len + col) as u16;
         let total = bucket.total();
@@ -879,46 +882,15 @@ fn render_project_meter(
         }
         let filled = ((total as f64 / scale as f64) * eighths_total as f64).round() as usize;
         let filled = filled.clamp(1, eighths_total);
-        // Simplified single-series paint (model colors still applied per band).
-        let stacked = bucket.stacked();
-        let mut remaining = filled;
-        let mut y_eighth = 0usize;
-        for (band, tokens) in stacked.iter().rev() {
-            if remaining == 0 {
-                break;
+        let segments = token_meter::stacked_eighths(&bucket.stacked(), total, filled);
+        for cell in token_meter::column_cells(&segments, filled, cells) {
+            let y = graph.y + graph.height.saturating_sub(cell.row + 1);
+            let mut style = Style::default().fg(meter.band_color(cell.fg));
+            if let Some(bg) = cell.bg {
+                style = style.bg(meter.band_color(bg));
             }
-            let share = ((*tokens as f64 / total as f64) * filled as f64).round() as usize;
-            let take = share.min(remaining).max(if remaining > 0 && *tokens > 0 {
-                1
-            } else {
-                0
-            });
-            let take = take.min(remaining);
-            for _ in 0..take {
-                let cell_row = y_eighth / 8;
-                let eighth = y_eighth % 8;
-                if cell_row < cells {
-                    let y = graph.y + graph.height.saturating_sub(cell_row as u16 + 1);
-                    let glyph = match eighth {
-                        0 => "▁",
-                        1 => "▂",
-                        2 => "▃",
-                        3 => "▄",
-                        4 => "▅",
-                        5 => "▆",
-                        6 => "▇",
-                        _ => "█",
-                    };
-                    // Only the top partial of a band uses partial glyphs; solid for full cells.
-                    let g = if eighth == 7 || take > 1 { "█" } else { glyph };
-                    f.buffer_mut()
-                        .set_string(x, y, g, Style::default().fg(meter.band_color(*band)));
-                }
-                y_eighth += 1;
-            }
-            remaining = remaining.saturating_sub(take);
+            f.buffer_mut().set_string(x, y, cell.glyph, style);
         }
-        let _ = remaining;
     }
 
     // Legend / rate line.
