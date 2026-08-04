@@ -14,7 +14,7 @@
 
 use construct_adapter_common::{
     context_breakdown::{estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin},
-    drive_turn, grok_transcript_path, next_native_seq, spawn_stderr_log, TurnOutcome,
+    drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome,
 };
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
 use construct_protocol::adapter::{
@@ -285,17 +285,77 @@ fn sibling_native_ids(own_cwd: &Path) -> HashSet<String> {
     ids
 }
 
-fn grok_session_dir(cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    Some(
-        grok_home()?
-            .join("sessions")
-            .join(url_encode_path(cwd))
-            .join(session_id),
-    )
+/// Locate a known native session id anywhere under `sessions_root/*/`.
+///
+/// Grok keys directories by process cwd. Construct's recorded cwd can lag
+/// behind when Grok chdirs into a project/git root after spawn (spec 0192),
+/// so the preferred cwd-keyed path may never appear. A scan by id is the
+/// only reliable way to attach the watcher to the real directory once it
+/// exists. If multiple cwd encodings somehow contain the same id (should
+/// not happen in practice), the newest mtime wins.
+fn find_grok_session_dir_by_id_in(sessions_root: &Path, session_id: &str) -> Option<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(sessions_root) else {
+        return None;
+    };
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let candidate = entry.path().join(session_id);
+        if !candidate.is_dir() {
+            continue;
+        }
+        let modified = candidate
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if best
+            .as_ref()
+            .map(|(t, _)| modified > *t)
+            .unwrap_or(true)
+        {
+            best = Some((modified, candidate));
+        }
+    }
+    best.map(|(_, path)| path)
 }
 
-fn grok_updates_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    Some(grok_session_dir(cwd, session_id)?.join("updates.jsonl"))
+/// Prefer the cwd-keyed path under `sessions_root` when it exists; otherwise
+/// scan by id (spec 0192). The `sessions_root` form is pure filesystem so
+/// unit tests don't race on process-global `CONSTRUCT_GROK_HOME`.
+fn resolve_grok_session_dir_in(
+    sessions_root: &Path,
+    preferred_cwd: &Path,
+    session_id: &str,
+) -> Option<PathBuf> {
+    let preferred = sessions_root
+        .join(url_encode_path(preferred_cwd))
+        .join(session_id);
+    if preferred.is_dir() {
+        return Some(preferred);
+    }
+    find_grok_session_dir_by_id_in(sessions_root, session_id)
+}
+
+/// Prefer the cwd-keyed path when it exists; otherwise scan by id (spec 0192).
+fn resolve_grok_session_dir(preferred_cwd: &Path, session_id: &str) -> Option<PathBuf> {
+    resolve_grok_session_dir_in(&grok_home()?.join("sessions"), preferred_cwd, session_id)
+}
+
+/// Grok's own idea of the session cwd, stamped on `summary.json` once the
+/// directory is fully initialized. Used to re-anchor `/clear` discovery
+/// after a process-cwd rebinding.
+fn grok_session_recorded_cwd(session_dir: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(session_dir.join("summary.json")).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v.pointer("/info/cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Context gauge from a session dir's `signals.json` (spec 0104): grok
@@ -304,8 +364,8 @@ fn grok_updates_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
 ///
 /// This is the *gauge* only. Per-call consumption comes from `updates.jsonl`
 /// instead — see `grok_usage_events`.
-fn grok_context_usage(cwd: &Path, session_id: &str) -> Option<(u64, Option<u64>)> {
-    let path = grok_session_dir(cwd, session_id)?.join("signals.json");
+fn grok_context_usage_in(session_dir: &Path) -> Option<(u64, Option<u64>)> {
+    let path = session_dir.join("signals.json");
     let text = std::fs::read_to_string(path).ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
     let used = v.get("contextTokensUsed").and_then(Value::as_u64)?;
@@ -324,12 +384,6 @@ fn grok_context_usage(cwd: &Path, session_id: &str) -> Option<(u64, Option<u64>)
 /// `system_prompt.txt` and the full conversation to `chat_history.jsonl`,
 /// so both components are derivable via the char heuristic. Ordered
 /// fixed-prefix first (system prompt, then messages), both estimated.
-fn grok_context_breakdown(cwd: &Path, session_id: &str) -> Vec<ContextSegment> {
-    grok_session_dir(cwd, session_id)
-        .map(|dir| grok_context_breakdown_in(&dir))
-        .unwrap_or_default()
-}
-
 fn grok_context_breakdown_in(session_dir: &Path) -> Vec<ContextSegment> {
     let mut segments = Vec::new();
     let prompt_chars = std::fs::read_to_string(session_dir.join("system_prompt.txt"))
@@ -842,6 +896,82 @@ fn grok_allow_args_for(
     out
 }
 
+/// Apply skip-existing cursors and subagent seed state once the real on-disk
+/// directory for `root_id` is attached. Returns the line cursors to use.
+fn attach_existing_native_session(
+    root_id: &str,
+    session_dir: &Path,
+    emit: &EventEmitter,
+    children: &mut HashMap<String, GrokNativeChild>,
+) -> (usize, usize) {
+    let transcript = session_dir.join("chat_history.jsonl");
+    let updates = session_dir.join("updates.jsonl");
+    let next_line = count_jsonl_lines(&transcript);
+    let next_update_line = count_jsonl_lines(&updates);
+    let mut replay_line = 0;
+    for value in read_new_grok_jsonl_lines(&updates, &mut replay_line, emit) {
+        if let Some(update) = grok_native_subagent_update(&value, root_id) {
+            apply_grok_native_update(update, children, None);
+        }
+    }
+    (next_line, next_update_line)
+}
+
+/// Rebind transcript/updates paths onto the directory Grok actually wrote
+/// for `session_id`, following a process-cwd rebinding (spec 0192).
+///
+/// Returns `true` when this call first attaches to a real directory (caller
+/// may then apply skip-existing). Updates `watch_cwd` and the discovery
+/// exclusion set when Grok's recorded cwd differs from construct's.
+fn rebind_watcher_to_resolved_session(
+    session_id: &str,
+    construct_cwd: &Path,
+    watch_cwd: &mut PathBuf,
+    path: &mut Option<PathBuf>,
+    updates_path: &mut Option<PathBuf>,
+    session_dir_out: &mut Option<PathBuf>,
+    never_rebind_onto: &mut HashSet<String>,
+    emit: &EventEmitter,
+) -> bool {
+    let Some(dir) = resolve_grok_session_dir(watch_cwd, session_id)
+        .or_else(|| resolve_grok_session_dir(construct_cwd, session_id))
+    else {
+        return false;
+    };
+    let new_path = dir.join("chat_history.jsonl");
+    let new_updates = dir.join("updates.jsonl");
+    if path.as_ref() == Some(&new_path)
+        && updates_path.as_ref() == Some(&new_updates)
+        && session_dir_out.as_ref() == Some(&dir)
+    {
+        return false;
+    }
+    let first_attach = path.is_none()
+        || path
+            .as_ref()
+            .map(|p| !p.exists())
+            .unwrap_or(true);
+    if let Some(recorded) = grok_session_recorded_cwd(&dir) {
+        if &recorded != watch_cwd {
+            emit.log(format!(
+                "grok: native session cwd rebased {} -> {}; \
+                 rebinding transcript watcher paths",
+                watch_cwd.display(),
+                recorded.display()
+            ));
+            // Dirs that already lived under the rebased cwd cannot be our
+            // future /clear — snapshot them into the permanent exclusion set.
+            never_rebind_onto.extend(existing_session_ids(&recorded));
+            never_rebind_onto.remove(session_id);
+            *watch_cwd = recorded;
+        }
+    }
+    *path = Some(new_path);
+    *updates_path = Some(new_updates);
+    *session_dir_out = Some(dir);
+    first_attach
+}
+
 fn spawn_interactive_transcript_watcher(
     initial_id: Option<String>,
     cwd: PathBuf,
@@ -855,39 +985,47 @@ fn spawn_interactive_transcript_watcher(
         return;
     }
     tokio::spawn(async move {
+        // `cwd` is construct's recorded session cwd (sibling filter key).
+        // `watch_cwd` tracks where Grok actually stores files and may rebind
+        // after a process chdir (spec 0192).
+        let construct_cwd = cwd;
+        let mut watch_cwd = construct_cwd.clone();
+        let mut never_rebind_onto = never_rebind_onto;
         let mut current_id = initial_id;
-        let mut path: Option<PathBuf> = current_id
-            .as_ref()
-            .and_then(|id| grok_transcript_path(&cwd, id, &HashMap::new()));
-        let mut updates_path: Option<PathBuf> = current_id
-            .as_ref()
-            .and_then(|id| grok_updates_path(&cwd, id));
+        let mut path: Option<PathBuf> = None;
+        let mut updates_path: Option<PathBuf> = None;
+        let mut session_dir: Option<PathBuf> = None;
         let mut last_model = initial_model;
         let mut last_effort: Option<String> = None;
-        // Only the initial resume attach skips prior history; mid-session
-        // rebinds (after /clear) start at the top of the new transcript.
-        let mut next_line = if skip_existing {
-            path.as_ref().map(|p| count_jsonl_lines(p)).unwrap_or(0)
-        } else {
-            0
-        };
-        let mut next_update_line = if skip_existing {
-            updates_path.as_deref().map(count_jsonl_lines).unwrap_or(0)
-        } else {
-            0
-        };
+        // Resume attaches skip prior history only after the real directory
+        // is found — a delayed cwd rebase must not re-project native history.
+        let mut pending_skip_existing = skip_existing;
+        let mut next_line = 0usize;
+        let mut next_update_line = 0usize;
         let mut children = HashMap::new();
         let mut child_seq: HashMap<String, u64> = HashMap::new();
-        if skip_existing {
-            if let (Some(root_id), Some(updates_path)) =
-                (current_id.as_deref(), updates_path.as_deref())
+        if let Some(id) = current_id.as_deref() {
+            if rebind_watcher_to_resolved_session(
+                id,
+                &construct_cwd,
+                &mut watch_cwd,
+                &mut path,
+                &mut updates_path,
+                &mut session_dir,
+                &mut never_rebind_onto,
+                &emit,
+            ) && pending_skip_existing
             {
-                let mut replay_line = 0;
-                for value in read_new_grok_jsonl_lines(updates_path, &mut replay_line, &emit) {
-                    if let Some(update) = grok_native_subagent_update(&value, root_id) {
-                        apply_grok_native_update(update, &mut children, None);
-                    }
+                if let Some(dir) = session_dir.as_ref() {
+                    let (nl, nul) =
+                        attach_existing_native_session(id, dir, &emit, &mut children);
+                    next_line = nl;
+                    next_update_line = nul;
                 }
+                pending_skip_existing = false;
+            } else if path.is_some() {
+                // Attached without skip (fresh/fork): leave cursors at 0.
+                pending_skip_existing = false;
             }
         }
         let mut tick = tokio::time::interval(Duration::from_millis(500));
@@ -897,8 +1035,10 @@ fn spawn_interactive_transcript_watcher(
         // session's lifetime, only their native ids rotate occasionally.
         // Refreshing every 5s (10 ticks) still closes the false-rebind
         // window far faster than that window can recur in practice.
+        // Sibling filter always uses construct's recorded cwd (spec 0088 /
+        // 0192): it matches construct metadata, not Grok's process cwd.
         let mut ticks_since_sibling_refresh: u32 = 0;
-        let mut sibling_ids: HashSet<String> = sibling_native_ids(&cwd);
+        let mut sibling_ids: HashSet<String> = sibling_native_ids(&construct_cwd);
         // Last context gauge reported (spec 0104) — poll `signals.json`
         // each tick but only emit when the numbers actually move.
         let mut last_context: Option<(u64, Option<u64>)> = None;
@@ -911,7 +1051,37 @@ fn spawn_interactive_transcript_watcher(
             ticks_since_sibling_refresh += 1;
             if ticks_since_sibling_refresh >= 10 {
                 ticks_since_sibling_refresh = 0;
-                sibling_ids = sibling_native_ids(&cwd);
+                sibling_ids = sibling_native_ids(&construct_cwd);
+            }
+            // Known id: keep paths pointed at the real on-disk directory,
+            // which may appear under a different cwd encoding after Grok
+            // chdirs (spec 0192).
+            if let Some(id) = current_id.as_deref() {
+                if rebind_watcher_to_resolved_session(
+                    id,
+                    &construct_cwd,
+                    &mut watch_cwd,
+                    &mut path,
+                    &mut updates_path,
+                    &mut session_dir,
+                    &mut never_rebind_onto,
+                    &emit,
+                ) && pending_skip_existing
+                {
+                    if let Some(dir) = session_dir.as_ref() {
+                        let (nl, nul) =
+                            attach_existing_native_session(id, dir, &emit, &mut children);
+                        next_line = nl;
+                        next_update_line = nul;
+                    }
+                    pending_skip_existing = false;
+                } else if path
+                    .as_ref()
+                    .map(|p| p.exists())
+                    .unwrap_or(false)
+                {
+                    pending_skip_existing = false;
+                }
             }
             if let Some(path) = path.as_deref().filter(|path| path.exists()) {
                 emit_new_grok_transcript_lines(
@@ -934,8 +1104,8 @@ fn spawn_interactive_transcript_watcher(
                     }
                 }
             }
-            if let Some(root_id) = current_id.as_deref() {
-                let observed = grok_context_usage(&cwd, root_id);
+            if let Some(dir) = session_dir.as_ref() {
+                let observed = grok_context_usage_in(dir);
                 if let Some((used, window)) = observed {
                     if last_context != Some((used, window)) {
                         last_context = Some((used, window));
@@ -945,7 +1115,7 @@ fn spawn_interactive_transcript_watcher(
                         });
                     }
                 }
-                let mut segments = grok_context_breakdown(&cwd, root_id);
+                let mut segments = grok_context_breakdown_in(dir);
                 // Differential fixed-overhead pin (spec 0156): grok's gauge
                 // is a live snapshot with no on-disk history, so the pin is
                 // held across polls and lands on the first poll where both
@@ -972,7 +1142,12 @@ fn spawn_interactive_transcript_watcher(
                 }
             }
             for (id, child) in &mut children {
-                let Some(child_path) = grok_transcript_path(&cwd, id, &HashMap::new()) else {
+                // Children live under the same cwd encoding as the root
+                // after any rebase; also accept a scan-by-id hit.
+                let child_path = resolve_grok_session_dir(&watch_cwd, id)
+                    .or_else(|| resolve_grok_session_dir(&construct_cwd, id))
+                    .map(|d| d.join("chat_history.jsonl"));
+                let Some(child_path) = child_path else {
                     continue;
                 };
                 for value in
@@ -994,18 +1169,15 @@ fn spawn_interactive_transcript_watcher(
                 }
             }
 
-            // Prefer the newest non-child, non-sibling session dir under this
-            // cwd. First spawn discovers the id; after /clear a fresher root
-            // dir appears and we rebind both transcript streams.
+            // Prefer the newest non-child, non-sibling session dir under the
+            // watch cwd (Grok's effective storage cwd). First spawn discovers
+            // the id; after /clear a fresher root dir appears and we rebind.
             let mut excluded: HashSet<String> = children.keys().cloned().collect();
             excluded.extend(never_rebind_onto.iter().cloned());
             excluded.extend(sibling_ids.iter().cloned());
-            if let Some(id) = find_session_id_excluding(&cwd, &excluded) {
+            if let Some(id) = find_session_id_excluding(&watch_cwd, &excluded) {
                 if current_id.as_ref() != Some(&id) {
-                    if let (Some(new_path), Some(new_updates_path)) = (
-                        grok_transcript_path(&cwd, &id, &HashMap::new()),
-                        grok_updates_path(&cwd, &id),
-                    ) {
+                    if let Some(dir) = resolve_grok_session_dir(&watch_cwd, &id) {
                         if let Some(prior) = current_id.as_ref() {
                             emit.log(format!(
                                 "grok: native session id changed {:?} -> {id}; \
@@ -1019,10 +1191,12 @@ fn spawn_interactive_transcript_watcher(
                         }
                         write_conv_id(&id);
                         current_id = Some(id);
-                        path = Some(new_path);
-                        updates_path = Some(new_updates_path);
+                        path = Some(dir.join("chat_history.jsonl"));
+                        updates_path = Some(dir.join("updates.jsonl"));
+                        session_dir = Some(dir);
                         next_line = 0;
                         next_update_line = 0;
+                        pending_skip_existing = false;
                         last_context = None;
                         breakdown_gate = BreakdownGate::default();
                         // New native session, new context epoch: re-measure.
@@ -1811,6 +1985,66 @@ mod tests {
         assert!(gate.changed(&segments));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_session_dir_prefers_cwd_keyed_path() {
+        let root = std::env::temp_dir().join(format!(
+            "agentd-grok-resolve-prefer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let spawn_cwd = Path::new("/Users/moon");
+        let other_cwd = Path::new("/Users/moon/construct");
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let preferred = root.join(url_encode_path(spawn_cwd)).join(id);
+        let other = root.join(url_encode_path(other_cwd)).join(id);
+        std::fs::create_dir_all(&preferred).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        // Pure filesystem helper — no process-global GROK_HOME (CI runs
+        // these tests in parallel with other env-mutating cases).
+        let got = resolve_grok_session_dir_in(&root, spawn_cwd, id);
+        assert_eq!(got.as_deref(), Some(preferred.as_path()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// When Grok chdirs after spawn, the cwd-keyed path under construct's
+    /// recorded cwd never appears — the scan-by-id fallback must find the
+    /// real directory under the rebased cwd encoding (spec 0192).
+    #[test]
+    fn resolve_session_dir_scans_by_id_when_cwd_path_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "agentd-grok-resolve-scan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let spawn_cwd = Path::new("/Users/moon");
+        let rebased_cwd = Path::new("/Users/moon/construct");
+        let id = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+        let real = root.join(url_encode_path(rebased_cwd)).join(id);
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(
+            real.join("summary.json"),
+            r#"{"info":{"id":"bbbbbbbb-cccc-dddd-eeee-ffffffffffff","cwd":"/Users/moon/construct"}}"#,
+        )
+        .unwrap();
+
+        // Preferred path under spawn cwd does not exist under `root`.
+        assert!(!root.join(url_encode_path(spawn_cwd)).join(id).is_dir());
+        let got = resolve_grok_session_dir_in(&root, spawn_cwd, id).expect("scan by id");
+        assert_eq!(got, real);
+        assert_eq!(
+            grok_session_recorded_cwd(&got).as_deref(),
+            Some(Path::new("/Users/moon/construct"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
