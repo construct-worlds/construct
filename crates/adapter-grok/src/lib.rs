@@ -823,11 +823,18 @@ fn apply_grok_native_update(
 }
 
 fn grok_allow_args() -> Vec<String> {
-    let policy = construct_protocol::adapter::policy::AutoApprovePolicy::from_env();
+    grok_allow_args_for(&construct_protocol::adapter::policy::AutoApprovePolicy::from_env())
+}
+
+fn grok_allow_args_for(
+    policy: &construct_protocol::adapter::policy::AutoApprovePolicy,
+) -> Vec<String> {
     let mut out = Vec::new();
     for root in policy.allow_paths() {
         let glob = format!("{}/**", root.display());
-        for tool in ["Write", "Edit", "MultiEdit"] {
+        // Grok's CLI only knows `Write` and `Edit`; `MultiEdit` is a Claude
+        // tool prefix and is rejected as an unknown prefix at spawn time.
+        for tool in ["Write", "Edit"] {
             out.push("--allow".into());
             out.push(format!("{tool}({glob})"));
         }
@@ -2183,5 +2190,23 @@ mod tests {
             })
             .sum();
         assert_eq!(total, 300, "the split is used instead of the aggregate");
+    }
+
+    #[test]
+    fn grok_allow_args_omits_multiedit() {
+        let policy =
+            construct_protocol::adapter::policy::AutoApprovePolicy::new(vec![PathBuf::from(
+                "/var/agentd/widgets",
+            )]);
+        let args = grok_allow_args_for(&policy);
+        assert_eq!(
+            args,
+            vec![
+                "--allow".to_string(),
+                "Write(/var/agentd/widgets/**)".to_string(),
+                "--allow".to_string(),
+                "Edit(/var/agentd/widgets/**)".to_string(),
+            ]
+        );
     }
 }
