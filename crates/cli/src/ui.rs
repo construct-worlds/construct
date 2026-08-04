@@ -9228,7 +9228,6 @@ fn render_group_overview(
         f,
         area,
         &app.theme,
-        &group.name,
         &group.id,
         &members,
         &mut app.project_dashboard,

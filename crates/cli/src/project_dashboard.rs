@@ -641,7 +641,6 @@ pub fn render(
     f: &mut Frame,
     area: Rect,
     theme: &Theme,
-    group_name: &str,
     project_id: &str,
     members: &[&SessionSummary],
     dashboard: &mut ProjectDashboard,
@@ -667,17 +666,13 @@ pub fn render(
     let w = area.width;
 
     // ── Header ──────────────────────────────────────────────────────────
+    // Project name lives on the main pane title bar (`project: {name}`);
+    // this row is tally-only so we don't repeat identity one line below.
     if row < bottom {
         let mut spans = vec![Span::styled(
-            format!(" Project: {group_name} "),
-            Style::default()
-                .fg(theme.group)
-                .add_modifier(Modifier::BOLD),
-        )];
-        spans.push(Span::styled(
-            format!("· {} ", members.len()),
+            format!(" {} ", members.len()),
             Style::default().fg(theme.dim),
-        ));
+        )];
         if tally.working > 0 {
             spans.push(Span::styled(
                 format!("●{} ", tally.working),
