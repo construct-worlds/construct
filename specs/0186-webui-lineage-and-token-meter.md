@@ -1,9 +1,9 @@
 # 0186-webui-lineage-and-token-meter
 
 Status: accepted
-Date: 2026-08-02
+Date: 2026-08-02 (amended 2026-08-03)
 Area: webui
-Scope: The web UI sidebar gains the selected-session lineage section and the ambient operator panel's fleet token meter, matching the TUI's sidebar composition.
+Scope: The web UI sidebar and persistent header expose the fleet token meter alongside the selected-session lineage section.
 
 ## Decision
 
@@ -62,6 +62,18 @@ Cached prompt tokens shade a model's band rather than growing column
 height. Rates are tokens per second of compute, summed across models for
 fleet throughput. An empty meter states that nothing has been reported.
 
+### Header projection and connection state
+
+The persistent header's top-right badge is a compact, legend-free projection
+of the same fleet token history. It uses the same buckets, scale, model colors,
+and cached-token tones as the sidebar meter; it does not maintain a second
+usage data model. The badge remains the entry point for Web UI settings.
+
+Connection state belongs to the badge frame instead of replacing its data.
+While disconnected, the graph remains visible but subdued behind a red border
+and an explicit disconnected icon. The accessible label always names both the
+token-usage surface and the current connection state.
+
 ## Reason
 
 Users running the web client had no way to inspect fork/subagent
@@ -75,6 +87,8 @@ the gap was client presentation.
 - Future web sidebar work must preserve the stack order: list → lineage
   → operator, and must not drop Cost events that arrive for unfocused
   sessions.
+- The header graph and sidebar meter must continue to share one fleet token
+  history; connection loss changes presentation, not the recorded graph.
 - The lineage section may later adopt the full boxed-lane diagram
   without changing the data rules or visibility gates defined here.
 - Dollar cost and per-session breakdown remain non-goals for this panel
