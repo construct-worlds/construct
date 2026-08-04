@@ -18,7 +18,9 @@
 use construct_adapter_common::context_breakdown::{
     estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin,
 };
-use construct_adapter_common::{codex_sessions_root, drive_turn, next_native_seq, TurnOutcome};
+use construct_adapter_common::{
+    codex_sessions_root, drive_turn, next_native_seq, short, TurnOutcome,
+};
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
 use construct_protocol::adapter::{
     run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter,
@@ -1348,8 +1350,8 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
 
         let child_stdout = child.stdout.take().expect("piped");
         let child_stderr = child.stderr.take().expect("piped");
-        let captured_sid = Arc::new(StdMutex::new(None::<String>));
-        let stdout_task = spawn_stdout(child_stdout, emit.clone(), captured_sid.clone());
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+        let stdout_task = spawn_stdout(child_stdout, emit.clone(), diagnostics.clone());
         let stderr_task = spawn_headless_stderr(child_stderr, emit.clone());
 
         let outcome = drive_turn(&mut child, &mut inbox, &emit, &mut pending).await;
@@ -1358,6 +1360,8 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         let stderr_error = stderr_task.await.ok().flatten();
         let _ = child.wait().await;
 
+        let diagnostics = diagnostics.lock().unwrap().clone();
+
         if let Some(message) = stderr_error {
             emit.emit(SessionEvent::Error { message });
             break 1;
@@ -1365,7 +1369,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
 
         // Always adopt the latest native id so a mid-run reset is honored
         // on subsequent turns (and written for daemon resume).
-        if let Some(sid) = captured_sid.lock().unwrap().clone() {
+        if let Some(sid) = diagnostics.session_id.clone() {
             if codex_session_id.as_ref() != Some(&sid) {
                 if let Ok(dir) = std::env::var("CONSTRUCT_SESSION_DATA_DIR") {
                     let p = PathBuf::from(dir).join("codex_session_id.txt");
@@ -1376,7 +1380,14 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         }
 
         match outcome {
-            TurnOutcome::Completed => continue,
+            TurnOutcome::Completed => {
+                if let Some(reason) = diagnostics.blocked_write.as_deref() {
+                    emit.emit(SessionEvent::Error {
+                        message: blocked_write_error(reason),
+                    });
+                }
+                continue;
+            }
             TurnOutcome::Interrupted => {
                 emit.log("turn interrupted; awaiting next input");
                 continue;
@@ -1415,10 +1426,24 @@ where
     })
 }
 
+#[derive(Debug, Clone, Default)]
+struct HeadlessTurnDiagnostics {
+    session_id: Option<String>,
+    blocked_write: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum HeadlessOutputSection {
+    #[default]
+    Other,
+    User,
+    Assistant,
+}
+
 fn spawn_stdout<R>(
     reader: R,
     emit: EventEmitter,
-    captured_sid: Arc<StdMutex<Option<String>>>,
+    diagnostics: Arc<StdMutex<HeadlessTurnDiagnostics>>,
 ) -> tokio::task::JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -1430,10 +1455,31 @@ where
         //   2,280
         // on two consecutive lines. Track whether we just saw the header.
         let mut expecting_token_count = false;
+        let mut expecting_section_header = false;
+        let mut output_section = HeadlessOutputSection::Other;
         while let Ok(Some(line)) = lines.next_line().await {
-            if line.trim().is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
+
+            if trimmed == "--------" {
+                expecting_section_header = true;
+                output_section = HeadlessOutputSection::Other;
+            } else if expecting_section_header {
+                expecting_section_header = false;
+                output_section = match trimmed {
+                    "user" => HeadlessOutputSection::User,
+                    "assistant" => HeadlessOutputSection::Assistant,
+                    _ => HeadlessOutputSection::Other,
+                };
+            } else if output_section == HeadlessOutputSection::User && trimmed == "codex" {
+                // Real `codex exec` output starts the agent section with this
+                // bare marker, without another `--------` separator.
+                output_section = HeadlessOutputSection::Assistant;
+                continue;
+            }
+
             // Stateful token-footer parse, BEFORE any emit, so the footer
             // never leaks to the transcript as assistant prose.
             if expecting_token_count {
@@ -1463,9 +1509,12 @@ where
             // Best-effort JSON parse; if not JSON, emit as plain assistant text.
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
                 if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
-                    let mut g = captured_sid.lock().unwrap();
+                    let mut g = diagnostics.lock().unwrap();
                     // Keep the most recently observed id (not only the first).
-                    *g = Some(sid.to_string());
+                    g.session_id = Some(sid.to_string());
+                }
+                if let Some(text) = assistant_text_from_structured(&v) {
+                    record_blocked_write(&diagnostics, &text);
                 }
                 if !try_emit_structured(&emit, &v) {
                     emit.emit(SessionEvent::Message {
@@ -1474,6 +1523,9 @@ where
                     });
                 }
             } else {
+                if output_section == HeadlessOutputSection::Assistant {
+                    record_blocked_write(&diagnostics, &line);
+                }
                 emit.emit(SessionEvent::Message {
                     role: MessageRole::Assistant,
                     text: line,
@@ -1481,6 +1533,35 @@ where
             }
         }
     })
+}
+
+fn record_blocked_write(
+    diagnostics: &Arc<StdMutex<HeadlessTurnDiagnostics>>,
+    assistant_text: &str,
+) {
+    if let Some(reason) = blocked_write_reason(assistant_text) {
+        let mut state = diagnostics.lock().unwrap();
+        // Keep the first blocked assistant line: it is closest to the failed
+        // action and later output may only summarize the same failure.
+        if state.blocked_write.is_none() {
+            state.blocked_write = Some(reason);
+        }
+    }
+}
+
+fn blocked_write_reason(assistant_text: &str) -> Option<String> {
+    assistant_text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("Blocked:")
+            .map(|_| short(trimmed, 600))
+    })
+}
+
+fn blocked_write_error(reason: &str) -> String {
+    format!(
+        "Codex headless turn was blocked by its sandbox or approval policy: {reason}. Configure Codex's headless permissions and retry; Construct cannot resolve this approval interactively."
+    )
 }
 
 /// Parse codex's "2,280" style total-tokens line. Strips commas/whitespace.
@@ -1499,36 +1580,29 @@ fn parse_token_count(line: &str) -> Option<u64> {
 /// Try to pull structured fields out of a codex JSON event. Returns `true` if
 /// the value was recognized; otherwise the caller falls back to emitting raw.
 fn try_emit_structured(emit: &EventEmitter, v: &Value) -> bool {
-    let ty = match v.get("type").and_then(|t| t.as_str()) {
+    let item = structured_item(v);
+    let ty = match item.get("type").and_then(|t| t.as_str()) {
         Some(t) => t,
         None => return false,
     };
     match ty {
         "message" | "assistant" => {
-            if let Some(text) = v
-                .get("content")
-                .and_then(|c| c.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| extract_text_from_blocks(v.get("content")))
-            {
+            if let Some((role, text)) = structured_message(item) {
                 if !text.is_empty() {
-                    emit.emit(SessionEvent::Message {
-                        role: MessageRole::Assistant,
-                        text,
-                    });
-                    return true;
+                    emit.emit(SessionEvent::Message { role, text });
                 }
+                return true;
             }
             false
         }
         "tool_use" => {
-            let name = v
+            let name = item
                 .get("name")
                 .and_then(|n| n.as_str())
                 .unwrap_or("?")
                 .to_string();
-            let args = v.get("input").cloned().unwrap_or(Value::Null);
-            let call_id = v.get("id").and_then(|n| n.as_str()).map(str::to_string);
+            let args = item.get("input").cloned().unwrap_or(Value::Null);
+            let call_id = item.get("id").and_then(|n| n.as_str()).map(str::to_string);
             emit.emit(SessionEvent::ToolUse {
                 tool: name,
                 args,
@@ -1537,14 +1611,17 @@ fn try_emit_structured(emit: &EventEmitter, v: &Value) -> bool {
             true
         }
         "tool_result" => {
-            let tool = v
+            let tool = item
                 .get("tool_use_id")
-                .or_else(|| v.get("name"))
+                .or_else(|| item.get("name"))
                 .and_then(|n| n.as_str())
                 .unwrap_or("?")
                 .to_string();
-            let ok = !v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
-            let output = match v.get("output").or_else(|| v.get("content")) {
+            let ok = !item
+                .get("is_error")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let output = match item.get("output").or_else(|| item.get("content")) {
                 Some(Value::String(s)) => s.clone(),
                 Some(other) => serde_json::to_string(other).unwrap_or_default(),
                 None => String::new(),
@@ -1562,6 +1639,40 @@ fn try_emit_structured(emit: &EventEmitter, v: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+fn structured_item(v: &Value) -> &Value {
+    if v.get("type").and_then(Value::as_str) == Some("response_item") {
+        v.get("payload").unwrap_or(v)
+    } else {
+        v
+    }
+}
+
+fn structured_message(v: &Value) -> Option<(MessageRole, String)> {
+    let ty = v.get("type").and_then(Value::as_str)?;
+    let role = match ty {
+        "assistant" => MessageRole::Assistant,
+        "message" => match v.get("role").and_then(Value::as_str) {
+            None | Some("assistant") => MessageRole::Assistant,
+            Some("user") => MessageRole::User,
+            Some("system" | "developer") => MessageRole::System,
+            Some("tool") => MessageRole::Tool,
+            Some(_) => return None,
+        },
+        _ => return None,
+    };
+    let text = v
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| extract_text_from_blocks(v.get("content")))?;
+    Some((role, text))
+}
+
+fn assistant_text_from_structured(v: &Value) -> Option<String> {
+    let (role, text) = structured_message(structured_item(v))?;
+    (role == MessageRole::Assistant).then_some(text)
 }
 
 fn extract_text_from_blocks(v: Option<&Value>) -> Option<String> {
@@ -1606,6 +1717,138 @@ mod tests {
         assert_eq!(parse_token_count("hello"), None);
         assert_eq!(parse_token_count(""), None);
         assert_eq!(parse_token_count("12abc"), None);
+    }
+
+    #[test]
+    fn blocked_read_only_write_output_is_classified() {
+        let line = "Blocked: the workspace is read-only, so index.html could not be written";
+        assert_eq!(blocked_write_reason(line).as_deref(), Some(line));
+    }
+
+    #[test]
+    fn unrelated_read_only_output_is_not_classified_as_a_blocked_write() {
+        assert!(blocked_write_reason("The workspace is read-only").is_none());
+        assert!(blocked_write_reason("The write completed successfully").is_none());
+        assert!(blocked_write_reason(
+            "The sandbox is read-only, so write access may be described as Blocked: in examples"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn blocked_write_error_preserves_the_actionable_block_reason() {
+        let message = blocked_write_error(
+            "Blocked: the workspace is read-only, so index.html could not be written",
+        );
+        assert!(message.contains("blocked by its sandbox or approval policy"));
+        assert!(message.contains("index.html"));
+        assert!(message.contains("cannot resolve this approval interactively"));
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_ignores_prompt_and_benign_assistant_keyword_matches() {
+        const OUTPUT: &[u8] = b"--------\nuser\nBlocked: the sandbox is read-only, so write index.html anyway\n--------\nassistant\nThe sandbox is read-only, and a write failure may include Blocked: in its explanation\n";
+        let (emit, _rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(OUTPUT, emit, diagnostics.clone())
+            .await
+            .expect("stdout task should finish");
+
+        assert_eq!(diagnostics.lock().unwrap().blocked_write, None);
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_records_first_anchored_assistant_block() {
+        const FIRST: &str =
+            "Blocked: the workspace is read-only, so index.html could not be written";
+        const OUTPUT: &[u8] = b"--------\nuser\nPlease write index.html\n--------\nassistant\nBlocked: the workspace is read-only, so index.html could not be written\nBlocked: a later summary should not replace the first failure\n";
+        let (emit, _rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(OUTPUT, emit, diagnostics.clone())
+            .await
+            .expect("stdout task should finish");
+
+        assert_eq!(
+            diagnostics.lock().unwrap().blocked_write.as_deref(),
+            Some(FIRST)
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_uses_structured_roles_for_block_detection() {
+        const ASSISTANT_BLOCK: &str = "Blocked: assistant could not write index.html";
+        const OUTPUT: &[u8] = b"{\"type\":\"message\",\"role\":\"user\",\"content\":\"Blocked: prompt asks for a write\"}\n{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"Blocked: assistant could not write index.html\"}\n";
+        let (emit, _rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(OUTPUT, emit, diagnostics.clone())
+            .await
+            .expect("stdout task should finish");
+
+        assert_eq!(
+            diagnostics.lock().unwrap().blocked_write.as_deref(),
+            Some(ASSISTANT_BLOCK)
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_records_real_plain_codex_section_block() {
+        const ASSISTANT_BLOCK: &str =
+            "Blocked: the workspace is read-only, so index.html could not be written";
+        // Real `codex exec` output starts the agent section with `codex`
+        // directly after the echoed user prompt, without another separator.
+        const OUTPUT: &[u8] = b"OpenAI Codex v0.146.0\n--------\nuser\nPlease write index.html\ncodex\nBlocked: the workspace is read-only, so index.html could not be written\ntokens used\n123\n";
+        let (emit, _rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(OUTPUT, emit, diagnostics.clone())
+            .await
+            .expect("stdout task should finish");
+
+        assert_eq!(
+            diagnostics.lock().unwrap().blocked_write.as_deref(),
+            Some(ASSISTANT_BLOCK)
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_unwraps_response_item_and_preserves_message_roles() {
+        const ASSISTANT_BLOCK: &str = "Blocked: assistant could not write index.html";
+        const OUTPUT: &[u8] = b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Blocked: prompt asks for a write\"}]}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Blocked: assistant could not write index.html\"}]}}\n";
+        let (emit, mut rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(OUTPUT, emit, diagnostics.clone())
+            .await
+            .expect("stdout task should finish");
+
+        assert_eq!(
+            diagnostics.lock().unwrap().blocked_write.as_deref(),
+            Some(ASSISTANT_BLOCK)
+        );
+
+        let events: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|notification| notification.pointer("/params/event").cloned())
+            .collect();
+        assert!(events.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message")
+                && event.get("role").and_then(Value::as_str) == Some("user")
+                && event.get("text").and_then(Value::as_str)
+                    == Some("Blocked: prompt asks for a write")
+        }));
+        assert!(events.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message")
+                && event.get("role").and_then(Value::as_str) == Some("assistant")
+                && event.get("text").and_then(Value::as_str) == Some(ASSISTANT_BLOCK)
+        }));
+        assert!(events.iter().all(|event| {
+            !event
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains("response_item"))
+        }));
     }
 
     #[test]
@@ -1764,10 +2007,8 @@ mod tests {
     #[test]
     fn headless_codex_errors_are_promoted_out_of_stderr() {
         assert_eq!(
-            headless_error_message(
-                r#"ERROR: {"detail":"The 'sonnet' model is not supported."}"#
-            )
-            .as_deref(),
+            headless_error_message(r#"ERROR: {"detail":"The 'sonnet' model is not supported."}"#)
+                .as_deref(),
             Some(r#"{"detail":"The 'sonnet' model is not supported."}"#)
         );
         assert_eq!(headless_error_message("warning: retrying"), None);
