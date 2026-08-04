@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="color-scheme" content="dark light" />
-<title>agentd · remote</title>
+<title>Construct</title>
 <!--
   xterm.js + addon-fit are bundled into the daemon binary and served
   from root-relative `/static/...` URLs so session URLs such as
@@ -4364,6 +4364,13 @@ const mainEl = document.querySelector("main");
 const sessionListEl = $("sessionList");
 const sessionListResizerEl = $("sessionListResizer");
 const sessionTitleEl = $("sessionTitle");
+// Browser tab title tracks the header chrome so multi-tab users can tell
+// sessions apart. Empty → product name only; otherwise `<label> · Construct`.
+function setSessionChromeTitle(title) {
+  const label = title || "";
+  sessionTitleEl.textContent = label;
+  document.title = label ? `${label} · Construct` : "Construct";
+}
 const sessionRuntimeEl = $("sessionRuntime");
 const sessionRuntimeBtn = $("sessionRuntimeBtn");
 const sessionRuntimeModelEl = $("sessionRuntimeModel");
@@ -7010,7 +7017,7 @@ async function selectService(name, { replaceUrl = false, fromPane = false } = {}
 }
 
 function serviceTitleAndChrome(name) {
-  sessionTitleEl.textContent = name ? `service · ${name}` : "";
+  setSessionChromeTitle(name ? `service · ${name}` : "");
   sessionRuntimeEl.hidden = true;
   viewModeToggleEl.hidden = true;
   sessionMenuOverlayEl.hidden = true;
@@ -8481,7 +8488,7 @@ async function selectSession(
   serviceViewEl.hidden = true;
   renderSessions();
   const s = state.sessions.find((x) => x.id === id);
-  sessionTitleEl.textContent = s ? sessionViewTitle(s) : "";
+  setSessionChromeTitle(s ? sessionViewTitle(s) : "");
   renderSessionRuntimeMeta(s);
   renderViewModeToggle(s);
   renderBrowserPreviewForSession(id);
@@ -15429,7 +15436,7 @@ function handleNotification(method, params) {
     if (archiveNeighborId) {
       selectSession(archiveNeighborId);
     } else if (session.id === state.currentId) {
-      sessionTitleEl.textContent = sessionViewTitle(session);
+      setSessionChromeTitle(sessionViewTitle(session));
       renderSessionRuntimeMeta(session);
       renderViewModeToggle(session);
       if (state.mode !== "playbook") hydrateWidgets(session.id);
@@ -15472,7 +15479,7 @@ function handleNotification(method, params) {
       clearTranscriptPane(params.session_id);
       renderEditorState(null);
       renderBrowserPreviewForSession(null);
-      sessionTitleEl.textContent = "";
+      setSessionChromeTitle("");
       renderSessionRuntimeMeta(null);
       viewModeToggleEl.hidden = true;
       refreshSessionActions();
@@ -17906,7 +17913,7 @@ async function submitRename(ev) {
   if (s) {
     s.title = raw || null;
     scheduleRenderSessions();
-    if (sessionId === state.currentId) sessionTitleEl.textContent = sessionViewTitle(s);
+    if (sessionId === state.currentId) setSessionChromeTitle(sessionViewTitle(s));
   }
   closeRenameDialog();
   try {
@@ -17915,7 +17922,7 @@ async function submitRename(ev) {
     if (s) {
       s.title = prevTitle;
       scheduleRenderSessions();
-      if (sessionId === state.currentId) sessionTitleEl.textContent = sessionViewTitle(s);
+      if (sessionId === state.currentId) setSessionChromeTitle(sessionViewTitle(s));
     }
     appendError(`rename failed: ${e.message}`);
   }
