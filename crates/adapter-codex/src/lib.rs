@@ -15,6 +15,8 @@
 //! `CONSTRUCT_CODEX_MODE=interactive|headless`. Honors `CONSTRUCT_CODEX_CMD` for a
 //! full command prefix, falling back to `CONSTRUCT_CODEX_BIN` for a binary path.
 
+use std::borrow::Cow;
+
 use construct_adapter_common::context_breakdown::{
     estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin,
 };
@@ -1462,12 +1464,6 @@ where
                 continue;
             }
 
-            // `codex exec` opens each agent section with a bare `codex`
-            // marker. It labels the message rather than being part of it.
-            if trimmed == "codex" {
-                continue;
-            }
-
             // Stateful token-footer parse, BEFORE any emit, so the footer
             // never leaks to the transcript as assistant prose.
             if expecting_token_count {
@@ -1530,23 +1526,68 @@ where
 /// signal: it is free-form ("I cannot create `notes.txt` because...",
 /// "Cannot: `$HOME` resolves to..."), and a turn that merely quotes a refusal
 /// reads identically to one that suffered it.
+///
+/// Both halves of the match are deliberately conservative. codex colors this
+/// line when its stderr is a terminal — headless spawns a pipe, so we receive
+/// it plain, but the coloring is one flag away and invisible when it breaks, so
+/// strip the escapes rather than depend on the stream shape. The cause must
+/// then name *both* the refusal and the policy that refused: unrelated
+/// `codex_core` errors borrow the same verbs ("request rejected by server", a
+/// path that happens to contain `blocked/`) and reporting those as permissions
+/// problems would send the operator to the wrong knob. A refusal worded outside
+/// this vocabulary is missed instead, which degrades to silence — the safe
+/// direction for a signal read out of a tool's log.
 fn blocked_write_reason_from_log(line: &str) -> Option<String> {
-    let (envelope, cause) = line.split_once("error=")?;
+    let line = strip_ansi(line);
+    let (envelope, cause) = line.split_once(": error=")?;
     if !envelope.contains(" ERROR ") || !envelope.contains("codex_core::") {
         return None;
     }
     let cause = cause.trim();
-    // codex_core logs plenty of unrelated errors; only a refusal is actionable
-    // as a permissions problem.
-    if !cause.contains("rejected") && !cause.contains("blocked") {
+    let refused = ["rejected", "blocked", "denied"]
+        .iter()
+        .any(|word| cause.contains(word));
+    let by_policy = ["sandbox", "approval"]
+        .iter()
+        .any(|word| cause.contains(word));
+    if !refused || !by_policy {
         return None;
     }
     Some(short(cause, 600))
 }
 
+/// Drop ANSI escape sequences so a colored log line parses like a plain one.
+fn strip_ansi(line: &str) -> Cow<'_, str> {
+    if !line.contains('\u{1b}') {
+        return Cow::Borrowed(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // CSI (`ESC [ params… final`) is the only form codex emits; consume it
+        // through its final byte. Any other escape loses just its introducer.
+        if chars.clone().next() == Some('[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if matches!(c, '\u{40}'..='\u{7e}') {
+                    break;
+                }
+            }
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Reported when a turn completes but codex was refused along the way. The
+/// refusal is action-level, not turn-level: codex may have routed around it and
+/// finished, so this names what was denied without claiming the turn failed.
 fn blocked_write_error(reason: &str) -> String {
     format!(
-        "Codex headless turn was blocked by its sandbox or approval policy: {reason}. Configure Codex's headless permissions and retry; Construct cannot resolve this approval interactively."
+        "Codex was refused an action by its sandbox or approval policy during this turn: {reason}. The turn may have completed anyway by working around the refusal. If that was not intended, configure Codex's headless permissions; Construct cannot resolve this approval interactively."
     )
 }
 
@@ -1742,6 +1783,20 @@ tokens used
     }
 
     #[test]
+    fn ansi_colored_refusal_logs_are_classified() {
+        // Verbatim bytes from the same refusal captured with codex's stderr on
+        // a terminal (`script -q`), where tracing colors the envelope and
+        // splits both `ERROR` and `error=` with SGR sequences. Headless spawns
+        // a pipe and gets the plain form, but the parse must not depend on it.
+        // The trailing CR is the PTY's, and must not survive into the reason.
+        const COLORED: &str = "\u{1b}[2m2026-08-04T13:29:34.381807Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m \u{1b}[2mcodex_core::tools::router\u{1b}[0m\u{1b}[2m:\u{1b}[0m \u{1b}[3merror\u{1b}[0m\u{1b}[2m=\u{1b}[0mpatch rejected: writing is blocked by read-only sandbox; rejected by user approval settings\r";
+        assert_eq!(
+            blocked_write_reason_from_log(COLORED).as_deref(),
+            Some("patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings")
+        );
+    }
+
+    #[test]
     fn unrelated_stderr_lines_are_not_classified_as_refusals() {
         // Session preamble.
         assert!(blocked_write_reason_from_log("sandbox: read-only").is_none());
@@ -1764,13 +1819,36 @@ tokens used
     }
 
     #[test]
+    fn core_errors_that_merely_borrow_the_refusal_vocabulary_are_not_classified() {
+        // Each of these would reach an operator as "your sandbox or approval
+        // policy refused this", sending them to a setting that is not the
+        // problem. Refusal verbs alone are not enough.
+        for line in [
+            "2026-08-04T12:57:08.883766Z ERROR codex_core::client: error=request rejected by server: rate limit exceeded",
+            "2026-08-04T12:57:08.883766Z ERROR codex_core::auth: error=token rejected: invalid credentials",
+            "2026-08-04T12:57:08.883766Z ERROR codex_core::client: error=request blocked by content policy",
+            "2026-08-04T12:57:08.883766Z ERROR codex_core::tools::router: error=failed to open /tmp/blocked/fixture.txt",
+            // `unblocked` contains `blocked`, and this one is good news.
+            "2026-08-04T12:57:08.883766Z ERROR codex_core::client: error=stream unblocked after retry, then failed",
+        ] {
+            assert!(
+                blocked_write_reason_from_log(line).is_none(),
+                "should not be classified as a refusal: {line}"
+            );
+        }
+    }
+
+    #[test]
     fn blocked_write_error_preserves_the_actionable_block_reason() {
         let message = blocked_write_error(
             "patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings",
         );
-        assert!(message.contains("blocked by its sandbox or approval policy"));
+        assert!(message.contains("refused an action by its sandbox or approval policy"));
         assert!(message.contains("read-only sandbox"));
         assert!(message.contains("cannot resolve this approval interactively"));
+        // The refusal is action-level: the turn itself may still have finished,
+        // so the message must not assert that it failed.
+        assert!(message.contains("may have completed anyway"));
     }
 
     #[tokio::test]
@@ -1819,6 +1897,27 @@ tokens used
             .expect("stdout task should finish");
 
         assert_eq!(diagnostics.lock().unwrap().blocked_write, None);
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_keeps_a_final_message_that_is_only_the_word_codex() {
+        // `codex` is a section marker, but real stdout carries only the final
+        // agent message and no markers — so a lone `codex` there is the answer,
+        // and dropping it would silently delete the whole turn's output.
+        let (emit, mut rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(&b"codex\n"[..], emit, diagnostics)
+            .await
+            .expect("stdout task should finish");
+
+        let events: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|notification| notification.pointer("/params/event").cloned())
+            .collect();
+        assert!(events.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message")
+                && event.get("text").and_then(Value::as_str) == Some("codex")
+        }));
     }
 
     #[tokio::test]
