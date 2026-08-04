@@ -12477,6 +12477,11 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         )]);
     }
     persistent_notices.push(version_notice_segments(app));
+    // After the version notice, so the newer information sits nearer the
+    // edge and the existing notice keeps its position.
+    if let Some(segments) = config_notice_segments(app) {
+        persistent_notices.push(segments);
+    }
     if let Some(latest) = app.latest_version.as_deref() {
         persistent_notices.push(vec![(
             format!("{latest} available"),
@@ -12754,6 +12759,24 @@ fn version_notice_segments(app: &App) -> Vec<(String, Option<KeyAction>)> {
         ),
         (format!(" - {} (tui)", crate::BUILD_ID), None),
     ]
+}
+
+/// Status-bar segment for configuration the daemon has read but cannot apply
+/// until it restarts (spec 0190) — `None` in the ordinary case, where an edit
+/// applied in full and there is nothing to say.
+///
+/// Opens the same confirm the daemon-build segment does — the question and
+/// the answer are identical — but through its own `KeyAction`, because both
+/// segments can be on screen at once and the tooltip has to know which one it
+/// is over.
+fn config_notice_segments(app: &App) -> Option<Vec<(String, Option<KeyAction>)>> {
+    if app.config_restart_required.is_empty() {
+        return None;
+    }
+    Some(vec![(
+        "config: restart to apply".to_string(),
+        Some(KeyAction::OpenConfigRestartConfirm),
+    )])
 }
 
 fn modeline_remote_text(enabled: bool, clients: u32) -> String {
@@ -13070,18 +13093,28 @@ fn render_modeline_version_notice_tooltip(f: &mut Frame, app: &App) {
     let Some(hit) = app.layout.shortcut_hints.iter().find(|h| {
         matches!(
             h.action,
-            KeyAction::OpenRestartDaemonConfirm | KeyAction::OpenUpgradeConfirm
+            KeyAction::OpenRestartDaemonConfirm
+                | KeyAction::OpenConfigRestartConfirm
+                | KeyAction::OpenUpgradeConfirm
         ) && my == h.y
             && mx >= h.x_start
             && mx < h.x_end
     }) else {
         return;
     };
+    // Owned, because the config tooltip names the waiting fields rather than
+    // making the operator click to find out what the restart is for.
     let label = match hit.action {
-        KeyAction::OpenRestartDaemonConfirm => " Daemon build differs — click to restart ",
-        _ => " Newer version available — click to upgrade ",
+        KeyAction::OpenRestartDaemonConfirm => {
+            " Daemon build differs — click to restart ".to_string()
+        }
+        KeyAction::OpenConfigRestartConfirm => format!(
+            " {} needs a restart — click to restart ",
+            app.config_restart_required.join(", ")
+        ),
+        _ => " Newer version available — click to upgrade ".to_string(),
     };
-    render_button_tooltip(f, &app.theme, label, hit.x_start, hit.y.saturating_sub(2));
+    render_button_tooltip(f, &app.theme, &label, hit.x_start, hit.y.saturating_sub(2));
 }
 
 fn render_modeline_remote_tooltip(f: &mut Frame, app: &App) {

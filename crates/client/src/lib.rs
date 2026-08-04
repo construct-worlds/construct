@@ -438,6 +438,20 @@ impl Client {
         )
         .await
     }
+    /// Re-read `config.toml` and apply it to the running daemon (spec 0190).
+    ///
+    /// The watcher does this on its own within a couple of seconds of a hand
+    /// edit; call this to apply immediately, typically right after writing
+    /// the file. A config that fails to parse comes back in the result's
+    /// `error`, not as an `Err` — the running configuration is unchanged
+    /// either way.
+    pub async fn config_reload(&self) -> Result<construct_protocol::ConfigApplyResult> {
+        self.request(
+            ipc_method::CONFIG_RELOAD,
+            &serde_json::json!({}),
+        )
+        .await
+    }
     /// Dev-only: point the daemon's web server at a directory of assets
     /// (or `None` to revert to embedded). No-op on release daemons.
     pub async fn dev_set_assets(

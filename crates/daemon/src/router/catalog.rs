@@ -46,7 +46,7 @@ impl Router {
     /// never advertises a target the same session could not select from the
     /// Construct route menu.
     pub fn published_models(&self, harness: &str) -> Vec<PublishedModel> {
-        if !self.publish_models {
+        if !self.settings().publish_models {
             return Vec::new();
         }
         let mut out = Vec::new();
@@ -64,7 +64,8 @@ impl Router {
                 });
             }
         }
-        for (route, profile) in &self.profiles {
+        let settings = self.settings();
+        for (route, profile) in &settings.profiles {
             if self.profile_blocker(profile, harness).is_some() {
                 continue;
             }
@@ -161,7 +162,7 @@ impl Router {
         if published.is_empty() {
             bail!("no available routes can be published to Codex");
         }
-        let catalog = build_codex_catalog(baseline, &published, &self.featured_models)?;
+        let catalog = build_codex_catalog(baseline, &published, &self.settings().featured_models)?;
 
         let dir = self.state_dir.join("router").join("catalogs");
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;

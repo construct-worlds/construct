@@ -143,6 +143,15 @@ pub enum KeyAction {
     /// `<daemon build> (daemon)` segment of the status-bar version notice
     /// shown when the connected daemon's build differs from this client's.
     OpenRestartDaemonConfirm,
+    /// Open the "restart daemon?" confirmation for a configuration change
+    /// that cannot apply while the daemon runs (spec 0190). Click-only,
+    /// bound to the `config: restart to apply` segment.
+    ///
+    /// Opens the same confirm as `OpenRestartDaemonConfirm` — a separate
+    /// action because the two segments can be on screen at once, and a shared
+    /// action would leave the hover tooltip and the zone tests unable to tell
+    /// which one they had found.
+    OpenConfigRestartConfirm,
     /// Open the "upgrade to <version>?" confirmation. Click-only, bound to
     /// the `<version> available` segment of the status-bar version notice.
     OpenUpgradeConfirm,

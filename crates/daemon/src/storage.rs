@@ -22,6 +22,7 @@ use construct_protocol::{
 use anyhow::{Context, Result};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 const GLOBAL_MEMORY_TEMPLATE: &str =
@@ -233,27 +234,44 @@ pub fn is_user_prompt_for_history(text: &str) -> bool {
     true
 }
 
-pub struct Storage {
-    data_dir: PathBuf,
+/// The directories a config reload can move (spec 0190).
+///
+/// Grouped into one struct so a reload swaps them together: they are derived
+/// from a single read of the config file and the plugin set, and applying
+/// half of one derivation would leave templates and verbs disagreeing about
+/// which plugin set is installed.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct StorageOverrides {
     /// When set, playbook templates are read from this directory instead of the
-    /// default `data_dir/playbook/templates`. Resolved at daemon start from the
+    /// default `data_dir/playbook/templates`. Resolved from the
     /// `[playbook].templates_dir` config option / `CONSTRUCT_PLAYBOOK_TEMPLATES_DIR`
     /// env override. `None` keeps the legacy default location (and its
     /// `canvas/templates` → `playbook/templates` migration).
-    playbook_templates_dir_override: Option<PathBuf>,
+    pub(crate) playbook_templates_dir: Option<PathBuf>,
     /// Directory user Playbook-verb definition files are read from (spec
     /// 0087): `verbs/*.md`, one file per verb, each replacing a built-in of
     /// the same name. Daemon start always sets this to the config
     /// directory's `verbs/` subdirectory — unlike playbook templates, verbs
     /// are a personal customization, not project data. `None` (only in
     /// tests that don't call the setter) falls back to `data_dir/verbs`.
-    playbook_verbs_dir_override: Option<PathBuf>,
+    pub(crate) playbook_verbs_dir: Option<PathBuf>,
     /// Plugin verb directories as `(namespace, dir)` pairs (spec 0152).
     /// Verbs from these load force-namespaced `<namespace>:<name>`.
-    plugin_verb_dirs: Vec<(String, PathBuf)>,
+    pub(crate) plugin_verb_dirs: Vec<(String, PathBuf)>,
     /// Plugin template directories as `(namespace, dir)` pairs (spec 0152).
     /// Templates from these list with id `<namespace>:<stem>`.
-    plugin_template_dirs: Vec<(String, PathBuf)>,
+    pub(crate) plugin_template_dirs: Vec<(String, PathBuf)>,
+}
+
+pub struct Storage {
+    /// Deliberately not swappable. Every session, transcript, and worktree
+    /// path already handed out is relative to it, so it must outlive any
+    /// config reload.
+    data_dir: PathBuf,
+    /// Config-derived directories, replaced wholesale by a reload (spec
+    /// 0190). Read through [`Storage::overrides`], which clones the `Arc` out
+    /// before the caller does anything with it.
+    overrides: std::sync::RwLock<Arc<StorageOverrides>>,
     /// Serializes read-modify-write cycles on the global prompt-history
     /// file (spec 0155) so concurrent session inputs can't drop entries.
     prompt_history_lock: std::sync::Mutex<()>,
@@ -268,12 +286,34 @@ impl Storage {
         Self::migrate_legacy_playbook_data_dir(&data_dir);
         Ok(Self {
             data_dir,
-            playbook_templates_dir_override: None,
-            playbook_verbs_dir_override: None,
-            plugin_verb_dirs: Vec::new(),
-            plugin_template_dirs: Vec::new(),
+            overrides: std::sync::RwLock::new(Arc::new(StorageOverrides::default())),
             prompt_history_lock: std::sync::Mutex::new(()),
         })
+    }
+
+    /// The config-derived directories in force, cloned out of the lock.
+    pub(crate) fn overrides(&self) -> Arc<StorageOverrides> {
+        self.overrides
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Replace every config-derived directory at once (spec 0190). Called by
+    /// a reload with a fresh derivation; the `with_*` builders below are the
+    /// same act at construction time.
+    pub(crate) fn set_overrides(&self, next: StorageOverrides) {
+        let mut slot = self
+            .overrides
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Arc::new(next);
+    }
+
+    fn mutate_overrides(&self, edit: impl FnOnce(&mut StorageOverrides)) {
+        let mut next = (*self.overrides()).clone();
+        edit(&mut next);
+        self.set_overrides(next);
     }
 
     /// One-time, idempotent migration of the shared playbook data directory,
@@ -297,35 +337,36 @@ impl Storage {
 
     /// Override the directory playbook templates are read from. Set once at
     /// daemon start from config; `None` (the default) keeps `data_dir/playbook/templates`.
-    pub fn with_playbook_templates_dir(mut self, dir: Option<PathBuf>) -> Self {
-        self.playbook_templates_dir_override = dir;
+    pub fn with_playbook_templates_dir(self, dir: Option<PathBuf>) -> Self {
+        self.mutate_overrides(|o| o.playbook_templates_dir = dir);
         self
     }
 
     /// Set the directory user Playbook-verb definition files are read from.
     /// Daemon start always calls this with the config dir's `verbs/`
     /// subdirectory (see `lib.rs::run`).
-    pub fn with_playbook_verbs_dir(mut self, dir: PathBuf) -> Self {
-        self.playbook_verbs_dir_override = Some(dir);
+    pub fn with_playbook_verbs_dir(self, dir: PathBuf) -> Self {
+        self.mutate_overrides(|o| o.playbook_verbs_dir = Some(dir));
         self
     }
 
     /// Set the plugin verb directories (spec 0152), as `(namespace, dir)`
     /// pairs from `plugins::PluginSet::verb_dirs`.
-    pub fn with_plugin_verb_dirs(mut self, dirs: Vec<(String, PathBuf)>) -> Self {
-        self.plugin_verb_dirs = dirs;
+    pub fn with_plugin_verb_dirs(self, dirs: Vec<(String, PathBuf)>) -> Self {
+        self.mutate_overrides(|o| o.plugin_verb_dirs = dirs);
         self
     }
 
     /// Set the plugin template directories (spec 0152), as `(namespace,
     /// dir)` pairs from `plugins::PluginSet::template_dirs`.
-    pub fn with_plugin_template_dirs(mut self, dirs: Vec<(String, PathBuf)>) -> Self {
-        self.plugin_template_dirs = dirs;
+    pub fn with_plugin_template_dirs(self, dirs: Vec<(String, PathBuf)>) -> Self {
+        self.mutate_overrides(|o| o.plugin_template_dirs = dirs);
         self
     }
 
     pub fn playbook_verbs_dir(&self) -> PathBuf {
-        self.playbook_verbs_dir_override
+        self.overrides()
+            .playbook_verbs_dir
             .clone()
             .unwrap_or_else(|| self.data_dir.join("verbs"))
     }
@@ -333,7 +374,7 @@ impl Storage {
     pub fn playbook_verbs(&self) -> Vec<construct_protocol::PlaybookVerb> {
         crate::playbook_verbs::load_verbs_with_plugins(
             &self.playbook_verbs_dir(),
-            &self.plugin_verb_dirs,
+            &self.overrides().plugin_verb_dirs,
         )
     }
 
@@ -572,7 +613,8 @@ impl Storage {
     }
 
     pub fn playbook_templates_dir(&self) -> PathBuf {
-        self.playbook_templates_dir_override
+        self.overrides()
+            .playbook_templates_dir
             .clone()
             .unwrap_or_else(|| self.data_dir.join("playbook").join("templates"))
     }
@@ -800,7 +842,7 @@ impl Storage {
         // Migrate user templates from the former `canvas/templates` location.
         // Only for the default location — when an explicit override is set the
         // operator owns that directory, so we never move files into it.
-        if self.playbook_templates_dir_override.is_none() {
+        if self.overrides().playbook_templates_dir.is_none() {
             let legacy_dir = self.data_dir.join("canvas").join("templates");
             if legacy_dir.exists() && !dir.exists() {
                 if let Some(parent) = dir.parent() {
@@ -841,7 +883,7 @@ impl Storage {
         }
         // Plugin templates (spec 0152): listed like user templates but with
         // namespaced ids so a plugin can never shadow a user template file.
-        for (namespace, dir) in &self.plugin_template_dirs {
+        for (namespace, dir) in &self.overrides().plugin_template_dirs {
             let entries = match std::fs::read_dir(dir) {
                 Ok(entries) => entries,
                 Err(e) => {

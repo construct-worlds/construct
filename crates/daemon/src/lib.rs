@@ -19,6 +19,7 @@ mod adapter;
 mod availability;
 mod channel_publication;
 mod config;
+mod config_supervisor;
 mod console;
 mod cost_history;
 mod daemon_env;
@@ -278,6 +279,25 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
         ));
         service_handle.reload_detached(service_supervisor::ReloadReason::Boot);
         service_supervisor::spawn_watcher(paths.clone(), service_handle);
+    }
+    // Config reloads (spec 0190). `config.toml` is hand-edited in the same
+    // directory as the service definitions above, so it applies on the same
+    // terms: the supervisor re-derives the running configuration from disk
+    // and swaps it in, and the watcher notices an edit made in an editor.
+    //
+    // No boot reload is fired — startup above already ran this exact
+    // derivation, and the watcher seeds its fingerprint from the file as it
+    // stands now, so the first tick is a no-op.
+    {
+        let (config_handle, config_rx) = config_supervisor::channel();
+        manager.set_config_supervisor(config_handle.clone());
+        tokio::spawn(config_supervisor::run(
+            manager.clone(),
+            paths.clone(),
+            socket_path.clone(),
+            config_rx,
+        ));
+        config_supervisor::spawn_watcher(paths.clone(), config_handle);
     }
     // Loop scheduler: wakes every second, fires due loops by
     // calling `SessionManager::send_input`. Persisted per-session

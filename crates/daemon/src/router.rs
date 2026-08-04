@@ -611,23 +611,41 @@ impl SessionRouting {
     }
 }
 
-pub struct Router {
+/// The parts of `[router]` a config reload can replace (spec 0190).
+///
+/// Everything here is consulted while serving — resolving a route, publishing
+/// a catalog — so swapping it is enough for the change to take effect. The
+/// port deliberately is *not* here: see [`Router::apply_config`].
+pub(crate) struct RouterSettings {
     enabled: bool,
     /// Native picker publication is automatic but independently
     /// configurable, so users may retain manual routing with an otherwise
     /// blind unarmed path.
     publish_models: bool,
     featured_models: Vec<String>,
-    /// Preferred port before bind. `0` asks the OS (tests / fallback).
-    preferred_port: u16,
-    /// When true the operator pinned `[router] port` — do not auto-fallback
-    /// on EADDRINUSE and do not overwrite the persisted port file.
-    port_pinned: bool,
     /// Route targets: the `[smith.models.*]` profiles, so an endpoint is
     /// declared once and reachable from both smith and a routed session.
     profiles: BTreeMap<String, ModelProfile>,
     /// `[router.oauth]` model overrides, keyed by provider name.
     oauth_models: BTreeMap<String, crate::config::OauthModels>,
+}
+
+pub struct Router {
+    /// Config-derived state that can be exchanged while running. Read through
+    /// [`Router::settings`], which clones the `Arc` out of the lock — a
+    /// `std::sync::RwLockReadGuard` held across an await would make the
+    /// enclosing future `!Send`.
+    settings: RwLock<Arc<RouterSettings>>,
+    /// Preferred port before bind. `0` asks the OS (tests / fallback).
+    ///
+    /// Not swappable, and deliberately so (spec 0183, spec 0190): harness
+    /// processes are told this port once, in their environment at spawn, and
+    /// have no way to be told it moved. Changing it in config is recorded as
+    /// needing a restart rather than applied.
+    preferred_port: u16,
+    /// When true the operator pinned `[router] port` — do not auto-fallback
+    /// on EADDRINUSE and do not overwrite the persisted port file.
+    port_pinned: bool,
     state_dir: PathBuf,
     /// Runtime dir of this home — owns `router.port` so the bound port
     /// is reclaimed on the next start of the same home.
@@ -667,13 +685,15 @@ impl Router {
         };
         let preferred_port = construct_protocol::paths::preferred_router_port(&paths, cfg.port);
         Arc::new(Self {
-            enabled: cfg.enabled,
-            publish_models: cfg.publish_models,
-            featured_models: cfg.featured_models.clone(),
+            settings: RwLock::new(Arc::new(RouterSettings {
+                enabled: cfg.enabled,
+                publish_models: cfg.publish_models,
+                featured_models: cfg.featured_models.clone(),
+                profiles,
+                oauth_models: cfg.oauth.clone(),
+            })),
             preferred_port,
             port_pinned: cfg.port.is_some(),
-            profiles,
-            oauth_models: cfg.oauth.clone(),
             state_dir,
             runtime_dir,
             ca: RwLock::new(None),
@@ -685,6 +705,83 @@ impl Router {
             sessions: RwLock::new(HashMap::new()),
             tokens: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// The settings in force, cloned out of the lock before the caller does
+    /// anything with them.
+    pub(crate) fn settings(&self) -> Arc<RouterSettings> {
+        self.settings
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Adopt a reloaded `[router]` / `[smith.models.*]` (spec 0190), and
+    /// report what could not be applied.
+    ///
+    /// Deliberately synchronous, and deliberately does not call
+    /// [`Self::start`]: the caller does that afterwards, outside the lock.
+    /// Awaiting the bind while holding the settings write lock would deadlock
+    /// against any concurrent `session_env`.
+    ///
+    /// Two things are recorded rather than applied, both for the reason spec
+    /// 0183 gives — a harness process is told the router's port once, in its
+    /// environment at spawn, and cannot be told it moved:
+    ///
+    /// * A **port change** never moves the bound socket.
+    /// * A **listening router is never switched off**, because withdrawing
+    ///   the port would strand every session already dialing it. Switching a
+    ///   *stopped* router on is applied, since nothing depends on its absence.
+    pub fn apply_config(
+        &self,
+        cfg: &RouterConfig,
+        profiles: BTreeMap<String, ModelProfile>,
+    ) -> Vec<String> {
+        let listening = self.listening.load(Ordering::SeqCst);
+        let mut restart_required = Vec::new();
+
+        if !cfg.enabled && listening {
+            restart_required.push(
+                "[router] enabled = false (the router is serving sessions that are still dialing it)"
+                    .to_string(),
+            );
+        }
+        // A pin that names a different port is a move. `Some(0)` is not a
+        // port but a request for any port, which whatever we already bound
+        // already satisfies — reporting it would make a restart look
+        // necessary to reach a state we are in.
+        let pinned_elsewhere = cfg
+            .port
+            .is_some_and(|port| port != 0 && port != self.port());
+        // A pin appearing or disappearing is also a change, since it decides
+        // whether a busy port may be fallen back from. Compared exactly as
+        // `Router::new` derives `port_pinned`, so re-applying the running
+        // config can never read as a toggle.
+        let pin_toggled = cfg.port.is_some() != self.port_pinned;
+        if pinned_elsewhere || pin_toggled {
+            restart_required.push(format!("[router] port (still serving {})", self.port()));
+        }
+
+        let mut slot = self
+            .settings
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Arc::new(RouterSettings {
+            // Never `false` while listening — see above.
+            enabled: cfg.enabled || listening,
+            publish_models: cfg.publish_models,
+            featured_models: cfg.featured_models.clone(),
+            profiles,
+            oauth_models: cfg.oauth.clone(),
+        });
+        restart_required
+    }
+
+    /// Whether the router should be serving but is not yet — the off→on
+    /// transition a reload can apply. The caller follows a `true` with
+    /// [`Self::start`].
+    pub fn wants_start(&self) -> bool {
+        self.settings().enabled && !self.listening.load(Ordering::SeqCst)
     }
 
     /// The port harness processes are told to use.
@@ -706,7 +803,13 @@ impl Router {
     /// session spawned by a previous daemon on this port can no longer
     /// reach us.
     pub async fn start(self: &Arc<Self>) -> Result<()> {
-        if !self.enabled || self.listening.swap(true, Ordering::SeqCst) {
+        // The `||` short-circuit is load-bearing, not incidental: when the
+        // router is disabled the `swap` is never evaluated, so `listening`
+        // stays false and the latch is left unarmed. That is what lets a
+        // config reload switch a stopped router on (spec 0190) and have this
+        // bind normally. Splitting it into two `if`s would silently break
+        // hot-enable -- see `enabling_a_stopped_router_arms_the_listener`.
+        if !self.settings().enabled || self.listening.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
         // Whether this home already has a port of its own. A home that does
@@ -911,7 +1014,7 @@ impl Router {
 
     /// Whether a session on `harness` would get routing transport.
     pub fn can_route_harness(&self, harness: &str) -> bool {
-        self.enabled && harness_routing(harness).is_some()
+        self.settings().enabled && harness_routing(harness).is_some()
     }
 
     /// The CA, generated on first actual use so a disabled or unused
@@ -945,7 +1048,8 @@ impl Router {
     ) -> Result<HashMap<String, String>> {
         let routing = harness_routing(harness)
             .ok_or_else(|| anyhow!("harness {harness} is not route-capable"))?;
-        if !self.enabled {
+        let settings = self.settings();
+        if !settings.enabled {
             return Err(anyhow!("router is disabled"));
         }
         if !self.listening.load(Ordering::SeqCst) {
@@ -953,7 +1057,7 @@ impl Router {
         }
         let ca = self.ca()?;
         let token = existing_token.unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-        let catalog_path = if self.publish_models && harness == "codex" {
+        let catalog_path = if settings.publish_models && harness == "codex" {
             match self.write_codex_catalog(session_id) {
                 Ok(path) => Some(path),
                 Err(error) => {
@@ -969,7 +1073,7 @@ impl Router {
             None
         };
         let catalog_enabled = catalog_path.is_some()
-            || (self.publish_models
+            || (settings.publish_models
                 && harness == "claude"
                 && !self.published_models("claude").is_empty());
         // Failing to read the catalog leaves the set empty, which restores
@@ -1235,6 +1339,7 @@ impl Router {
     /// Models a subscription target offers, configured or built-in.
     fn oauth_model_list(&self, provider: OauthProvider) -> Vec<String> {
         let configured: Vec<String> = self
+            .settings()
             .oauth_models
             .get(provider.name())
             .map(|m| m.to_vec())
@@ -1303,7 +1408,8 @@ impl Router {
         if let Some(provider) = OauthProvider::ALL.iter().find(|p| p.name() == name) {
             return self.resolve_oauth(*provider, harness, model);
         }
-        let profile = self.profiles.get(name).ok_or_else(|| {
+        let settings = self.settings();
+        let profile = settings.profiles.get(name).ok_or_else(|| {
             anyhow!(
                 "no route named \"{name}\": it is neither a [smith.models] profile \
                  nor a known subscription login"
@@ -1429,7 +1535,8 @@ impl Router {
         native_catalog: bool,
     ) -> RouterListRoutesResult {
         let routing = harness_routing(harness);
-        let unavailable_reason = if !self.enabled {
+        let settings = self.settings();
+        let unavailable_reason = if !settings.enabled {
             Some("routing is disabled; set [router] enabled = true in config.toml".to_string())
         } else if routing.is_none() {
             Some(format!(
@@ -1470,7 +1577,7 @@ impl Router {
                 }
             })
             .collect();
-        routes.extend(self
+        routes.extend(settings
             .profiles
             .iter()
             .map(|(name, profile)| {
@@ -1536,6 +1643,128 @@ mod tests {
             api_key: None,
             model: Some("kimi-k2.5".to_string()),
         }
+    }
+
+    /// REGRESSION: pins the `||` short-circuit in `Router::start`. When the
+    /// router is disabled, `enabled` is false so `listening.swap(true)` is
+    /// never evaluated and the latch stays unarmed — which is the only reason
+    /// a config reload can switch a stopped router on (spec 0190) without an
+    /// unbind path. Rewriting that guard as two separate `if`s would leave
+    /// the latch armed, make this `start()` a silent no-op, and break
+    /// hot-enable with nothing else failing.
+    #[tokio::test]
+    async fn enabling_a_stopped_router_arms_the_listener() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let router = Router::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            &cfg_with(false),
+            BTreeMap::new(),
+        );
+        router.start().await.expect("start on a disabled router");
+        assert!(
+            !router.listening.load(Ordering::SeqCst),
+            "a disabled router must not bind"
+        );
+
+        let restart_required = router.apply_config(&cfg_with(true), BTreeMap::new());
+        assert!(
+            restart_required.is_empty(),
+            "switching a stopped router on needs no restart: {restart_required:?}"
+        );
+        assert!(router.wants_start(), "the router should now want to serve");
+        router.start().await.expect("start after hot-enable");
+        assert!(
+            router.listening.load(Ordering::SeqCst),
+            "hot-enable must actually bind the listener"
+        );
+        assert!(router.port() > 0, "a bound router reports its port");
+    }
+
+    /// Spec 0183: harness processes were told this port at spawn and cannot
+    /// be told it moved, so withdrawing it is recorded, never performed.
+    #[tokio::test]
+    async fn disabling_a_listening_router_is_recorded_not_applied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let router = started(&dir, cfg_with(true)).await;
+        let bound = router.port();
+
+        let restart_required = router.apply_config(&cfg_with(false), BTreeMap::new());
+
+        assert!(
+            restart_required.iter().any(|r| r.contains("[router] enabled")),
+            "disabling a serving router must be reported as needing a restart: {restart_required:?}"
+        );
+        assert!(
+            router.can_route_harness("claude"),
+            "the router keeps serving until the restart it asked for"
+        );
+        assert_eq!(router.port(), bound, "the bound port never moves");
+    }
+
+    #[tokio::test]
+    async fn a_port_change_is_recorded_and_the_bound_port_stays_put() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let router = started(&dir, cfg_with(true)).await;
+        let bound = router.port();
+
+        let moved = RouterConfig {
+            port: Some(bound.wrapping_add(1).max(1)),
+            ..cfg_with(true)
+        };
+        let restart_required = router.apply_config(&moved, BTreeMap::new());
+
+        assert!(
+            restart_required.iter().any(|r| r.contains("[router] port")),
+            "a port change must be reported: {restart_required:?}"
+        );
+        assert_eq!(
+            router.port(),
+            bound,
+            "sessions are still dialing the port we bound"
+        );
+    }
+
+    /// The other half of the split: what the router reads per request does
+    /// apply, with no restart and no rebind.
+    #[tokio::test]
+    async fn swapped_profiles_are_visible_to_the_next_resolve() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let router = started(&dir, cfg_with(true)).await;
+        assert!(
+            router.resolve("kimi", "claude", None).is_err(),
+            "the profile does not exist yet"
+        );
+
+        let restart_required = router.apply_config(
+            &cfg_with(true),
+            profiles(vec![("kimi", profile("anthropic", None))]),
+        );
+
+        assert!(
+            restart_required.is_empty(),
+            "a model profile applies live: {restart_required:?}"
+        );
+        assert!(
+            router.settings().profiles.contains_key("kimi"),
+            "the new profile is in force"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_router_config_asks_for_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let router = started(&dir, cfg_with(true)).await;
+        // `cfg_with` pins port 0, which the OS resolved to the bound port;
+        // re-applying the same config must not read as a move.
+        let same = RouterConfig {
+            port: Some(router.port()),
+            ..cfg_with(true)
+        };
+        assert!(
+            router.apply_config(&same, BTreeMap::new()).is_empty(),
+            "re-applying the running config must not ask for a restart"
+        );
     }
 
     #[test]

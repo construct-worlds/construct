@@ -1424,6 +1424,14 @@ pub mod ipc_method {
     /// the process exits, so clients detect the shutdown as a socket
     /// close — same as `daemon.restart`, minus the re-exec.
     pub const DAEMON_SHUTDOWN: &str = "daemon.shutdown";
+    /// Re-read `config.toml` and apply it to the running daemon (spec 0190).
+    /// The file watcher does this on its own when the file changes; this is
+    /// the same act on demand, for a client that just wrote the file or an
+    /// operator who does not want to wait for the next tick. Returns a
+    /// `ConfigApplyResult` describing what applied and what needs a restart —
+    /// a config that fails to parse is reported there, not raised as an error,
+    /// because the running configuration is intact either way.
+    pub const CONFIG_RELOAD: &str = "config.reload";
     /// Dev tooling: point the running daemon at a directory of web-UI
     /// assets (`index.html`, `static/*`) to serve from disk instead of
     /// the binary's embedded copies, and inject a live-reload poller so
@@ -1479,6 +1487,11 @@ pub mod ipc_notif {
     /// actually skips work for lack of a smith credential, so clients can
     /// surface the degradation without polling.
     pub const FEATURES_STATE: &str = "features/state";
+    /// A `config.toml` reload settled (spec 0190). Carries what the reload
+    /// applied and what is still waiting on a restart. Replayed on subscribe,
+    /// because a restart residue is a property of the daemon rather than of
+    /// the client that happened to be attached when it arose.
+    pub const CONFIG_STATE: &str = "config/state";
     pub const CHANNEL_PUBLICATION_STATE: &str = "service/channel-publication-state";
     /// Console PTY bytes for the connection that opened the console. Not a
     /// broadcast: consoles are per-connection, so this never reaches another
@@ -3535,6 +3548,10 @@ pub enum PropagationClass {
     /// definition they started with, because no harness can be re-instructed
     /// or re-modelled in place.
     NextSession,
+    /// The daemon holds this in a form it cannot exchange while running — a
+    /// bound socket that live peers are already dialing. Saving records the
+    /// intent; only a restart performs it. Spec 0190.
+    Restart,
 }
 
 impl PropagationClass {
@@ -3543,6 +3560,7 @@ impl PropagationClass {
             PropagationClass::Immediate => "applies immediately",
             PropagationClass::NextRequest => "applies to the next request",
             PropagationClass::NextSession => "applies to new sessions",
+            PropagationClass::Restart => "needs a daemon restart",
         }
     }
 }
@@ -3614,6 +3632,154 @@ impl ServiceField {
             | ServiceField::Sandbox => PropagationClass::NextSession,
         }
     }
+}
+
+/// Every part of the daemon's `config.toml` that an edit can change.
+///
+/// The parallel of [`ServiceField`] for the configuration file, and it exists
+/// for the same reason: the class beside a setting is the promise the daemon
+/// keeps (spec 0190). [`ConfigField::propagation`] is an exhaustive match, so
+/// adding a setting to the configuration does not compile until it has been
+/// given a class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConfigField {
+    /// Adding or removing an `[adapters.*]` table — the harness list itself.
+    AdapterSet,
+    AdapterBinary,
+    AdapterArgs,
+    AdapterEnv,
+    AdapterDescription,
+    AdapterUsageProbe,
+    DaemonEnv,
+    DefaultsWorktree,
+    OrchestratorHarness,
+    PlaybookTemplatesDir,
+    SuggestEnabled,
+    RouterEnabled,
+    RouterPort,
+    RouterPublishModels,
+    RouterFeaturedModels,
+    RouterOauth,
+    SmithModels,
+}
+
+impl ConfigField {
+    pub const ALL: &'static [ConfigField] = &[
+        ConfigField::AdapterSet,
+        ConfigField::AdapterBinary,
+        ConfigField::AdapterArgs,
+        ConfigField::AdapterEnv,
+        ConfigField::AdapterDescription,
+        ConfigField::AdapterUsageProbe,
+        ConfigField::DaemonEnv,
+        ConfigField::DefaultsWorktree,
+        ConfigField::OrchestratorHarness,
+        ConfigField::PlaybookTemplatesDir,
+        ConfigField::SuggestEnabled,
+        ConfigField::RouterEnabled,
+        ConfigField::RouterPort,
+        ConfigField::RouterPublishModels,
+        ConfigField::RouterFeaturedModels,
+        ConfigField::RouterOauth,
+        ConfigField::SmithModels,
+    ];
+
+    pub fn propagation(self) -> PropagationClass {
+        match self {
+            // Read every time the answer is assembled, from config the daemon
+            // holds — nothing is spawned, bound, or cached behind them.
+            ConfigField::AdapterSet
+            | ConfigField::AdapterDescription
+            | ConfigField::PlaybookTemplatesDir
+            | ConfigField::SuggestEnabled => PropagationClass::Immediate,
+            // Consulted while serving a request: resolving a route, publishing
+            // a catalog, running a usage probe.
+            ConfigField::AdapterUsageProbe
+            | ConfigField::RouterOauth
+            | ConfigField::SmithModels
+            | ConfigField::RouterPublishModels
+            | ConfigField::RouterFeaturedModels => PropagationClass::NextRequest,
+            // Consulted only while a session is built. A process already
+            // running cannot be moved onto a different binary or environment.
+            ConfigField::AdapterBinary
+            | ConfigField::AdapterArgs
+            | ConfigField::AdapterEnv
+            | ConfigField::DaemonEnv
+            | ConfigField::DefaultsWorktree
+            | ConfigField::OrchestratorHarness => PropagationClass::NextSession,
+            // The port is transport identity: harness processes are told it
+            // once, at spawn, and cannot be told it moved (spec 0183).
+            ConfigField::RouterPort => PropagationClass::Restart,
+            // The only value-dependent row. Switching a *stopped* router on
+            // applies immediately — nothing depends on its absence — but
+            // switching a *listening* one off would withdraw a port live
+            // sessions are dialing. `propagation` cannot see the transition,
+            // so it states the reachable-now class and the reload report
+            // carries the truth for the other direction.
+            ConfigField::RouterEnabled => PropagationClass::Immediate,
+        }
+    }
+}
+
+/// The effect an accepted configuration reload had on the running daemon.
+///
+/// Mirrors [`ServiceApplyResult`]: the daemon states what it did rather than
+/// telling the operator to restart and hope.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigApplyResult {
+    /// False when the file failed to parse — nothing changed.
+    pub reloaded: bool,
+    /// What changed and is now in force, named for an operator.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied: Vec<String>,
+    /// What was read and recorded but is not in force until a restart. Sticky:
+    /// it persists across reloads until the restart it names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restart_required: Vec<String>,
+    /// Why the reload was refused, when it was. The running configuration is
+    /// untouched in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ConfigApplyResult {
+    /// One line for an operator: what changed, or what stopped it.
+    pub fn summary(&self) -> String {
+        if let Some(error) = &self.error {
+            return format!("config unchanged: {error}");
+        }
+        if !self.reloaded {
+            return "config unchanged".to_string();
+        }
+        let mut parts = Vec::new();
+        if !self.applied.is_empty() {
+            parts.push(format!("applied {}", self.applied.join(", ")));
+        }
+        if !self.restart_required.is_empty() {
+            parts.push(format!(
+                "restart to apply {}",
+                self.restart_required.join(", ")
+            ));
+        }
+        if parts.is_empty() {
+            "config reloaded; nothing changed".to_string()
+        } else {
+            format!("config {}", parts.join("; "))
+        }
+    }
+}
+
+/// Pushed whenever a configuration reload settles, and replayed to a client
+/// when it subscribes so a restart residue survives a reconnect.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigStateNotificationPayload {
+    /// Sticky. Non-empty means a restart is waiting, and names what for.
+    #[serde(default)]
+    pub restart_required: Vec<String>,
+    /// Transient — what the reload that produced this notification applied.
+    /// Empty on replay, since replay is not a reload.
+    #[serde(default)]
+    pub applied: Vec<String>,
 }
 
 /// The effect an accepted service edit had on the running daemon.
@@ -5154,6 +5320,81 @@ mod service_protocol_tests {
         assert_eq!(
             ServiceField::SessionMode.propagation(),
             PropagationClass::NextSession
+        );
+    }
+}
+
+#[cfg(test)]
+mod config_protocol_tests {
+    use super::*;
+
+    /// The exhaustive `match` in `propagation()` is what forces a new setting
+    /// to be given a class; this catches the other half — a variant added to
+    /// the enum but forgotten in `ALL`, which would silently drop it out of
+    /// anything that enumerates the table.
+    #[test]
+    fn every_config_field_is_listed_and_classified() {
+        let mut seen = std::collections::HashSet::new();
+        for field in ConfigField::ALL {
+            assert!(seen.insert(*field), "{field:?} is listed twice in ALL");
+            let _ = field.propagation();
+        }
+        assert_eq!(
+            seen.len(),
+            ConfigField::ALL.len(),
+            "ALL must list each field exactly once"
+        );
+    }
+
+    #[test]
+    fn the_router_port_needs_a_restart() {
+        assert_eq!(
+            ConfigField::RouterPort.propagation(),
+            PropagationClass::Restart,
+            "spec 0183: sessions dial the port they were given at spawn"
+        );
+        assert!(PropagationClass::Restart.label().contains("restart"));
+    }
+
+    #[test]
+    fn a_harness_binary_applies_to_new_sessions_only() {
+        assert_eq!(
+            ConfigField::AdapterBinary.propagation(),
+            PropagationClass::NextSession,
+            "a running process cannot be moved onto a different binary"
+        );
+    }
+
+    #[test]
+    fn an_unparsed_config_summarizes_as_unchanged() {
+        let result = ConfigApplyResult {
+            reloaded: false,
+            error: Some("expected `=`".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(result.summary(), "config unchanged: expected `=`");
+    }
+
+    #[test]
+    fn a_reload_that_changed_nothing_says_so() {
+        let result = ConfigApplyResult {
+            reloaded: true,
+            ..Default::default()
+        };
+        assert_eq!(result.summary(), "config reloaded; nothing changed");
+    }
+
+    #[test]
+    fn a_summary_names_both_what_applied_and_what_is_waiting() {
+        let result = ConfigApplyResult {
+            reloaded: true,
+            applied: vec!["adapters".to_string()],
+            restart_required: vec!["[router] port".to_string()],
+            error: None,
+        };
+        assert_eq!(
+            result.summary(),
+            "config applied adapters; restart to apply [router] port"
         );
     }
 }

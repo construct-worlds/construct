@@ -1858,6 +1858,14 @@ pub struct App {
     /// a difference (including a missing daemon id) shows both builds with a
     /// clickable "restart daemon" segment.
     pub daemon_build_id: Option<String>,
+    /// Configuration the daemon has read but cannot apply until it restarts
+    /// (spec 0190), named for an operator — `[router] port`, and disabling a
+    /// router that is already serving. Non-empty renders a clickable
+    /// "restart to apply" segment beside the version notice. Pushed by
+    /// `config/state`, and replayed when this client subscribes, so it
+    /// survives a reconnect. Everything else in a config edit applies without
+    /// a restart and never appears here.
+    pub config_restart_required: Vec<String>,
     /// Sender for background upgrade-install status messages (see
     /// `spawn_detached_upgrade`); the event loop drains the paired receiver
     /// and surfaces each message via `set_status`.
@@ -5352,6 +5360,7 @@ async fn run_with_socket_initial_selection(
         status: None,
         latest_version: None,
         daemon_build_id: None,
+        config_restart_required: Vec::new(),
         upgrade_status_tx,
         session_mutation_tx,
         last_diff: None,
@@ -10170,6 +10179,27 @@ impl App {
                     }
                 }
             }
+            m if m == construct_protocol::ipc_notif::CONFIG_STATE => {
+                if let Some(p) = n.params {
+                    if let Ok(payload) = serde_json::from_value::<
+                        construct_protocol::ConfigStateNotificationPayload,
+                    >(p)
+                    {
+                        self.config_restart_required = payload.restart_required;
+                        // Only a reload that actually changed something says
+                        // so. A comment-only edit still bumps the file's
+                        // mtime and reloads; announcing that would make the
+                        // status bar chatter at every save. Replays carry an
+                        // empty `applied` for the same reason.
+                        if !payload.applied.is_empty() {
+                            self.set_status(format!(
+                                "config applied: {}",
+                                payload.applied.join(", ")
+                            ));
+                        }
+                    }
+                }
+            }
             m if m == construct_protocol::ipc_notif::CHANNEL_PUBLICATION_STATE => {
                 if let Some(p) = n.params {
                     if let Ok(payload) = serde_json::from_value::<
@@ -13414,6 +13444,21 @@ impl App {
             OpenRestartDaemonConfirm => {
                 self.minibuffer = Some(Minibuffer {
                     prompt: "Restart daemon? ".to_string(),
+                    input: String::new(),
+                    cursor: 0,
+                    intent: MinibufferIntent::RestartDaemonConfirm,
+                    error: None,
+                });
+            }
+            OpenConfigRestartConfirm => {
+                // Name the waiting fields in the prompt: the operator is being
+                // asked to drop every attached client, and "Restart daemon?"
+                // alone does not say what they get for it.
+                self.minibuffer = Some(Minibuffer {
+                    prompt: format!(
+                        "Restart daemon to apply {}? ",
+                        self.config_restart_required.join(", ")
+                    ),
                     input: String::new(),
                     cursor: 0,
                     intent: MinibufferIntent::RestartDaemonConfirm,
@@ -16844,6 +16889,7 @@ mod tests {
             // about it. Tests exercising the mismatch/upgrade UI override
             // this explicitly.
             daemon_build_id: Some(crate::BUILD_ID.to_string()),
+            config_restart_required: Vec::new(),
             upgrade_status_tx: mpsc::unbounded_channel().0,
             session_mutation_tx: mpsc::unbounded_channel().0,
             last_diff: None,
@@ -36877,6 +36923,216 @@ mod tests {
                 "daemon segment click hijacked at width {width}"
             );
         }
+        server.abort();
+    }
+
+    /// Spec 0190: a restart residue renders as its own clickable segment,
+    /// distinct from the daemon-build one, and opens the restart confirm.
+    #[tokio::test]
+    async fn config_restart_residue_renders_a_clickable_segment() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.config_restart_required = vec!["[router] port".to_string()];
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+
+        let screen = rendered_text(terminal.backend().buffer());
+        assert!(
+            screen.contains("config: restart to apply"),
+            "the residue notice should be on screen:\n{screen}"
+        );
+
+        let hint = *app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::OpenConfigRestartConfirm)
+            .expect("the config segment should be clickable");
+        app.handle_left_click(hint.x_start, hint.y).await;
+        assert!(
+            matches!(
+                app.minibuffer.as_ref().map(|m| &m.intent),
+                Some(MinibufferIntent::RestartDaemonConfirm)
+            ),
+            "clicking the config segment should open the restart confirm"
+        );
+        assert!(
+            app.minibuffer
+                .as_ref()
+                .is_some_and(|m| m.prompt.contains("[router] port")),
+            "the prompt should name what the restart is for"
+        );
+        server.abort();
+    }
+
+    /// The quiet case, which is the common one: everything a config edit
+    /// changed applied, so there is nothing to say.
+    #[tokio::test]
+    async fn no_residue_renders_no_config_notice() {
+        let (mut app, _dir, server) = empty_app().await;
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+
+        let screen = rendered_text(terminal.backend().buffer());
+        assert!(
+            !screen.contains("config: restart to apply"),
+            "an applied config must not leave a notice behind:\n{screen}"
+        );
+        assert!(
+            !app.layout
+                .shortcut_hints
+                .iter()
+                .any(|h| h.action == KeyAction::OpenConfigRestartConfirm),
+            "and no clickable zone either"
+        );
+        server.abort();
+    }
+
+    /// REGRESSION: the config notice widens the modeline notice block, which
+    /// moves the collision boundary against the left-side empty-state hint.
+    /// Same sweep as `modeline_hint_yields_to_version_notice_without_zone_overlap`,
+    /// with both restart notices live at once — the worst case for width.
+    #[tokio::test]
+    async fn config_notice_and_version_notice_coexist_without_zone_overlap() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.daemon_build_id = Some("0.1.0+deadbee".to_string());
+        app.config_restart_required = vec!["[router] port".to_string()];
+
+        for width in [120u16, 124, 128, 132, 136, 140] {
+            app.minibuffer = None;
+            let backend = ratatui::backend::TestBackend::new(width, 36);
+            let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|f| crate::ui::render(f, &mut app))
+                .expect("draw");
+            let hints = app.layout.shortcut_hints.clone();
+            for (i, a) in hints.iter().enumerate() {
+                for b in hints.iter().skip(i + 1) {
+                    if a.y == b.y {
+                        assert!(
+                            a.x_end <= b.x_start || b.x_end <= a.x_start,
+                            "overlapping zones at width {width}, row {}: {:?} vs {:?}",
+                            a.y,
+                            a,
+                            b
+                        );
+                    }
+                }
+            }
+            // Each notice still dispatches its own action — the reason they
+            // do not share one.
+            if let Some(hit) = hints
+                .iter()
+                .find(|h| h.action == KeyAction::OpenConfigRestartConfirm)
+            {
+                let hit = *hit;
+                app.handle_left_click(hit.x_start, hit.y).await;
+                assert!(
+                    app.minibuffer
+                        .as_ref()
+                        .is_some_and(|m| m.prompt.contains("[router] port")),
+                    "config segment click hijacked at width {width}"
+                );
+                app.minibuffer = None;
+            }
+            let hit = *hints
+                .iter()
+                .find(|h| h.action == KeyAction::OpenRestartDaemonConfirm)
+                .unwrap_or_else(|| panic!("daemon zone missing at width {width}"));
+            app.handle_left_click(hit.x_start, hit.y).await;
+            assert_eq!(
+                app.minibuffer.as_ref().map(|m| m.prompt.as_str()),
+                Some("Restart daemon? "),
+                "daemon segment click hijacked at width {width}"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn hovering_the_config_segment_names_the_waiting_field() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.config_restart_required = vec!["[router] port".to_string()];
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let hint = *app
+            .layout
+            .shortcut_hints
+            .iter()
+            .find(|h| h.action == KeyAction::OpenConfigRestartConfirm)
+            .expect("the config segment should be clickable");
+        app.mouse_pos = Some((hint.x_start, hint.y));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+
+        let screen = rendered_text(terminal.backend().buffer());
+        assert!(
+            screen.contains("[router] port needs a restart"),
+            "the tooltip should name the field, not just say a restart is due:\n{screen}"
+        );
+        server.abort();
+    }
+
+    /// The transient half of spec 0190: a reload that applied something says
+    /// so once and expires, and never leaves a persistent notice.
+    #[tokio::test]
+    async fn an_applied_config_sets_a_transient_status_and_no_notice() {
+        let (mut app, _dir, server) = empty_app().await;
+
+        app.on_notification(construct_protocol::Notification::new(
+            construct_protocol::ipc_notif::CONFIG_STATE,
+            Some(
+                serde_json::to_value(construct_protocol::ConfigStateNotificationPayload {
+                    restart_required: Vec::new(),
+                    applied: vec!["harnesses".to_string()],
+                })
+                .expect("payload"),
+            ),
+        ))
+        .await;
+
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("harnesses")),
+            "an applied change is reported transiently: {:?}",
+            app.status
+        );
+        assert!(
+            app.config_restart_required.is_empty(),
+            "nothing is waiting on a restart"
+        );
+        server.abort();
+    }
+
+    /// A reload that changed nothing semantically must not chatter — a
+    /// comment-only save still reloads.
+    #[tokio::test]
+    async fn a_reload_that_applied_nothing_is_silent() {
+        let (mut app, _dir, server) = empty_app().await;
+
+        app.on_notification(construct_protocol::Notification::new(
+            construct_protocol::ipc_notif::CONFIG_STATE,
+            Some(
+                serde_json::to_value(construct_protocol::ConfigStateNotificationPayload::default())
+                    .expect("payload"),
+            ),
+        ))
+        .await;
+
+        assert!(app.status.is_none(), "nothing to announce: {:?}", app.status);
         server.abort();
     }
 
