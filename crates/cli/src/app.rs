@@ -2366,6 +2366,9 @@ pub struct App {
     /// 0167). Keyed by session id; entries for vanished sessions are pruned
     /// as they are noticed.
     pub token_meter_busy: HashMap<String, u64>,
+    /// Project dashboard state: activity feed, per-project token meters,
+    /// chat-preview cache, and cursor when a project header is selected.
+    pub project_dashboard: crate::project_dashboard::ProjectDashboard,
     /// Whether the ungrouped top-level section's archived sessions are
     /// revealed. Toggled by its "N archived" row. Ephemeral — archived
     /// sessions default to hidden on each launch.
@@ -5505,6 +5508,7 @@ async fn run_with_socket_initial_selection(
             meter
         },
         token_meter_busy: HashMap::new(),
+        project_dashboard: crate::project_dashboard::ProjectDashboard::default(),
         show_archived_ungrouped: false,
         show_archived_groups: HashSet::new(),
         show_archived_children: HashSet::new(),
@@ -5520,6 +5524,7 @@ async fn run_with_socket_initial_selection(
         pty_input_errors,
         tutorial: None,
     };
+    app.project_dashboard.seed_from_sessions(&app.sessions);
     if let Some(step) = persisted.tutorial_step {
         app.tutorial_resume(step);
     }
@@ -6710,6 +6715,7 @@ impl App {
         self.pty_input_errors = pty_input_errors;
         self.sessions = sessions;
         self.groups = groups;
+        self.project_dashboard.seed_from_sessions(&self.sessions);
         self.harnesses = harnesses;
         self.refresh_features().await;
         self.plugin_actions = plugin_actions;
@@ -7609,12 +7615,96 @@ impl App {
         if self.selection.group_id() != Some(id.as_str()) {
             self.start_session_transition();
         }
-        self.selection = Selection::Group(id);
+        self.selection = Selection::Group(id.clone());
+        self.project_dashboard.ensure_project(&id);
         self.transcript.clear();
         self.transcript_session = None;
         self.transcript_scroll = u16::MAX;
         let active_window = Some(self.active_window_id);
         self.set_scrollback_for_window(active_window, 0);
+    }
+
+    /// True when the project dashboard owns keyboard navigation: a project
+    /// header is selected and the view pane has focus.
+    pub fn project_dashboard_interactive(&self) -> bool {
+        self.selection.group_id().is_some() && self.focus == PaneFocus::View
+    }
+
+    /// Move the project-dashboard member cursor. Returns true when the key
+    /// was consumed (so list/PTY scroll does not also run).
+    pub fn project_dashboard_scroll(&mut self, delta: i32) -> bool {
+        if !self.project_dashboard_interactive() {
+            return false;
+        }
+        let Some(project_id) = self.selection.group_id().map(str::to_owned) else {
+            return false;
+        };
+        let members =
+            crate::project_dashboard::project_members(&self.sessions, &project_id);
+        self.project_dashboard.ensure_project(&project_id);
+        self.project_dashboard
+            .move_cursor(delta, members.len());
+        true
+    }
+
+    /// Open the dashboard's highlighted (or hovered) member session.
+    pub fn activate_project_dashboard_selection(&mut self, project_id: &str) {
+        let members =
+            crate::project_dashboard::project_members(&self.sessions, project_id);
+        self.project_dashboard.ensure_project(project_id);
+        self.project_dashboard.clamp_cursor(members.len());
+        let target = crate::project_dashboard::preview_target_id(
+            &members,
+            self.project_dashboard.cursor,
+            self.project_dashboard.hover_session.as_deref(),
+            true,
+        );
+        if let Some(id) = target {
+            let id = id.to_string();
+            self.select_session(id.clone());
+            self.focus = PaneFocus::View;
+            self.list_scroll_target = Some(id);
+            self.sync_active_window_selection();
+        } else {
+            self.set_status("project has no sessions to open".into());
+        }
+    }
+
+    /// Mouse click on a dashboard member or activity row → open that session.
+    pub fn activate_project_dashboard_hit(&mut self, col: u16, row: u16) -> bool {
+        if self.selection.group_id().is_none() {
+            return false;
+        }
+        let Some(id) = self
+            .project_dashboard
+            .hit_session_at(col, row)
+            .map(str::to_owned)
+        else {
+            return false;
+        };
+        self.select_session(id.clone());
+        self.focus = PaneFocus::View;
+        self.list_scroll_target = Some(id);
+        self.sync_active_window_selection();
+        true
+    }
+
+    /// Mouse hover over a dashboard member retargets the preview strip.
+    pub fn project_dashboard_hover_at(&mut self, col: u16, row: u16) {
+        if self.selection.group_id().is_none() {
+            self.project_dashboard.hover_session = None;
+            return;
+        }
+        let hit = self
+            .project_dashboard
+            .hits
+            .member_rows
+            .iter()
+            .find(|h| h.contains(col, row))
+            .map(|h| h.session_id.clone());
+        if self.project_dashboard.hover_session != hit {
+            self.project_dashboard.hover_session = hit;
+        }
     }
 
     /// Select a section's "N archived" disclosure row. Like [`Self::select_group`]
@@ -8896,6 +8986,7 @@ impl App {
             Ok(list) => self.groups = list,
             Err(e) => self.set_status(format!("project list failed: {e}")),
         }
+        self.project_dashboard.seed_from_sessions(&self.sessions);
         self.refresh_orchestrator_id();
         self.ensure_selection_valid();
     }
@@ -9577,14 +9668,24 @@ impl App {
         // adding it would double-count the cheapest part of the sample. It
         // rides along instead, to shade its share of the model's band.
         let tokens = tokens_in.saturating_add(*tokens_out);
-        let label = model.clone().or_else(|| {
-            self.sessions
-                .iter()
-                .find(|s| s.id == session_id)
-                .and_then(|s| s.model.clone())
-        });
+        let session = self.sessions.iter().find(|s| s.id == session_id);
+        let label = model
+            .clone()
+            .or_else(|| session.and_then(|s| s.model.clone()));
+        let now = Instant::now();
         self.token_meter
-            .observe(label.as_deref(), tokens, *tokens_cached, Instant::now());
+            .observe(label.as_deref(), tokens, *tokens_cached, now);
+        // Project-scoped meter (dashboard C2): same sample, filtered by
+        // the session's project membership.
+        if let Some(project_id) = session.and_then(|s| s.group_id.clone()) {
+            self.project_dashboard.observe_cost(
+                &project_id,
+                label.as_deref(),
+                tokens,
+                *tokens_cached,
+                now,
+            );
+        }
     }
 
     /// Feed the token meter the compute time that elapsed since the last
@@ -9602,7 +9703,7 @@ impl App {
     fn sample_compute_time(&mut self, now: Instant) {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut seen: HashSet<&str> = HashSet::with_capacity(self.sessions.len());
-        let mut deltas: Vec<(Option<String>, u64)> = Vec::new();
+        let mut deltas: Vec<(Option<String>, Option<String>, u64)> = Vec::new();
         for session in &self.sessions {
             let Some(model) = session.model.clone() else {
                 continue;
@@ -9616,15 +9717,23 @@ impl App {
             if let Some(previous) = previous {
                 let delta = busy.saturating_sub(previous);
                 if delta > 0 {
-                    deltas.push((Some(model), delta));
+                    deltas.push((Some(model), session.group_id.clone(), delta));
                 }
             }
             self.token_meter_busy.insert(session.id.clone(), busy);
         }
         let live: HashSet<String> = seen.into_iter().map(str::to_string).collect();
         self.token_meter_busy.retain(|id, _| live.contains(id));
-        for (model, delta) in deltas {
+        for (model, project_id, delta) in deltas {
             self.token_meter.observe_busy(model.as_deref(), delta, now);
+            if let Some(project_id) = project_id {
+                self.project_dashboard.observe_busy(
+                    &project_id,
+                    model.as_deref(),
+                    delta,
+                    now,
+                );
+            }
         }
     }
 
@@ -9917,6 +10026,25 @@ impl App {
                                     .or_default();
                                 history.feed_message(kind, &text);
                             }
+                            // Project dashboard chat preview cache (C3): keep
+                            // a short ring of recent messages for every
+                            // session so the project pane can peek without
+                            // selecting it.
+                            let preview_role = match kind {
+                                crate::pty_render::MessageKind::User => {
+                                    crate::project_dashboard::PreviewRole::User
+                                }
+                                crate::pty_render::MessageKind::Assistant => {
+                                    crate::project_dashboard::PreviewRole::Assistant
+                                }
+                                _ => crate::project_dashboard::PreviewRole::Other,
+                            };
+                            self.project_dashboard.observe_message(
+                                &payload.session_id,
+                                preview_role,
+                                &text,
+                                payload.at,
+                            );
                             // Accumulate the orchestrator's streaming assistant
                             // text; finalized into a typewriter monolog at turn
                             // end (the AgentStatus active=false handler below).
@@ -10104,12 +10232,25 @@ impl App {
                         if payload.session.archived && !was_archived {
                             self.focus_neighbor_of(&id);
                         }
+                        let is_new = !self.sessions.iter().any(|s| s.id == id);
                         if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
                             self.sessions[i] = payload.session;
                         } else {
                             self.sessions.push(payload.session);
                             self.sessions
                                 .sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                        }
+                        // Project dashboard activity feed (transitions only).
+                        if let Some(session) = self.sessions.iter().find(|s| s.id == id) {
+                            let session = session.clone();
+                            let now = chrono::Utc::now();
+                            if is_new {
+                                self.project_dashboard
+                                    .note_session_created(&session, now);
+                            } else {
+                                self.project_dashboard
+                                    .observe_session_state(&session, now);
+                            }
                         }
                         // If the session that just changed is visible on screen,
                         // consume its marker right away.
@@ -10661,6 +10802,7 @@ impl App {
         self.ui_panels.remove(id);
         self.pty_activity.remove(id);
         self.matrix_rain.forget_session(id);
+        self.project_dashboard.forget_session(id);
         // Playbook state is keyed by session id and otherwise never expires —
         // left uncleaned, a long-running TUI that opens/closes Playbook views
         // across many short-lived sessions accumulates stale entries forever.
@@ -10744,6 +10886,7 @@ impl App {
 
     async fn on_group_deleted(&mut self, id: &str) {
         self.groups.retain(|g| g.id != id);
+        self.project_dashboard.forget_project(id);
         self.ensure_selection_valid();
     }
 
@@ -10844,6 +10987,7 @@ impl App {
         // hover-revealed affordances can rely on `mouse_pos` from here on.
         if matches!(ev.kind, MouseEventKind::Moved) {
             self.saw_mouse_motion = true;
+            self.project_dashboard_hover_at(ev.column, ev.row);
         }
         if self.help_dismiss_mouse_button.is_some_and(
             |button| matches!(ev.kind, MouseEventKind::Up(released) if released == button),
@@ -11454,6 +11598,10 @@ impl App {
                 return;
             }
             self.service_title_menu = None;
+        }
+        // Project dashboard member/activity rows open the target session.
+        if self.activate_project_dashboard_hit(col, row) {
+            return;
         }
         // The fleet-tally panel is sized to its content and overhangs the
         // sidebar into the view pane, so it has to claim its own cells
@@ -12830,8 +12978,20 @@ impl App {
         self.tutorial_observe_action(action);
         match action {
             Quit => self.should_quit = true,
-            NextSession => self.step_selection(1).await,
-            PrevSession => self.step_selection(-1).await,
+            NextSession => {
+                if self.project_dashboard_scroll(1) {
+                    // project dashboard member cursor
+                } else {
+                    self.step_selection(1).await;
+                }
+            }
+            PrevSession => {
+                if self.project_dashboard_scroll(-1) {
+                    // project dashboard member cursor
+                } else {
+                    self.step_selection(-1).await;
+                }
+            }
             Refresh => {
                 self.refresh_sessions().await;
                 self.transcript_session = None;
@@ -13167,6 +13327,22 @@ impl App {
                     self.toggle_archive_section(&section);
                     return;
                 }
+                // Project dashboard: Enter from the list focuses the pane so
+                // the operator can move the member cursor; Enter again (view
+                // already focused) opens the highlighted member.
+                if let Some(project_id) = self.selection.group_id().map(str::to_owned) {
+                    if self.focus == PaneFocus::View {
+                        self.activate_project_dashboard_selection(&project_id);
+                        return;
+                    }
+                    match self.zoom {
+                        ZoomMode::List => self.zoom = ZoomMode::View,
+                        ZoomMode::View | ZoomMode::None => {}
+                    }
+                    self.collapse_orchestrator_panel_on_focus_change();
+                    self.focus = PaneFocus::View;
+                    return;
+                }
                 // Enter on a *terminated* session opens a restart
                 // confirmation instead of drilling in. Typing into
                 // the prompt of a Done/Errored session is a no-op
@@ -13348,28 +13524,36 @@ impl App {
                 }
             }
             ScrollUp => {
-                if self.can_scroll_pty_history() {
+                if self.project_dashboard_scroll(-1) {
+                    // handled
+                } else if self.can_scroll_pty_history() {
                     self.adjust_scrollback(1);
                 } else if self.view == ViewMode::Chat {
                     self.adjust_chat_scroll(1);
                 }
             }
             ScrollDown => {
-                if self.can_scroll_pty_history() {
+                if self.project_dashboard_scroll(1) {
+                    // handled
+                } else if self.can_scroll_pty_history() {
                     self.adjust_scrollback(-1);
                 } else if self.view == ViewMode::Chat {
                     self.adjust_chat_scroll(-1);
                 }
             }
             ScrollPageUp => {
-                if self.can_scroll_pty_history() {
+                if self.project_dashboard_scroll(-5) {
+                    // handled
+                } else if self.can_scroll_pty_history() {
                     self.adjust_scrollback(10);
                 } else if self.view == ViewMode::Chat {
                     self.adjust_chat_scroll(10);
                 }
             }
             ScrollPageDown => {
-                if self.can_scroll_pty_history() {
+                if self.project_dashboard_scroll(5) {
+                    // handled
+                } else if self.can_scroll_pty_history() {
                     self.adjust_scrollback(-10);
                 } else if self.view == ViewMode::Chat {
                     self.adjust_chat_scroll(-10);
@@ -13377,7 +13561,9 @@ impl App {
             }
             ScrollHalfPageUp => {
                 let rows = (self.active_pane_size().1.max(1) as i32 / 2).max(1);
-                if self.can_scroll_pty_history() {
+                if self.project_dashboard_scroll(-rows) {
+                    // handled
+                } else if self.can_scroll_pty_history() {
                     self.adjust_scrollback(rows);
                 } else if self.view == ViewMode::Chat {
                     self.adjust_chat_scroll(rows);
@@ -13385,7 +13571,9 @@ impl App {
             }
             ScrollHalfPageDown => {
                 let rows = (self.active_pane_size().1.max(1) as i32 / 2).max(1);
-                if self.can_scroll_pty_history() {
+                if self.project_dashboard_scroll(rows) {
+                    // handled
+                } else if self.can_scroll_pty_history() {
                     self.adjust_scrollback(-rows);
                 } else if self.view == ViewMode::Chat {
                     self.adjust_chat_scroll(-rows);
@@ -17011,6 +17199,7 @@ mod tests {
             matrix_panel_mode: MatrixPanelMode::default(),
             token_meter: crate::token_meter::TokenMeter::new(now),
             token_meter_busy: HashMap::new(),
+            project_dashboard: crate::project_dashboard::ProjectDashboard::default(),
             show_archived_ungrouped: false,
             show_archived_groups: HashSet::new(),
             show_archived_children: HashSet::new(),

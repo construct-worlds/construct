@@ -7949,8 +7949,8 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
         render_empty_session_state(f, inner, app);
         return;
     }
-    if let Some(g) = app.selected_group() {
-        render_group_overview(f, inner, app, g);
+    if let Some(g) = group {
+        render_group_overview(f, inner, app, &g);
         return;
     }
     // Per-window view mode: `C-x t` toggles only the focused split, so each
@@ -9217,45 +9217,25 @@ fn render_tutorial_card(f: &mut Frame, app: &mut App) {
 fn render_group_overview(
     f: &mut Frame,
     area: Rect,
-    app: &App,
+    app: &mut App,
     group: &construct_protocol::GroupSummary,
 ) {
-    let members: Vec<&construct_protocol::SessionSummary> = app
-        .sessions
-        .iter()
-        .filter(|s| s.group_id.as_deref() == Some(group.id.as_str()))
-        .collect();
-    let mut lines: Vec<Line> = Vec::with_capacity(members.len() + 3);
-    lines.push(Line::from(vec![Span::styled(
-        format!("Project: {}", group.name),
-        group_name_style(&app.theme),
-    )]));
-    lines.push(Line::from(format!(
-        "  {} member(s){}",
-        members.len(),
-        if group.collapsed { ", collapsed" } else { "" }
-    )));
-    lines.push(Line::from(""));
-    if members.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  (empty - move sessions into this project)",
-            Style::default().fg(app.theme.dim),
-        )));
-    } else {
-        for s in &members {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {} ", session_status_glyph(app, s)),
-                    state_style(&app.theme, s.state),
-                ),
-                Span::styled(primary_label(s), Style::default().fg(app.theme.text)),
-                Span::raw("  "),
-                Span::styled(harness_label(s), harness_style(&app.theme)),
-            ]));
-        }
-    }
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
-    f.render_widget(para, area);
+    let members = crate::project_dashboard::project_members(&app.sessions, &group.id);
+    let interactive = app.focus == crate::app::PaneFocus::View;
+    let now = Instant::now();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    crate::project_dashboard::render(
+        f,
+        area,
+        &app.theme,
+        &group.name,
+        &group.id,
+        &members,
+        &mut app.project_dashboard,
+        interactive,
+        now,
+        now_ms,
+    );
 }
 
 fn render_terminal(f: &mut Frame, area: Rect, app: &mut App) {
