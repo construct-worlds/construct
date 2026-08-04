@@ -32,6 +32,95 @@ A Slack channel connects over Socket Mode and needs no inbound port. It routes
 each thread to its own session, so a conversation in Slack is a conversation in
 Construct.
 
+### Creating the Slack app
+
+A channel needs an app installed in your workspace, which gives you the two
+tokens the channel is configured with: an **app-level token** (`xapp-…`) that
+opens the Socket Mode connection, and a **bot token** (`xoxb-…`) that posts as
+the bot. They are different tokens with different lifetimes — the app-level one
+is not an install artifact and does not change when you reinstall.
+
+The fastest path is a manifest, which sets the scopes and event subscriptions
+in one step. At [api.slack.com/apps](https://api.slack.com/apps) choose **Create
+New App → From an app manifest**, pick the workspace, and paste:
+
+```yaml
+display_information:
+  name: Construct
+features:
+  bot_user:
+    display_name: Construct
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - im:history
+      - channels:history
+      - groups:history
+      - mpim:history
+      - reactions:write
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+      - message.channels
+      - message.groups
+      - message.mpim
+  socket_mode_enabled: true
+  interactivity:
+    is_enabled: false
+  token_rotation_enabled: false
+```
+
+Keep `token_rotation_enabled: false`: Construct holds a static bot token and has
+nowhere to put a refreshed one. With the app created:
+
+1. **Basic Information → App-Level Tokens → Generate Token and Scopes.** Add the
+   `connections:write` scope and generate. The `xapp-…` value it shows is
+   `app_token`, and it is shown once — copy it now.
+2. **OAuth & Permissions → Install to Workspace.** Approve the scopes. The
+   **Bot User OAuth Token** (`xoxb-…`) on that page is `bot_token`; you can come
+   back for it later.
+3. **Invite the bot to the channels it should work in** (`/invite @Construct`).
+   Slack sends no events for a channel the app is not a member of. DMs need no
+   invite.
+
+Adding a scope later takes effect only after reinstalling the app to the
+workspace — Slack keeps issuing the token you already have with the scopes it
+was granted. Construct logs a refusal rather than failing the turn when a scope
+is missing, so a silent capability gap usually means a pending reinstall.
+
+Both tokens are credentials for your workspace. Configure them where the rest of
+the channel is configured (the service view's channel editor, or the config file
+below), not in a shared repository.
+
+### What each permission buys
+
+Nothing here is required except the first three; every other scope enables a
+behavior described further down, and an app without it simply cannot do that
+thing.
+
+| bot scope | needed for |
+| --- | --- |
+| `connections:write` *(app-level token)* | Opening the Socket Mode connection at all. Without it the channel never connects. |
+| `app_mentions:read` | Receiving `@bot` mentions, with the `app_mention` event. |
+| `chat:write` | Posting answers, and the `placeholder` progress message. |
+| `im:history` | DMs, with the `message.im` event. |
+| `channels:history` | Untagged follow-ups (`follow_up`) and `thread_context` in public channels, with `message.channels`. |
+| `groups:history` | The same in private channels, with `message.groups`. |
+| `mpim:history` | The same in group DMs, with `message.mpim`. Group DMs behave like channels, not like DMs: the bot must be mentioned before it engages. |
+| `reactions:write` | `progress = "reaction"` or `"both"`. |
+
+A scope and its event travel together — the scope grants access, the event
+subscription is what makes Slack deliver anything. Granting `channels:history`
+without subscribing to `message.channels` still leaves `follow_up` behaving like
+`off`.
+
+### Configuring the channel
+
 ```toml
 [channels.my-bot]
 kind = "slack"
