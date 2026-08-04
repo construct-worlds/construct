@@ -8402,13 +8402,23 @@ async function switchCurrentViewMode(mode) {
     // toggle. Switching between terminal sessions never did that and worked
     // fine, so match it — the cached xterm is revealed and the child repaints
     // on the geometry claim.
+    const focusTerm = shouldFocusTerminalAfterSessionSwitch();
     await enterTerminalMode(id, {
-      focusTerminal: shouldFocusTerminalAfterSessionSwitch(),
+      focusTerminal: focusTerm,
     });
+    // A deliberate view toggle must leave a typing destination (issue #1074).
+    // On touch with the soft keyboard hidden we skip xterm focus, so land on
+    // the mobile composer instead of leaving the caret on <body>.
+    if (!focusTerm) {
+      focusActiveSurface({ preferComposerOnTouch: true });
+    }
   } else {
     rememberActiveTerminalState();
     enterChatMode();
     await loadTranscript(id);
+    // Chat has no enter-time focus path of its own; put the caret in the
+    // composer so the user can type immediately after the toggle.
+    focusActiveSurface({ preferComposerOnTouch: true });
   }
   setComposerEnabled(!!(state.ws && state.ws.readyState === 1 && state.currentId));
   reportView();
@@ -17719,6 +17729,8 @@ const newSessionCancelBtn = $("newSessionCancel");
 const newSessionCreateBtn = $("newSessionCreate");
 
 async function openNewSessionDialog() {
+  // Capture before anything in this dialog takes the caret (issue #1074).
+  const invoker = captureOverlayInvoker();
   // Populate the harness dropdown from `harness.list`. Filtered to
   // available harnesses so the user can't pick one that the daemon
   // would reject.
@@ -17729,6 +17741,7 @@ async function openNewSessionDialog() {
   } catch (e) {
     newSessionErrorEl.textContent = `harness.list failed: ${e.message}`;
     newSessionErrorEl.hidden = false;
+    newSessionSheetEl._overlayInvoker = invoker;
     newSessionSheetEl.hidden = false;
     return;
   }
@@ -17747,16 +17760,21 @@ async function openNewSessionDialog() {
   const cur = state.sessions.find((s) => s.id === state.currentId);
   newSessionCwdEl.value = (cur && cur.cwd) || "";
   newSessionPromptEl.value = "";
+  newSessionSheetEl._overlayInvoker = invoker;
   newSessionSheetEl.hidden = false;
   // Defer focus so the slide-up animation doesn't fight the
   // keyboard-summon path.
   setTimeout(() => newSessionHarnessEl.focus(), 200);
 }
 
-function closeNewSessionDialog() {
+function closeNewSessionDialog(opts = {}) {
+  const restore = opts.restore !== false;
+  const invoker = newSessionSheetEl._overlayInvoker;
+  newSessionSheetEl._overlayInvoker = null;
   newSessionSheetEl.hidden = true;
   newSessionErrorEl.hidden = true;
   newSessionCreateBtn.disabled = false;
+  if (restore) restoreOverlayFocus(invoker);
 }
 
 function currentTerminalSize() {
@@ -17805,12 +17823,17 @@ async function submitNewSession(ev) {
   }
   try {
     const res = await rpc("session.create", params);
-    closeNewSessionDialog();
+    // Don't bounce focus back to the + button — the new session is the
+    // surface the user is about to type into (issue #1074).
+    closeNewSessionDialog({ restore: false });
     // session/state notifications will repopulate the list; also
     // auto-select the new session so the user sees it immediately.
     if (res && res.session_id) {
       await refreshSessions();
-      selectSession(res.session_id);
+      await selectSession(res.session_id);
+      focusActiveSurface({ preferComposerOnTouch: true });
+    } else {
+      restoreOverlayFocus(newSessionBtn);
     }
   } catch (e) {
     newSessionCreateBtn.disabled = false;
@@ -17840,6 +17863,8 @@ const renameSaveBtn = $("renameSave");
 function openRenameDialog(sessionId) {
   const s = state.sessions.find((x) => x.id === sessionId);
   if (!s) return;
+  // Capture before the deferred input focus takes the caret (issue #1074).
+  renameSheetEl._overlayInvoker = captureOverlayInvoker();
   renameFormEl.dataset.sessionId = sessionId;
   renameTitleEl.value = s.title || "";
   renameErrorEl.hidden = true;
@@ -17852,10 +17877,13 @@ function openRenameDialog(sessionId) {
 }
 
 function closeRenameDialog() {
+  const invoker = renameSheetEl._overlayInvoker;
+  renameSheetEl._overlayInvoker = null;
   renameSheetEl.hidden = true;
   renameErrorEl.hidden = true;
   renameSaveBtn.disabled = false;
   delete renameFormEl.dataset.sessionId;
+  restoreOverlayFocus(invoker);
 }
 
 async function submitRename(ev) {
@@ -17914,15 +17942,24 @@ const closeSessionArchiveBtn = $("closeSessionArchive");
 function openCloseSessionDialog(sessionId) {
   const s = state.sessions.find((x) => x.id === sessionId);
   if (!s) return;
+  closeSessionSheetEl._overlayInvoker = captureOverlayInvoker();
   closeSessionSheetEl.dataset.sessionId = sessionId;
   const label = sessionDisplayTitle(s) || sessionId.slice(0, 8);
   closeSessionLabelEl.textContent = `"${label}"`;
   closeSessionSheetEl.hidden = false;
+  // Land caret inside the sheet so Escape / Tab stay in the dialog, and so
+  // close always has a focus transition to restore from (issue #1074).
+  setTimeout(() => {
+    try { closeSessionCancelBtn.focus(); } catch (_) {}
+  }, 0);
 }
 
 function closeCloseSessionDialog() {
+  const invoker = closeSessionSheetEl._overlayInvoker;
+  closeSessionSheetEl._overlayInvoker = null;
   closeSessionSheetEl.hidden = true;
   delete closeSessionSheetEl.dataset.sessionId;
+  restoreOverlayFocus(invoker);
 }
 
 closeSessionCancelBtn.addEventListener("click", closeCloseSessionDialog);
@@ -18047,11 +18084,21 @@ themePickerEl.addEventListener("change", () => {
 const settingsSheetEl = $("settingsSheet");
 
 function openSettingsSheet() {
+  settingsSheetEl._overlayInvoker = captureOverlayInvoker();
   settingsSheetEl.hidden = false;
+  setTimeout(() => {
+    const closeBtn = $("settingsClose");
+    if (closeBtn) {
+      try { closeBtn.focus(); } catch (_) {}
+    }
+  }, 0);
 }
 
 function closeSettingsSheet() {
+  const invoker = settingsSheetEl._overlayInvoker;
+  settingsSheetEl._overlayInvoker = null;
   settingsSheetEl.hidden = true;
+  restoreOverlayFocus(invoker);
 }
 
 miniUsageGraphEl.addEventListener("click", openSettingsSheet);
@@ -18769,18 +18816,76 @@ function toggleListFocus() {
   }
 }
 
-/** Put the caret back where typing should land for the current view. */
-function focusActiveSurface() {
+/**
+ * Put the caret back where typing should land for the current view.
+ *
+ * `preferComposerOnTouch`: when restoring after an overlay dismiss (issue
+ * #1074), touch layouts prefer the composer over xterm so the user gets a
+ * visible focus ring / soft keyboard rather than a silent helper-textarea
+ * focus that looks like the caret vanished.
+ */
+function focusActiveSurface(opts = {}) {
   if (state.mode === "playbook") {
-    playbookInputEl.focus();
+    try { playbookInputEl.focus(); } catch (_) {}
     return;
   }
   if (state.mode === "terminal") {
+    if (opts.preferComposerOnTouch && isLikelyTouchDevice() && composerEl && !composerEl.hidden) {
+      try { inputEl.focus({ preventScroll: true }); } catch (_) {}
+      return;
+    }
     const handle = state.terminalById.get(state.currentId);
-    if (handle) handle.term.focus();
-    return;
+    if (handle && handle.term) {
+      try { handle.term.focus(); } catch (_) {}
+      return;
+    }
   }
-  inputEl.focus();
+  try { inputEl.focus({ preventScroll: true }); } catch (_) {}
+}
+
+/**
+ * Overlay focus restore (issue #1074 / spec 0189).
+ *
+ * Every dismissible sheet records who had focus when it opened. On close we
+ * put the caret back on that invoker when it is still focusable in the page;
+ * otherwise we land on the active surface so the next keystroke is not eaten
+ * by `<body>`.
+ */
+function captureOverlayInvoker() {
+  const active = document.activeElement;
+  if (!active || active === document.body || active === document.documentElement) {
+    return null;
+  }
+  return active;
+}
+
+function overlayInvokerIsRestorable(el) {
+  if (!el || !el.isConnected || typeof el.focus !== "function") return false;
+  if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+  // A node inside a [hidden] ancestor (closed menu, closed sheet) is not a
+  // useful restore target — the browser would bounce focus to <body>.
+  if (el.closest("[hidden]")) return false;
+  try {
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+  } catch (_) {
+    /* computed style is best-effort */
+  }
+  return true;
+}
+
+function restoreOverlayFocus(invoker) {
+  try {
+    if (overlayInvokerIsRestorable(invoker)) {
+      invoker.focus({ preventScroll: true });
+      if (document.activeElement === invoker || invoker.contains(document.activeElement)) {
+        return;
+      }
+    }
+  } catch (_) {
+    /* fall through to the active surface */
+  }
+  focusActiveSurface({ preferComposerOnTouch: true });
 }
 
 /** Scroll whichever surface the current view is showing. */

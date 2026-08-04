@@ -1858,6 +1858,128 @@ async fn web_client_loads_and_websocket_connects() {
         "clicking an already-focused terminal split must still claim PTY geometry"
     );
 
+    // Overlay dismiss must restore the invoker (or the active surface) so the
+    // next keystroke never lands on <body> (issue #1074 / spec 0189).
+    let overlay_focus: serde_json::Value = page
+        .evaluate(
+            r#"
+            (async () => {
+              const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+              const activeTag = () => {
+                const a = document.activeElement;
+                if (!a || a === document.body) return 'BODY';
+                return a.id || a.tagName;
+              };
+
+              // Ensure a current session so rename/close-session open paths work.
+              if (!state.currentId) {
+                state.sessions = state.sessions || [];
+                if (!state.sessions.some((s) => s.id === 's-focus-overlay')) {
+                  state.sessions.push({
+                    id: 's-focus-overlay',
+                    title: 'Focus Overlay',
+                    has_pty: true,
+                    mode: 'interactive',
+                  });
+                }
+                state.currentId = 's-focus-overlay';
+              }
+
+              // --- Rename: open from a live invoker, cancel → invoker ---
+              // (titleRenameBtn may be [hidden] depending on session actions,
+              // so use a dedicated button we control.)
+              const renameInvoker = document.createElement('button');
+              renameInvoker.id = 'renameInvokerProbe';
+              renameInvoker.type = 'button';
+              renameInvoker.textContent = 'rename-probe';
+              document.body.appendChild(renameInvoker);
+              renameInvoker.focus();
+              openRenameDialog(state.currentId);
+              await sleep(250);
+              const renameFocusedWhileOpen = document.activeElement === renameTitleEl;
+              closeRenameDialog();
+              await sleep(0);
+              const afterRenameCancel = activeTag();
+              const afterRenameIsBody = document.activeElement === document.body;
+              renameInvoker.remove();
+
+              // --- Settings: open from badge, close → invoker ---
+              // Canvas is focusable via tabindex set by the badge paint path.
+              miniUsageGraphEl.setAttribute('tabindex', '0');
+              miniUsageGraphEl.focus();
+              openSettingsSheet();
+              await sleep(20);
+              closeSettingsSheet();
+              await sleep(0);
+              const afterSettings = activeTag();
+              const afterSettingsIsBody = document.activeElement === document.body;
+
+              // --- Close-session: cancel → not body ---
+              openCloseSessionDialog(state.currentId);
+              await sleep(20);
+              closeCloseSessionDialog();
+              await sleep(0);
+              const afterCloseSessionIsBody = document.activeElement === document.body;
+
+              // --- restoreOverlayFocus falls back when invoker is gone ---
+              const ghost = document.createElement('button');
+              ghost.id = 'ghostInvoker';
+              document.body.appendChild(ghost);
+              ghost.focus();
+              openRenameDialog(state.currentId);
+              await sleep(250);
+              ghost.remove();
+              closeRenameDialog();
+              await sleep(0);
+              const afterGhostGoneIsBody = document.activeElement === document.body;
+              const afterGhostGoneTag = activeTag();
+
+              return {
+                renameFocusedWhileOpen,
+                afterRenameCancel,
+                afterRenameIsBody,
+                afterSettings,
+                afterSettingsIsBody,
+                afterCloseSessionIsBody,
+                afterGhostGoneIsBody,
+                afterGhostGoneTag,
+              };
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate overlay focus restore")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        overlay_focus["renameFocusedWhileOpen"], true,
+        "rename sheet should move focus into its input: {overlay_focus:?}"
+    );
+    assert_eq!(
+        overlay_focus["afterRenameIsBody"], false,
+        "closing rename must not leave focus on <body>: {overlay_focus:?}"
+    );
+    assert_eq!(
+        overlay_focus["afterRenameCancel"], "renameInvokerProbe",
+        "closing rename should restore the invoker button: {overlay_focus:?}"
+    );
+    assert_eq!(
+        overlay_focus["afterSettingsIsBody"], false,
+        "closing settings must not leave focus on <body>: {overlay_focus:?}"
+    );
+    assert_eq!(
+        overlay_focus["afterSettings"], "miniUsageGraph",
+        "closing settings should restore the usage badge: {overlay_focus:?}"
+    );
+    assert_eq!(
+        overlay_focus["afterCloseSessionIsBody"], false,
+        "closing close-session must not leave focus on <body>: {overlay_focus:?}"
+    );
+    assert_eq!(
+        overlay_focus["afterGhostGoneIsBody"], false,
+        "when the invoker is gone, focus must fall back to a surface, not <body>: {overlay_focus:?}"
+    );
+
     // xterm emits child-requested mouse reports and automatic terminal
     // protocol replies through the same onData path as keystrokes. Plain
     // pointer motion and protocol replies must stay passive; a drag is
