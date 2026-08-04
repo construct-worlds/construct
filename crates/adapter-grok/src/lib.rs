@@ -285,15 +285,6 @@ fn sibling_native_ids(own_cwd: &Path) -> HashSet<String> {
     ids
 }
 
-fn grok_session_dir(cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    Some(
-        grok_home()?
-            .join("sessions")
-            .join(url_encode_path(cwd))
-            .join(session_id),
-    )
-}
-
 /// Locate a known native session id anywhere under `sessions_root/*/`.
 ///
 /// Grok keys directories by process cwd. Construct's recorded cwd can lag
