@@ -393,6 +393,47 @@ impl SessionManager {
         })
     }
 
+    /// Render the session's terminal server-side and return it as a compact
+    /// escape-sequence stream (spec 0188): a bounded `pty.log` tail is fed
+    /// through a native vt100 parser at the session's PTY size, then the
+    /// parser's scrollback and visible screen are serialized. A client
+    /// writes the result into a freshly reset terminal of the same size and
+    /// is caught up in O(screen + scrollback) bytes instead of replaying
+    /// the raw history through its own emulator.
+    pub async fn screen_snapshot(
+        &self,
+        id: &str,
+        strip_alt_screen: bool,
+    ) -> Result<construct_protocol::ScreenSnapshotResult> {
+        use base64::Engine;
+        let entry = self
+            .get_entry(id)
+            .await
+            .ok_or_else(|| anyhow!("session not found: {}", id))?;
+        let size = entry.pty.lock().await.size.ok_or_else(|| {
+            // Without the child's real geometry the render would wrap
+            // wrongly; callers fall back to `session.pty_replay`.
+            anyhow!("session {} has no known pty size", id)
+        })?;
+        let (bytes, start_offset, end_offset, total_bytes) = self
+            .storage
+            .read_pty_range_before(id, SCREEN_SNAPSHOT_REPLAY_BYTES, None)
+            .unwrap_or_else(|e| {
+                tracing::warn!(session = %id, error = ?e, "pty_log range read failed");
+                (Vec::new(), 0, 0, 0)
+            });
+        let rendered = render_screen_snapshot(&bytes, size, strip_alt_screen);
+        Ok(construct_protocol::ScreenSnapshotResult {
+            data: base64::engine::general_purpose::STANDARD.encode(rendered.data),
+            scrollback_rows: rendered.scrollback_rows as u64,
+            scrollback_truncated: rendered.scrollback_truncated,
+            start_offset,
+            end_offset,
+            total_bytes,
+            size,
+        })
+    }
+
     /// Deliver a prompt as a bracketed paste (`ESC[200~` … `ESC[201~`) when
     /// submitting to external PTY-backed agents.
     pub(super) async fn playbook_submit_typed_prompt(&self, id: &str, prompt: &str) -> Result<()> {
@@ -524,11 +565,244 @@ async fn deliver_pty_input(entry: &Arc<SessionEntry>, bytes: &[u8]) -> Result<()
     Ok(())
 }
 
+/// Bytes of `pty.log` tail parsed to build a screen snapshot. Only feeds
+/// the server-side parser — none of it goes over the wire — so it just
+/// needs to comfortably cover the visible screen plus the scrollback row
+/// budget below. Kept well under `PTY_REPLAY_CAP`: a client that pages
+/// into older history re-fetches this span as raw bytes, so the span
+/// bounds that fallback's cost too.
+const SCREEN_SNAPSHOT_REPLAY_BYTES: usize = 1024 * 1024;
+/// Scrollback rows the snapshot parser retains and serializes. Bounds the
+/// transient parser memory and the snapshot payload; rows beyond it are
+/// reported as truncated and remain reachable through `session.pty_replay`.
+const SCREEN_SNAPSHOT_SCROLLBACK_ROWS: usize = 4000;
+
+pub(crate) struct RenderedScreenSnapshot {
+    pub data: Vec<u8>,
+    pub scrollback_rows: usize,
+    pub scrollback_truncated: bool,
+}
+
+/// Build the escape-sequence stream for [`SessionManager::screen_snapshot`]
+/// from a raw PTY byte tail. The stream assumes a freshly reset terminal of
+/// `size`: it flows the parser's scrollback rows first, feeds line feeds
+/// until they have all scrolled into the client's scrollback buffer (the
+/// screen repaint clears the visible area without saving it), then repaints
+/// the visible screen and restores cursor, attributes, scroll region, and
+/// input modes.
+pub(crate) fn render_screen_snapshot(
+    bytes: &[u8],
+    size: construct_protocol::PtySize,
+    strip_alt_screen: bool,
+) -> RenderedScreenSnapshot {
+    let rows = size.rows.max(1);
+    let cols = size.cols.max(1);
+    let stripped;
+    let src: &[u8] = if strip_alt_screen {
+        stripped = strip_alt_screen_sequences(bytes);
+        &stripped
+    } else {
+        bytes
+    };
+    let mut parser = vt100::Parser::new(rows, cols, SCREEN_SNAPSHOT_SCROLLBACK_ROWS);
+    parser.process(src);
+    let screen = parser.screen();
+    let mut data = Vec::new();
+    let scrollback_rows = screen.scrollback_contents_formatted(&mut data);
+    if scrollback_rows > 0 {
+        // `rows - 1` line feeds push every prepended row off the visible
+        // screen whether there were fewer of them than the screen height
+        // (some feeds just walk the cursor down to the bottom row first)
+        // or more (the cursor is already on the bottom row and every feed
+        // scrolls). No blank line ever reaches the top before the feeds
+        // stop, so exactly the prepended rows land in scrollback.
+        data.extend(std::iter::repeat(b'\n').take(usize::from(rows) - 1));
+    }
+    data.extend(screen.contents_formatted());
+    // `contents_formatted` restores contents, cursor, and attributes but
+    // not the scroll region or origin mode, and live deltas following the
+    // snapshot may depend on both. DECSTBM and DECOM home the cursor, so
+    // re-restore its position afterwards (region-relative under DECOM).
+    let (top, bottom) = screen.scroll_region();
+    let origin = screen.origin_mode();
+    if (top, bottom) != (0, rows - 1) || origin {
+        data.extend(format!("\x1b[{};{}r", top + 1, bottom + 1).into_bytes());
+        if origin {
+            data.extend_from_slice(b"\x1b[?6h");
+        }
+        let (cur_row, cur_col) = screen.cursor_position();
+        let cur_row = if origin {
+            cur_row.saturating_sub(top)
+        } else {
+            cur_row
+        };
+        data.extend(format!("\x1b[{};{}H", cur_row + 1, cur_col + 1).into_bytes());
+    }
+    data.extend(screen.input_mode_formatted());
+    RenderedScreenSnapshot {
+        data,
+        scrollback_rows,
+        scrollback_truncated: scrollback_rows >= SCREEN_SNAPSHOT_SCROLLBACK_ROWS,
+    }
+}
+
+/// Remove alternate-screen enter/exit sequences (`ESC[?1049h/l`,
+/// `ESC[?1047h/l`, `ESC[?47h/l`) from a PTY byte stream — the same filter
+/// the web UI applies to every byte it writes into xterm.js.
+pub(crate) fn strip_alt_screen_sequences(bytes: &[u8]) -> Vec<u8> {
+    const SEQS: [&[u8]; 6] = [
+        b"\x1b[?1049h",
+        b"\x1b[?1049l",
+        b"\x1b[?1047h",
+        b"\x1b[?1047l",
+        b"\x1b[?47h",
+        b"\x1b[?47l",
+    ];
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    'outer: while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            for seq in SEQS {
+                if bytes[i..].starts_with(seq) {
+                    i += seq.len();
+                    continue 'outer;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
 #[cfg(test)]
 pub(super) fn pty_caps() -> construct_protocol::Capabilities {
     construct_protocol::Capabilities {
         supports_pty: true,
         supports_silent_resume: false,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod screen_snapshot_tests {
+    use super::*;
+    use construct_protocol::PtySize;
+
+    /// Feed a byte stream into a fresh parser the way a client terminal
+    /// of the same geometry would consume it.
+    fn parse(data: &[u8], size: PtySize) -> vt100::Parser {
+        let mut p = vt100::Parser::new(size.rows, size.cols, SCREEN_SNAPSHOT_SCROLLBACK_ROWS);
+        p.process(data);
+        p
+    }
+
+    /// Plain-text contents of the view scrolled all the way back, plus the
+    /// scrollback depth — the two things a snapshot must reproduce beyond
+    /// the visible screen.
+    fn top_view(parser: &mut vt100::Parser) -> (usize, String) {
+        parser.screen_mut().set_scrollback(usize::MAX);
+        let depth = parser.screen().scrollback();
+        let contents = parser.screen().contents();
+        parser.screen_mut().set_scrollback(0);
+        (depth, contents)
+    }
+
+    #[test]
+    fn snapshot_round_trips_screen_scrollback_and_colors() {
+        let size = PtySize { cols: 20, rows: 4 };
+        let mut input = Vec::new();
+        for i in 0..10 {
+            input.extend(format!("\x1b[3{}mline{i:02}\x1b[m", i % 8).into_bytes());
+            if i < 9 {
+                input.extend_from_slice(b"\r\n");
+            }
+        }
+        let mut orig = parse(&input, size);
+        let rendered = render_screen_snapshot(&input, size, false);
+        let mut rep = parse(&rendered.data, size);
+
+        assert_eq!(rendered.scrollback_rows, 6, "10 lines on a 4-row screen");
+        assert!(!rendered.scrollback_truncated);
+        assert_eq!(rep.screen().contents(), orig.screen().contents());
+        // Formatted comparison covers colors/attributes, not just text.
+        assert_eq!(
+            rep.screen().contents_formatted(),
+            orig.screen().contents_formatted()
+        );
+        assert_eq!(
+            rep.screen().cursor_position(),
+            orig.screen().cursor_position()
+        );
+        assert_eq!(top_view(&mut rep), top_view(&mut orig));
+    }
+
+    #[test]
+    fn snapshot_preserves_soft_wrapped_scrollback_rows() {
+        let size = PtySize { cols: 10, rows: 3 };
+        // A 25-char line soft-wraps across three rows, then enough hard
+        // lines push it entirely into scrollback.
+        let mut input = b"ABCDEFGHIJ0123456789abcde\r\n".to_vec();
+        for i in 0..4 {
+            input.extend(format!("tail{i}\r\n").into_bytes());
+        }
+        input.extend_from_slice(b"end");
+        let mut orig = parse(&input, size);
+        let rendered = render_screen_snapshot(&input, size, false);
+        let mut rep = parse(&rendered.data, size);
+
+        assert_eq!(rep.screen().contents(), orig.screen().contents());
+        assert_eq!(top_view(&mut rep), top_view(&mut orig));
+    }
+
+    #[test]
+    fn snapshot_strip_alt_screen_paints_alt_content_on_primary() {
+        let size = PtySize { cols: 20, rows: 4 };
+        let mut input = b"before\r\n".to_vec();
+        input.extend_from_slice(b"\x1b[?1049h\x1b[2J\x1b[HALTUI");
+        let rendered = render_screen_snapshot(&input, size, true);
+        let rep = parse(&rendered.data, size);
+
+        assert!(rep.screen().contents().contains("ALTUI"));
+        assert!(!rep.screen().alternate_screen());
+        assert!(
+            !rendered
+                .data
+                .windows(b"\x1b[?1049h".len())
+                .any(|w| w == b"\x1b[?1049h"),
+            "stripped snapshot must not smuggle alt-screen switches back in"
+        );
+    }
+
+    #[test]
+    fn snapshot_restores_scroll_region_and_cursor() {
+        let size = PtySize { cols: 20, rows: 6 };
+        let input = b"hello\x1b[2;5r\x1b[3;4H".to_vec();
+        let rendered = render_screen_snapshot(&input, size, false);
+        let rep = parse(&rendered.data, size);
+
+        assert_eq!(rep.screen().scroll_region(), (1, 4));
+        assert_eq!(rep.screen().cursor_position(), (2, 3));
+    }
+
+    #[test]
+    fn snapshot_reports_scrollback_truncation() {
+        let size = PtySize { cols: 20, rows: 4 };
+        let mut input = Vec::new();
+        for i in 0..(SCREEN_SNAPSHOT_SCROLLBACK_ROWS + 100) {
+            input.extend(format!("row {i}\r\n").into_bytes());
+        }
+        let rendered = render_screen_snapshot(&input, size, false);
+        assert_eq!(rendered.scrollback_rows, SCREEN_SNAPSHOT_SCROLLBACK_ROWS);
+        assert!(rendered.scrollback_truncated);
+    }
+
+    #[test]
+    fn strip_alt_screen_sequences_removes_only_switches() {
+        let input = b"a\x1b[?1049hb\x1b[31mc\x1b[?47ld\x1b[?1047h".to_vec();
+        assert_eq!(
+            strip_alt_screen_sequences(&input),
+            b"ab\x1b[31mcd".to_vec()
+        );
     }
 }

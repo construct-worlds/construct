@@ -952,6 +952,25 @@ impl Client {
         )
         .await
     }
+    /// Fetch a server-rendered reconstruction of the session's terminal
+    /// (scrollback rows + visible-screen repaint as escape sequences) —
+    /// attach in O(screen) instead of replaying raw PTY history. Errors
+    /// when the daemon has no PTY geometry for the session; callers fall
+    /// back to [`Self::pty_replay`].
+    pub async fn screen_snapshot(
+        &self,
+        id: &str,
+        strip_alt_screen: bool,
+    ) -> Result<construct_protocol::ScreenSnapshotResult> {
+        self.request(
+            ipc_method::SESSION_SCREEN_SNAPSHOT,
+            &construct_protocol::ScreenSnapshotParams {
+                session_id: id.to_string(),
+                strip_alt_screen,
+            },
+        )
+        .await
+    }
     pub async fn interrupt(&self, id: &str) -> Result<()> {
         let _: serde_json::Value = self
             .request(

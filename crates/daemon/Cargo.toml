@@ -33,6 +33,7 @@ which.workspace = true
 futures.workspace = true
 async-trait.workspace = true
 base64.workspace = true
+vt100.workspace = true
 # Console PTY (a browser-rendered instance of our own TUI client).
 portable-pty.workspace = true
 tokio-tungstenite.workspace = true

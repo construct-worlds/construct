@@ -216,6 +216,32 @@ impl Screen {
         }
     }
 
+    /// agentd fork addition: write the primary screen's scrollback buffer
+    /// (rows scrolled off the top of the visible screen, oldest first) as
+    /// a formatted byte stream — see
+    /// `Grid::write_scrollback_contents_formatted`. Always reads the
+    /// primary grid's scrollback: the alternate screen has none.
+    /// Returns the number of scrollback rows written.
+    pub fn scrollback_contents_formatted(
+        &self,
+        contents: &mut Vec<u8>,
+    ) -> usize {
+        self.grid.write_scrollback_contents_formatted(contents)
+    }
+
+    /// agentd fork addition: the current scroll region as 0-based
+    /// inclusive (top, bottom) rows. `(0, rows - 1)` when unset.
+    #[must_use]
+    pub fn scroll_region(&self) -> (u16, u16) {
+        self.grid().scroll_region()
+    }
+
+    /// agentd fork addition: whether origin mode (DECOM) is enabled.
+    #[must_use]
+    pub fn origin_mode(&self) -> bool {
+        self.grid().origin_mode()
+    }
+
     /// Return escape codes sufficient to reproduce the entire contents of the
     /// current terminal state. This is a convenience wrapper around
     /// [`contents_formatted`](Self::contents_formatted) and

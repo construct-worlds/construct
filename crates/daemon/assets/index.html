@@ -11402,6 +11402,9 @@ function resetTerminalReplay(handle) {
   handle.ptyReplayEndOffset = 0;
   handle.ptyReplayTotalBytes = 0;
   handle.ptyReplayLoadingOlder = false;
+  handle.snapshotHydrated = false;
+  handle.snapshotEndOffset = 0;
+  handle.snapshotTruncated = false;
   handle.structuredTranscript = false;
   handle.transcriptReplayEvents = [];
   handle.transcriptHistoryBeforeSeq = 0;
@@ -11492,19 +11495,42 @@ async function enterTerminalMode(id, options = {}) {
         await replayStructuredTranscript(handle);
         renderEditorStateForSession(id);
       } else {
-        const r = await rpc("session.pty_replay", {
-          session_id: id,
-          max_bytes: PTY_REPLAY_PAGE_BYTES,
-        });
-        if (r && r.size) {
-          // Daemon's last-known size wins as the initial geometry; we
-          // refit below in case the phone screen is narrower.
-          state.term.resize(r.size.cols, r.size.rows);
-          state.ptySizeById.set(id, { cols: r.size.cols, rows: r.size.rows });
+        // Prefer a rendered screen snapshot (spec 0188): the daemon feeds
+        // the pty.log tail through its own native emulator and returns
+        // just scrollback rows + a visible-screen repaint as escape
+        // sequences, so attach cost is O(screen + scrollback) instead of
+        // replaying raw history through xterm. Fall back to the raw
+        // pty_replay path on older daemons or when the daemon has no PTY
+        // geometry to render at.
+        let snap = null;
+        try {
+          snap = await rpc("session.screen_snapshot", {
+            session_id: id,
+            // Mirror writeTermBytes: this client strips alt-screen
+            // switches from everything it feeds xterm, so ask for a
+            // render that applied the same filter to the history.
+            strip_alt_screen: true,
+          });
+        } catch (_) {
+          // Older daemon or unrenderable session — use raw replay below.
         }
-        rememberPtyReplayChunk(handle, r);
-        updateTerminalHistoryButton(handle);
-        await replayPtyChunks(handle);
+        if (snap && snap.size) {
+          await hydrateFromScreenSnapshot(handle, id, snap);
+        } else {
+          const r = await rpc("session.pty_replay", {
+            session_id: id,
+            max_bytes: PTY_REPLAY_PAGE_BYTES,
+          });
+          if (r && r.size) {
+            // Daemon's last-known size wins as the initial geometry; we
+            // refit below in case the phone screen is narrower.
+            state.term.resize(r.size.cols, r.size.rows);
+            state.ptySizeById.set(id, { cols: r.size.cols, rows: r.size.rows });
+          }
+          rememberPtyReplayChunk(handle, r);
+          updateTerminalHistoryButton(handle);
+          await replayPtyChunks(handle);
+        }
         hydratedFromPtyReplay = true;
       }
       handle.term.scrollToBottom();
@@ -11785,6 +11811,13 @@ function createTerminalHandle(id) {
     ptyReplayEndOffset: 0,
     ptyReplayTotalBytes: 0,
     ptyReplayLoadingOlder: false,
+    // True while the terminal's contents came from session.screen_snapshot
+    // (a rendered screen, not raw bytes). xterm cannot prepend, so the
+    // first "load older" leaves snapshot mode: it re-fetches the raw span
+    // the snapshot covered plus one older page and rebuilds classically.
+    snapshotHydrated: false,
+    snapshotEndOffset: 0,
+    snapshotTruncated: false,
     structuredTranscript: false,
     transcriptReplayEvents: [],
     transcriptHistoryBeforeSeq: 0,
@@ -11958,6 +11991,36 @@ function writeTermBytes(term, bytes) {
   return writeTermData(term, filterTerminalAltScreenBytes(bytes));
 }
 
+// Hydrate a terminal from a session.screen_snapshot result: one write of a
+// server-rendered escape stream (scrollback rows + screen repaint) into a
+// freshly reset xterm sized to the snapshot's PTY geometry. Seeds the same
+// offset bookkeeping the raw-replay path uses so "load older" knows where
+// the rendered span ended.
+async function hydrateFromScreenSnapshot(handle, id, snap) {
+  // The snapshot was rendered at exactly this geometry; resizing after the
+  // write would rewrap a screen the daemon has already laid out.
+  handle.term.resize(snap.size.cols, snap.size.rows);
+  state.ptySizeById.set(id, { cols: snap.size.cols, rows: snap.size.rows });
+  const bytes = decodeBase64ToBytes(snap.data || "");
+  ensureTerminalScrollback(handle, Number(snap.scrollback_rows || 0));
+  handle.replayingPty = true;
+  try {
+    handle.term.reset();
+    handle.ptyAltScreenFilterCarry = new Uint8Array(0);
+    await writeTermBytes(handle.term, bytes);
+  } finally {
+    handle.replayingPty = false;
+  }
+  handle.snapshotHydrated = true;
+  handle.snapshotEndOffset = Number(snap.end_offset || 0);
+  handle.snapshotTruncated = !!snap.scrollback_truncated;
+  handle.ptyReplayChunks = [];
+  handle.ptyReplayStartOffset = Number(snap.start_offset || 0);
+  handle.ptyReplayEndOffset = Number(snap.end_offset || 0);
+  handle.ptyReplayTotalBytes = Number(snap.total_bytes || 0);
+  updateTerminalHistoryButton(handle);
+}
+
 async function replayPtyChunks(handle) {
   if (!handle || !handle.term) return;
   const loadedBytes = handle.ptyReplayChunks.reduce((sum, chunk) => sum + chunk.bytes.length, 0);
@@ -12002,17 +12065,26 @@ function updateTerminalHistoryButton(handle = terminalHandleForSession(state.cur
   const canLoad = !!(handle && handle.loaded && (
     handle.structuredTranscript
       ? handle.transcriptHistoryBeforeSeq > 1
-      : handle.ptyReplayStartOffset > 0
+      : hasOlderPtyHistory(handle)
   ));
   terminalHistoryBtn.hidden = !canLoad;
   terminalHistoryBtn.disabled = !!(canLoad && handle.ptyReplayLoadingOlder);
+}
+
+// Whether raw pty.log history older than what the terminal shows exists. A
+// snapshot-hydrated terminal can also owe rows dropped by the snapshot's
+// scrollback budget even when its rendered span started at offset 0.
+function hasOlderPtyHistory(handle) {
+  if (!handle) return false;
+  if (handle.ptyReplayStartOffset > 0) return true;
+  return !!(handle.snapshotHydrated && handle.snapshotTruncated);
 }
 
 function shouldLoadOlderPtyReplay(handle, { force = false } = {}) {
   if (!handle || !handle.loaded || handle.ptyReplayLoadingOlder) return false;
   if (handle.structuredTranscript) {
     if (handle.transcriptHistoryBeforeSeq <= 1) return false;
-  } else if (handle.ptyReplayStartOffset <= 0) return false;
+  } else if (!hasOlderPtyHistory(handle)) return false;
   if (force) return true;
   const active = handle.term && handle.term.buffer && handle.term.buffer.active;
   if (!active) return false;
@@ -12029,17 +12101,34 @@ async function maybeLoadOlderPtyReplay(id, opts = {}) {
   updateTerminalHistoryButton(handle);
   const priorViewportY = handle.term.buffer.active.viewportY;
   const priorBaseY = handle.term.buffer.active.baseY;
-  const maxBytes = PTY_REPLAY_PAGE_BYTES;
+  // Leaving snapshot mode: the terminal holds a rendered screen, not raw
+  // bytes, and xterm cannot prepend. Re-fetch the raw span the snapshot
+  // rendered plus one older page so the chunk replay below rebuilds the
+  // whole terminal from real history; later pages then extend classically.
+  const fromSnapshot = !handle.structuredTranscript && handle.snapshotHydrated;
+  const request = fromSnapshot
+    ? {
+        session_id: id,
+        before_offset: handle.snapshotEndOffset,
+        max_bytes:
+          Math.max(0, handle.snapshotEndOffset - handle.ptyReplayStartOffset) +
+          PTY_REPLAY_PAGE_BYTES,
+      }
+    : {
+        session_id: id,
+        before_offset: handle.ptyReplayStartOffset,
+        max_bytes: PTY_REPLAY_PAGE_BYTES,
+      };
   setTerminalLoadingMessage(ptyReplayProgressText(handle));
   state.ptyBuffer = [];
   state.ptyBuffering = true;
   try {
-    const r = await rpc("session.pty_replay", {
-      session_id: id,
-      before_offset: handle.ptyReplayStartOffset,
-      max_bytes: maxBytes,
-    });
+    const r = await rpc("session.pty_replay", request);
     if (state.currentId !== id) return;
+    if (fromSnapshot) {
+      handle.snapshotHydrated = false;
+      handle.snapshotTruncated = false;
+    }
     rememberPtyReplayChunk(handle, r);
     updateTerminalHistoryButton(handle);
     setTerminalLoadingMessage(ptyReplayProgressText(handle));
@@ -13736,10 +13825,24 @@ async function hydrateDuplicateTerminalMirror(handle) {
   handle.hydrating = true;
   handle.replayingPty = true;
   try {
-    const r = await rpc("session.pty_replay", { session_id: handle.sessionId });
-    if (r && r.size) handle.term.resize(r.size.cols, r.size.rows);
-    if (r && r.data) {
-      await writeTermBytes(handle.term, decodeBase64ToBytes(r.data));
+    // A mirror only needs the current screen; prefer the rendered snapshot
+    // over shipping and replaying the raw history (older daemons fall back).
+    let snap = null;
+    try {
+      snap = await rpc("session.screen_snapshot", {
+        session_id: handle.sessionId,
+        strip_alt_screen: true,
+      });
+    } catch (_) {}
+    if (snap && snap.size) {
+      handle.term.resize(snap.size.cols, snap.size.rows);
+      await writeTermBytes(handle.term, decodeBase64ToBytes(snap.data || ""));
+    } else {
+      const r = await rpc("session.pty_replay", { session_id: handle.sessionId });
+      if (r && r.size) handle.term.resize(r.size.cols, r.size.rows);
+      if (r && r.data) {
+        await writeTermBytes(handle.term, decodeBase64ToBytes(r.data));
+      }
     }
     handle.loaded = true;
   } catch (_) {
@@ -13925,9 +14028,29 @@ async function hydrateMirrorTerminal(id) {
   if (!handle || handle.loaded || handle.mirrorHydrating) return;
   handle.mirrorHydrating = true;
   try {
-    const r = await rpc("session.pty_replay", { session_id: id });
-    if (r && r.data) {
-      await writeTermBytes(handle.term, decodeBase64ToBytes(r.data));
+    // Prefer the rendered snapshot: same content as a full raw replay at a
+    // fraction of the bytes. The mirror keeps its own local geometry
+    // either way (spec 0121 — a mirror never claims PTY size).
+    let snap = null;
+    try {
+      snap = await rpc("session.screen_snapshot", {
+        session_id: id,
+        strip_alt_screen: true,
+      });
+    } catch (_) {}
+    if (snap && snap.size) {
+      await writeTermBytes(handle.term, decodeBase64ToBytes(snap.data || ""));
+      handle.snapshotHydrated = true;
+      handle.snapshotEndOffset = Number(snap.end_offset || 0);
+      handle.snapshotTruncated = !!snap.scrollback_truncated;
+      handle.ptyReplayStartOffset = Number(snap.start_offset || 0);
+      handle.ptyReplayEndOffset = Number(snap.end_offset || 0);
+      handle.ptyReplayTotalBytes = Number(snap.total_bytes || 0);
+    } else {
+      const r = await rpc("session.pty_replay", { session_id: id });
+      if (r && r.data) {
+        await writeTermBytes(handle.term, decodeBase64ToBytes(r.data));
+      }
     }
     handle.loaded = true;
   } catch (_) {
