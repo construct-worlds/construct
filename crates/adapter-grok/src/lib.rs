@@ -294,7 +294,7 @@ fn grok_session_dir(cwd: &Path, session_id: &str) -> Option<PathBuf> {
     )
 }
 
-/// Locate a known native session id anywhere under `~/.grok/sessions/*/`.
+/// Locate a known native session id anywhere under `sessions_root/*/`.
 ///
 /// Grok keys directories by process cwd. Construct's recorded cwd can lag
 /// behind when Grok chdirs into a project/git root after spawn (spec 0192),
@@ -302,8 +302,7 @@ fn grok_session_dir(cwd: &Path, session_id: &str) -> Option<PathBuf> {
 /// only reliable way to attach the watcher to the real directory once it
 /// exists. If multiple cwd encodings somehow contain the same id (should
 /// not happen in practice), the newest mtime wins.
-fn find_grok_session_dir_by_id(session_id: &str) -> Option<PathBuf> {
-    let sessions_root = grok_home()?.join("sessions");
+fn find_grok_session_dir_by_id_in(sessions_root: &Path, session_id: &str) -> Option<PathBuf> {
     let Ok(entries) = std::fs::read_dir(sessions_root) else {
         return None;
     };
@@ -334,14 +333,26 @@ fn find_grok_session_dir_by_id(session_id: &str) -> Option<PathBuf> {
     best.map(|(_, path)| path)
 }
 
+/// Prefer the cwd-keyed path under `sessions_root` when it exists; otherwise
+/// scan by id (spec 0192). The `sessions_root` form is pure filesystem so
+/// unit tests don't race on process-global `CONSTRUCT_GROK_HOME`.
+fn resolve_grok_session_dir_in(
+    sessions_root: &Path,
+    preferred_cwd: &Path,
+    session_id: &str,
+) -> Option<PathBuf> {
+    let preferred = sessions_root
+        .join(url_encode_path(preferred_cwd))
+        .join(session_id);
+    if preferred.is_dir() {
+        return Some(preferred);
+    }
+    find_grok_session_dir_by_id_in(sessions_root, session_id)
+}
+
 /// Prefer the cwd-keyed path when it exists; otherwise scan by id (spec 0192).
 fn resolve_grok_session_dir(preferred_cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    if let Some(dir) = grok_session_dir(preferred_cwd, session_id) {
-        if dir.is_dir() {
-            return Some(dir);
-        }
-    }
-    find_grok_session_dir_by_id(session_id)
+    resolve_grok_session_dir_in(&grok_home()?.join("sessions"), preferred_cwd, session_id)
 }
 
 /// Grok's own idea of the session cwd, stamped on `summary.json` once the
@@ -1987,7 +1998,7 @@ mod tests {
 
     #[test]
     fn resolve_session_dir_prefers_cwd_keyed_path() {
-        let home = std::env::temp_dir().join(format!(
+        let root = std::env::temp_dir().join(format!(
             "agentd-grok-resolve-prefer-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -1998,22 +2009,16 @@ mod tests {
         let spawn_cwd = Path::new("/Users/moon");
         let other_cwd = Path::new("/Users/moon/construct");
         let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        let preferred = home
-            .join("sessions")
-            .join(url_encode_path(spawn_cwd))
-            .join(id);
-        let other = home
-            .join("sessions")
-            .join(url_encode_path(other_cwd))
-            .join(id);
+        let preferred = root.join(url_encode_path(spawn_cwd)).join(id);
+        let other = root.join(url_encode_path(other_cwd)).join(id);
         std::fs::create_dir_all(&preferred).unwrap();
         std::fs::create_dir_all(&other).unwrap();
 
-        std::env::set_var("CONSTRUCT_GROK_HOME", &home);
-        let got = resolve_grok_session_dir(spawn_cwd, id);
-        std::env::remove_var("CONSTRUCT_GROK_HOME");
+        // Pure filesystem helper — no process-global GROK_HOME (CI runs
+        // these tests in parallel with other env-mutating cases).
+        let got = resolve_grok_session_dir_in(&root, spawn_cwd, id);
         assert_eq!(got.as_deref(), Some(preferred.as_path()));
-        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// When Grok chdirs after spawn, the cwd-keyed path under construct's
@@ -2021,7 +2026,7 @@ mod tests {
     /// real directory under the rebased cwd encoding (spec 0192).
     #[test]
     fn resolve_session_dir_scans_by_id_when_cwd_path_missing() {
-        let home = std::env::temp_dir().join(format!(
+        let root = std::env::temp_dir().join(format!(
             "agentd-grok-resolve-scan-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -2032,10 +2037,7 @@ mod tests {
         let spawn_cwd = Path::new("/Users/moon");
         let rebased_cwd = Path::new("/Users/moon/construct");
         let id = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
-        let real = home
-            .join("sessions")
-            .join(url_encode_path(rebased_cwd))
-            .join(id);
+        let real = root.join(url_encode_path(rebased_cwd)).join(id);
         std::fs::create_dir_all(&real).unwrap();
         std::fs::write(
             real.join("summary.json"),
@@ -2043,17 +2045,15 @@ mod tests {
         )
         .unwrap();
 
-        std::env::set_var("CONSTRUCT_GROK_HOME", &home);
-        // Preferred path under spawn cwd does not exist.
-        assert!(grok_session_dir(spawn_cwd, id).map(|p| !p.is_dir()).unwrap_or(true));
-        let got = resolve_grok_session_dir(spawn_cwd, id).expect("scan by id");
+        // Preferred path under spawn cwd does not exist under `root`.
+        assert!(!root.join(url_encode_path(spawn_cwd)).join(id).is_dir());
+        let got = resolve_grok_session_dir_in(&root, spawn_cwd, id).expect("scan by id");
         assert_eq!(got, real);
         assert_eq!(
             grok_session_recorded_cwd(&got).as_deref(),
             Some(Path::new("/Users/moon/construct"))
         );
-        std::env::remove_var("CONSTRUCT_GROK_HOME");
-        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
