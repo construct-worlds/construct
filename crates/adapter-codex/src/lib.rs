@@ -1456,14 +1456,28 @@ where
         // on two consecutive lines. Track whether we just saw the header.
         let mut expecting_token_count = false;
         let mut expecting_section_header = false;
-        let mut output_section = HeadlessOutputSection::Other;
+        // Real `codex exec` splits its streams: the session preamble, the
+        // echoed prompt, every section marker and all tool output go to
+        // stderr, while stdout carries only the final agent message. So an
+        // unlabelled stdout line is assistant prose, and the markers below
+        // only refine that when a codex build does route them here.
+        let mut output_section = HeadlessOutputSection::Assistant;
+        let mut inside_code_fence = false;
         while let Ok(Some(line)) = lines.next_line().await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
 
-            if trimmed == "--------" {
+            // Agents quote shell output back verbatim, so a fenced block is
+            // not a claim about this turn — track fences and never read a
+            // section marker or a block reason out of one.
+            let fence_delimiter = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+            if fence_delimiter {
+                inside_code_fence = !inside_code_fence;
+            } else if inside_code_fence {
+                // Quoted content: emit it, but read nothing out of it.
+            } else if trimmed == "--------" {
                 expecting_section_header = true;
                 output_section = HeadlessOutputSection::Other;
             } else if expecting_section_header {
@@ -1473,11 +1487,15 @@ where
                     "assistant" => HeadlessOutputSection::Assistant,
                     _ => HeadlessOutputSection::Other,
                 };
-            } else if output_section == HeadlessOutputSection::User && trimmed == "codex" {
-                // Real `codex exec` output starts the agent section with this
+            } else if trimmed == "codex" {
+                // Real `codex exec` output starts each agent section with this
                 // bare marker, without another `--------` separator.
                 output_section = HeadlessOutputSection::Assistant;
                 continue;
+            } else if trimmed == "exec" && output_section == HeadlessOutputSection::Assistant {
+                // A tool invocation and its stdout follow. Whatever the command
+                // prints is not the agent describing its own turn.
+                output_section = HeadlessOutputSection::Other;
             }
 
             // Stateful token-footer parse, BEFORE any emit, so the footer
@@ -1523,7 +1541,10 @@ where
                     });
                 }
             } else {
-                if output_section == HeadlessOutputSection::Assistant {
+                if output_section == HeadlessOutputSection::Assistant
+                    && !inside_code_fence
+                    && !fence_delimiter
+                {
                     record_blocked_write(&diagnostics, &line);
                 }
                 emit.emit(SessionEvent::Message {
@@ -1550,8 +1571,18 @@ fn record_blocked_write(
 }
 
 fn blocked_write_reason(assistant_text: &str) -> Option<String> {
+    let mut inside_code_fence = false;
     assistant_text.lines().find_map(|line| {
         let trimmed = line.trim();
+        // Same rule as the line-by-line path: text the agent quotes back is
+        // not the agent reporting a block.
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            inside_code_fence = !inside_code_fence;
+            return None;
+        }
+        if inside_code_fence {
+            return None;
+        }
         trimmed
             .strip_prefix("Blocked:")
             .map(|_| short(trimmed, 600))
@@ -1810,6 +1841,93 @@ mod tests {
         assert_eq!(
             diagnostics.lock().unwrap().blocked_write.as_deref(),
             Some(ASSISTANT_BLOCK)
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_records_block_reported_on_bare_final_message_stdout() {
+        const ASSISTANT_BLOCK: &str =
+            "Blocked: the workspace is read-only, so index.html could not be written";
+        // How real `codex exec` actually writes stdout: no preamble, no
+        // markers, no prompt echo — those all go to stderr. Only the final
+        // agent message reaches this stream.
+        const OUTPUT: &[u8] =
+            b"Blocked: the workspace is read-only, so index.html could not be written\n";
+        let (emit, _rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(OUTPUT, emit, diagnostics.clone())
+            .await
+            .expect("stdout task should finish");
+
+        assert_eq!(
+            diagnostics.lock().unwrap().blocked_write.as_deref(),
+            Some(ASSISTANT_BLOCK)
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_ignores_a_block_line_the_agent_only_quotes_back() {
+        // Verbatim final message from a real successful run: the agent was
+        // asked to print a line and quotes the command's stdout in a fence.
+        // Nothing was blocked.
+        const OUTPUT: &[u8] = b"```text\nBlocked: synthetic tool output line\n```\n";
+        let (emit, _rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(OUTPUT, emit, diagnostics.clone())
+            .await
+            .expect("stdout task should finish");
+
+        assert_eq!(diagnostics.lock().unwrap().blocked_write, None);
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_ignores_tool_output_printed_under_an_exec_section() {
+        // Should a codex build interleave sections into stdout, a command's
+        // own stdout is still not the agent reporting a block.
+        const OUTPUT: &[u8] = b"--------\nuser\nrun the printf command\ncodex\nI'll run the command exactly as provided.\nexec\n/bin/zsh -lc \"printf 'Blocked: synthetic tool output line\\n'\"\n succeeded in 0ms:\nBlocked: synthetic tool output line\n";
+        let (emit, _rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(OUTPUT, emit, diagnostics.clone())
+            .await
+            .expect("stdout task should finish");
+
+        assert_eq!(diagnostics.lock().unwrap().blocked_write, None);
+    }
+
+    #[tokio::test]
+    async fn spawn_stdout_rearms_the_agent_section_after_a_tool_call() {
+        const ASSISTANT_BLOCK: &str = "Blocked: the sandbox denied the write";
+        const OUTPUT: &[u8] = b"--------\nuser\nwrite index.html\ncodex\nTrying the write.\nexec\n/bin/zsh -lc \"touch index.html\"\n exited with 1 in 4ms:\ntouch: index.html: Read-only file system\ncodex\nBlocked: the sandbox denied the write\n";
+        let (emit, _rx) = EventEmitter::channel("session");
+        let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+
+        spawn_stdout(OUTPUT, emit, diagnostics.clone())
+            .await
+            .expect("stdout task should finish");
+
+        assert_eq!(
+            diagnostics.lock().unwrap().blocked_write.as_deref(),
+            Some(ASSISTANT_BLOCK)
+        );
+    }
+
+    #[test]
+    fn quoted_block_lines_in_structured_messages_are_not_classified() {
+        assert!(blocked_write_reason(
+            "Here is what the command printed:\n```text\nBlocked: synthetic tool output line\n```\n"
+        )
+        .is_none());
+        // A fenced quote earlier in the message must not mask a real report
+        // after it.
+        assert_eq!(
+            blocked_write_reason(
+                "```\nBlocked: quoted\n```\nBlocked: the sandbox denied the write"
+            )
+            .as_deref(),
+            Some("Blocked: the sandbox denied the write")
         );
     }
 
