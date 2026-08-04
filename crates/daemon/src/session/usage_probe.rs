@@ -124,7 +124,7 @@ impl SessionManager {
         allow_refresh: bool,
     ) -> construct_protocol::UsageQueryResult {
         let Some(command) = self
-            .config
+            .config()
             .effective_usage_probe(harness)
             .map(str::to_string)
         else {
@@ -665,7 +665,7 @@ impl SessionManager {
     fn try_unlink_usage_probe_native_transcript(&self, harness: &str, id: &str) -> UnlinkOutcome {
         let session_dir = self.storage.session_dir(id);
         let env = self
-            .config
+            .config()
             .adapters
             .get(harness)
             .map(|c| c.env.clone())

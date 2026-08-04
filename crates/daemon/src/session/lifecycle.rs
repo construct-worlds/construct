@@ -3,8 +3,12 @@ use super::*;
 impl SessionManager {
     pub async fn create(self: &Arc<Self>, params: CreateSessionParams) -> Result<String> {
         let harness = params.harness.as_str();
-        let adapter_cfg = self
-            .config
+        // Cloned out here, before any of the slow work below. A config reload
+        // landing mid-create leaves this session on the configuration it
+        // started from, which is the guarantee spec 0190 makes: nothing is
+        // re-applied to a session already being built.
+        let config = self.config();
+        let adapter_cfg = config
             .adapters
             .get(harness)
             .ok_or_else(|| anyhow!("unknown harness: {}", params.harness))?
@@ -20,7 +24,7 @@ impl SessionManager {
         let now = Utc::now();
 
         // Worktree setup (best effort).
-        let want_worktree = params.worktree || self.config.defaults.worktree.unwrap_or(false);
+        let want_worktree = params.worktree || config.defaults.worktree.unwrap_or(false);
         let cwd_path = PathBuf::from(&params.cwd);
         let worktree_path = if want_worktree && worktree::is_git_repo(&cwd_path).await {
             let dest = self.storage.worktree_path(&id);
@@ -346,7 +350,7 @@ impl SessionManager {
     ///    initial prompt rejected) are logged and the daemon proceeds
     ///    without an orchestrator — clients see palette mode.
     pub async fn ensure_orchestrator(self: Arc<Self>) {
-        let harness = match self.config.orchestrator.effective_harness() {
+        let harness = match self.config().orchestrator.effective_harness() {
             Some(h) => h.to_string(),
             None => {
                 tracing::info!("orchestrator disabled in config");
@@ -653,7 +657,7 @@ impl SessionManager {
         let (msg_tx, msg_rx) = mpsc::channel::<AdapterMessage>(ADAPTER_DRAIN_CAP);
 
         let adapter_cfg = self
-            .config
+            .config()
             .adapters
             .get(&harness)
             .ok_or_else(|| anyhow!("unknown harness on resume: {harness}"))?

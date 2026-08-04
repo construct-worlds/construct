@@ -804,7 +804,7 @@ fn env_var_present(name: &str) -> bool {
 }
 
 /// One `[smith.models.<name>]` entry (spec 0030).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ModelProfile {
     /// Wire protocol: `openai` | `openai-responses` | `azure-openai` |
     /// `anthropic` | `gemini` | `meta` | `ollama` | `grok`.
@@ -890,7 +890,7 @@ impl ModelProfile {
 /// `[router.oauth] <provider>` accepts one model or a list of them. One
 /// model is the common case; a list is what makes the picker's second step
 /// worth having.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum OauthModels {
     One(String),
@@ -984,7 +984,7 @@ impl OrchestratorConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct AdapterConfig {
     #[serde(default)]
     pub binary: Option<String>,

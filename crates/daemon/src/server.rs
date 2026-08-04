@@ -913,6 +913,14 @@ async fn run_subscription_loop(
                                 BroadcastMsg::RemoteState(manager.remote_state_payload()),
                                 conn_id,
                             );
+                            // A pending restart belongs to the daemon, not to
+                            // whoever was attached when it arose (spec 0190).
+                            forward_broadcast(
+                                &out_tx,
+                                &filter,
+                                BroadcastMsg::ConfigState(manager.config_state_payload()),
+                                conn_id,
+                            );
                         }
                         Some(SubCmd::Unsubscribe) => {
                             sub_rx = None;
@@ -944,6 +952,14 @@ async fn run_subscription_loop(
                         &out_tx,
                         &filter,
                         BroadcastMsg::RemoteState(manager.remote_state_payload()),
+                        conn_id,
+                    );
+                    // A pending restart belongs to the daemon, not to whoever
+                    // was attached when it arose (spec 0190).
+                    forward_broadcast(
+                        &out_tx,
+                        &filter,
+                        BroadcastMsg::ConfigState(manager.config_state_payload()),
                         conn_id,
                     );
                 }
@@ -992,6 +1008,7 @@ fn forward_broadcast(
             | BroadcastMsg::RemoteState(_)
             | BroadcastMsg::ChannelPublicationState(_)
             | BroadcastMsg::FeaturesState(_)
+            | BroadcastMsg::ConfigState(_)
             | BroadcastMsg::LayoutState(_) => true,
         };
         if !matches {
@@ -1083,6 +1100,13 @@ fn forward_broadcast(
                 Err(_) => return,
             };
             Notification::new(ipc_notif::FEATURES_STATE, Some(p))
+        }
+        BroadcastMsg::ConfigState(cs) => {
+            let p = match serde_json::to_value(&cs) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            Notification::new(ipc_notif::CONFIG_STATE, Some(p))
         }
         BroadcastMsg::LayoutState(l) => {
             let p = match serde_json::to_value(&l) {
@@ -2054,6 +2078,20 @@ pub(crate) async fn dispatch(
                     pid: std::process::id(),
                 }
             ),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
+    dispatch_entry!(ipc_method::CONFIG_RELOAD, {
+        // A config that does not parse comes back as a `ConfigApplyResult`
+        // carrying the error, not as an RPC error: the running configuration
+        // is intact either way, and the caller wants to see which fields are
+        // waiting on a restart in the same reply (spec 0190). Only a missing
+        // supervisor — tests, and nothing else — is a real failure.
+        match manager
+            .reload_config(crate::config_supervisor::ReloadReason::Ipc)
+            .await
+        {
+            Ok(result) => ok!(req, &result),
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });

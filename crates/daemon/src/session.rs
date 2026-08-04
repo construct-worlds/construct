@@ -340,6 +340,10 @@ pub enum BroadcastMsg {
     /// ambient feature actually skips work for lack of a smith credential,
     /// so clients can surface the degradation without polling.
     FeaturesState(construct_protocol::FeaturesStatusResult),
+    /// A `config.toml` reload settled (spec 0190). Carries what it applied
+    /// and what is still waiting on a restart. Also replayed on subscribe,
+    /// so a client attaching later still learns about a pending restart.
+    ConfigState(construct_protocol::ConfigStateNotificationPayload),
     /// The shared split layout changed — a client wrote it, or the daemon
     /// emptied a pane whose session went away. Carries the whole tree: there
     /// are no incremental layout deltas.
@@ -1346,14 +1350,28 @@ use widgets::WidgetSnapshot;
 
 pub struct SessionManager {
     storage: Arc<Storage>,
-    config: Arc<Config>,
-    /// Plugin action/event-hook runtime (spec 0152 phase 2). Set once from
-    /// daemon startup after construction; empty when no plugins are loaded.
-    plugins: std::sync::OnceLock<Arc<crate::plugins::PluginRuntime>>,
+    /// The configuration in force. Swapped wholesale by a reload (spec 0190),
+    /// never mutated in place — read it through [`SessionManager::config`],
+    /// which clones the `Arc` out before any await. Holding the guard across
+    /// one would make the enclosing future `!Send`.
+    config: std::sync::RwLock<Arc<Config>>,
+    /// Plugin action/event-hook runtime (spec 0152 phase 2). Set from daemon
+    /// startup after construction, and replaced by a config reload so a
+    /// newly installed or disabled plugin takes effect without a restart;
+    /// empty when no plugins are loaded.
+    plugins: std::sync::RwLock<Option<Arc<crate::plugins::PluginRuntime>>>,
     /// Handle to the service supervisor, so any caller can ask for a
     /// definition reload without depending on its internals. Set once from
     /// daemon startup; absent in tests, which never spawn one.
     services: std::sync::OnceLock<crate::service_supervisor::ServiceHandle>,
+    /// Handle to the config supervisor (spec 0190). Set once from daemon
+    /// startup; absent in tests, which never spawn one.
+    config_reloads: std::sync::OnceLock<crate::config_supervisor::ConfigHandle>,
+    /// Configuration that has been read but cannot take effect until the
+    /// daemon is restarted, named for an operator. Sticky: it survives later
+    /// reloads and client reconnects, because it is a property of this daemon
+    /// process and persists until the restart it names.
+    config_restart_required: std::sync::RwLock<Vec<String>>,
     /// Provider-neutral public exposure for channel-owned ingress endpoints.
     /// Separate from `services`: future channel implementations can register
     /// endpoints without depending on service definition internals.
@@ -1899,9 +1917,11 @@ impl SessionManager {
         Ok((
             Self {
                 storage,
-                config,
-                plugins: std::sync::OnceLock::new(),
+                config: std::sync::RwLock::new(config),
+                plugins: std::sync::RwLock::new(None),
                 services: std::sync::OnceLock::new(),
+                config_reloads: std::sync::OnceLock::new(),
+                config_restart_required: std::sync::RwLock::new(Vec::new()),
                 channel_publications: std::sync::OnceLock::new(),
                 adapter_runtime_dir,
                 sessions: RwLock::new(sessions),
@@ -1950,14 +1970,50 @@ impl SessionManager {
         let _ = self.self_ref.set(Arc::downgrade(self));
     }
 
-    /// Install the plugin runtime (spec 0152 phase 2). Called once from
-    /// daemon startup, right after construction; later calls are ignored.
-    pub fn set_plugin_runtime(&self, runtime: Arc<crate::plugins::PluginRuntime>) {
-        let _ = self.plugins.set(runtime);
+    /// The configuration in force, cloned out of the lock before any await.
+    ///
+    /// Returning an owned `Arc` rather than a guard is deliberate: a
+    /// `std::sync::RwLockReadGuard` is `!Send`, so a caller that held one
+    /// across an await would make its whole future `!Send` and fail to
+    /// compile where the IPC handler spawns it. Callers that read config
+    /// around an await must bind this once, up front.
+    pub(crate) fn config(&self) -> Arc<Config> {
+        self.config
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
-    pub(crate) fn plugin_runtime(&self) -> Option<&Arc<crate::plugins::PluginRuntime>> {
-        self.plugins.get()
+    /// Adopt a freshly loaded configuration (spec 0190). The reload swaps
+    /// this last, after storage, plugins, and the router, so anything reading
+    /// the new config sees subsystems that are at least as new.
+    pub(crate) fn set_config(&self, config: Arc<Config>) {
+        let mut slot = self
+            .config
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = config;
+    }
+
+    /// Install the plugin runtime (spec 0152 phase 2). Called from daemon
+    /// startup right after construction, and again by a config reload — a
+    /// plugin installed or disabled since boot takes effect without a
+    /// restart. Always pass a runtime built by `PluginRuntime::new`, never a
+    /// mutated one: `has_hooks` is precomputed there, and a stale copy would
+    /// silently stop dispatching a new plugin's event hooks.
+    pub fn set_plugin_runtime(&self, runtime: Arc<crate::plugins::PluginRuntime>) {
+        let mut slot = self
+            .plugins
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(runtime);
+    }
+
+    pub(crate) fn plugin_runtime(&self) -> Option<Arc<crate::plugins::PluginRuntime>> {
+        self.plugins
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Install the service supervisor handle. Called once from daemon startup.
@@ -1986,6 +2042,73 @@ impl SessionManager {
         self.services.get()
     }
 
+    pub(crate) fn storage(&self) -> &Arc<Storage> {
+        &self.storage
+    }
+
+    /// Install the config supervisor handle. Called once from daemon startup.
+    pub fn set_config_supervisor(&self, handle: crate::config_supervisor::ConfigHandle) {
+        let _ = self.config_reloads.set(handle);
+    }
+
+    /// Re-read `config.toml` and apply it (spec 0190).
+    ///
+    /// Errors when no supervisor is installed, which is the case in tests —
+    /// callers should treat that as "nothing to reload", not as a failure.
+    pub async fn reload_config(
+        &self,
+        reason: crate::config_supervisor::ReloadReason,
+    ) -> Result<construct_protocol::ConfigApplyResult> {
+        let Some(handle) = self.config_reloads.get() else {
+            anyhow::bail!("config supervisor is not running");
+        };
+        handle.reload(reason).await
+    }
+
+    /// Configuration read but waiting on a restart to take effect.
+    pub(crate) fn config_restart_required(&self) -> Vec<String> {
+        self.config_restart_required
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn set_config_restart_required(&self, fields: Vec<String>) {
+        let mut slot = self
+            .config_restart_required
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = fields;
+    }
+
+    /// The payload a subscribing client is replayed, so a pending restart
+    /// survives a reconnect. `applied` is empty here on purpose: a replay is
+    /// not a reload, and reporting it as one would show a stale transient
+    /// status to a client that just attached.
+    pub(crate) fn config_state_payload(&self) -> construct_protocol::ConfigStateNotificationPayload {
+        construct_protocol::ConfigStateNotificationPayload {
+            restart_required: self.config_restart_required(),
+            applied: Vec::new(),
+        }
+    }
+
+    pub(crate) fn broadcast_config_state(&self, result: &construct_protocol::ConfigApplyResult) {
+        let _ = self.broadcast.send(BroadcastMsg::ConfigState(
+            construct_protocol::ConfigStateNotificationPayload {
+                restart_required: result.restart_required.clone(),
+                applied: result.applied.clone(),
+            },
+        ));
+    }
+
+    /// Republish ambient feature status. A config reload can move
+    /// `suggest.enabled` or the orchestrator harness, and clients would
+    /// otherwise keep rendering the answer from before the edit.
+    pub(crate) async fn broadcast_features_state(&self) {
+        let status = self.features_status().await;
+        let _ = self.broadcast.send(BroadcastMsg::FeaturesState(status));
+    }
+
     pub fn set_channel_publications(
         &self,
         handle: crate::channel_publication::PublicationHandle,
@@ -2001,8 +2124,7 @@ impl SessionManager {
 
     /// Every plugin-contributed action, for `plugin.list_actions`.
     pub fn plugin_actions(&self) -> Vec<construct_protocol::PluginActionInfo> {
-        self.plugins
-            .get()
+        self.plugin_runtime()
             .map(|rt| rt.actions())
             .unwrap_or_default()
     }
@@ -2012,7 +2134,9 @@ impl SessionManager {
         &self,
         params: &construct_protocol::PluginRunActionParams,
     ) -> Result<()> {
-        let runtime = self.plugins.get().context("no plugins are loaded")?;
+        let runtime = self
+            .plugin_runtime()
+            .context("no plugins are loaded")?;
         runtime.run_action(
             &params.plugin_id,
             &params.action_id,
@@ -2594,8 +2718,12 @@ impl SessionManager {
     }
 
     pub async fn harnesses(&self) -> Vec<HarnessInfo> {
-        let mut out = Vec::with_capacity(self.config.adapters.len());
-        for (name, cfg) in self.config.adapters.iter() {
+        // Bound once, up front: `cfg` is borrowed across the availability
+        // probe below, so reading through `self.config()` inline would hold a
+        // `!Send` guard across an await.
+        let config = self.config();
+        let mut out = Vec::with_capacity(config.adapters.len());
+        for (name, cfg) in config.adapters.iter() {
             let binary_spec = cfg.binary.clone().unwrap_or_else(|| name.clone());
             let resolved = locate_binary(&binary_spec);
             let availability = self
@@ -2618,8 +2746,8 @@ impl SessionManager {
     /// live-detected status, plus which one (if any) is currently pinned.
     pub async fn smith_auth_status(&self) -> SmithAuthStatusResult {
         let methods = crate::availability::smith_auth_methods(&self.availability_cache).await;
-        let pinned = self
-            .config
+        let config = self.config();
+        let pinned = config
             .adapters
             .get("smith")
             .and_then(|a| a.env.get("CONSTRUCT_SMITH_MODEL"))
@@ -2641,9 +2769,16 @@ impl SessionManager {
 
     /// Pin (or clear) smith's default model by writing
     /// `[adapters.smith.env] CONSTRUCT_SMITH_MODEL` in `config.toml` (spec
-    /// 0069). Does not affect already-running adapters — only sessions
-    /// started after a daemon restart pick up the new pin, which
-    /// `SmithSetAuthMethodResult::note` tells the caller.
+    /// 0069). Does not affect already-running adapters — sessions started
+    /// after this pick up the new pin, which `SmithSetAuthMethodResult::note`
+    /// tells the caller.
+    ///
+    /// Applies the write itself rather than leaving it to the watcher (spec
+    /// 0190): this is the one caller that edits `config.toml` from inside the
+    /// daemon, and waiting up to a watch interval to adopt our own write
+    /// would make the dialog appear not to have taken. The watcher's later
+    /// tick sees the changed fingerprint and reloads an already-current file,
+    /// which is a no-op.
     pub async fn set_smith_auth_method(&self, method: &str) -> Result<SmithSetAuthMethodResult> {
         let methods = crate::availability::smith_auth_methods(&self.availability_cache).await;
         let model_spec = if method == "auto" {
@@ -2657,10 +2792,15 @@ impl SessionManager {
         };
         let paths = construct_protocol::paths::Paths::discover();
         crate::config::set_smith_model_pin(&paths, model_spec.as_deref())?;
+        // Best-effort: without a supervisor (tests) the write still stands
+        // and the next daemon start reads it.
+        let _ = self
+            .reload_config(crate::config_supervisor::ReloadReason::Ipc)
+            .await;
         Ok(SmithSetAuthMethodResult {
             model_spec,
-            note: "new sessions pick up this default after `construct daemon restart`; \
-                   already-running sessions keep their current model"
+            note: "new sessions pick up this default; already-running sessions keep their \
+                   current model"
                 .to_string(),
         })
     }
@@ -2673,14 +2813,16 @@ impl SessionManager {
     /// already existed, but nothing tied the degraded features to them.
     pub async fn features_status(&self) -> construct_protocol::FeaturesStatusResult {
         let smith = crate::availability::probe_smith(&self.availability_cache).await;
-        let orchestrator = match self.config.orchestrator.effective_harness() {
+        // Bound once, up front: `name` borrows from it and stays live across
+        // the availability probe below, which cannot hold a `!Send` guard.
+        let config = self.config();
+        let orchestrator = match config.orchestrator.effective_harness() {
             None => None,
             Some(name) => {
                 let avail = if name == "smith" {
                     smith.clone()
                 } else {
-                    let binary_spec = self
-                        .config
+                    let binary_spec = config
                         .adapters
                         .get(name)
                         .and_then(|c| c.binary.clone())
@@ -2696,7 +2838,7 @@ impl SessionManager {
             features: crate::availability::ambient_features(&crate::availability::FeatureInputs {
                 smith,
                 title_gen: crate::availability::smith_title_gen_available(),
-                suggest_enabled: self.config.suggest.enabled,
+                suggest_enabled: config.suggest.enabled,
                 orchestrator,
             }),
             degradation_observed: self.ambient_degraded.load(Ordering::SeqCst),
@@ -4628,7 +4770,7 @@ impl SessionManager {
         // on a one-shot that could only fail, so OAuth-only machines never
         // reached the fallback below that exists for them.
         let smith_cmd = if crate::availability::smith_title_gen_available() {
-            self.config.adapters.get("smith").and_then(|smith_adapter| {
+            self.config().adapters.get("smith").and_then(|smith_adapter| {
                 let binary_spec = smith_adapter
                     .binary
                     .clone()
@@ -4896,7 +5038,7 @@ impl SessionManager {
         id: &str,
         keywords: Option<String>,
     ) -> Result<bool> {
-        if !self.config.suggest.enabled {
+        if !self.config().suggest.enabled {
             return Ok(false);
         }
         let entry = self
@@ -4948,7 +5090,7 @@ impl SessionManager {
                 self.note_ambient_degradation("suggestions").await;
                 return Ok(false);
             }
-            let Some(smith_adapter) = self.config.adapters.get("smith").cloned() else {
+            let Some(smith_adapter) = self.config().adapters.get("smith").cloned() else {
                 return Ok(false);
             };
             let binary_spec = smith_adapter
