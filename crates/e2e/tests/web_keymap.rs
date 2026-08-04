@@ -529,6 +529,200 @@ async fn web_keymap_list_navigation_keeps_the_caret_on_the_list() {
     );
 }
 
+/// Opening the suggestion deck is the one gesture that hands it the keyboard.
+///
+/// The standing rule — typing belongs to the terminal, suggestion chrome never
+/// takes it — holds everywhere else, so this asserts both halves: while the
+/// deck is open printable keys search prompt history instead of reaching the
+/// terminal, and the caret never actually moves, so `C-g` / Escape / accepting
+/// a card give the keyboard straight back with nothing to restore.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_keymap_suggestion_deck_takes_the_keyboard_once_opened() {
+    let d = Daemon::spawn().await.expect("daemon");
+    let r = d
+        .client
+        .remote_start(construct_protocol::TunnelProvider::None, None)
+        .await
+        .expect("remote.start");
+
+    let cwd = std::env::temp_dir().to_string_lossy().to_string();
+    let mut params = shell_session_params(&cwd, "alpha");
+    params.mode = Some("interactive".to_string());
+    d.client.create(params).await.expect("create alpha");
+
+    let Some((browser, mut handler)) = launch_browser().await else {
+        eprintln!("skipping web_keymap suggestion-deck test: could not launch Chromium");
+        return;
+    };
+    let _handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+    let page = browser.new_page("about:blank").await.expect("new page");
+    set_viewport(&page, WIDE).await;
+    let url = inject_userinfo(&r.local_url, "remote", &r.password);
+    page.goto(&url).await.expect("goto");
+    wait_conn_open(&page).await;
+    assert!(
+        wait_for_bool(&page, "!!state.currentId").await,
+        "a session should be selected once the list loads"
+    );
+    // Two fixtures, both pinned rather than raced:
+    //
+    // * the orb only exists while the session awaits input;
+    // * the history is seeded in the page. A PTY-backed shell session takes
+    //   `session.input` as raw terminal bytes, so nothing the test could send
+    //   would land in the global history — recording has its own coverage in
+    //   the daemon, and what is under test here is key routing over a known
+    //   set of prompts.
+    let _ = page
+        .evaluate(
+            r#"
+            (() => {
+              window.sessionStatusLabel = () => 'awaiting_input';
+              state.promptHistory = [
+                { text: 'echo cargo build workspace' },
+                { text: 'echo commit the branch' },
+                { text: 'echo check background tasks' },
+              ];
+              // Opening the deck refreshes history from the daemon, which is
+              // empty here and would wipe the fixtures mid-test.
+              window.refreshPromptHistory = () => Promise.resolve();
+              updateSuggestOrb();
+              return true;
+            })()
+        "#,
+        )
+        .await;
+    assert!(
+        wait_for_bool(&page, "suggestDeckIsAvailable()").await,
+        "the deck must be available before a chord can open it"
+    );
+
+    let caret_before = text_of_active(&page).await;
+
+    // --- C-x . opens it, and then typing searches history -----------------
+    chord(&page, ".").await;
+    assert!(
+        wait_for_bool(&page, "suggestFanIsOpen()").await,
+        "C-x . should open the deck, same as the TUI"
+    );
+
+    assert!(
+        press_consumed(&page, "c").await,
+        "with the deck open a printable key belongs to the deck, not the terminal"
+    );
+    assert!(
+        wait_for_bool(&page, "suggestStackIsOpen() && suggestNav.query === 'c'").await,
+        "the first character typed should land in the history search, which is \
+         the deck's default surface"
+    );
+    for ch in ["o", "m", "m", "i", "t"] {
+        assert!(
+            press_consumed(&page, ch).await,
+            "every character of the search must be consumed by the deck"
+        );
+    }
+    assert!(
+        wait_for_bool(&page, "suggestNav.query === 'commit'").await,
+        "typed characters should accumulate into one query"
+    );
+    assert!(
+        wait_for_bool(
+            &page,
+            "(() => { const c = [...suggestCardsEl.querySelectorAll('.suggest-card')];
+                      return c.length === 1 && c[0].textContent.includes('commit the branch'); })()",
+        )
+        .await,
+        "the search should narrow history to the matching prompt"
+    );
+    save_screenshot(&page, "web_keymap_suggest_history_search.png").await;
+
+    // Backspace edits the query rather than closing anything.
+    assert!(press_consumed(&page, "Backspace").await, "Backspace edits the query");
+    assert!(
+        wait_for_bool(&page, "suggestNav.query === 'commi'").await,
+        "Backspace should trim the search, not leave the surface"
+    );
+
+    // The caret never moved through any of that — which is the whole reason
+    // handing the keyboard back needs no restoration.
+    let caret_during = text_of_active(&page).await;
+    assert_eq!(
+        caret_before, caret_during,
+        "the deck must route keys without taking DOM focus"
+    );
+
+    // --- arrows walk the matches, Enter accepts ---------------------------
+    // Accept into a visible composer so the assertion is on the staged text
+    // rather than on a fire-and-forget send, and so this also pins spec
+    // 0109's rule that accepting stages for review instead of sending.
+    let _ = page
+        .evaluate("composerEl.hidden = false; inputEl.value = ''; true")
+        .await;
+    assert!(press_consumed(&page, "ArrowDown").await, "ArrowDown moves the cursor");
+    assert!(
+        wait_for_bool(&page, "suggestNav.index === 0").await,
+        "ArrowDown should highlight the first match"
+    );
+    save_screenshot(&page, "web_keymap_suggest_cursor.png").await;
+    assert!(
+        press_consumed(&page, "Enter").await,
+        "Enter should accept the highlighted row"
+    );
+    assert!(
+        wait_for_bool(&page, "!suggestDeckIsOpen()").await,
+        "accepting a suggestion closes the deck and returns the keyboard"
+    );
+    assert!(
+        wait_for_bool(&page, "inputEl.value.includes('commit the branch')").await,
+        "Enter should run the highlighted card's own action, staging the \
+         recalled prompt for review"
+    );
+
+    // --- C-g and Escape both hand the keyboard back -----------------------
+    chord(&page, ".").await;
+    assert!(wait_for_bool(&page, "suggestDeckIsOpen()").await, "reopen for C-g");
+    assert!(
+        press_ctrl_consumed(&page, "g").await,
+        "C-g is the TUI's abort and the deck honors it"
+    );
+    assert!(
+        wait_for_bool(&page, "!suggestDeckIsOpen()").await,
+        "C-g should close the deck"
+    );
+
+    chord(&page, ".").await;
+    assert!(wait_for_bool(&page, "suggestDeckIsOpen()").await, "reopen for Escape");
+    press(&page, "Escape", false).await;
+    assert!(
+        wait_for_bool(&page, "!suggestDeckIsOpen()").await,
+        "Escape should still unwind the deck through the overlay stack"
+    );
+
+    // Closing resets the surface: the next open is a fresh search, not a
+    // resumed one.
+    chord(&page, ".").await;
+    assert!(
+        wait_for_bool(&page, "suggestNav.query === '' && suggestNav.index === -1").await,
+        "reopening the deck should start from a clean search"
+    );
+    press(&page, "Escape", false).await;
+
+    // --- phones keep the old rule ----------------------------------------
+    // The composer and its virtual keyboard are the point of that layout, so
+    // a tap on the orb must not divert the next character out of a message.
+    set_viewport(&page, NARROW).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _ = page.evaluate("suggestOrbClick(); true").await;
+    assert!(
+        wait_for_bool(&page, "suggestDeckIsOpen()").await,
+        "the orb should still open the deck on a narrow layout"
+    );
+    assert!(
+        !press_consumed(&page, "c").await,
+        "on a narrow layout the deck must leave typing to the composer"
+    );
+}
+
 /// A label for whatever currently holds focus, for failure messages.
 async fn text_of_active(page: &Page) -> String {
     page.evaluate(
@@ -564,6 +758,39 @@ async fn press(page: &Page, key: &str, ctrl: bool) {
     );
     let _ = page.evaluate(js.as_str()).await;
     tokio::time::sleep(Duration::from_millis(120)).await;
+}
+
+/// Press a key and report whether a handler claimed it. `dispatchEvent`
+/// returns false exactly when something called `preventDefault`, which is the
+/// difference between "the deck took this keystroke" and "it fell through to
+/// the terminal".
+async fn press_consumed(page: &Page, key: &str) -> bool {
+    press_consumed_with(page, key, false).await
+}
+
+async fn press_ctrl_consumed(page: &Page, key: &str) -> bool {
+    press_consumed_with(page, key, true).await
+}
+
+async fn press_consumed_with(page: &Page, key: &str, ctrl: bool) -> bool {
+    let js = format!(
+        "(() => {{
+           const target = document.activeElement || document.body;
+           return !target.dispatchEvent(new KeyboardEvent('keydown', {{
+             key: {key:?}, ctrlKey: {ctrl}, bubbles: true, cancelable: true,
+           }}));
+         }})()",
+        key = key,
+        ctrl = ctrl,
+    );
+    let consumed = page
+        .evaluate(js.as_str())
+        .await
+        .ok()
+        .and_then(|r| r.into_value::<bool>().ok())
+        .unwrap_or(false);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    consumed
 }
 
 async fn text_of(page: &Page, sel: &str) -> String {
