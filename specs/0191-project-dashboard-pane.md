@@ -15,9 +15,10 @@ is an observation and hand-off surface, not a second session workspace.
 
 Top to bottom, dropping lower-priority regions when the pane is short:
 
-1. **Header** — project name, member count, project-scoped tally (working /
-   wants you / errored, same ranking and glyphs as the fleet tally), lifetime
-   token total when non-zero, and a dominant cwd line.
+1. **Header** — member count, project-scoped tally (working / wants you /
+   errored, same ranking and glyphs as the fleet tally), lifetime token total
+   when non-zero, and a dominant cwd line. Project identity is not repeated
+   here: the main pane title bar already shows `project: {name}`.
 2. **Token meter** — project-scoped throughput history fed from the same
    `Cost` / busy-time path as the fleet meter, filtered to members of this
    project. Idle projects show a quiet empty line rather than a blank grid.
