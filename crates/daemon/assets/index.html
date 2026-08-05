@@ -4863,6 +4863,13 @@ const state = {
   // full-screen PTY apps like codex repaint on resize, which looks
   // like terminal history replaying from the top after Insert.
   composerResizeSuppressPtyResizeUntil: 0,
+  // Layout churn (session-list toggle, keyboard show/hide, grid resizes)
+  // clamps the xterm viewport's scrollTop and fires scroll events the user
+  // never made. Those must not be read as "the user scrolled to the top",
+  // or the lazy history loader replays the raw backlog over a terminal
+  // that was quietly following live output (issue: mobile menu toggle
+  // visibly replayed the session and parked the scroll at the top).
+  terminalScrollChurnUntil: 0,
   // PTY events that arrived during the `pty_replay` round-trip get
   // queued here, then drained after the snapshot is written. Keeps
   // history-before-live ordering correct without a race window.
@@ -4975,6 +4982,12 @@ const WIDGET_VISIBILITY_KEY_PREFIX = "agentd.web.widgets.visible.";
 const WIDGET_AUTOHIDE_MS = 15000;
 const PTY_REPLAY_PAGE_BYTES = 64 * 1024;
 const PTY_REPLAY_TOP_THRESHOLD_ROWS = 20;
+// How long after a layout change scroll events are treated as browser
+// fallout instead of user scrolling (see noteTerminalScrollChurn). Long
+// enough to cover the pty-resize debounce (120ms) plus a remote echo
+// round-trip; each churn stage refreshes the window, so it does not need
+// to cover the whole sequence in one span.
+const TERMINAL_SCROLL_CHURN_SUPPRESS_MS = 600;
 const TERMINAL_TRANSCRIPT_TAIL_EVENTS = 200;
 const TERMINAL_TRANSCRIPT_PAGE_EVENTS = 200;
 const PLAYBOOK_HOVER_REPLAY_BYTES = 32 * 1024;
@@ -11865,7 +11878,12 @@ function createTerminalHandle(id) {
   // claims daemon PTY geometry; hidden cached terminals just keep their
   // local dimensions ready for instant reveal.
   new ResizeObserver(() => {
-    if (state.currentId === id) refitTerminal();
+    if (state.currentId !== id) return;
+    // Any host geometry change (list toggle, keyboard, composer growth)
+    // can clamp the viewport's scrollTop; those scroll events are layout
+    // fallout, not the user reading history.
+    noteTerminalScrollChurn();
+    refitTerminal();
   }).observe(host);
 
   host.addEventListener("wheel", (ev) => {
@@ -12103,9 +12121,31 @@ function shouldLoadOlderPtyReplay(handle, { force = false } = {}) {
     if (handle.transcriptHistoryBeforeSeq <= 1) return false;
   } else if (!hasOlderPtyHistory(handle)) return false;
   if (force) return true;
+  // Implicit triggers come from scroll events. During layout churn the
+  // browser clamps the viewport's scrollTop itself, so a scroll event is
+  // not evidence of user intent — and misreading one replays raw history
+  // over a live terminal (see terminalScrollChurnUntil).
+  if (performance.now() <= state.terminalScrollChurnUntil) return false;
   const active = handle.term && handle.term.buffer && handle.term.buffer.active;
   if (!active) return false;
+  // A bottom-following terminal is watching live output, not reading
+  // history. When the whole rendered buffer is shorter than the top
+  // threshold (a TUI child repaints in place, so its rendered scrollback
+  // is tiny), "at the bottom" is also "near the top" — without this
+  // guard any scroll event would trigger a history replay.
+  if (active.viewportY >= active.baseY) return false;
   return active.viewportY <= PTY_REPLAY_TOP_THRESHOLD_ROWS;
+}
+
+// Stamp the start of a window in which terminal scroll events are assumed
+// to be browser layout fallout rather than user scrolling. Refreshed by
+// every stage of a layout change (CSS toggle, host ResizeObserver, grid
+// resize), so the window covers the whole toggle → refit → PTY echo →
+// grid-adopt sequence even when the stages are spread over slow rpc
+// round-trips.
+function noteTerminalScrollChurn() {
+  state.terminalScrollChurnUntil =
+    performance.now() + TERMINAL_SCROLL_CHURN_SUPPRESS_MS;
 }
 
 async function maybeLoadOlderPtyReplay(id, opts = {}) {
@@ -12338,6 +12378,9 @@ function resizeTermGridTo(term, cols, rows) {
   if (term.cols === cols && term.rows === rows) return;
   const active = term.buffer && term.buffer.active;
   const wasAtBottom = !!active && active.viewportY >= active.baseY;
+  // A grid resize reflows the buffer and emits scroll events of its own;
+  // keep them inside the churn window too.
+  if (term === state.term) noteTerminalScrollChurn();
   term.resize(cols, rows);
   if (wasAtBottom) restoreTerminalBottomFor(term);
 }
@@ -12965,6 +13008,11 @@ function setSessionListWidth(width, persist = true) {
 
 function setSessionListVisible(visible, persist = true) {
   state.sessionListVisible = !!visible;
+  // Collapsing/expanding the list reshapes the terminal host, which can
+  // clamp the xterm viewport's scrollTop. Stamp the churn window BEFORE
+  // the class flip so the resulting scroll events are never mistaken for
+  // the user scrolling into history.
+  noteTerminalScrollChurn();
   if (isNarrowLayout()) {
     sessionListEl.classList.toggle("collapsed", !visible);
   } else {
