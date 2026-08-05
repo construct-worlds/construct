@@ -2660,6 +2660,25 @@ pub struct SessionSummary {
     pub pending_input: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_prompt: Option<String>,
+    /// Who spoke the most recent chat `Message` — pairs with `last_message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_role: Option<MessageRole>,
+    /// Short plain-text snippet of the most recent chat `Message`, so
+    /// clients can show what a session is doing / asking without attaching
+    /// or fetching its transcript (spec 0191). Streaming assistant deltas
+    /// accumulate into one snippet until another role speaks; the daemon
+    /// caps the length. Restored from the transcript at load like
+    /// `last_message_at`, so it survives restarts and self-heals for
+    /// sessions recorded before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message: Option<String>,
+    /// Message of the most recent `Error` event (or a synthesized
+    /// `exited {code}` for a nonzero `Done`), cleared when the session
+    /// starts running again. Clients gate display on
+    /// `state == Errored` — the field answers "errored *why*", not
+    /// "did it ever error". Restored from the transcript at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
     #[serde(default)]
     pub event_count: u64,
     /// True if the session's adapter owns a PTY (clients should default the
@@ -2785,6 +2804,62 @@ impl SessionSummary {
             busy = busy.saturating_add(now_ms.saturating_sub(since).max(0) as u64);
         }
         busy
+    }
+
+    /// Fold a chat `Message` into `last_message` / `last_message_role`.
+    ///
+    /// Consecutive assistant texts are streaming deltas of one utterance and
+    /// accumulate into a single snippet; any other role (or an assistant
+    /// message after someone else spoke) starts a fresh one. The snippet is
+    /// capped at [`LAST_MESSAGE_SNIPPET_CAP`] characters — once full,
+    /// further deltas of the same utterance are dropped. Both the daemon's
+    /// live event fold and its load-time transcript scan call this, so the
+    /// restored snippet matches what live observation would have produced.
+    pub fn observe_last_message(&mut self, role: MessageRole, text: &str) {
+        fold_last_message(&mut self.last_message_role, &mut self.last_message, role, text);
+    }
+}
+
+/// The fold behind [`SessionSummary::observe_last_message`], usable against
+/// detached slots so a transcript scan can accumulate without a summary.
+pub fn fold_last_message(
+    role_slot: &mut Option<MessageRole>,
+    text_slot: &mut Option<String>,
+    role: MessageRole,
+    text: &str,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    if role == MessageRole::Assistant && *role_slot == Some(MessageRole::Assistant) {
+        let snippet = text_slot.get_or_insert_with(String::new);
+        if !snippet.ends_with('…') {
+            snippet.push_str(text);
+            cap_snippet(snippet);
+        }
+        return;
+    }
+    let mut snippet = text.trim_start().to_string();
+    cap_snippet(&mut snippet);
+    *text_slot = Some(snippet);
+    *role_slot = Some(role);
+}
+
+/// Character cap for [`SessionSummary::last_message`] and
+/// [`SessionSummary::last_error`] snippets.
+pub const LAST_MESSAGE_SNIPPET_CAP: usize = 240;
+
+/// Trim and cap free-form text into a summary-sized snippet.
+pub fn snippet(text: &str) -> String {
+    let mut s = text.trim().to_string();
+    cap_snippet(&mut s);
+    s
+}
+
+fn cap_snippet(s: &mut String) {
+    if s.chars().count() > LAST_MESSAGE_SNIPPET_CAP {
+        *s = s.chars().take(LAST_MESSAGE_SNIPPET_CAP).collect();
+        s.push('…');
     }
 }
 
@@ -4679,6 +4754,53 @@ pub struct PingResult {
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_id: Option<String>,
+}
+
+#[cfg(test)]
+mod last_message_fold_tests {
+    use super::*;
+
+    /// Consecutive assistant texts are streaming deltas of one utterance
+    /// and accumulate; any other speaker starts a fresh snippet.
+    #[test]
+    fn assistant_deltas_coalesce_until_another_role_speaks() {
+        let mut role = None;
+        let mut text = None;
+        fold_last_message(&mut role, &mut text, MessageRole::Assistant, "Hel");
+        fold_last_message(&mut role, &mut text, MessageRole::Assistant, "lo");
+        assert_eq!(text.as_deref(), Some("Hello"));
+        fold_last_message(&mut role, &mut text, MessageRole::User, "hi");
+        assert_eq!(role, Some(MessageRole::User));
+        assert_eq!(text.as_deref(), Some("hi"));
+        fold_last_message(&mut role, &mut text, MessageRole::Assistant, "fresh");
+        assert_eq!(text.as_deref(), Some("fresh"));
+    }
+
+    /// The snippet caps: once full it stops growing, so a huge streamed
+    /// answer cannot bloat every summary broadcast.
+    #[test]
+    fn snippet_caps_and_stops_accumulating() {
+        let mut role = None;
+        let mut text = None;
+        let chunk = "x".repeat(LAST_MESSAGE_SNIPPET_CAP);
+        fold_last_message(&mut role, &mut text, MessageRole::Assistant, &chunk);
+        fold_last_message(&mut role, &mut text, MessageRole::Assistant, &chunk);
+        fold_last_message(&mut role, &mut text, MessageRole::Assistant, &chunk);
+        let s = text.expect("snippet");
+        assert_eq!(s.chars().count(), LAST_MESSAGE_SNIPPET_CAP + 1);
+        assert!(s.ends_with('…'));
+    }
+
+    /// Whitespace-only deltas are noise, not a new "last word".
+    #[test]
+    fn blank_text_does_not_disturb_the_snippet() {
+        let mut role = None;
+        let mut text = None;
+        fold_last_message(&mut role, &mut text, MessageRole::Assistant, "answer");
+        fold_last_message(&mut role, &mut text, MessageRole::User, "  \n ");
+        assert_eq!(role, Some(MessageRole::Assistant));
+        assert_eq!(text.as_deref(), Some("answer"));
+    }
 }
 
 #[cfg(test)]

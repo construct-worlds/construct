@@ -63,6 +63,9 @@ impl SessionManager {
                 s.event_count = 0;
                 s.message_count = 0;
                 s.last_message_at = None;
+                s.last_message = None;
+                s.last_message_role = None;
+                s.last_error = None;
                 s.tokens = Default::default();
                 s.context_used = None;
                 s.context_window = None;
@@ -433,9 +436,10 @@ impl SessionManager {
             let mut s = entry.summary.write().await;
             s.last_event_at = Some(now);
             s.event_count = seq;
-            if matches!(&event, SessionEvent::Message { .. }) {
+            if let SessionEvent::Message { role, text } = &event {
                 s.message_count = s.message_count.saturating_add(1);
                 s.last_message_at = Some(now);
+                s.observe_last_message(*role, text);
             }
             let prev_state = s.state;
             match &event {
@@ -499,12 +503,14 @@ impl SessionManager {
                     let terminal = if *exit_code == 0 {
                         SessionState::Done
                     } else {
+                        s.last_error = Some(format!("exited {exit_code}"));
                         SessionState::Errored
                     };
                     crate::session::set_state_tracked(&mut s, terminal, now.timestamp_millis());
                     s.pending_input = false;
                 }
-                SessionEvent::Error { .. } => {
+                SessionEvent::Error { message } => {
+                    s.last_error = Some(construct_protocol::snippet(message));
                     crate::session::set_state_tracked(
                         &mut s,
                         SessionState::Errored,
@@ -721,6 +727,9 @@ impl SessionManager {
                 worktree: owner_summary.worktree.clone(),
                 pending_input: false,
                 last_prompt: None,
+                last_message_role: None,
+                last_message: None,
+                last_error: None,
                 event_count: 0,
                 has_pty: false,
                 mode: Some("native-subagent".into()),
