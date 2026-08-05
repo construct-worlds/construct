@@ -133,6 +133,57 @@ compute time, and netting cache reads out of them would report a throughput
 no bill and no provider agrees with. Exact per-model cached figures belong in
 the hover detail, which is where a darker band gets a number.
 
+### The hover detail restates the column as bars
+
+Hovering a column details what that span consumed: the span and the column's
+total, then one row per model that contributed to it.
+
+Those rows are **bars, not a sentence of numbers**. A column is a stack, and
+the question asked of it — what was this mostly, and how much of that was
+real work — is a question about proportion. Comma-separated figures leave the
+division to be done by eye, and past two models a single line of them reads
+as a run of text with no shape at all. Each row therefore draws that model's
+share of the column as a bar, and keeps its exact figures beside it: the bar
+answers the proportion, the figures answer the amount, and neither has to
+stand in for the other.
+
+The bars carry the column's own tones, laid along a row instead of up one: one
+hue per model, the cache-served part darker at the bar's start and the fresh
+part full-strength after it. A hover that recolored or reordered what it
+details would be describing a different graph than the one under the pointer.
+
+They do **not** inherit the column's sub-cell resolution. A column is a few
+cells tall and buys precision by topping out on a partial block glyph; a bar
+has room for twenty cells and does not need to. Ending on a glyph would cost
+something a bar cannot afford instead: cells a band fills outright are painted
+as background, and a foreground block set beside them is drawn only where the
+font puts ink — a font that draws it short of the line box notches the bar's
+corner, so the rectangle reads as damaged rather than as precise. A bar
+therefore spends whole cells only, and its parts are apportioned by
+largest-remainder so they still sum to exactly its length.
+
+Rows follow series order — the order the column stacks them and the legend
+names them — not size. Reordering by size would make the detail's rows and the
+band they describe disagree about position, which is the same reading failure
+that fixes the stack's order in the first place.
+
+Shares are drawn against the hovered column's own total, so the bars are read
+against each other and a model that did any work at all keeps a visible bar
+however small its share; the figures beside it, not the bar, carry how the
+column compares to its neighbours. A pane too narrow for a bar whose cells
+can still separate one share from another shows the figures alone rather than
+a stub bar that misstates every share.
+
+The figures name the cache-served share in words. A glyph standing in for
+"cached" has to be learned before the row can be read, and one borrowed from
+another vocabulary — a refresh arrow, say — actively misleads; the box can
+simply be as wide as the words need.
+
+Any meter drawn from these buckets details itself this way, whether it is the
+fleet-wide meter or one scoped to a subset of sessions (spec 0191). Two
+graphs of the same data with two different hover vocabularies would make the
+scoping look like a difference in kind.
+
 ### Buckets are arrival time
 
 A sample lands in the bucket in which its report *arrived*, not spread over
@@ -276,6 +327,18 @@ inspecting the rest.
 - Because the bars carry no stated ceiling, a client must not invite
   cross-time comparison of bar heights alone; the legend's rates are the
   figure that survives the scale moving.
+- The hover detail's bars and the column's bands share tones and order: a
+  change to how a band is colored or stacked has to move both, or the detail
+  starts describing a graph the user isn't looking at. Resolution is where
+  they legitimately differ — the column needs eighths of a cell, the bar needs
+  a square edge — and neither should be pushed onto the other.
+- Any surface that fills cells outright as background must not put a partial
+  block glyph beside them where an edge shows. The two are only
+  interchangeable while the glyph's neighbours are empty; against filled cells
+  the font's leading becomes a visible notch (#1183).
+- The hover detail is the meter's exact-figures surface: it may add shape but
+  may not drop the per-model volume or the cached subset in favor of it. A
+  proportion is not an amount.
 - Compute time must be attributed only to model-backed sessions. A session
   running a shell command spends most of its life busy with no model behind
   it; counting that would divide real token output by unrelated seconds and
@@ -343,3 +406,13 @@ inspecting the rest.
 - A harness reports no cache figure at all: its bands are drawn solid, entirely
   as new work, which is what "nothing was cached" looks like — the meter does
   not infer a cached share from the size of the prompt.
+- A column mixing three models is hovered: the detail names the span and the
+  column's total, then draws three bars in the same order and hues the column
+  stacked them, each with its own token figure and, where the provider cached
+  part of the prompt, that subset marked as such. Which model dominated the
+  column is answered by the bars' lengths; how much it actually was, by the
+  figures beside them.
+- One model in that column was almost entirely cache-served: its bar is nearly
+  all darker tone, so a long conversation being replayed is distinguishable
+  from the same volume of new work at a glance rather than by comparing two
+  numbers.

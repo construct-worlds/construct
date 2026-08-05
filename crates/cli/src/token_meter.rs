@@ -806,9 +806,23 @@ pub fn band_cell<K: BandPaint>(row: usize, band: K, fill: usize) -> ColumnCell<K
 /// their tokens, largest-remainder so the parts sum to exactly `filled` and
 /// no visible band rounds away to nothing.
 pub fn stacked_eighths<K: Copy>(stacked: &[(K, u64)], total: u64, filled: usize) -> Vec<(K, usize)> {
-    if total == 0 || filled == 0 {
+    split_units(stacked, total, filled)
+}
+
+/// Hand out `units` of drawing space to bands in proportion to their tokens,
+/// largest-remainder so the parts sum to exactly `units` and no band that has
+/// volume rounds away to nothing.
+///
+/// A column's unit is an eighth of a cell (see [`stacked_eighths`]); a
+/// horizontal bar's unit is a whole cell, because a bar drawn along a row has
+/// to end on a cell boundary to keep a square edge — see the hover detail in
+/// the TUI renderer.
+pub fn split_units<K: Copy>(parts: &[(K, u64)], total: u64, units: usize) -> Vec<(K, usize)> {
+    if total == 0 || units == 0 {
         return Vec::new();
     }
+    let stacked = parts;
+    let filled = units;
     let mut out: Vec<(K, usize)> = Vec::with_capacity(stacked.len());
     let mut remainders: Vec<(usize, f64)> = Vec::with_capacity(stacked.len());
     let mut assigned = 0usize;
@@ -1328,6 +1342,43 @@ mod tests {
                 fg: (0, Part::New),
                 bg: Some((1, Part::New)),
             }]
+        );
+    }
+
+    /// A horizontal bar spends whole cells, so `split_units` has to hand out
+    /// exactly the cells asked for and give a band with volume at least one —
+    /// the hover detail's bars have no sub-cell resolution to fall back on.
+    #[test]
+    fn split_units_hands_out_whole_cells_exactly() {
+        let parts = [((0u16, Part::Cached), 2_000u64), ((0u16, Part::New), 3_000)];
+        let cells = split_units(&parts, 5_000, 15);
+        assert_eq!(cells.iter().map(|(_, n)| *n).sum::<usize>(), 15);
+        assert_eq!(cells[0], ((0, Part::Cached), 6), "2/5 of 15 cells");
+        assert_eq!(cells[1], ((0, Part::New), 9));
+
+        // A part small enough to floor to zero still takes a cell, at the
+        // expense of the largest one — a band drawn as nothing would
+        // contradict the figure printed beside it.
+        let lopsided = split_units(
+            &[((0u16, Part::Cached), 1u64), ((0u16, Part::New), 999)],
+            1_000,
+            8,
+        );
+        assert_eq!(lopsided.iter().map(|(_, n)| *n).sum::<usize>(), 8);
+        assert!(
+            lopsided.iter().all(|(_, n)| *n >= 1),
+            "no band vanishes: {lopsided:?}"
+        );
+    }
+
+    /// The column stack is the same split at eighth resolution, so the two
+    /// entry points cannot drift.
+    #[test]
+    fn stacked_eighths_is_the_same_split_in_eighths() {
+        let parts = [((0u16, Part::Cached), 1_000u64), ((1u16, Part::New), 3_000)];
+        assert_eq!(
+            stacked_eighths(&parts, 4_000, 32),
+            split_units(&parts, 4_000, 32)
         );
     }
 

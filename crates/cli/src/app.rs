@@ -18473,6 +18473,91 @@ mod tests {
         assert!(painted, "no bar drawn:\n{out}");
     }
 
+    /// Hovering a column details it as a bar per model: the model's name, a
+    /// horizontal bar in its own hue with the cache-served part in the darker
+    /// tone, and the exact figures the bar stands for (spec 0167).
+    #[tokio::test]
+    async fn hovering_a_meter_column_details_it_as_bars_per_model() {
+        let (mut app, _dir, _server) = token_meter_app(&[]).await;
+        // Two models in one bucket, one of them part cache-served, so the
+        // detail has to draw two rows and two tones.
+        for (model, tokens, cached) in [
+            ("claude-opus-5", 18_000u64, 9_000u64),
+            ("gpt-5.5", 6_000, 0),
+        ] {
+            app.observe_cost_for_meter(
+                "s1",
+                &SessionEvent::Cost {
+                    usd: 0.0,
+                    tokens_in: tokens,
+                    tokens_out: 0,
+                    tokens_cached: cached,
+                    model: Some(model.to_string()),
+                },
+            );
+        }
+        // First frame to learn where the graph is, then hover its newest
+        // column and draw again.
+        let _ = rendered(&mut app, 140, 40);
+        let graph = app
+            .layout
+            .matrix_token_graph_area
+            .expect("the meter drew a graph area");
+        app.mouse_pos = Some((graph.x + graph.width - 1, graph.y + graph.height / 2));
+        let out = rendered(&mut app, 140, 40);
+
+        assert!(
+            out.contains("24k tok"),
+            "the header names the column's total:\n{out}"
+        );
+        assert!(
+            out.contains("18k") && out.contains("9.0k cached"),
+            "each row keeps its exact figures, cached named as a subset:\n{out}"
+        );
+        // The bars are paint, not text — and paint made entirely of background
+        // fills, so a bar is a clean rectangle on every font (#1183). Find the
+        // row carrying the opus figures and look at what it painted.
+        let backend = ratatui::backend::TestBackend::new(140, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let buf = term.backend().buffer().clone();
+        let row_text = |y: u16| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        let bar_row = (0..buf.area.height)
+            .find(|y| row_text(*y).contains("18k"))
+            .expect("the detail's opus row");
+        let filled: Vec<usize> = (0..buf.area.width as usize)
+            .filter(|x| {
+                let cell = &buf[(*x as u16, bar_row)];
+                cell.bg != ratatui::style::Color::Reset && cell.symbol() == " "
+            })
+            .collect();
+        // 18k of 24k over a 20-cell bar is 15 cells, in two tones.
+        assert_eq!(filled.len(), 15, "bar length is the model's share");
+        assert!(
+            filled.windows(2).all(|w| w[1] == w[0] + 1),
+            "the bar is one contiguous run: {filled:?}"
+        );
+        let tones: std::collections::HashSet<_> = filled
+            .iter()
+            .map(|x| format!("{:?}", buf[(*x as u16, bar_row)].bg))
+            .collect();
+        assert_eq!(
+            tones.len(),
+            2,
+            "cache-served and fresh volume are two tones of one hue"
+        );
+        assert!(
+            filled
+                .iter()
+                .all(|x| buf[(*x as u16, bar_row)].symbol() == " "),
+            "no glyph in the bar: a partial block would notch its corner"
+        );
+    }
+
     /// Tokens with no measured compute time read as `idle`, not as `0/s`:
     /// the client can't have watched the work, so it states nothing about
     /// how fast it was rather than claiming it was slow.
