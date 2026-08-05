@@ -661,33 +661,6 @@ pub fn contrast_pairs() -> impl Iterator<Item = (Color, Color)> {
 /// (caller should not paint that cell); full cells use background fill.
 pub const METER_PARTIALS: [&str; 8] = ["", "▁", "▂", "▃", "▄", "▅", "▆", "▇"];
 
-/// The same eighths growing rightward instead of upward, for a stack laid
-/// along a row (the hover detail's per-model bars). A horizontal bar reads
-/// its bands left-to-right in the same order a column reads them bottom-up,
-/// so only the glyph table differs.
-pub const METER_PARTIALS_H: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
-
-/// Which way a stack of bands grows. The cell arithmetic is identical either
-/// way — a band boundary inside a cell is a partial block of the leading
-/// band over the trailing one as background — so the axis only picks the
-/// glyph table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MeterAxis {
-    /// Bottom-up, one cell per graph row: the meter's columns.
-    Vertical,
-    /// Left-to-right, one cell per column of a row: the hover detail's bars.
-    Horizontal,
-}
-
-impl MeterAxis {
-    fn partials(self) -> &'static [&'static str; 8] {
-        match self {
-            MeterAxis::Vertical => &METER_PARTIALS,
-            MeterAxis::Horizontal => &METER_PARTIALS_H,
-        }
-    }
-}
-
 /// How a band identifies its solid paint. Cached and fresh parts of one model
 /// use distinct lightnesses of the same hue, so their boundary can use the
 /// terminal's ordinary foreground/background split without a texture glyph.
@@ -717,9 +690,7 @@ impl BandPaint for u16 {
 /// whose color.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnCell<K> {
-    /// Cells from the stack's origin: rows up from the bottom of the graph
-    /// for a vertical column, columns right from the start of the bar for a
-    /// horizontal one.
+    /// Rows up from the bottom of the graph.
     pub row: u16,
     pub glyph: &'static str,
     /// Band drawn as the glyph's filled part.
@@ -744,39 +715,17 @@ pub fn column_cells<K: BandPaint>(
     filled: usize,
     cells: usize,
 ) -> Vec<ColumnCell<K>> {
-    axis_cells(segments, filled, cells, MeterAxis::Vertical)
-}
-
-/// The same stack laid along a row, growing rightward: one band's cached and
-/// fresh parts read left-to-right exactly as they read bottom-up in a column,
-/// and a boundary inside a cell is a left-partial block of the leading band
-/// over the trailing band's background.
-pub fn bar_cells<K: BandPaint>(
-    segments: &[(K, usize)],
-    filled: usize,
-    cells: usize,
-) -> Vec<ColumnCell<K>> {
-    axis_cells(segments, filled, cells, MeterAxis::Horizontal)
-}
-
-fn axis_cells<K: BandPaint>(
-    segments: &[(K, usize)],
-    filled: usize,
-    cells: usize,
-    axis: MeterAxis,
-) -> Vec<ColumnCell<K>> {
     let mut out = Vec::new();
     if segments.is_empty() || filled == 0 {
         return out;
     }
-    // Which band owns each eighth, from the stack's origin outward.
+    // Which band owns each eighth, bottom-up.
     let mut owner: Vec<K> = Vec::with_capacity(filled);
     for (band, eighths) in segments {
         for _ in 0..*eighths {
             owner.push(*band);
         }
     }
-    let partials = axis.partials();
     for row in 0..cells {
         let base = row * 8;
         if base >= filled.min(owner.len()) {
@@ -793,14 +742,14 @@ fn axis_cells<K: BandPaint>(
         let upper = owner[top - 1];
         let cell = if bottom_run == fill {
             // One band owns everything filled here.
-            axis_band_cell(row, bottom_series, fill, axis)
+            band_cell(row, bottom_series, fill)
         } else if fill == 8 && bottom_series.paint() != upper.paint() {
             // A boundary between two colors inside a full cell: lower band as
             // the glyph's filled part, whatever tops the cell as its
             // background.
             ColumnCell {
                 row: row as u16,
-                glyph: partials[bottom_run],
+                glyph: METER_PARTIALS[bottom_run],
                 fg: bottom_series,
                 bg: Some(upper),
             }
@@ -814,7 +763,7 @@ fn axis_cells<K: BandPaint>(
             } else {
                 bottom_series
             };
-            axis_band_cell(row, winner, fill, axis)
+            band_cell(row, winner, fill)
         };
         out.push(cell);
     }
@@ -837,15 +786,6 @@ fn axis_cells<K: BandPaint>(
 /// leading applies there, but it falls at the top of a column against
 /// background that is empty anyway.
 pub fn band_cell<K: BandPaint>(row: usize, band: K, fill: usize) -> ColumnCell<K> {
-    axis_band_cell(row, band, fill, MeterAxis::Vertical)
-}
-
-fn axis_band_cell<K: BandPaint>(
-    row: usize,
-    band: K,
-    fill: usize,
-    axis: MeterAxis,
-) -> ColumnCell<K> {
     if fill == 8 {
         return ColumnCell {
             row: row as u16,
@@ -856,7 +796,7 @@ fn axis_band_cell<K: BandPaint>(
     }
     ColumnCell {
         row: row as u16,
-        glyph: axis.partials()[fill],
+        glyph: METER_PARTIALS[fill],
         fg: band,
         bg: None,
     }
@@ -866,9 +806,23 @@ fn axis_band_cell<K: BandPaint>(
 /// their tokens, largest-remainder so the parts sum to exactly `filled` and
 /// no visible band rounds away to nothing.
 pub fn stacked_eighths<K: Copy>(stacked: &[(K, u64)], total: u64, filled: usize) -> Vec<(K, usize)> {
-    if total == 0 || filled == 0 {
+    split_units(stacked, total, filled)
+}
+
+/// Hand out `units` of drawing space to bands in proportion to their tokens,
+/// largest-remainder so the parts sum to exactly `units` and no band that has
+/// volume rounds away to nothing.
+///
+/// A column's unit is an eighth of a cell (see [`stacked_eighths`]); a
+/// horizontal bar's unit is a whole cell, because a bar drawn along a row has
+/// to end on a cell boundary to keep a square edge — see the hover detail in
+/// the TUI renderer.
+pub fn split_units<K: Copy>(parts: &[(K, u64)], total: u64, units: usize) -> Vec<(K, usize)> {
+    if total == 0 || units == 0 {
         return Vec::new();
     }
+    let stacked = parts;
+    let filled = units;
     let mut out: Vec<(K, usize)> = Vec::with_capacity(stacked.len());
     let mut remainders: Vec<(usize, f64)> = Vec::with_capacity(stacked.len());
     let mut assigned = 0usize;
@@ -1391,53 +1345,41 @@ mod tests {
         );
     }
 
-    /// The hover detail lays one model's stack along a row, so its cells use
-    /// the left-block eighths while keeping the column paint's fg-over-bg
-    /// encoding: the leading (cached) tone fills the glyph, the trailing
-    /// (fresh) tone the cell behind it.
+    /// A horizontal bar spends whole cells, so `split_units` has to hand out
+    /// exactly the cells asked for and give a band with volume at least one —
+    /// the hover detail's bars have no sub-cell resolution to fall back on.
     #[test]
-    fn bar_cells_grow_rightward_with_left_partials() {
-        let cells = bar_cells(&[((0u16, Part::Cached), 3), ((0u16, Part::New), 5)], 8, 4);
-        assert_eq!(
-            cells,
-            vec![ColumnCell {
-                row: 0,
-                glyph: METER_PARTIALS_H[3],
-                fg: (0, Part::Cached),
-                bg: Some((0, Part::New)),
-            }]
+    fn split_units_hands_out_whole_cells_exactly() {
+        let parts = [((0u16, Part::Cached), 2_000u64), ((0u16, Part::New), 3_000)];
+        let cells = split_units(&parts, 5_000, 15);
+        assert_eq!(cells.iter().map(|(_, n)| *n).sum::<usize>(), 15);
+        assert_eq!(cells[0], ((0, Part::Cached), 6), "2/5 of 15 cells");
+        assert_eq!(cells[1], ((0, Part::New), 9));
+
+        // A part small enough to floor to zero still takes a cell, at the
+        // expense of the largest one — a band drawn as nothing would
+        // contradict the figure printed beside it.
+        let lopsided = split_units(
+            &[((0u16, Part::Cached), 1u64), ((0u16, Part::New), 999)],
+            1_000,
+            8,
+        );
+        assert_eq!(lopsided.iter().map(|(_, n)| *n).sum::<usize>(), 8);
+        assert!(
+            lopsided.iter().all(|(_, n)| *n >= 1),
+            "no band vanishes: {lopsided:?}"
         );
     }
 
-    /// A bar's own trailing cell is partial for the same reason a column's top
-    /// cell is: the unfilled remainder has to stay panel background, so it
-    /// carries a foreground glyph rather than a background fill.
+    /// The column stack is the same split at eighth resolution, so the two
+    /// entry points cannot drift.
     #[test]
-    fn bar_cells_end_on_a_left_partial_glyph() {
-        // 12 eighths = one full cell plus half of the next.
-        let cells = bar_cells(&[((1u16, Part::New), 12)], 12, 8);
-        assert_eq!(cells.len(), 2);
-        assert_eq!(cells[0].glyph, " ", "a full cell fills by background");
-        assert_eq!(cells[0].bg, Some((1, Part::New)));
-        assert_eq!(cells[1].glyph, METER_PARTIALS_H[4]);
-        assert_eq!(cells[1].bg, None, "the rest of the row stays background");
-    }
-
-    /// Both axes are the same arithmetic over different glyph tables — a
-    /// divergence here would mean a bar and its column disagreed about where
-    /// a band ends.
-    #[test]
-    fn both_axes_place_the_same_boundaries() {
-        let segments = [((0u16, Part::Cached), 5), ((0u16, Part::New), 11)];
-        let vertical = column_cells(&segments, 16, 4);
-        let horizontal = bar_cells(&segments, 16, 4);
-        assert_eq!(vertical.len(), horizontal.len());
-        for (v, h) in vertical.iter().zip(horizontal.iter()) {
-            assert_eq!((v.row, v.fg, v.bg), (h.row, h.fg, h.bg));
-            let vi = METER_PARTIALS.iter().position(|g| *g == v.glyph);
-            let hi = METER_PARTIALS_H.iter().position(|g| *g == h.glyph);
-            assert_eq!(vi, hi, "same eighth, different axis: {v:?} vs {h:?}");
-        }
+    fn stacked_eighths_is_the_same_split_in_eighths() {
+        let parts = [((0u16, Part::Cached), 1_000u64), ((1u16, Part::New), 3_000)];
+        assert_eq!(
+            stacked_eighths(&parts, 4_000, 32),
+            split_units(&parts, 4_000, 32)
+        );
     }
 
     /// A column's segments sum to exactly the column's height — no drift

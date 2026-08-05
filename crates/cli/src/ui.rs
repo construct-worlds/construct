@@ -4812,19 +4812,16 @@ fn render_project_meter_tooltip(f: &mut Frame, app: &App) {
 /// enough for the catalog ids in practice, short enough that one outlier
 /// can't push the figures off a narrow terminal.
 const TOKEN_HOVER_NAME_MAX: usize = 18;
-/// Bar length the hover detail wants, in cells. The bars are shares of one
-/// column's total, so this is purely how finely those shares are drawn.
+/// Bar length the hover detail wants, in cells. Whole cells are also the
+/// bars' resolution, so this is how finely a share can be drawn: 20 cells
+/// separate a tenth from a fifth several times over.
 const TOKEN_HOVER_BAR_IDEAL: usize = 20;
-/// Shortest bar still worth drawing. Below this the eighths stop separating
-/// a tenth from a fifth, and the numbers beside them say more than the shape
-/// does — so a narrower terminal gets the plain text detail instead.
-const TOKEN_HOVER_BAR_MIN: usize = 6;
+/// Shortest bar still worth drawing. Below this a cell is too coarse to
+/// separate one share from another, and the numbers beside it say more than
+/// the shape does — so a narrower terminal gets the plain text detail instead.
+const TOKEN_HOVER_BAR_MIN: usize = 8;
 /// Space inside the border, either side of a row.
 const TOKEN_HOVER_PAD: usize = 1;
-
-/// Marks a cached figure. Spelled out in the header (`↺ cached`) whenever any
-/// row carries one, so the glyph is never left to be guessed at.
-const TOKEN_HOVER_CACHED_MARK: &str = "↺";
 
 /// One row of the hover detail: a model's share of the hovered column.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4874,8 +4871,10 @@ fn token_hover_figures(row: &TokenHoverRow) -> String {
     if row.cached == 0 {
         return tokens;
     }
+    // Spelled out rather than marked with a glyph: a symbol here has to be
+    // learned, and the box can simply be as wide as the words need.
     format!(
-        "{tokens} · {}{TOKEN_HOVER_CACHED_MARK}",
+        "{tokens} · {} cached",
         crate::lineage::format_token_count(row.cached)
     )
 }
@@ -4923,12 +4922,20 @@ fn token_hover_layout(
     })
 }
 
-/// The eighths a row's bar paints: its share of the column total, split into
+/// The cells a row's bar paints: its share of the column total, split into
 /// the cache-served part and the part processed fresh.
+///
+/// Whole cells, deliberately. A column has only a few rows to work with, so it
+/// buys resolution by ending on a partial block glyph; a bar has twenty cells
+/// and does not need to. Ending on a glyph would cost a square edge instead:
+/// a foreground block sits beside background-filled cells, and a font that
+/// draws it short of the line box (see #1183) leaves a notch at the bar's
+/// corner. Every cell here is a background fill, so the bar is a clean
+/// rectangle whatever the font does.
 ///
 /// Scaled to the column's total, so the bars are shares of the thing hovered
 /// and read against each other. A row with any volume at all keeps at least
-/// one eighth — rounding a model that did work down to an empty bar would
+/// one cell — rounding a model that did work down to an empty bar would
 /// contradict the figure printed beside it.
 fn token_hover_bar_segments(
     row: &TokenHoverRow,
@@ -4938,9 +4945,8 @@ fn token_hover_bar_segments(
     if column_total == 0 || row.tokens == 0 || bar_w == 0 {
         return Vec::new();
     }
-    let eighths_total = bar_w * 8;
-    let exact = (row.tokens as f64 / column_total as f64) * eighths_total as f64;
-    let filled = (exact.round() as usize).clamp(1, eighths_total);
+    let exact = (row.tokens as f64 / column_total as f64) * bar_w as f64;
+    let filled = (exact.round() as usize).clamp(1, bar_w);
     let cached = row.cached.min(row.tokens);
     let fresh = row.tokens - cached;
     let mut bands: Vec<(crate::token_meter::Band, u64)> = Vec::with_capacity(2);
@@ -4950,19 +4956,19 @@ fn token_hover_bar_segments(
     if fresh > 0 {
         bands.push(((row.model, crate::token_meter::Part::New), fresh));
     }
-    crate::token_meter::stacked_eighths(&bands, row.tokens, filled)
+    crate::token_meter::split_units(&bands, row.tokens, filled)
 }
 
 /// Hover detail for whichever meter is under the pointer: a header naming the
 /// span and its total, then one row per model — name, a horizontal bar of that
 /// model's share, and the exact figures.
 ///
-/// The bars are the same paint as the graph they came from: one hue per model,
-/// the cache-served part in the darker tone at the bar's left and the fresh
-/// part full-strength beside it (spec 0167). Reading a column's mix out of a
-/// run of comma-separated numbers meant doing the division by eye; the bars
-/// answer "what was this column mostly" directly, and the figures stay for
-/// the exact answer.
+/// The bars carry the same tones as the graph they came from: one hue per
+/// model, the cache-served part in the darker tone at the bar's left and the
+/// fresh part full-strength beside it (spec 0167). Reading a column's mix out
+/// of a run of comma-separated numbers meant doing the division by eye; the
+/// bars answer "what was this column mostly" directly, and the figures stay
+/// for the exact answer.
 fn render_token_meter_hover(
     f: &mut Frame,
     theme: &Theme,
@@ -4982,15 +4988,11 @@ fn render_token_meter_hover(
     }
     let total = bucket.total();
     let rows = token_hover_rows(bucket, meter);
-    let any_cached = rows.iter().any(|r| r.cached > 0);
-    let mut header = format!(
+    let header = format!(
         "{} · {} tok",
         crate::token_meter::TokenMeter::bucket_span_label(),
         crate::lineage::format_token_count(total)
     );
-    if any_cached {
-        header.push_str(&format!(" · {TOKEN_HOVER_CACHED_MARK} cached"));
-    }
 
     let screen = f.area();
     let Some(layout) = token_hover_layout(
@@ -5052,16 +5054,20 @@ fn render_token_meter_hover(
             &row.label,
             Style::default().fg(meter.color(row.model)),
         );
+        // The bar: each band's run of whole cells, painted as background so
+        // the rectangle has no font-dependent edges (see
+        // `token_hover_bar_segments`).
         let bar_x = text_x + 2 + layout.name_w as u16 + 2;
-        let segments = token_hover_bar_segments(row, total, layout.bar_w);
-        let filled: usize = segments.iter().map(|(_, e)| *e).sum();
-        for cell in crate::token_meter::bar_cells(&segments, filled, layout.bar_w) {
-            let mut style = Style::default().fg(meter.band_color(cell.fg));
-            if let Some(bg) = cell.bg {
-                style = style.bg(meter.band_color(bg));
-            }
-            f.buffer_mut()
-                .set_string(bar_x + cell.row, y, cell.glyph, style);
+        let mut cell_x = bar_x;
+        for (band, cells) in token_hover_bar_segments(row, total, layout.bar_w) {
+            let fill = " ".repeat(cells);
+            f.buffer_mut().set_string(
+                cell_x,
+                y,
+                &fill,
+                Style::default().bg(meter.band_color(band)),
+            );
+            cell_x += cells as u16;
         }
         // Figures right-aligned into their own column: a column of numbers is
         // read down, which needs them to start at the same offset on every row.
@@ -24799,8 +24805,8 @@ mod tests {
         let split = token_hover_figures(&hover_row(0, "opus", 18_200, 9_100));
         assert!(split.starts_with("18k"), "volume leads: {split}");
         assert!(
-            split.contains("9.1k") && split.ends_with(TOKEN_HOVER_CACHED_MARK),
-            "the cached share is marked, not summed: {split}"
+            split.contains("9.1k") && split.ends_with("cached"),
+            "the cached share is named in words, not summed: {split}"
         );
     }
 
@@ -24824,7 +24830,7 @@ mod tests {
             "the box stays on screen: {wide:?}"
         );
 
-        let snug = token_hover_layout(&rows, 20, 44).expect("a shorter bar still fits");
+        let snug = token_hover_layout(&rows, 20, 52).expect("a shorter bar still fits");
         assert!(
             (TOKEN_HOVER_BAR_MIN..wide.bar_w).contains(&snug.bar_w),
             "the bar absorbs the squeeze: {snug:?}"
@@ -24838,7 +24844,7 @@ mod tests {
     #[test]
     fn hover_layout_declines_a_terminal_too_narrow_for_bars() {
         let rows = vec![hover_row(0, "claude-opus-5", 18_200, 9_100)];
-        assert!(token_hover_layout(&rows, 20, 30).is_none());
+        assert!(token_hover_layout(&rows, 20, 36).is_none());
         let fallback = token_hover_text_fallback("2s · 24.6k tok", &rows);
         assert!(fallback.contains("claude-opus-5") && fallback.contains("18k"));
     }
@@ -24856,14 +24862,20 @@ mod tests {
         );
     }
 
-    /// A bar is the model's share of the hovered column, split cache-served
-    /// then fresh — the same order and tones the column stacks them in.
+    /// A bar is the model's share of the hovered column in whole cells, split
+    /// cache-served then fresh — the same order and tones the column stacks
+    /// them in. Whole cells are what keep the bar a clean rectangle: a partial
+    /// block glyph beside background-filled cells notches its corner on fonts
+    /// that draw the glyph short of the line box (#1183).
     #[test]
-    fn hover_bar_segments_split_the_share_cached_first() {
+    fn hover_bar_segments_split_the_share_into_whole_cells() {
         let row = hover_row(3, "opus", 5_000, 2_000);
         let segments = token_hover_bar_segments(&row, 10_000, 20);
-        let filled: usize = segments.iter().map(|(_, e)| *e).sum();
-        assert_eq!(filled, 80, "half of a 20-cell bar, in eighths");
+        assert_eq!(
+            segments.iter().map(|(_, c)| *c).sum::<usize>(),
+            10,
+            "half of a 20-cell bar: {segments:?}"
+        );
         assert_eq!(
             segments.first().map(|(band, _)| *band),
             Some((3, crate::token_meter::Part::Cached)),
@@ -24873,7 +24885,7 @@ mod tests {
             segments.last().map(|(band, _)| *band),
             Some((3, crate::token_meter::Part::New))
         );
-        assert_eq!(segments[0].1, 32, "2k of 5k over 80 eighths");
+        assert_eq!(segments[0].1, 4, "2k of 5k over 10 cells");
     }
 
     /// A model that did work never draws an empty bar — that would contradict
@@ -24882,7 +24894,11 @@ mod tests {
     fn hover_bar_segments_keep_a_tiny_share_visible() {
         let row = hover_row(0, "opus", 1, 0);
         let segments = token_hover_bar_segments(&row, 1_000_000, 20);
-        assert_eq!(segments.iter().map(|(_, e)| *e).sum::<usize>(), 1);
+        assert_eq!(
+            segments.iter().map(|(_, c)| *c).sum::<usize>(),
+            1,
+            "one cell is the floor, not zero"
+        );
         assert!(token_hover_bar_segments(&hover_row(0, "opus", 0, 0), 100, 20).is_empty());
     }
 

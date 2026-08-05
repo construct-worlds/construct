@@ -147,11 +147,20 @@ share of the column as a bar, and keeps its exact figures beside it: the bar
 answers the proportion, the figures answer the amount, and neither has to
 stand in for the other.
 
-The bars are the column's own paint, laid along a row instead of up one: one
-hue per model, the cache-served part in the darker tone at the bar's start and
-the fresh part full-strength after it, boundaries carried at sub-cell
-resolution the same way. A hover that recolored or reordered what it details
-would be describing a different graph than the one under the pointer.
+The bars carry the column's own tones, laid along a row instead of up one: one
+hue per model, the cache-served part darker at the bar's start and the fresh
+part full-strength after it. A hover that recolored or reordered what it
+details would be describing a different graph than the one under the pointer.
+
+They do **not** inherit the column's sub-cell resolution. A column is a few
+cells tall and buys precision by topping out on a partial block glyph; a bar
+has room for twenty cells and does not need to. Ending on a glyph would cost
+something a bar cannot afford instead: cells a band fills outright are painted
+as background, and a foreground block set beside them is drawn only where the
+font puts ink — a font that draws it short of the line box notches the bar's
+corner, so the rectangle reads as damaged rather than as precise. A bar
+therefore spends whole cells only, and its parts are apportioned by
+largest-remainder so they still sum to exactly its length.
 
 Rows follow series order — the order the column stacks them and the legend
 names them — not size. Reordering by size would make the detail's rows and the
@@ -161,9 +170,14 @@ that fixes the stack's order in the first place.
 Shares are drawn against the hovered column's own total, so the bars are read
 against each other and a model that did any work at all keeps a visible bar
 however small its share; the figures beside it, not the bar, carry how the
-column compares to its neighbours. A pane too narrow for a bar that would
-still separate a tenth from a fifth shows the figures alone rather than a stub
-bar that misstates every share.
+column compares to its neighbours. A pane too narrow for a bar whose cells
+can still separate one share from another shows the figures alone rather than
+a stub bar that misstates every share.
+
+The figures name the cache-served share in words. A glyph standing in for
+"cached" has to be learned before the row can be read, and one borrowed from
+another vocabulary — a refresh arrow, say — actively misleads; the box can
+simply be as wide as the words need.
 
 Any meter drawn from these buckets details itself this way, whether it is the
 fleet-wide meter or one scoped to a subset of sessions (spec 0191). Two
@@ -313,10 +327,15 @@ inspecting the rest.
 - Because the bars carry no stated ceiling, a client must not invite
   cross-time comparison of bar heights alone; the legend's rates are the
   figure that survives the scale moving.
-- The hover detail's bars and the column's bands are one paint model in two
-  orientations. A change to how a band is toned, ordered, or resolved below a
-  cell has to move both, or the detail starts describing a graph the user
-  isn't looking at.
+- The hover detail's bars and the column's bands share tones and order: a
+  change to how a band is colored or stacked has to move both, or the detail
+  starts describing a graph the user isn't looking at. Resolution is where
+  they legitimately differ — the column needs eighths of a cell, the bar needs
+  a square edge — and neither should be pushed onto the other.
+- Any surface that fills cells outright as background must not put a partial
+  block glyph beside them where an edge shows. The two are only
+  interchangeable while the glyph's neighbours are empty; against filled cells
+  the font's leading becomes a visible notch (#1183).
 - The hover detail is the meter's exact-figures surface: it may add shape but
   may not drop the per-model volume or the cached subset in favor of it. A
   proportion is not an amount.

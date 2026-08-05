@@ -18511,24 +18511,50 @@ mod tests {
             "the header names the column's total:\n{out}"
         );
         assert!(
-            out.contains("18k") && out.contains("9.0k↺"),
-            "each row keeps its exact figures, cached marked as a subset:\n{out}"
+            out.contains("18k") && out.contains("9.0k cached"),
+            "each row keeps its exact figures, cached named as a subset:\n{out}"
         );
-        // The bars are paint, not text: full cells carry their tone as a
-        // background and partial ones as a left-block glyph.
+        // The bars are paint, not text — and paint made entirely of background
+        // fills, so a bar is a clean rectangle on every font (#1183). Find the
+        // row carrying the opus figures and look at what it painted.
         let backend = ratatui::backend::TestBackend::new(140, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let buf = term.backend().buffer().clone();
-        let bar_row = (0..buf.area.height).find(|y| {
-            (0..buf.area.width).any(|x| {
-                let cell = &buf[(x, *y)];
-                crate::token_meter::METER_PARTIALS_H.contains(&cell.symbol())
+        let row_text = |y: u16| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        let bar_row = (0..buf.area.height)
+            .find(|y| row_text(*y).contains("18k"))
+            .expect("the detail's opus row");
+        let filled: Vec<usize> = (0..buf.area.width as usize)
+            .filter(|x| {
+                let cell = &buf[(*x as u16, bar_row)];
+                cell.bg != ratatui::style::Color::Reset && cell.symbol() == " "
             })
-        });
+            .collect();
+        // 18k of 24k over a 20-cell bar is 15 cells, in two tones.
+        assert_eq!(filled.len(), 15, "bar length is the model's share");
         assert!(
-            bar_row.is_some(),
-            "no horizontal bar drawn in the hover detail:\n{out}"
+            filled.windows(2).all(|w| w[1] == w[0] + 1),
+            "the bar is one contiguous run: {filled:?}"
+        );
+        let tones: std::collections::HashSet<_> = filled
+            .iter()
+            .map(|x| format!("{:?}", buf[(*x as u16, bar_row)].bg))
+            .collect();
+        assert_eq!(
+            tones.len(),
+            2,
+            "cache-served and fresh volume are two tones of one hue"
+        );
+        assert!(
+            filled
+                .iter()
+                .all(|x| buf[(*x as u16, bar_row)].symbol() == " "),
+            "no glyph in the bar: a partial block would notch its corner"
         );
     }
 
