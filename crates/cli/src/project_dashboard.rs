@@ -1,100 +1,46 @@
 //! Project dashboard pane (view area when a project header is selected).
 //!
-//! Turns the previously passive "flat member list" into a live project
-//! console: tally, member roster with full-mode detail, activity feed,
-//! project-scoped token meter, and a peek preview of the hottest session.
+//! A single full-width column of member cards: each card pairs the roster
+//! facts (status, title, harness, model, context, activity) with a content
+//! line that says what the session is doing, asking, or blocked on — fed
+//! from the daemon's durable last-message / last-error snippets and the
+//! live pending-approval set, so triage completes without opening the
+//! session. A project-scoped token meter sits above the cards.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::time::Instant;
 
-use chrono::{DateTime, Utc};
-use construct_protocol::{SessionState, SessionSummary};
+use construct_protocol::{MessageRole, SessionState, SessionSummary};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Theme;
 use crate::token_meter::{self, TokenMeter};
 
-/// Max activity lines retained per project (client ring buffer).
-pub const ACTIVITY_CAP: usize = 40;
-
-/// Max chat messages retained per session for the preview strip.
-pub const PREVIEW_MESSAGE_CAP: usize = 6;
-
-/// Max messages painted in the preview body.
-pub const PREVIEW_SHOW: usize = 3;
-
 /// Compact meter height when the pane is tall enough.
 const METER_HEIGHT: u16 = 4;
 
-/// Preview block height (title + chrome + body lines).
-const PREVIEW_MIN_HEIGHT: u16 = 5;
+/// Rows kept for member cards even when the meter would like more.
+const CARDS_MIN_HEIGHT: u16 = 6;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActivityKind {
-    Running,
-    WantsYou,
-    Done,
-    Errored,
-    Created,
-    Other,
-}
-
-impl ActivityKind {
-    pub fn glyph(self) -> &'static str {
-        match self {
-            ActivityKind::Running => "●",
-            ActivityKind::WantsYou => "·",
-            ActivityKind::Done => "✓",
-            ActivityKind::Errored => "✗",
-            ActivityKind::Created => "+",
-            ActivityKind::Other => "·",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ActivityKind::Running => "running",
-            ActivityKind::WantsYou => "wants you",
-            ActivityKind::Done => "done",
-            ActivityKind::Errored => "errored",
-            ActivityKind::Created => "created",
-            ActivityKind::Other => "updated",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ActivityEntry {
-    pub at: DateTime<Utc>,
-    pub session_id: String,
-    pub label: String,
-    pub kind: ActivityKind,
-}
-
-#[derive(Debug, Clone)]
-pub struct PreviewMessage {
-    pub role: PreviewRole,
-    pub text: String,
-    pub at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PreviewRole {
-    User,
-    Assistant,
-    Other,
+/// A tool call waiting on the user, retained per session so the member
+/// card can say *what* wants approval, not just that something does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingToolApproval {
+    pub call_id: String,
+    pub tool: String,
+    pub args_summary: String,
+    pub risk: construct_protocol::ToolRisk,
 }
 
 /// Hit zones painted last frame for the project dashboard.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectDashboardHits {
     pub member_rows: Vec<ProjectRowHit>,
-    pub feed_rows: Vec<ProjectRowHit>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,26 +59,18 @@ impl ProjectRowHit {
 }
 
 /// Per-client state for the project dashboard surface.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ProjectDashboard {
     /// Cursor into the sorted member list of the currently selected project.
     pub cursor: usize,
-    /// Rows scrolled off the top of the member list.
+    /// Cards scrolled off the top of the member list.
     pub member_scroll: usize,
-    /// Rows scrolled off the top of the activity feed.
-    pub feed_scroll: usize,
     /// Project id the cursor/scroll state applies to (reset on switch).
     pub active_project: Option<String>,
-    /// Hovered member (mouse) — retargets preview without selecting.
+    /// Hovered member (mouse) — highlights without selecting.
     pub hover_session: Option<String>,
-    /// project_id → newest-first activity.
-    pub activity: HashMap<String, VecDeque<ActivityEntry>>,
-    /// session_id → recent chat messages for preview body.
-    pub preview_messages: HashMap<String, VecDeque<PreviewMessage>>,
     /// project_id → live token meter (fed from Cost events).
     pub token_meters: HashMap<String, TokenMeter>,
-    /// session_id → last (state, needs_attention) observed for feed diffs.
-    pub last_seen: HashMap<String, (SessionState, bool)>,
     /// Hit zones from the last render.
     pub hits: ProjectDashboardHits,
     /// `(project_id, graph rect)` of the meter drawn on the last frame, so the
@@ -141,43 +79,13 @@ pub struct ProjectDashboard {
     pub meter_graph: Option<(String, Rect)>,
 }
 
-impl Default for ProjectDashboard {
-    fn default() -> Self {
-        Self {
-            cursor: 0,
-            member_scroll: 0,
-            feed_scroll: 0,
-            active_project: None,
-            hover_session: None,
-            activity: HashMap::new(),
-            preview_messages: HashMap::new(),
-            token_meters: HashMap::new(),
-            last_seen: HashMap::new(),
-            hits: ProjectDashboardHits::default(),
-            meter_graph: None,
-        }
-    }
-}
-
 impl ProjectDashboard {
-    /// Seed transition baselines from the current session list so the first
-    /// real state change after attach produces a feed line (not every
-    /// session looking newly created).
-    pub fn seed_from_sessions(&mut self, sessions: &[SessionSummary]) {
-        for s in sessions {
-            self.last_seen
-                .entry(s.id.clone())
-                .or_insert((s.state, s.needs_attention));
-        }
-    }
-
     /// Keep cursor/scroll coherent when the selected project changes.
     pub fn ensure_project(&mut self, project_id: &str) {
         if self.active_project.as_deref() != Some(project_id) {
             self.active_project = Some(project_id.to_string());
             self.cursor = 0;
             self.member_scroll = 0;
-            self.feed_scroll = 0;
             self.hover_session = None;
         }
     }
@@ -199,130 +107,6 @@ impl ProjectDashboard {
         let cur = self.cursor as i32;
         let next = (cur + delta).clamp(0, member_count as i32 - 1) as usize;
         self.cursor = next;
-    }
-
-    /// Record a state transition into the project's activity feed.
-    pub fn observe_session_state(&mut self, session: &SessionSummary, now: DateTime<Utc>) {
-        let Some(project_id) = session.group_id.as_deref() else {
-            self.last_seen
-                .insert(session.id.clone(), (session.state, session.needs_attention));
-            return;
-        };
-        // Native harness mirrors stay out of the scan (spec 0079 / 0169).
-        if session.native_subagent.is_some() {
-            return;
-        }
-        if session.archived {
-            self.last_seen
-                .insert(session.id.clone(), (session.state, session.needs_attention));
-            return;
-        }
-
-        let prev = self.last_seen.insert(
-            session.id.clone(),
-            (session.state, session.needs_attention),
-        );
-        // First sighting only seeds the baseline so reconnect / list hydration
-        // does not flood the feed with synthetic "created" lines for every
-        // pre-existing member. Real creates call `note_session_created`.
-        let Some((prev_state, prev_attention)) = prev else {
-            return;
-        };
-        let label = primary_label(session);
-        let entry = if session.state == SessionState::Errored && prev_state != SessionState::Errored
-        {
-            Some(ActivityKind::Errored)
-        } else if session.needs_attention && !prev_attention {
-            Some(ActivityKind::WantsYou)
-        } else if session.state == SessionState::Running && prev_state != SessionState::Running {
-            Some(ActivityKind::Running)
-        } else if session.state == SessionState::Done && prev_state != SessionState::Done {
-            Some(ActivityKind::Done)
-        } else if session.state != prev_state {
-            Some(ActivityKind::Other)
-        } else {
-            None
-        }
-        .map(|kind| ActivityEntry {
-            at: now,
-            session_id: session.id.clone(),
-            label,
-            kind,
-        });
-        if let Some(entry) = entry {
-            let feed = self
-                .activity
-                .entry(project_id.to_string())
-                .or_insert_with(VecDeque::new);
-            feed.push_front(entry);
-            while feed.len() > ACTIVITY_CAP {
-                feed.pop_back();
-            }
-        }
-    }
-
-    /// Record that a session was newly created in a project (not a reconnect seed).
-    pub fn note_session_created(&mut self, session: &SessionSummary, now: DateTime<Utc>) {
-        let Some(project_id) = session.group_id.as_deref() else {
-            return;
-        };
-        if session.native_subagent.is_some() || session.archived {
-            return;
-        }
-        self.last_seen
-            .insert(session.id.clone(), (session.state, session.needs_attention));
-        let feed = self
-            .activity
-            .entry(project_id.to_string())
-            .or_insert_with(VecDeque::new);
-        feed.push_front(ActivityEntry {
-            at: now,
-            session_id: session.id.clone(),
-            label: primary_label(session),
-            kind: ActivityKind::Created,
-        });
-        while feed.len() > ACTIVITY_CAP {
-            feed.pop_back();
-        }
-    }
-
-    pub fn observe_message(
-        &mut self,
-        session_id: &str,
-        role: PreviewRole,
-        text: &str,
-        at: DateTime<Utc>,
-    ) {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        // Coalesce streaming assistant deltas into one bubble.
-        let feed = self
-            .preview_messages
-            .entry(session_id.to_string())
-            .or_insert_with(VecDeque::new);
-        if role == PreviewRole::Assistant {
-            if let Some(last) = feed.back_mut() {
-                if last.role == PreviewRole::Assistant {
-                    last.text.push_str(trimmed);
-                    last.at = at;
-                    return;
-                }
-            }
-        }
-        // Cap individual message size so a huge dump doesn't bloat the pane.
-        let text = if trimmed.chars().count() > 400 {
-            let mut s: String = trimmed.chars().take(400).collect();
-            s.push('…');
-            s
-        } else {
-            trimmed.to_string()
-        };
-        feed.push_back(PreviewMessage { role, text, at });
-        while feed.len() > PREVIEW_MESSAGE_CAP {
-            feed.pop_front();
-        }
     }
 
     pub fn observe_cost(
@@ -361,24 +145,17 @@ impl ProjectDashboard {
     }
 
     pub fn forget_session(&mut self, session_id: &str) {
-        self.last_seen.remove(session_id);
-        self.preview_messages.remove(session_id);
         if self.hover_session.as_deref() == Some(session_id) {
             self.hover_session = None;
-        }
-        for feed in self.activity.values_mut() {
-            feed.retain(|e| e.session_id != session_id);
         }
     }
 
     pub fn forget_project(&mut self, project_id: &str) {
-        self.activity.remove(project_id);
         self.token_meters.remove(project_id);
         if self.active_project.as_deref() == Some(project_id) {
             self.active_project = None;
             self.cursor = 0;
             self.member_scroll = 0;
-            self.feed_scroll = 0;
             self.hover_session = None;
         }
     }
@@ -387,7 +164,6 @@ impl ProjectDashboard {
         self.hits
             .member_rows
             .iter()
-            .chain(self.hits.feed_rows.iter())
             .find(|h| h.contains(col, row))
             .map(|h| h.session_id.as_str())
     }
@@ -468,30 +244,6 @@ pub fn project_tally(members: &[&SessionSummary]) -> ProjectTally {
 /// Lifetime token total across members.
 pub fn project_lifetime_tokens(members: &[&SessionSummary]) -> u64 {
     members.iter().map(|s| s.tokens.total()).sum()
-}
-
-/// Pick the session the preview should show.
-///
-/// Order: hover → cursor (when interactive) → hottest by rank/recency.
-pub fn preview_target_id<'a>(
-    members: &[&'a SessionSummary],
-    cursor: usize,
-    hover: Option<&str>,
-    interactive: bool,
-) -> Option<&'a str> {
-    if members.is_empty() {
-        return None;
-    }
-    if let Some(h) = hover {
-        if let Some(s) = members.iter().find(|s| s.id == h) {
-            return Some(s.id.as_str());
-        }
-    }
-    if interactive {
-        return members.get(cursor).map(|s| s.id.as_str());
-    }
-    // Hottest first — members are already sorted that way.
-    members.first().map(|s| s.id.as_str())
 }
 
 pub fn primary_label(s: &SessionSummary) -> String {
@@ -641,13 +393,147 @@ fn dominant_cwd(members: &[&SessionSummary]) -> Option<String> {
         .map(|(path, _)| path.to_string())
 }
 
+/// What a member card's content line says: the one fact about this session
+/// the operator would otherwise open it to learn. Ordered by urgency —
+/// a waiting approval beats everything, an error beats conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CardLine {
+    /// A tool call is waiting on the user: `approve? {tool · args}`.
+    Approve(String),
+    /// The session errored: `error: {message}`.
+    Error(String),
+    /// The session stopped while unwatched and its last words are a
+    /// question/result waiting on the user: `asks: {text}`.
+    Asks(String),
+    /// Running, and the latest streamed assistant text: `now: {text}`.
+    Now(String),
+    /// Running on the user's last message (no assistant text yet this
+    /// turn): `on: {text}`.
+    On(String),
+    /// Idle with the user's message as the last word: `you: {text}`.
+    You(String),
+    /// Idle assistant text already seen/answered: `last: {text}`.
+    Last(String),
+    /// Nothing to quote — soft placeholder.
+    Quiet(&'static str),
+}
+
+/// Choose the content line for a member.
+pub fn card_line(s: &SessionSummary, approvals: Option<&[PendingToolApproval]>) -> CardLine {
+    if let Some(first) = approvals.and_then(|list| list.first()) {
+        let mut text = first.tool.clone();
+        if !first.args_summary.trim().is_empty() {
+            text = format!("{} · {}", text, first.args_summary.trim());
+        }
+        let extra = approvals.map(|l| l.len()).unwrap_or(1).saturating_sub(1);
+        if extra > 0 {
+            text.push_str(&format!("  (+{extra} more)"));
+        }
+        return CardLine::Approve(text);
+    }
+    if s.state == SessionState::Errored {
+        if let Some(e) = s
+            .last_error
+            .as_deref()
+            .or(s.last_message.as_deref())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            return CardLine::Error(e.to_string());
+        }
+        return CardLine::Quiet("errored — open session for detail");
+    }
+    let msg = s
+        .last_message
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    if s.state == SessionState::Running {
+        return match (s.last_message_role, msg) {
+            (Some(MessageRole::Assistant), Some(m)) => CardLine::Now(m.to_string()),
+            (_, Some(m)) => CardLine::On(m.to_string()),
+            (_, None) => match s
+                .last_prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                Some(p) => CardLine::On(p.to_string()),
+                None => CardLine::Quiet("working…"),
+            },
+        };
+    }
+    match (s.last_message_role, msg) {
+        (Some(MessageRole::Assistant), Some(m)) if s.needs_attention => {
+            CardLine::Asks(m.to_string())
+        }
+        (Some(MessageRole::User), Some(m)) => CardLine::You(m.to_string()),
+        (_, Some(m)) => CardLine::Last(m.to_string()),
+        (_, None) => CardLine::Quiet("no messages yet"),
+    }
+}
+
+impl CardLine {
+    fn label(&self) -> &'static str {
+        match self {
+            CardLine::Approve(_) => "approve?",
+            CardLine::Error(_) => "error:",
+            CardLine::Asks(_) => "asks:",
+            CardLine::Now(_) => "now:",
+            CardLine::On(_) => "on:",
+            CardLine::You(_) => "you:",
+            CardLine::Last(_) => "last:",
+            CardLine::Quiet(_) => "",
+        }
+    }
+
+    fn text(&self) -> &str {
+        match self {
+            CardLine::Approve(t)
+            | CardLine::Error(t)
+            | CardLine::Asks(t)
+            | CardLine::Now(t)
+            | CardLine::On(t)
+            | CardLine::You(t)
+            | CardLine::Last(t) => t,
+            CardLine::Quiet(t) => t,
+        }
+    }
+
+    fn label_style(&self, theme: &Theme) -> Style {
+        match self {
+            CardLine::Approve(_) => Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+            CardLine::Error(_) => Style::default().fg(theme.danger),
+            CardLine::Asks(_) => Style::default().fg(theme.accent),
+            CardLine::Now(_) | CardLine::On(_) => Style::default().fg(theme.success),
+            CardLine::You(_) | CardLine::Last(_) | CardLine::Quiet(_) => {
+                Style::default().fg(theme.dim)
+            }
+        }
+    }
+
+    fn text_style(&self, theme: &Theme) -> Style {
+        match self {
+            // Actionable content reads at full strength; ambient at dim.
+            CardLine::Approve(_) | CardLine::Error(_) | CardLine::Asks(_) => {
+                Style::default().fg(theme.text)
+            }
+            _ => Style::default().fg(theme.dim),
+        }
+    }
+}
+
 /// Render the full project dashboard into `area`.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     area: Rect,
     theme: &Theme,
     project_id: &str,
     members: &[&SessionSummary],
+    approvals: &HashMap<String, Vec<PendingToolApproval>>,
     dashboard: &mut ProjectDashboard,
     interactive: bool,
     now: Instant,
@@ -733,7 +619,7 @@ pub fn render(
         }
     }
 
-    // ── Token meter (C2) ────────────────────────────────────────────────
+    // ── Token meter ─────────────────────────────────────────────────────
     let meter = dashboard.token_meters.get_mut(project_id);
     let show_meter = area.height >= 12 && w >= 24;
     // Recorded after the meter's own borrow ends, so the hover detail can map
@@ -742,7 +628,8 @@ pub fn render(
     if show_meter {
         if let Some(meter) = meter {
             meter.advance_to(now);
-            let meter_h = METER_HEIGHT.min(bottom.saturating_sub(row).saturating_sub(PREVIEW_MIN_HEIGHT));
+            let meter_h =
+                METER_HEIGHT.min(bottom.saturating_sub(row).saturating_sub(CARDS_MIN_HEIGHT));
             if meter_h >= 2 {
                 let meter_area = Rect {
                     x,
@@ -771,84 +658,28 @@ pub fn render(
     }
     dashboard.meter_graph = meter_graph.map(|graph| (project_id.to_string(), graph));
 
-    // Gap before body columns.
+    // Gap before the cards.
     if row < bottom {
         row = row.saturating_add(1);
     }
 
-    // Reserve preview at the bottom.
-    let preview_h = if bottom.saturating_sub(row) >= PREVIEW_MIN_HEIGHT + 3 {
-        PREVIEW_MIN_HEIGHT
-            .max(4)
-            .min(8)
-            .min(bottom.saturating_sub(row).saturating_sub(3))
-    } else {
-        0
+    // ── Member cards ────────────────────────────────────────────────────
+    let cards_area = Rect {
+        x,
+        y: row,
+        width: w,
+        height: bottom.saturating_sub(row),
     };
-    let body_bottom = bottom.saturating_sub(preview_h);
-    let body_h = body_bottom.saturating_sub(row);
-
-    // ── Members | Activity (C0 + C1) ─────────────────────────────────────
-    if body_h > 0 && w > 0 {
-        let split = if w >= 60 {
-            let left_w = (w * 3 / 5).max(28).min(w.saturating_sub(22));
-            (left_w, w.saturating_sub(left_w).saturating_sub(1))
-        } else {
-            (w, 0)
-        };
-
-        let members_area = Rect {
-            x,
-            y: row,
-            width: split.0,
-            height: body_h,
-        };
-        render_members(
-            f,
-            members_area,
-            theme,
-            members,
-            dashboard,
-            interactive,
-            now_ms,
-        );
-
-        if split.1 >= 18 {
-            let feed_area = Rect {
-                x: x.saturating_add(split.0).saturating_add(1),
-                y: row,
-                width: split.1,
-                height: body_h,
-            };
-            // Vertical divider
-            for dy in 0..body_h {
-                f.buffer_mut().set_string(
-                    x.saturating_add(split.0),
-                    row.saturating_add(dy),
-                    "│",
-                    Style::default().fg(theme.dim),
-                );
-            }
-            render_activity_feed(f, feed_area, theme, project_id, dashboard, now_ms);
-        }
-    }
-
-    // ── Preview (C0 chrome + C3 body) ───────────────────────────────────
-    if preview_h > 0 {
-        let preview_area = Rect {
-            x,
-            y: body_bottom,
-            width: w,
-            height: preview_h,
-        };
-        let target = preview_target_id(
-            members,
-            dashboard.cursor,
-            dashboard.hover_session.as_deref(),
-            interactive,
-        );
-        render_preview(f, preview_area, theme, members, target, dashboard, now_ms);
-    }
+    render_members(
+        f,
+        cards_area,
+        theme,
+        members,
+        approvals,
+        dashboard,
+        interactive,
+        now_ms,
+    );
 }
 
 /// Returns the rect the columns occupy, so the caller can record it as the
@@ -932,11 +763,26 @@ fn render_project_meter(
     Some(graph)
 }
 
+/// Rows one member card occupies given the pane's shape: 1 (title only) on
+/// cramped panes, 2 (title + content), or 3 (a breathing row between cards)
+/// when every member fits airily.
+fn card_height(area: Rect, member_count: usize) -> usize {
+    if area.width < 40 || (area.height as usize) < 2 {
+        return 1;
+    }
+    if member_count > 0 && (area.height as usize) >= member_count * 3 {
+        return 3;
+    }
+    2
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_members(
     f: &mut Frame,
     area: Rect,
     theme: &Theme,
     members: &[&SessionSummary],
+    approvals: &HashMap<String, Vec<PendingToolApproval>>,
     dashboard: &mut ProjectDashboard,
     interactive: bool,
     now_ms: i64,
@@ -944,23 +790,6 @@ fn render_members(
     if area.height == 0 {
         return;
     }
-    let mut row = area.y;
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            " members ",
-            Style::default()
-                .fg(theme.dim)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Rect {
-            x: area.x,
-            y: row,
-            width: area.width,
-            height: 1,
-        },
-    );
-    row = row.saturating_add(1);
-
     if members.is_empty() {
         f.render_widget(
             Paragraph::new(Span::styled(
@@ -969,7 +798,7 @@ fn render_members(
             )),
             Rect {
                 x: area.x,
-                y: row,
+                y: area.y,
                 width: area.width,
                 height: 1,
             },
@@ -977,9 +806,8 @@ fn render_members(
         return;
     }
 
-    let visible_h = area.bottom().saturating_sub(row) as usize;
-    // Two rows per member when width allows detail.
-    let row_h: usize = if area.width >= 40 && visible_h >= 4 { 2 } else { 1 };
+    let visible_h = area.height as usize;
+    let row_h = card_height(area, members.len());
     let page = (visible_h / row_h).max(1);
 
     // Keep cursor visible.
@@ -993,6 +821,7 @@ fn render_members(
     let max_scroll = members.len().saturating_sub(page);
     dashboard.member_scroll = dashboard.member_scroll.min(max_scroll);
 
+    let mut row = area.y;
     let end = (dashboard.member_scroll + page).min(members.len());
     for (i, s) in members[dashboard.member_scroll..end].iter().enumerate() {
         let idx = dashboard.member_scroll + i;
@@ -1009,10 +838,51 @@ fn render_members(
             " "
         };
 
+        // ── Title row: marks + name, right-aligned meta ──────────────────
         let glyph = s.state.glyph();
         let attention = if s.needs_attention { "·" } else { " " };
-        let name = truncate_width(&primary_label(s), (area.width as usize).saturating_sub(18).max(4));
-        let harness = harness_label(s);
+        let (act, busy) = activity_cell(s, now_ms);
+
+        // Meta parts, least important first — dropped from the left until
+        // the row fits alongside a readable title.
+        let mut parts: Vec<String> = Vec::new();
+        if !s.tokens.is_zero() {
+            parts.push(format!("{} tok", format_token_count(s.tokens.total())));
+        }
+        if let Some((filled, pct)) = context_pct(s) {
+            parts.push(format!(
+                "{}{} {pct}%",
+                "▰".repeat(filled),
+                "▱".repeat(4usize.saturating_sub(filled))
+            ));
+        }
+        parts.push(identity_label(s));
+        parts.push(harness_label(s));
+        let marks_w = 4usize; // "{mark}{attention}{glyph} "
+        let width = area.width as usize;
+        let title_min = 16usize.min(width.saturating_sub(marks_w));
+        let act_w = UnicodeWidthStr::width(act.as_str());
+        loop {
+            let meta_w = parts
+                .iter()
+                .map(|p| UnicodeWidthStr::width(p.as_str()) + 3)
+                .sum::<usize>()
+                + act_w;
+            if parts.is_empty() || marks_w + title_min + 2 + meta_w <= width {
+                break;
+            }
+            parts.remove(0);
+        }
+        let meta_dim = parts.join(" · ");
+        let meta_w = if meta_dim.is_empty() {
+            act_w
+        } else {
+            UnicodeWidthStr::width(meta_dim.as_str()) + 3 + act_w
+        };
+        let name = truncate_width(
+            &primary_label(s),
+            width.saturating_sub(marks_w + meta_w + 2).max(4),
+        );
 
         let mut spans = vec![
             Span::styled(
@@ -1030,61 +900,69 @@ fn render_members(
                 },
             ),
         ];
-        let used = spans.iter().map(|sp| UnicodeWidthStr::width(sp.content.as_ref())).sum::<usize>();
-        let harness_w = UnicodeWidthStr::width(harness.as_str());
-        let pad = (area.width as usize).saturating_sub(used + harness_w + 1);
+        let used = spans
+            .iter()
+            .map(|sp| UnicodeWidthStr::width(sp.content.as_ref()))
+            .sum::<usize>();
+        let pad = width.saturating_sub(used + meta_w);
         spans.push(Span::raw(" ".repeat(pad)));
+        if !meta_dim.is_empty() {
+            spans.push(Span::styled(
+                format!("{meta_dim} · "),
+                Style::default().fg(theme.dim),
+            ));
+        }
         spans.push(Span::styled(
-            harness,
-            Style::default().fg(theme.dim),
+            act,
+            if busy {
+                Style::default().fg(theme.success)
+            } else {
+                Style::default().fg(theme.dim)
+            },
         ));
 
-        let line_area = Rect {
-            x: area.x,
-            y: row,
-            width: area.width,
-            height: 1,
-        };
-        f.render_widget(Paragraph::new(Line::from(spans)), line_area);
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect {
+                x: area.x,
+                y: row,
+                width: area.width,
+                height: 1,
+            },
+        );
         dashboard.hits.member_rows.push(ProjectRowHit {
             area: Rect {
                 x: area.x,
                 y: row,
                 width: area.width,
-                height: row_h as u16,
+                height: row_h.min(2) as u16,
             },
             session_id: s.id.clone(),
         });
         row = row.saturating_add(1);
 
-        if row_h == 2 && row < area.bottom() {
-            let (act, busy) = activity_cell(s, now_ms);
-            let mut detail = String::new();
-            if let Some((filled, pct)) = context_pct(s) {
-                detail.push_str(&"▰".repeat(filled));
-                detail.push_str(&"▱".repeat(4usize.saturating_sub(filled)));
-                detail.push_str(&format!(" {pct}%  "));
-            }
-            detail.push_str(&act);
-            if !s.tokens.is_zero() {
-                detail.push_str(&format!("  {} tok", format_token_count(s.tokens.total())));
-            }
-            let id = identity_label(s);
-            let detail_w = (area.width as usize).saturating_sub(4);
-            let left = truncate_width(&detail, detail_w.saturating_sub(UnicodeWidthStr::width(id.as_str()) + 2));
-            let pad = detail_w
-                .saturating_sub(UnicodeWidthStr::width(left.as_str()))
-                .saturating_sub(UnicodeWidthStr::width(id.as_str()));
-            let line = format!("    {left}{}{id}", " ".repeat(pad));
+        // ── Content row: what the session is doing / asking ──────────────
+        if row_h >= 2 && row < area.bottom() {
+            let line = card_line(s, approvals.get(&s.id).map(Vec::as_slice));
+            let label = line.label();
+            let text = line.text().replace('\n', " ");
+            let prefix = if label.is_empty() {
+                "    └ ".to_string()
+            } else {
+                format!("    └ {label} ")
+            };
+            let text = truncate_width(
+                &text,
+                (area.width as usize)
+                    .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+                    .max(4),
+            );
+            let spans = vec![
+                Span::styled(prefix, line.label_style(theme)),
+                Span::styled(text, line.text_style(theme)),
+            ];
             f.render_widget(
-                Paragraph::new(Span::styled(
-                    truncate_width(&line, area.width as usize),
-                    if busy {
-                        Style::default().fg(theme.success)
-                    } else {
-                        Style::default().fg(theme.dim)
-                    },
-                )),
+                Paragraph::new(Line::from(spans)),
                 Rect {
                     x: area.x,
                     y: row,
@@ -1094,240 +972,10 @@ fn render_members(
             );
             row = row.saturating_add(1);
         }
-    }
-}
 
-fn render_activity_feed(
-    f: &mut Frame,
-    area: Rect,
-    theme: &Theme,
-    project_id: &str,
-    dashboard: &mut ProjectDashboard,
-    now_ms: i64,
-) {
-    if area.height == 0 {
-        return;
-    }
-    let mut row = area.y;
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            " activity ",
-            Style::default()
-                .fg(theme.dim)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Rect {
-            x: area.x,
-            y: row,
-            width: area.width,
-            height: 1,
-        },
-    );
-    row = row.saturating_add(1);
-
-    let empty = VecDeque::new();
-    let feed = dashboard
-        .activity
-        .get(project_id)
-        .unwrap_or(&empty);
-    if feed.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "  (state changes appear here)",
-                Style::default().fg(theme.dim),
-            )),
-            Rect {
-                x: area.x,
-                y: row,
-                width: area.width,
-                height: 1,
-            },
-        );
-        return;
-    }
-
-    let page = area.bottom().saturating_sub(row) as usize;
-    let max_scroll = feed.len().saturating_sub(page.max(1));
-    dashboard.feed_scroll = dashboard.feed_scroll.min(max_scroll);
-    let start = dashboard.feed_scroll;
-    let end = (start + page).min(feed.len());
-
-    for entry in feed.iter().skip(start).take(end.saturating_sub(start)) {
-        if row >= area.bottom() {
-            break;
-        }
-        let age = format_age_ms(
-            now_ms
-                .saturating_sub(entry.at.timestamp_millis())
-                .max(0) as u64,
-        );
-        let kind_style = match entry.kind {
-            ActivityKind::Errored => Style::default().fg(theme.danger),
-            ActivityKind::WantsYou => Style::default().fg(theme.accent),
-            ActivityKind::Running => Style::default().fg(theme.success),
-            ActivityKind::Done => Style::default().fg(theme.dim),
-            ActivityKind::Created => Style::default().fg(theme.dim),
-            ActivityKind::Other => Style::default().fg(theme.dim),
-        };
-        let name = truncate_width(
-            &entry.label,
-            (area.width as usize).saturating_sub(16).max(4),
-        );
-        let line = Line::from(vec![
-            Span::styled(format!(" {age:>4} "), Style::default().fg(theme.dim)),
-            Span::styled(format!("{} ", entry.kind.glyph()), kind_style),
-            Span::styled(
-                format!("{} ", entry.kind.label()),
-                kind_style,
-            ),
-            Span::styled(name, Style::default().fg(theme.text)),
-        ]);
-        f.render_widget(
-            Paragraph::new(line),
-            Rect {
-                x: area.x,
-                y: row,
-                width: area.width,
-                height: 1,
-            },
-        );
-        dashboard.hits.feed_rows.push(ProjectRowHit {
-            area: Rect {
-                x: area.x,
-                y: row,
-                width: area.width,
-                height: 1,
-            },
-            session_id: entry.session_id.clone(),
-        });
-        row = row.saturating_add(1);
-    }
-}
-
-fn render_preview(
-    f: &mut Frame,
-    area: Rect,
-    theme: &Theme,
-    members: &[&SessionSummary],
-    target_id: Option<&str>,
-    dashboard: &ProjectDashboard,
-    now_ms: i64,
-) {
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(theme.dim));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let Some(id) = target_id else {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                " preview — select a project member ",
-                Style::default().fg(theme.dim),
-            )),
-            inner,
-        );
-        return;
-    };
-    let Some(s) = members.iter().find(|m| m.id == id) else {
-        return;
-    };
-
-    let mut row = inner.y;
-    if row >= inner.bottom() {
-        return;
-    }
-
-    // Chrome line: name · state · model · context · activity
-    let (act, busy) = activity_cell(s, now_ms);
-    let mut chrome = format!(
-        " preview: {}  {} {}  {}",
-        primary_label(s),
-        s.state.glyph(),
-        s.state.label(),
-        identity_label(s),
-    );
-    if let Some((filled, pct)) = context_pct(s) {
-        chrome.push_str(&format!(
-            "  {}{} {}%",
-            "▰".repeat(filled),
-            "▱".repeat(4usize.saturating_sub(filled)),
-            pct
-        ));
-    }
-    chrome.push_str(&format!("  {act}"));
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            truncate_width(&chrome, inner.width as usize),
-            if busy {
-                Style::default().fg(theme.success)
-            } else {
-                Style::default().fg(theme.dim)
-            },
-        )),
-        Rect {
-            x: inner.x,
-            y: row,
-            width: inner.width,
-            height: 1,
-        },
-    );
-    row = row.saturating_add(1);
-
-    // Body: recent messages (C3)
-    let msgs = dashboard.preview_messages.get(id);
-    let body_h = inner.bottom().saturating_sub(row);
-    if body_h == 0 {
-        return;
-    }
-
-    match msgs {
-        Some(m) if !m.is_empty() => {
-            let show: Vec<&PreviewMessage> = m.iter().rev().take(PREVIEW_SHOW).collect();
-            for msg in show.into_iter().rev() {
-                if row >= inner.bottom() {
-                    break;
-                }
-                let role = match msg.role {
-                    PreviewRole::User => "you",
-                    PreviewRole::Assistant => "agent",
-                    PreviewRole::Other => "…",
-                };
-                let text = msg.text.replace('\n', " ");
-                let line = format!(
-                    "  {}: {}",
-                    role,
-                    truncate_width(&text, (inner.width as usize).saturating_sub(8).max(4))
-                );
-                f.render_widget(
-                    Paragraph::new(Span::styled(
-                        truncate_width(&line, inner.width as usize),
-                        Style::default().fg(theme.text),
-                    )),
-                    Rect {
-                        x: inner.x,
-                        y: row,
-                        width: inner.width,
-                        height: 1,
-                    },
-                );
-                row = row.saturating_add(1);
-            }
-        }
-        _ => {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    "  (no recent chat cached — open session to load history)",
-                    Style::default().fg(theme.dim),
-                ))
-                .wrap(Wrap { trim: false }),
-                Rect {
-                    x: inner.x,
-                    y: row,
-                    width: inner.width,
-                    height: body_h,
-                },
-            );
+        // Breathing row between cards in the airy layout.
+        if row_h >= 3 {
+            row = row.saturating_add(1);
         }
     }
 }
@@ -1346,7 +994,8 @@ fn state_style(theme: &Theme, state: SessionState) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use construct_protocol::{SessionKind, SessionSummary, TokenTally};
+    use chrono::Utc;
+    use construct_protocol::{SessionKind, SessionSummary, TokenTally, ToolRisk};
 
     fn session(
         id: &str,
@@ -1372,6 +1021,9 @@ mod tests {
             worktree: None,
             pending_input: false,
             last_prompt: None,
+            last_message_role: None,
+            last_message: None,
+            last_error: None,
             event_count: 0,
             has_pty: true,
             mode: Some("interactive".into()),
@@ -1426,54 +1078,6 @@ mod tests {
     }
 
     #[test]
-    fn activity_feed_records_transitions_only() {
-        let mut dash = ProjectDashboard::default();
-        let mut s = session("s1", Some("p1"), SessionState::Running, false);
-        let t0 = Utc::now();
-        // First observe seeds baseline without a feed line.
-        dash.observe_session_state(&s, t0);
-        assert!(dash.activity.get("p1").map(|f| f.is_empty()).unwrap_or(true));
-
-        // Same state → no new entry
-        dash.observe_session_state(&s, t0);
-        assert!(dash.activity.get("p1").map(|f| f.is_empty()).unwrap_or(true));
-
-        s.state = SessionState::AwaitingInput;
-        s.needs_attention = true;
-        dash.observe_session_state(&s, t0);
-        assert_eq!(dash.activity["p1"][0].kind, ActivityKind::WantsYou);
-
-        dash.note_session_created(&session("s2", Some("p1"), SessionState::Pending, false), t0);
-        assert_eq!(dash.activity["p1"][0].kind, ActivityKind::Created);
-    }
-
-    #[test]
-    fn preview_target_prefers_hover_then_cursor() {
-        let a = session("a", Some("p"), SessionState::Running, false);
-        let b = session("b", Some("p"), SessionState::Done, false);
-        let members = vec![&a, &b];
-        assert_eq!(
-            preview_target_id(&members, 1, Some("a"), true),
-            Some("a")
-        );
-        assert_eq!(preview_target_id(&members, 1, None, true), Some("b"));
-        assert_eq!(preview_target_id(&members, 1, None, false), Some("a"));
-    }
-
-    #[test]
-    fn message_cache_coalesces_assistant_stream() {
-        let mut dash = ProjectDashboard::default();
-        let t = Utc::now();
-        dash.observe_message("s1", PreviewRole::Assistant, "Hel", t);
-        dash.observe_message("s1", PreviewRole::Assistant, "lo", t);
-        dash.observe_message("s1", PreviewRole::User, "hi", t);
-        let msgs = &dash.preview_messages["s1"];
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].text, "Hello");
-        assert_eq!(msgs[1].text, "hi");
-    }
-
-    #[test]
     fn project_members_excludes_archived_and_native() {
         let live = session("live", Some("p"), SessionState::Running, false);
         let mut arch = session("arch", Some("p"), SessionState::Done, false);
@@ -1492,6 +1096,75 @@ mod tests {
         let _ = live;
     }
 
+    /// The content line answers "what would I learn by opening this
+    /// session" in urgency order: a waiting approval preempts everything,
+    /// an error preempts conversation, and only an *unwatched* stop turns
+    /// assistant text into an "asks" — idle interactive sessions the
+    /// operator already saw stay at "last".
+    #[test]
+    fn card_line_ranks_approval_over_error_over_conversation() {
+        let mut s = session("s", Some("p"), SessionState::Errored, false);
+        s.last_error = Some("cargo test exited 101".into());
+        s.last_message_role = Some(MessageRole::Assistant);
+        s.last_message = Some("I'll rerun the suite.".into());
+
+        let approvals = vec![PendingToolApproval {
+            call_id: "c1".into(),
+            tool: "bash".into(),
+            args_summary: "rm -rf target".into(),
+            risk: ToolRisk::Risky,
+        }];
+        assert_eq!(
+            card_line(&s, Some(&approvals)),
+            CardLine::Approve("bash · rm -rf target".into())
+        );
+        assert_eq!(
+            card_line(&s, None),
+            CardLine::Error("cargo test exited 101".into())
+        );
+
+        s.state = SessionState::AwaitingInput;
+        s.needs_attention = true;
+        assert_eq!(
+            card_line(&s, None),
+            CardLine::Asks("I'll rerun the suite.".into())
+        );
+        s.needs_attention = false;
+        assert_eq!(
+            card_line(&s, None),
+            CardLine::Last("I'll rerun the suite.".into())
+        );
+    }
+
+    /// Running cards distinguish "the agent is talking" (now:) from "the
+    /// agent is chewing on the user's message" (on:), and fall back to the
+    /// spawn prompt for headless sessions that haven't spoken yet.
+    #[test]
+    fn card_line_running_prefers_assistant_then_user_then_prompt() {
+        let mut s = session("s", Some("p"), SessionState::Running, false);
+        s.last_message_role = Some(MessageRole::Assistant);
+        s.last_message = Some("Editing token_meter.rs".into());
+        assert_eq!(
+            card_line(&s, None),
+            CardLine::Now("Editing token_meter.rs".into())
+        );
+
+        s.last_message_role = Some(MessageRole::User);
+        s.last_message = Some("fix the flaky test".into());
+        assert_eq!(
+            card_line(&s, None),
+            CardLine::On("fix the flaky test".into())
+        );
+
+        s.last_message = None;
+        s.last_message_role = None;
+        s.last_prompt = Some("audit the daemon".into());
+        assert_eq!(card_line(&s, None), CardLine::On("audit the daemon".into()));
+
+        s.last_prompt = None;
+        assert_eq!(card_line(&s, None), CardLine::Quiet("working…"));
+    }
+
     /// The dashboard's meter records the rect its columns occupy so the hover
     /// detail can map a pointer back to a bucket, and records nothing on a
     /// frame that drew no columns — a stale rect would keep answering hovers
@@ -1504,6 +1177,7 @@ mod tests {
         let theme = Theme::default();
         let now = Instant::now();
         let now_ms = Utc::now().timestamp_millis();
+        let approvals = HashMap::new();
         let area = Rect {
             x: 0,
             y: 0,
@@ -1513,8 +1187,12 @@ mod tests {
         let draw = |dash: &mut ProjectDashboard| {
             let backend = ratatui::backend::TestBackend::new(area.width, area.height);
             let mut term = ratatui::Terminal::new(backend).expect("terminal");
-            term.draw(|f| render(f, area, &theme, "p", &members, dash, true, now, now_ms))
-                .expect("draw");
+            term.draw(|f| {
+                render(
+                    f, area, &theme, "p", &members, &approvals, dash, true, now, now_ms,
+                )
+            })
+            .expect("draw");
         };
 
         // No meter for this project yet: nothing to hover.
@@ -1539,10 +1217,66 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| {
             render(
-                f, short, &theme, "p", &members, &mut dash, true, now, now_ms,
+                f, short, &theme, "p", &members, &approvals, &mut dash, true, now, now_ms,
             )
         })
         .expect("draw");
         assert_eq!(dash.meter_graph, None);
+    }
+
+    /// Member cards paint a content line under each title and register one
+    /// hit zone per member covering both rows.
+    #[test]
+    fn cards_render_content_lines_with_hit_zones() {
+        let mut ask = session("wire slack", Some("p"), SessionState::AwaitingInput, true);
+        ask.last_message_role = Some(MessageRole::Assistant);
+        ask.last_message = Some("Should replies thread under the original?".into());
+        let mut run = session("meter", Some("p"), SessionState::Running, false);
+        run.last_message_role = Some(MessageRole::Assistant);
+        run.last_message = Some("Editing token_meter.rs".into());
+        let members = vec![&ask, &run];
+        let mut dash = ProjectDashboard::default();
+        let theme = Theme::default();
+        let approvals = HashMap::new();
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 90,
+            height: 24,
+        };
+        let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            render(
+                f,
+                area,
+                &theme,
+                "p",
+                &members,
+                &approvals,
+                &mut dash,
+                true,
+                Instant::now(),
+                Utc::now().timestamp_millis(),
+            )
+        })
+        .expect("draw");
+        let buf = term.backend().buffer();
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                text.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("asks:"), "{text}");
+        assert!(
+            text.contains("Should replies thread under the original?"),
+            "{text}"
+        );
+        assert!(text.contains("now:"), "{text}");
+        assert!(text.contains("Editing token_meter.rs"), "{text}");
+        assert_eq!(dash.hits.member_rows.len(), 2);
+        assert!(dash.hits.member_rows.iter().all(|h| h.area.height == 2));
     }
 }

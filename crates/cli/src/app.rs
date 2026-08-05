@@ -2277,10 +2277,12 @@ pub struct App {
     /// Per-session live agent status, fed by `SessionEvent::AgentStatus`
     /// and rendered above queued input while a turn is active.
     pub agent_statuses: HashMap<String, construct_protocol::AgentStatus>,
-    /// Pending tool approvals by session id. Orchestrator approvals stay inline
-    /// in the Operator PTY, but this lets the Matrix title bar surface a clear
-    /// attention marker while the prompt is waiting.
-    pub pending_tool_approvals: HashMap<String, HashSet<String>>,
+    /// Pending tool approvals by session id, with the tool/args each prompt
+    /// is waiting on. Orchestrator approvals stay inline in the Operator
+    /// PTY, but this lets the Matrix title bar surface a clear attention
+    /// marker and the project dashboard say *what* wants approval.
+    pub pending_tool_approvals:
+        HashMap<String, Vec<crate::project_dashboard::PendingToolApproval>>,
     /// Latest browser preview per session, fed by `SessionEvent::BrowserPreview`
     /// and rendered as a top-right overlay in the terminal view.
     pub browser_previews: HashMap<String, BrowserPreviewState>,
@@ -5524,7 +5526,6 @@ async fn run_with_socket_initial_selection(
         pty_input_errors,
         tutorial: None,
     };
-    app.project_dashboard.seed_from_sessions(&app.sessions);
     if let Some(step) = persisted.tutorial_step {
         app.tutorial_resume(step);
     }
@@ -6715,7 +6716,6 @@ impl App {
         self.pty_input_errors = pty_input_errors;
         self.sessions = sessions;
         self.groups = groups;
-        self.project_dashboard.seed_from_sessions(&self.sessions);
         self.harnesses = harnesses;
         self.refresh_features().await;
         self.plugin_actions = plugin_actions;
@@ -7653,12 +7653,17 @@ impl App {
             crate::project_dashboard::project_members(&self.sessions, project_id);
         self.project_dashboard.ensure_project(project_id);
         self.project_dashboard.clamp_cursor(members.len());
-        let target = crate::project_dashboard::preview_target_id(
-            &members,
-            self.project_dashboard.cursor,
-            self.project_dashboard.hover_session.as_deref(),
-            true,
-        );
+        // Hovered member wins over the keyboard cursor.
+        let target = self
+            .project_dashboard
+            .hover_session
+            .as_deref()
+            .filter(|h| members.iter().any(|s| s.id == *h))
+            .or_else(|| {
+                members
+                    .get(self.project_dashboard.cursor)
+                    .map(|s| s.id.as_str())
+            });
         if let Some(id) = target {
             let id = id.to_string();
             self.select_session(id.clone());
@@ -7689,7 +7694,7 @@ impl App {
         true
     }
 
-    /// Mouse hover over a dashboard member retargets the preview strip.
+    /// Mouse hover over a dashboard member highlights its card.
     pub fn project_dashboard_hover_at(&mut self, col: u16, row: u16) {
         if self.selection.group_id().is_none() {
             self.project_dashboard.hover_session = None;
@@ -8986,7 +8991,6 @@ impl App {
             Ok(list) => self.groups = list,
             Err(e) => self.set_status(format!("project list failed: {e}")),
         }
-        self.project_dashboard.seed_from_sessions(&self.sessions);
         self.refresh_orchestrator_id();
         self.ensure_selection_valid();
     }
@@ -9792,10 +9796,18 @@ impl App {
                             allow_auto_review,
                         } = &payload.event
                         {
-                            self.pending_tool_approvals
+                            let pending = self
+                                .pending_tool_approvals
                                 .entry(payload.session_id.clone())
-                                .or_default()
-                                .insert(call_id.clone());
+                                .or_default();
+                            if !pending.iter().any(|a| a.call_id == *call_id) {
+                                pending.push(crate::project_dashboard::PendingToolApproval {
+                                    call_id: call_id.clone(),
+                                    tool: tool.clone(),
+                                    args_summary: args_summary.clone(),
+                                    risk: *risk,
+                                });
+                            }
                             self.maybe_open_approval_prompt(
                                 payload.session_id.clone(),
                                 call_id.clone(),
@@ -10026,25 +10038,11 @@ impl App {
                                     .or_default();
                                 history.feed_message(kind, &text);
                             }
-                            // Project dashboard chat preview cache (C3): keep
-                            // a short ring of recent messages for every
-                            // session so the project pane can peek without
-                            // selecting it.
-                            let preview_role = match kind {
-                                crate::pty_render::MessageKind::User => {
-                                    crate::project_dashboard::PreviewRole::User
-                                }
-                                crate::pty_render::MessageKind::Assistant => {
-                                    crate::project_dashboard::PreviewRole::Assistant
-                                }
-                                _ => crate::project_dashboard::PreviewRole::Other,
-                            };
-                            self.project_dashboard.observe_message(
-                                &payload.session_id,
-                                preview_role,
-                                &text,
-                                payload.at,
-                            );
+                            // The project dashboard's member cards quote the
+                            // daemon's durable last-message snippet
+                            // (`SessionSummary::last_message`), refreshed by
+                            // the per-event State broadcast — no client-side
+                            // message cache needed here.
                             // Accumulate the orchestrator's streaming assistant
                             // text; finalized into a typewriter monolog at turn
                             // end (the AgentStatus active=false handler below).
@@ -10232,25 +10230,12 @@ impl App {
                         if payload.session.archived && !was_archived {
                             self.focus_neighbor_of(&id);
                         }
-                        let is_new = !self.sessions.iter().any(|s| s.id == id);
                         if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
                             self.sessions[i] = payload.session;
                         } else {
                             self.sessions.push(payload.session);
                             self.sessions
                                 .sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                        }
-                        // Project dashboard activity feed (transitions only).
-                        if let Some(session) = self.sessions.iter().find(|s| s.id == id) {
-                            let session = session.clone();
-                            let now = chrono::Utc::now();
-                            if is_new {
-                                self.project_dashboard
-                                    .note_session_created(&session, now);
-                            } else {
-                                self.project_dashboard
-                                    .observe_session_state(&session, now);
-                            }
                         }
                         // If the session that just changed is visible on screen,
                         // consume its marker right away.
@@ -10653,7 +10638,7 @@ impl App {
         let Some(pending) = self.pending_tool_approvals.get_mut(session_id) else {
             return;
         };
-        pending.remove(call_id);
+        pending.retain(|a| a.call_id != call_id);
         if pending.is_empty() {
             self.pending_tool_approvals.remove(session_id);
         }
@@ -17366,6 +17351,9 @@ mod tests {
             worktree: None,
             pending_input: false,
             last_prompt: None,
+            last_message_role: None,
+            last_message: None,
+            last_error: None,
             event_count: 0,
             has_pty: false,
             mode: None,
@@ -41299,8 +41287,15 @@ mod tests {
         app.sessions.push(orch);
         app.refresh_orchestrator_id();
         app.matrix_rain_hidden = false;
-        app.pending_tool_approvals
-            .insert("orch".into(), HashSet::from(["call-1".to_string()]));
+        app.pending_tool_approvals.insert(
+            "orch".into(),
+            vec![crate::project_dashboard::PendingToolApproval {
+                call_id: "call-1".into(),
+                tool: "bash".into(),
+                args_summary: "echo hi".into(),
+                risk: construct_protocol::ToolRisk::Risky,
+            }],
+        );
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");

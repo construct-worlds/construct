@@ -1634,6 +1634,9 @@ pub(crate) fn set_state_tracked(
         if s.busy_running_since_ms.is_none() {
             s.busy_running_since_ms = Some(now_ms);
         }
+        // A fresh turn outdates the previous failure: `last_error` answers
+        // "errored why", and the session is no longer errored.
+        s.last_error = None;
     } else if let Some(since) = s.busy_running_since_ms.take() {
         s.busy_ms = s
             .busy_ms
@@ -1733,7 +1736,16 @@ impl SessionManager {
             // context gauge (spec 0104) restores from the LAST report seen,
             // and a Reset along the way clears it — mirroring the live fold.
             let path = storage.transcript_path(&s.id);
-            let (count, message_count, last_message_at, tokens, context, context_segments) =
+            let (
+                count,
+                message_count,
+                last_message_at,
+                last_message,
+                last_error,
+                tokens,
+                context,
+                context_segments,
+            ) =
                 if path.exists() {
                     let f = std::fs::File::open(&path)?;
                     let reader = std::io::BufReader::new(f);
@@ -1741,6 +1753,12 @@ impl SessionManager {
                     let mut n = 0u64;
                     let mut msgs = 0u64;
                     let mut last_msg_at: Option<chrono::DateTime<chrono::Utc>> = None;
+                    // Last-message snippet slots, folded exactly as the live
+                    // event path folds them so the restored snippet matches
+                    // what live observation would have produced.
+                    let mut last_msg_role: Option<construct_protocol::MessageRole> = None;
+                    let mut last_msg_text: Option<String> = None;
+                    let mut last_error: Option<String> = None;
                     let mut tally = construct_protocol::TokenTally::default();
                     let mut context: (Option<u64>, Option<u64>) = (None, None);
                     let mut segments: Vec<construct_protocol::ContextSegment> = Vec::new();
@@ -1758,9 +1776,28 @@ impl SessionManager {
                             serde_json::from_str::<construct_protocol::TimestampedEvent>(&line)
                         {
                             match ts.event {
-                                SessionEvent::Message { .. } => {
+                                SessionEvent::Message { role, ref text } => {
                                     msgs += 1;
                                     last_msg_at = Some(ts.at);
+                                    construct_protocol::fold_last_message(
+                                        &mut last_msg_role,
+                                        &mut last_msg_text,
+                                        role,
+                                        text,
+                                    );
+                                }
+                                SessionEvent::Error { ref message } => {
+                                    last_error = Some(construct_protocol::snippet(message));
+                                }
+                                SessionEvent::Done { exit_code } if exit_code != 0 => {
+                                    last_error = Some(format!("exited {exit_code}"));
+                                }
+                                SessionEvent::Status { state, .. }
+                                    if state == SessionState::Running =>
+                                {
+                                    // Mirrors the live fold: a fresh turn
+                                    // outdates the previous failure.
+                                    last_error = None;
                                 }
                                 SessionEvent::ModelChanged { ref model } => {
                                     scan_model = Some(model.clone());
@@ -1803,16 +1840,30 @@ impl SessionManager {
                                 SessionEvent::Reset => {
                                     context = (None, None);
                                     segments.clear();
+                                    last_msg_role = None;
+                                    last_msg_text = None;
+                                    last_error = None;
                                 }
                                 _ => {}
                             }
                         }
                     }
-                    (n, msgs, last_msg_at, tally, context, segments)
+                    (
+                        n,
+                        msgs,
+                        last_msg_at,
+                        last_msg_role.zip(last_msg_text),
+                        last_error,
+                        tally,
+                        context,
+                        segments,
+                    )
                 } else {
                     (
                         0,
                         0,
+                        None,
+                        None,
                         None,
                         construct_protocol::TokenTally::default(),
                         (None, None),
@@ -1822,6 +1873,9 @@ impl SessionManager {
             let mut s = s;
             s.message_count = message_count;
             s.last_message_at = last_message_at;
+            s.last_message_role = last_message.as_ref().map(|(role, _)| *role);
+            s.last_message = last_message.map(|(_, text)| text);
+            s.last_error = last_error;
             s.tokens = tokens;
             s.context_used = context.0;
             s.context_window = context.1;
@@ -6406,6 +6460,9 @@ impl SessionManager {
             worktree: None,
             pending_input: false,
             last_prompt: None,
+            last_message_role: None,
+            last_message: None,
+            last_error: None,
             event_count,
             has_pty,
             mode,
@@ -7781,6 +7838,9 @@ mod tests {
             worktree: None,
             pending_input: false,
             last_prompt: None,
+            last_message_role: None,
+            last_message: None,
+            last_error: None,
             event_count: 0,
             has_pty: true,
             mode: Some("interactive".to_string()),
@@ -8330,6 +8390,9 @@ mod tests {
                 worktree: None,
                 pending_input: false,
                 last_prompt: None,
+                last_message_role: None,
+                last_message: None,
+                last_error: None,
                 event_count: 0,
                 has_pty: true,
                 mode: None,
@@ -10340,6 +10403,9 @@ mod tests {
             worktree: None,
             pending_input: false,
             last_prompt: None,
+            last_message_role: None,
+            last_message: None,
+            last_error: None,
             event_count: 0,
             has_pty: true,
             mode: None,
@@ -10501,6 +10567,9 @@ mod tests {
             worktree: None,
             pending_input: false,
             last_prompt: None,
+            last_message_role: None,
+            last_message: None,
+            last_error: None,
             event_count: 0,
             has_pty: true,
             mode: None,
@@ -11662,6 +11731,86 @@ mod tests {
             "last_message_at restores from the newest Message event's own \
              timestamp — the trailing Reasoning events don't move it"
         );
+        assert_eq!(
+            loaded.last_message.as_deref(),
+            Some("hello"),
+            "the last-message snippet restores from the newest Message"
+        );
+        assert_eq!(
+            loaded.last_message_role,
+            Some(construct_protocol::MessageRole::Assistant)
+        );
+    }
+
+    /// Loading restores the last-error snippet from the transcript, and a
+    /// later Running status outdates it — exactly as the live fold would
+    /// have (an error the session already moved past is not "why it's
+    /// errored now").
+    #[tokio::test]
+    async fn load_restores_last_error_until_a_newer_run_outdates_it() {
+        use chrono::Utc;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+
+        for (id, events) in [
+            (
+                "still-errored",
+                vec![construct_protocol::SessionEvent::Error {
+                    message: "cargo test exited 101".into(),
+                }],
+            ),
+            (
+                "ran-again",
+                vec![
+                    construct_protocol::SessionEvent::Error {
+                        message: "cargo test exited 101".into(),
+                    },
+                    construct_protocol::SessionEvent::Status {
+                        state: SessionState::Running,
+                        detail: None,
+                    },
+                ],
+            ),
+        ] {
+            let summary =
+                placement_summary(id, 0, None, construct_protocol::SessionKind::User);
+            storage.save_summary(&summary).expect("save summary");
+            for (i, event) in events.into_iter().enumerate() {
+                let ts = construct_protocol::TimestampedEvent {
+                    seq: i as u64 + 1,
+                    at: Utc::now(),
+                    event,
+                };
+                storage.append_event(id, &ts).expect("append event");
+            }
+        }
+
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        let errored = mgr
+            .get_entry("still-errored")
+            .await
+            .expect("entry")
+            .summary()
+            .await;
+        assert_eq!(
+            errored.last_error.as_deref(),
+            Some("cargo test exited 101")
+        );
+        let recovered = mgr
+            .get_entry("ran-again")
+            .await
+            .expect("entry")
+            .summary()
+            .await;
+        assert_eq!(recovered.last_error, None);
     }
 
     /// `SessionManager::search` must use the live, in-memory session list
