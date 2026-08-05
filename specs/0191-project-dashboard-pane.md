@@ -22,6 +22,8 @@ Top to bottom, dropping lower-priority regions when the pane is short:
 2. **Token meter** — project-scoped throughput history fed from the same
    `Cost` / busy-time path as the fleet meter, filtered to members of this
    project. Idle projects show a quiet empty line rather than a blank grid.
+   Hovering a column details it exactly as the fleet meter's does (spec 0167):
+   the scoping changes which sessions are counted, not what the graph means.
 3. **Members | activity** — two columns when wide enough; members alone when
    narrow.
 4. **Preview** — chrome for the target session (name, state, model/identity,

@@ -133,6 +133,43 @@ compute time, and netting cache reads out of them would report a throughput
 no bill and no provider agrees with. Exact per-model cached figures belong in
 the hover detail, which is where a darker band gets a number.
 
+### The hover detail restates the column as bars
+
+Hovering a column details what that span consumed: the span and the column's
+total, then one row per model that contributed to it.
+
+Those rows are **bars, not a sentence of numbers**. A column is a stack, and
+the question asked of it — what was this mostly, and how much of that was
+real work — is a question about proportion. Comma-separated figures leave the
+division to be done by eye, and past two models a single line of them reads
+as a run of text with no shape at all. Each row therefore draws that model's
+share of the column as a bar, and keeps its exact figures beside it: the bar
+answers the proportion, the figures answer the amount, and neither has to
+stand in for the other.
+
+The bars are the column's own paint, laid along a row instead of up one: one
+hue per model, the cache-served part in the darker tone at the bar's start and
+the fresh part full-strength after it, boundaries carried at sub-cell
+resolution the same way. A hover that recolored or reordered what it details
+would be describing a different graph than the one under the pointer.
+
+Rows follow series order — the order the column stacks them and the legend
+names them — not size. Reordering by size would make the detail's rows and the
+band they describe disagree about position, which is the same reading failure
+that fixes the stack's order in the first place.
+
+Shares are drawn against the hovered column's own total, so the bars are read
+against each other and a model that did any work at all keeps a visible bar
+however small its share; the figures beside it, not the bar, carry how the
+column compares to its neighbours. A pane too narrow for a bar that would
+still separate a tenth from a fifth shows the figures alone rather than a stub
+bar that misstates every share.
+
+Any meter drawn from these buckets details itself this way, whether it is the
+fleet-wide meter or one scoped to a subset of sessions (spec 0191). Two
+graphs of the same data with two different hover vocabularies would make the
+scoping look like a difference in kind.
+
 ### Buckets are arrival time
 
 A sample lands in the bucket in which its report *arrived*, not spread over
@@ -276,6 +313,13 @@ inspecting the rest.
 - Because the bars carry no stated ceiling, a client must not invite
   cross-time comparison of bar heights alone; the legend's rates are the
   figure that survives the scale moving.
+- The hover detail's bars and the column's bands are one paint model in two
+  orientations. A change to how a band is toned, ordered, or resolved below a
+  cell has to move both, or the detail starts describing a graph the user
+  isn't looking at.
+- The hover detail is the meter's exact-figures surface: it may add shape but
+  may not drop the per-model volume or the cached subset in favor of it. A
+  proportion is not an amount.
 - Compute time must be attributed only to model-backed sessions. A session
   running a shell command spends most of its life busy with no model behind
   it; counting that would divide real token output by unrelated seconds and
@@ -343,3 +387,13 @@ inspecting the rest.
 - A harness reports no cache figure at all: its bands are drawn solid, entirely
   as new work, which is what "nothing was cached" looks like — the meter does
   not infer a cached share from the size of the prompt.
+- A column mixing three models is hovered: the detail names the span and the
+  column's total, then draws three bars in the same order and hues the column
+  stacked them, each with its own token figure and, where the provider cached
+  part of the prompt, that subset marked as such. Which model dominated the
+  column is answered by the bars' lengths; how much it actually was, by the
+  figures beside them.
+- One model in that column was almost entirely cache-served: its bar is nearly
+  all darker tone, so a long conversation being replayed is distinguishable
+  from the same volume of new work at a glance rather than by comparing two
+  numbers.

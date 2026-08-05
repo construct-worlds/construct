@@ -135,6 +135,10 @@ pub struct ProjectDashboard {
     pub last_seen: HashMap<String, (SessionState, bool)>,
     /// Hit zones from the last render.
     pub hits: ProjectDashboardHits,
+    /// `(project_id, graph rect)` of the meter drawn on the last frame, so the
+    /// hover detail can find which bucket the pointer is over. `None` on any
+    /// frame that drew no meter (idle project, or a pane too short for one).
+    pub meter_graph: Option<(String, Rect)>,
 }
 
 impl Default for ProjectDashboard {
@@ -150,6 +154,7 @@ impl Default for ProjectDashboard {
             token_meters: HashMap::new(),
             last_seen: HashMap::new(),
             hits: ProjectDashboardHits::default(),
+            meter_graph: None,
         }
     }
 }
@@ -651,6 +656,7 @@ pub fn render(
     dashboard.ensure_project(project_id);
     dashboard.clamp_cursor(members.len());
     dashboard.hits = ProjectDashboardHits::default();
+    dashboard.meter_graph = None;
 
     if area.width == 0 || area.height == 0 {
         return;
@@ -730,6 +736,9 @@ pub fn render(
     // ── Token meter (C2) ────────────────────────────────────────────────
     let meter = dashboard.token_meters.get_mut(project_id);
     let show_meter = area.height >= 12 && w >= 24;
+    // Recorded after the meter's own borrow ends, so the hover detail can map
+    // a pointer back to a bucket on the next frame.
+    let mut meter_graph = None;
     if show_meter {
         if let Some(meter) = meter {
             meter.advance_to(now);
@@ -741,7 +750,7 @@ pub fn render(
                     width: w,
                     height: meter_h,
                 };
-                render_project_meter(f, meter_area, theme, meter, now);
+                meter_graph = render_project_meter(f, meter_area, theme, meter, now);
                 row = row.saturating_add(meter_h);
             }
         } else if row < bottom {
@@ -760,6 +769,7 @@ pub fn render(
             row = row.saturating_add(1);
         }
     }
+    dashboard.meter_graph = meter_graph.map(|graph| (project_id.to_string(), graph));
 
     // Gap before body columns.
     if row < bottom {
@@ -841,20 +851,22 @@ pub fn render(
     }
 }
 
+/// Returns the rect the columns occupy, so the caller can record it as the
+/// hover-detail hit zone (the legend row below them is not part of it).
 fn render_project_meter(
     f: &mut Frame,
     area: Rect,
     theme: &Theme,
     meter: &TokenMeter,
     _now: Instant,
-) {
+) -> Option<Rect> {
     let dim = Style::default().fg(theme.dim);
     if meter.is_idle() {
         f.render_widget(
             Paragraph::new(Span::styled(" no token usage reported yet ", dim)),
             area,
         );
-        return;
+        return None;
     }
 
     let graph_h = area.height.saturating_sub(1).max(1);
@@ -917,6 +929,7 @@ fn render_project_meter(
             height: 1,
         },
     );
+    Some(graph)
 }
 
 fn render_members(
@@ -1477,5 +1490,59 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].id, "live");
         let _ = live;
+    }
+
+    /// The dashboard's meter records the rect its columns occupy so the hover
+    /// detail can map a pointer back to a bucket, and records nothing on a
+    /// frame that drew no columns — a stale rect would keep answering hovers
+    /// over whatever replaced it.
+    #[test]
+    fn the_meter_records_its_graph_rect_only_while_it_draws_one() {
+        let live = session("live", Some("p"), SessionState::Running, false);
+        let members = vec![&live];
+        let mut dash = ProjectDashboard::default();
+        let theme = Theme::default();
+        let now = Instant::now();
+        let now_ms = Utc::now().timestamp_millis();
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 90,
+            height: 30,
+        };
+        let draw = |dash: &mut ProjectDashboard| {
+            let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+            let mut term = ratatui::Terminal::new(backend).expect("terminal");
+            term.draw(|f| render(f, area, &theme, "p", &members, dash, true, now, now_ms))
+                .expect("draw");
+        };
+
+        // No meter for this project yet: nothing to hover.
+        draw(&mut dash);
+        assert_eq!(dash.meter_graph, None);
+
+        let mut meter = TokenMeter::new(now);
+        meter.observe(Some("claude-opus-5"), 12_000, 4_000, now);
+        dash.token_meters.insert("p".into(), meter);
+        draw(&mut dash);
+        let (project, graph) = dash.meter_graph.clone().expect("the meter drew columns");
+        assert_eq!(project, "p");
+        assert!(graph.width > 0 && graph.height > 0, "{graph:?}");
+        assert!(
+            graph.y + graph.height < area.y + area.height,
+            "the graph rect stops above the legend row: {graph:?}"
+        );
+
+        // A pane too short for a meter draws none, and clears the rect.
+        let short = Rect { height: 10, ..area };
+        let backend = ratatui::backend::TestBackend::new(short.width, short.height);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| {
+            render(
+                f, short, &theme, "p", &members, &mut dash, true, now, now_ms,
+            )
+        })
+        .expect("draw");
+        assert_eq!(dash.meter_graph, None);
     }
 }

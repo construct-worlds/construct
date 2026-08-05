@@ -18473,6 +18473,65 @@ mod tests {
         assert!(painted, "no bar drawn:\n{out}");
     }
 
+    /// Hovering a column details it as a bar per model: the model's name, a
+    /// horizontal bar in its own hue with the cache-served part in the darker
+    /// tone, and the exact figures the bar stands for (spec 0167).
+    #[tokio::test]
+    async fn hovering_a_meter_column_details_it_as_bars_per_model() {
+        let (mut app, _dir, _server) = token_meter_app(&[]).await;
+        // Two models in one bucket, one of them part cache-served, so the
+        // detail has to draw two rows and two tones.
+        for (model, tokens, cached) in [
+            ("claude-opus-5", 18_000u64, 9_000u64),
+            ("gpt-5.5", 6_000, 0),
+        ] {
+            app.observe_cost_for_meter(
+                "s1",
+                &SessionEvent::Cost {
+                    usd: 0.0,
+                    tokens_in: tokens,
+                    tokens_out: 0,
+                    tokens_cached: cached,
+                    model: Some(model.to_string()),
+                },
+            );
+        }
+        // First frame to learn where the graph is, then hover its newest
+        // column and draw again.
+        let _ = rendered(&mut app, 140, 40);
+        let graph = app
+            .layout
+            .matrix_token_graph_area
+            .expect("the meter drew a graph area");
+        app.mouse_pos = Some((graph.x + graph.width - 1, graph.y + graph.height / 2));
+        let out = rendered(&mut app, 140, 40);
+
+        assert!(
+            out.contains("24k tok"),
+            "the header names the column's total:\n{out}"
+        );
+        assert!(
+            out.contains("18k") && out.contains("9.0k↺"),
+            "each row keeps its exact figures, cached marked as a subset:\n{out}"
+        );
+        // The bars are paint, not text: full cells carry their tone as a
+        // background and partial ones as a left-block glyph.
+        let backend = ratatui::backend::TestBackend::new(140, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let buf = term.backend().buffer().clone();
+        let bar_row = (0..buf.area.height).find(|y| {
+            (0..buf.area.width).any(|x| {
+                let cell = &buf[(x, *y)];
+                crate::token_meter::METER_PARTIALS_H.contains(&cell.symbol())
+            })
+        });
+        assert!(
+            bar_row.is_some(),
+            "no horizontal bar drawn in the hover detail:\n{out}"
+        );
+    }
+
     /// Tokens with no measured compute time read as `idle`, not as `0/s`:
     /// the client can't have watched the work, so it states nothing about
     /// how fast it was rather than claiming it was slow.

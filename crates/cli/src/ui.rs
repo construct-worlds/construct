@@ -329,6 +329,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.service_channel_action_hits.clear();
     app.layout.lineage_subagent_toggle_hits.clear();
     app.layout.lineage_segment_tooltip = None;
+    // Cleared here rather than only in the dashboard's own render, which every
+    // frame showing something else skips — a stale graph rect would otherwise
+    // keep answering hovers at coordinates that now belong to another surface.
+    app.project_dashboard.meter_graph = None;
     app.window_pane_sizes.clear();
     app.terminal_replayed_sessions_this_frame.clear();
     app.layout.dynamic_ui_popover_area = None;
@@ -437,6 +441,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_view_uncollapse_tooltip(f, app);
     render_lineage_segment_tooltip(f, app);
     render_matrix_token_tooltip(f, app);
+    render_project_meter_tooltip(f, app);
     render_harness_hover_tooltip(f, app);
     // A session switch affects the pane's final composited surface, not just
     // the terminal/chat layer underneath it. Paint transitions after Playbook
@@ -4769,7 +4774,7 @@ fn truncate_label(label: &str, max: usize) -> String {
     out
 }
 
-/// Hover detail for one meter column: what that second consumed, split by
+/// Hover detail for one meter column: what that span consumed, split by
 /// model and — where the provider served part of it from cache — by how much
 /// of that model's share was cached. Mirrors the context gauge's
 /// hover-for-exact-numbers idiom, and is the only place the darker part of a
@@ -4784,37 +4789,312 @@ fn render_matrix_token_tooltip(f: &mut Frame, app: &App) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
+    render_token_meter_hover(f, &app.theme, &app.token_meter, graph, (mx, my));
+}
+
+/// Hover detail for the project dashboard's own meter (spec 0191), which
+/// draws the same columns from a project-scoped meter. One renderer for both
+/// so the two graphs can't drift into two different hover vocabularies.
+fn render_project_meter_tooltip(f: &mut Frame, app: &App) {
+    let Some((project_id, graph)) = app.project_dashboard.meter_graph.clone() else {
+        return;
+    };
+    let Some(meter) = app.project_dashboard.token_meters.get(&project_id) else {
+        return;
+    };
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    render_token_meter_hover(f, &app.theme, meter, graph, (mx, my));
+}
+
+/// Widest a model name gets in the hover detail before it is clipped. Long
+/// enough for the catalog ids in practice, short enough that one outlier
+/// can't push the figures off a narrow terminal.
+const TOKEN_HOVER_NAME_MAX: usize = 18;
+/// Bar length the hover detail wants, in cells. The bars are shares of one
+/// column's total, so this is purely how finely those shares are drawn.
+const TOKEN_HOVER_BAR_IDEAL: usize = 20;
+/// Shortest bar still worth drawing. Below this the eighths stop separating
+/// a tenth from a fifth, and the numbers beside them say more than the shape
+/// does — so a narrower terminal gets the plain text detail instead.
+const TOKEN_HOVER_BAR_MIN: usize = 6;
+/// Space inside the border, either side of a row.
+const TOKEN_HOVER_PAD: usize = 1;
+
+/// Marks a cached figure. Spelled out in the header (`↺ cached`) whenever any
+/// row carries one, so the glyph is never left to be guessed at.
+const TOKEN_HOVER_CACHED_MARK: &str = "↺";
+
+/// One row of the hover detail: a model's share of the hovered column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TokenHoverRow {
+    model: u16,
+    /// Already clipped to [`TOKEN_HOVER_NAME_MAX`].
+    label: String,
+    tokens: u64,
+    /// Subset of `tokens` the provider served from its prompt cache.
+    cached: u64,
+}
+
+/// Column widths for the hover detail's rows. `None` when the terminal is too
+/// narrow for a bar that would still be readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TokenHoverLayout {
+    name_w: usize,
+    bar_w: usize,
+    figures_w: usize,
+    /// Box width including both border columns.
+    box_w: u16,
+}
+
+/// The models that contributed to one hovered column, in series order — the
+/// same order the column stacks them and the legend names them, so a row can
+/// be matched to a band by position rather than by rereading its name.
+fn token_hover_rows(
+    bucket: &crate::token_meter::Bucket,
+    meter: &crate::token_meter::TokenMeter,
+) -> Vec<TokenHoverRow> {
+    bucket
+        .by_model()
+        .into_iter()
+        .map(|(model, tokens, cached)| TokenHoverRow {
+            model,
+            label: truncate_label(meter.model_label(model), TOKEN_HOVER_NAME_MAX),
+            tokens,
+            cached,
+        })
+        .collect()
+}
+
+/// A row's figures: its billed volume, plus the cache-served part of it when
+/// the provider reported one. Never a sum — cached is a subset (spec 0167).
+fn token_hover_figures(row: &TokenHoverRow) -> String {
+    let tokens = crate::lineage::format_token_count(row.tokens);
+    if row.cached == 0 {
+        return tokens;
+    }
+    format!(
+        "{tokens} · {}{TOKEN_HOVER_CACHED_MARK}",
+        crate::lineage::format_token_count(row.cached)
+    )
+}
+
+/// Fit the detail's three columns into `max_w` screen columns.
+///
+/// The bar is the only elastic part: names and figures are the facts, so they
+/// keep their room and the bar spends whatever is left, down to
+/// [`TOKEN_HOVER_BAR_MIN`]. Below that there is no honest bar to draw and the
+/// caller falls back to the plain text detail rather than shipping a
+/// three-cell stub that misreads every share.
+fn token_hover_layout(
+    rows: &[TokenHoverRow],
+    header_w: usize,
+    max_w: usize,
+) -> Option<TokenHoverLayout> {
+    if rows.is_empty() {
+        return None;
+    }
+    let name_w = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.label.as_str()))
+        .max()
+        .unwrap_or(0);
+    let figures_w = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(token_hover_figures(r).as_str()))
+        .max()
+        .unwrap_or(0);
+    // border + pad + "● " + name + gap + bar + gap + figures + pad + border
+    let fixed = 2 + TOKEN_HOVER_PAD * 2 + 2 + name_w + 2 + 2 + figures_w;
+    let bar_w = max_w.saturating_sub(fixed).min(TOKEN_HOVER_BAR_IDEAL);
+    if bar_w < TOKEN_HOVER_BAR_MIN {
+        return None;
+    }
+    // The header is one more thing the box has to hold; a wide header widens
+    // the box rather than clipping, since it carries the column's total.
+    let body_w = fixed + bar_w;
+    let box_w = body_w.max(header_w + 2 + TOKEN_HOVER_PAD * 2).min(max_w);
+    Some(TokenHoverLayout {
+        name_w,
+        bar_w,
+        figures_w,
+        box_w: box_w as u16,
+    })
+}
+
+/// The eighths a row's bar paints: its share of the column total, split into
+/// the cache-served part and the part processed fresh.
+///
+/// Scaled to the column's total, so the bars are shares of the thing hovered
+/// and read against each other. A row with any volume at all keeps at least
+/// one eighth — rounding a model that did work down to an empty bar would
+/// contradict the figure printed beside it.
+fn token_hover_bar_segments(
+    row: &TokenHoverRow,
+    column_total: u64,
+    bar_w: usize,
+) -> Vec<(crate::token_meter::Band, usize)> {
+    if column_total == 0 || row.tokens == 0 || bar_w == 0 {
+        return Vec::new();
+    }
+    let eighths_total = bar_w * 8;
+    let exact = (row.tokens as f64 / column_total as f64) * eighths_total as f64;
+    let filled = (exact.round() as usize).clamp(1, eighths_total);
+    let cached = row.cached.min(row.tokens);
+    let fresh = row.tokens - cached;
+    let mut bands: Vec<(crate::token_meter::Band, u64)> = Vec::with_capacity(2);
+    if cached > 0 {
+        bands.push(((row.model, crate::token_meter::Part::Cached), cached));
+    }
+    if fresh > 0 {
+        bands.push(((row.model, crate::token_meter::Part::New), fresh));
+    }
+    crate::token_meter::stacked_eighths(&bands, row.tokens, filled)
+}
+
+/// Hover detail for whichever meter is under the pointer: a header naming the
+/// span and its total, then one row per model — name, a horizontal bar of that
+/// model's share, and the exact figures.
+///
+/// The bars are the same paint as the graph they came from: one hue per model,
+/// the cache-served part in the darker tone at the bar's left and the fresh
+/// part full-strength beside it (spec 0167). Reading a column's mix out of a
+/// run of comma-separated numbers meant doing the division by eye; the bars
+/// answer "what was this column mostly" directly, and the figures stay for
+/// the exact answer.
+fn render_token_meter_hover(
+    f: &mut Frame,
+    theme: &Theme,
+    meter: &crate::token_meter::TokenMeter,
+    graph: Rect,
+    (mx, my): (u16, u16),
+) {
     if !contains_rect(graph, mx, my) {
         return;
     }
     let col = (mx - graph.x) as usize;
-    let Some(bucket) = app.token_meter.bucket_at(col, graph.width as usize) else {
+    let Some(bucket) = meter.bucket_at(col, graph.width as usize) else {
         return;
     };
     if bucket.is_empty() {
         return;
     }
-    let mut parts: Vec<String> = vec![format!(
+    let total = bucket.total();
+    let rows = token_hover_rows(bucket, meter);
+    let any_cached = rows.iter().any(|r| r.cached > 0);
+    let mut header = format!(
         "{} · {} tok",
         crate::token_meter::TokenMeter::bucket_span_label(),
-        crate::lineage::format_token_count(bucket.total())
-    )];
-    for (model, tokens, cached) in bucket.by_model() {
-        let mut part = format!(
-            "{} {}",
-            app.token_meter.model_label(model),
-            crate::lineage::format_token_count(tokens)
-        );
-        if cached > 0 {
-            part.push_str(&format!(
-                " ({} cached)",
-                crate::lineage::format_token_count(cached)
-            ));
-        }
-        parts.push(part);
+        crate::lineage::format_token_count(total)
+    );
+    if any_cached {
+        header.push_str(&format!(" · {TOKEN_HOVER_CACHED_MARK} cached"));
     }
-    let label = format!(" {} ", parts.join(" · "));
-    render_button_tooltip(f, &app.theme, &label, mx, my.saturating_sub(2));
+
+    let screen = f.area();
+    let Some(layout) = token_hover_layout(
+        &rows,
+        UnicodeWidthStr::width(header.as_str()),
+        screen.width as usize,
+    ) else {
+        // Too narrow for bars — the numbers alone still answer the question.
+        let label = token_hover_text_fallback(&header, &rows);
+        render_button_tooltip(f, theme, &label, mx, my.saturating_sub(2));
+        return;
+    };
+
+    // Header + one row per model, inside the border. A pane with more models
+    // than the screen has rows keeps the ones it can draw and counts the rest,
+    // the way the legend does.
+    let max_body = (screen.height as usize).saturating_sub(2).max(1);
+    let (shown, overflow) = if rows.len() + 1 > max_body {
+        let shown = max_body.saturating_sub(2); // header + "+N more"
+        (shown, rows.len() - shown)
+    } else {
+        (rows.len(), 0)
+    };
+    let body_h = 1 + shown + usize::from(overflow > 0);
+    let h = (body_h + 2) as u16;
+    let rect = harness_hover_tooltip_rect(mx, my, layout.box_w, h, screen);
+    f.render_widget(Clear, rect);
+    let block = theme.themed_block("");
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let text_x = inner.x + TOKEN_HOVER_PAD as u16;
+    f.buffer_mut().set_string(
+        text_x,
+        inner.y,
+        truncate_to_width(&header, inner.width.saturating_sub(2) as usize),
+        theme.accent_style().add_modifier(Modifier::BOLD),
+    );
+
+    for (idx, row) in rows.iter().take(shown).enumerate() {
+        let y = inner.y + 1 + idx as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        // The dot repeats the legend's mark in the same darker tone, so a row
+        // is tied to its band before the bar is read.
+        f.buffer_mut().set_string(
+            text_x,
+            y,
+            "●",
+            Style::default().fg(meter.cached_color(row.model)),
+        );
+        f.buffer_mut().set_string(
+            text_x + 2,
+            y,
+            &row.label,
+            Style::default().fg(meter.color(row.model)),
+        );
+        let bar_x = text_x + 2 + layout.name_w as u16 + 2;
+        let segments = token_hover_bar_segments(row, total, layout.bar_w);
+        let filled: usize = segments.iter().map(|(_, e)| *e).sum();
+        for cell in crate::token_meter::bar_cells(&segments, filled, layout.bar_w) {
+            let mut style = Style::default().fg(meter.band_color(cell.fg));
+            if let Some(bg) = cell.bg {
+                style = style.bg(meter.band_color(bg));
+            }
+            f.buffer_mut()
+                .set_string(bar_x + cell.row, y, cell.glyph, style);
+        }
+        // Figures right-aligned into their own column: a column of numbers is
+        // read down, which needs them to start at the same offset on every row.
+        let figures = token_hover_figures(row);
+        let pad = layout
+            .figures_w
+            .saturating_sub(UnicodeWidthStr::width(figures.as_str()));
+        let fig_x = bar_x + layout.bar_w as u16 + 2 + pad as u16;
+        f.buffer_mut()
+            .set_string(fig_x, y, &figures, theme.text_style());
+    }
+
+    if overflow > 0 {
+        let y = inner.y + 1 + shown as u16;
+        if y < inner.y + inner.height {
+            f.buffer_mut().set_string(
+                text_x,
+                y,
+                format!("+{overflow} more"),
+                theme.dim_style().add_modifier(Modifier::ITALIC),
+            );
+        }
+    }
+}
+
+/// The pre-bars one-line detail, kept for terminals too narrow to hold a bar
+/// worth reading. Same facts, no shape.
+fn token_hover_text_fallback(header: &str, rows: &[TokenHoverRow]) -> String {
+    let mut parts: Vec<String> = vec![header.to_string()];
+    for row in rows {
+        parts.push(format!("{} {}", row.label, token_hover_figures(row)));
+    }
+    format!(" {} ", parts.join(" · "))
 }
 
 /// Reveal speed and post-typing dwell for the operator monolog.
@@ -24500,6 +24780,130 @@ mod tests {
         let short = truncate_label("gpt-5.5-codex", 6);
         assert!(short.ends_with('…'), "{short}");
         assert!(UnicodeWidthStr::width(short.as_str()) <= 6, "{short}");
+    }
+
+    fn hover_row(model: u16, label: &str, tokens: u64, cached: u64) -> TokenHoverRow {
+        TokenHoverRow {
+            model,
+            label: label.to_string(),
+            tokens,
+            cached,
+        }
+    }
+
+    /// The figures state billed volume, and name the cache-served part of it
+    /// as a subset — never a second number to add on (spec 0167).
+    #[test]
+    fn hover_figures_name_cached_as_a_subset() {
+        assert_eq!(token_hover_figures(&hover_row(0, "opus", 18_200, 0)), "18k");
+        let split = token_hover_figures(&hover_row(0, "opus", 18_200, 9_100));
+        assert!(split.starts_with("18k"), "volume leads: {split}");
+        assert!(
+            split.contains("9.1k") && split.ends_with(TOKEN_HOVER_CACHED_MARK),
+            "the cached share is marked, not summed: {split}"
+        );
+    }
+
+    /// Names and figures are the facts and keep their room; the bar spends
+    /// whatever the terminal has left, up to its ideal length.
+    #[test]
+    fn hover_layout_gives_the_bar_the_slack() {
+        let rows = vec![
+            hover_row(0, "claude-opus-5", 18_200, 9_100),
+            hover_row(1, "gpt-5.5", 6_400, 0),
+        ];
+        let wide = token_hover_layout(&rows, 20, 200).expect("bars fit");
+        assert_eq!(wide.bar_w, TOKEN_HOVER_BAR_IDEAL, "no wider than it needs");
+        assert_eq!(
+            wide.name_w,
+            UnicodeWidthStr::width("claude-opus-5"),
+            "the name column fits the widest name"
+        );
+        assert!(
+            wide.box_w as usize <= 200,
+            "the box stays on screen: {wide:?}"
+        );
+
+        let snug = token_hover_layout(&rows, 20, 44).expect("a shorter bar still fits");
+        assert!(
+            (TOKEN_HOVER_BAR_MIN..wide.bar_w).contains(&snug.bar_w),
+            "the bar absorbs the squeeze: {snug:?}"
+        );
+        assert_eq!(snug.name_w, wide.name_w, "names are not clipped for a bar");
+        assert_eq!(snug.figures_w, wide.figures_w, "nor are the figures");
+    }
+
+    /// Below a readable bar length there is no honest bar to draw, so the
+    /// caller falls back to the plain text detail rather than a stub bar.
+    #[test]
+    fn hover_layout_declines_a_terminal_too_narrow_for_bars() {
+        let rows = vec![hover_row(0, "claude-opus-5", 18_200, 9_100)];
+        assert!(token_hover_layout(&rows, 20, 30).is_none());
+        let fallback = token_hover_text_fallback("2s · 24.6k tok", &rows);
+        assert!(fallback.contains("claude-opus-5") && fallback.contains("18k"));
+    }
+
+    /// A header wider than the rows widens the box instead of being clipped —
+    /// it carries the hovered column's total.
+    #[test]
+    fn hover_layout_box_holds_the_header() {
+        let rows = vec![hover_row(0, "o", 10, 0)];
+        let header_w = 80;
+        let layout = token_hover_layout(&rows, header_w, 200).expect("fits");
+        assert!(
+            layout.box_w as usize >= header_w + 2,
+            "the header fits inside the border: {layout:?}"
+        );
+    }
+
+    /// A bar is the model's share of the hovered column, split cache-served
+    /// then fresh — the same order and tones the column stacks them in.
+    #[test]
+    fn hover_bar_segments_split_the_share_cached_first() {
+        let row = hover_row(3, "opus", 5_000, 2_000);
+        let segments = token_hover_bar_segments(&row, 10_000, 20);
+        let filled: usize = segments.iter().map(|(_, e)| *e).sum();
+        assert_eq!(filled, 80, "half of a 20-cell bar, in eighths");
+        assert_eq!(
+            segments.first().map(|(band, _)| *band),
+            Some((3, crate::token_meter::Part::Cached)),
+            "cache-served volume is the foundation: {segments:?}"
+        );
+        assert_eq!(
+            segments.last().map(|(band, _)| *band),
+            Some((3, crate::token_meter::Part::New))
+        );
+        assert_eq!(segments[0].1, 32, "2k of 5k over 80 eighths");
+    }
+
+    /// A model that did work never draws an empty bar — that would contradict
+    /// the figure printed beside it.
+    #[test]
+    fn hover_bar_segments_keep_a_tiny_share_visible() {
+        let row = hover_row(0, "opus", 1, 0);
+        let segments = token_hover_bar_segments(&row, 1_000_000, 20);
+        assert_eq!(segments.iter().map(|(_, e)| *e).sum::<usize>(), 1);
+        assert!(token_hover_bar_segments(&hover_row(0, "opus", 0, 0), 100, 20).is_empty());
+    }
+
+    /// Cache-only volume draws entirely in the darker tone: no fresh band at
+    /// all, rather than a hairline of one.
+    #[test]
+    fn hover_bar_segments_omit_a_part_with_no_volume() {
+        let all_cached = token_hover_bar_segments(&hover_row(1, "opus", 4_000, 4_000), 4_000, 10);
+        assert!(
+            all_cached
+                .iter()
+                .all(|(band, _)| *band == (1, crate::token_meter::Part::Cached)),
+            "{all_cached:?}"
+        );
+        let none_cached = token_hover_bar_segments(&hover_row(1, "opus", 4_000, 0), 4_000, 10);
+        assert!(
+            none_cached
+                .iter()
+                .all(|(band, _)| *band == (1, crate::token_meter::Part::New)),
+            "{none_cached:?}"
+        );
     }
 
     fn clip_test_session(
