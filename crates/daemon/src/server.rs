@@ -1460,6 +1460,17 @@ pub(crate) async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
+    dispatch_entry!(ipc_method::SERVICE_MOVE, {
+        let p = params!(req, construct_protocol::ServiceMoveParams);
+        match crate::service::move_definition(
+            &construct_protocol::paths::Paths::discover().services_dir(),
+            &p.name,
+            p.direction,
+        ) {
+            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
+        }
+    });
     dispatch_entry!(ipc_method::SERVICE_CHANNEL_LIST, {
         let p = params!(req, construct_protocol::ServiceNameParams);
         match crate::service::list_channel_summaries(

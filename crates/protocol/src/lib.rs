@@ -1265,6 +1265,7 @@ pub mod ipc_method {
     pub const SERVICE_LIST: &str = "service.list";
     pub const SERVICE_PUT: &str = "service.put";
     pub const SERVICE_DELETE: &str = "service.delete";
+    pub const SERVICE_MOVE: &str = "service.move";
     pub const SERVICE_REPLY: &str = "service.reply";
     pub const SERVICE_CHANNEL_LIST: &str = "service.channel.list";
     pub const SERVICE_CHANNEL_CATALOG_LIST: &str = "service.channel.catalog.list";
@@ -3443,6 +3444,11 @@ pub struct CreateSessionParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceSummary {
     pub name: String,
+    /// Stable position among service rows in the unified session list.
+    /// Legacy definitions default to zero and use their name as a tie-breaker
+    /// until the first reorder materializes explicit positions.
+    #[serde(default)]
+    pub position: u64,
     pub instruction: String,
     pub harness: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3905,6 +3911,12 @@ impl ServiceApplyResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceNameParams {
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceMoveParams {
+    pub name: String,
+    pub direction: MoveDirection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5435,6 +5447,7 @@ mod service_protocol_tests {
         .expect("legacy service summary");
 
         assert_eq!(summary.session_mode, "headless");
+        assert_eq!(summary.position, 0);
     }
 
     #[test]
