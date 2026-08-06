@@ -903,6 +903,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "vt100",
  "which",
 ]
 
