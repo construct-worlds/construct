@@ -1348,6 +1348,7 @@ pub mod ipc_method {
     pub const PROJECT_DELETE: &str = "project.delete";
     pub const PROJECT_SET_COLLAPSED: &str = "project.set_collapsed";
     pub const PROJECT_MOVE: &str = "project.move";
+    pub const SERVICE_MOVE: &str = "service.move";
     pub const SESSION_DIFF: &str = "session.diff";
     pub const SESSION_TRANSCRIPT: &str = "session.transcript";
     /// Request next-prompt suggestion generation for a session (spec
@@ -3456,6 +3457,9 @@ pub struct ServiceSummary {
     pub routing: String,
     #[serde(default)]
     pub paused: bool,
+    /// Sort key among services (smaller = nearer the top of the list).
+    #[serde(default)]
+    pub position: i64,
     #[serde(default)]
     pub channels: Vec<ServiceChannelSummary>,
 }
@@ -4485,6 +4489,12 @@ pub struct ProjectSetCollapsedParams {
 pub struct ProjectMoveParams {
     #[serde(alias = "group_id")]
     pub project_id: String,
+    pub direction: MoveDirection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceMoveParams {
+    pub service_name: String,
     pub direction: MoveDirection,
 }
 

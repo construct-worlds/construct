@@ -1989,6 +1989,16 @@ pub(crate) async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
+    dispatch_entry!(ipc_method::SERVICE_MOVE, {
+        let p = params!(req, construct_protocol::ServiceMoveParams);
+        let dir = p.direction;
+        let name = p.service_name.clone();
+        let service_dir = construct_protocol::paths::Paths::discover().services_dir();
+        match crate::service::move_service(&service_dir, &name, dir) {
+            Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
+            Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
+        }
+    });
     dispatch_entry!(ipc_method::SESSION_DIFF, {
         let p = params!(req, SessionIdParams);
         match manager.diff(&p.session_id).await {

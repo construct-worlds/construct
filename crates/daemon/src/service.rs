@@ -39,6 +39,8 @@ pub struct ServiceConfig {
     pub routing: ServiceRouting,
     #[serde(default)]
     pub paused: bool,
+    #[serde(default)]
+    pub position: i64,
     /// Seconds to hold a turn stopped at an approval before denying it on the
     /// caller's behalf. `0` waits indefinitely, which keeps the operator as
     /// the only one who can decide.
@@ -298,10 +300,69 @@ pub fn load_definitions(dir: &std::path::Path) -> Result<BTreeMap<String, Servic
 }
 
 pub fn list_summaries(dir: &std::path::Path) -> Result<Vec<construct_protocol::ServiceSummary>> {
-    Ok(load_definitions(dir)?
+    let mut out: Vec<construct_protocol::ServiceSummary> = load_definitions(dir)?
         .into_iter()
         .map(|(name, config)| summary(name, &config))
-        .collect())
+        .collect();
+    out.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.name.cmp(&b.name)));
+    Ok(out)
+}
+
+pub fn move_service(dir: &std::path::Path, name: &str, direction: construct_protocol::MoveDirection) -> Result<()> {
+    validate_service_name(name)?;
+    let mut services = load_definitions(dir)?;
+    let mut sorted: Vec<(String, i64)> = services
+        .iter()
+        .map(|(n, c)| (n.clone(), c.position))
+        .collect();
+    sorted.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let idx = sorted
+        .iter()
+        .position(|(n, _)| n == name)
+        .ok_or_else(|| anyhow!("service `{name}` not found"))?;
+    let neighbor_idx = match direction {
+        construct_protocol::MoveDirection::Up => {
+            if idx == 0 {
+                return Ok(());
+            }
+            idx - 1
+        }
+        construct_protocol::MoveDirection::Down => {
+            if idx + 1 >= sorted.len() {
+                return Ok(());
+            }
+            idx + 1
+        }
+    };
+    let a_name = sorted[idx].0.clone();
+    let b_name = sorted[neighbor_idx].0.clone();
+    let a_pos = services.get(&a_name).map(|c| c.position).unwrap_or(0);
+    let b_pos = services.get(&b_name).map(|c| c.position).unwrap_or(0);
+    if a_pos == b_pos {
+        for (i, (n, _)) in sorted.iter().enumerate() {
+            if let Some(cfg) = services.get_mut(n) {
+                cfg.position = i as i64;
+            }
+        }
+        let a_pos = services.get(&a_name).map(|c| c.position).unwrap_or(0);
+        let b_pos = services.get(&b_name).map(|c| c.position).unwrap_or(0);
+        if let Some(cfg) = services.get_mut(&a_name) {
+            cfg.position = b_pos;
+        }
+        if let Some(cfg) = services.get_mut(&b_name) {
+            cfg.position = a_pos;
+        }
+    } else {
+        if let Some(cfg) = services.get_mut(&a_name) {
+            cfg.position = b_pos;
+        }
+        if let Some(cfg) = services.get_mut(&b_name) {
+            cfg.position = a_pos;
+        }
+    }
+    write_definition(dir, &a_name, services.get(&a_name).unwrap())?;
+    write_definition(dir, &b_name, services.get(&b_name).unwrap())?;
+    Ok(())
 }
 
 pub fn put_definition(
@@ -333,6 +394,18 @@ pub fn put_definition(
     };
     let session_mode =
         parse_service_session_mode(&params.service.harness, &params.service.session_mode)?;
+    let position = existing
+        .as_ref()
+        .map(|config| config.position)
+        .unwrap_or_else(|| {
+            let mut max_pos: Option<i64> = None;
+            if let Ok(defs) = load_definitions(dir) {
+                for cfg in defs.values() {
+                    max_pos = Some(max_pos.map_or(cfg.position, |m| m.max(cfg.position)));
+                }
+            }
+            max_pos.map(|p| p + 1).unwrap_or(0)
+        });
     let config = ServiceConfig {
         instruction: params.service.instruction,
         harness: params.service.harness,
@@ -341,6 +414,7 @@ pub fn put_definition(
         cwd: params.service.cwd,
         routing,
         paused: params.service.paused,
+        position,
         approval_timeout_secs: existing
             .as_ref()
             .map(|config| config.approval_timeout_secs)
@@ -932,6 +1006,7 @@ fn summary(name: String, config: &ServiceConfig) -> construct_protocol::ServiceS
         }
         .to_string(),
         paused: config.paused,
+        position: config.position,
         channels: config
             .channels
             .iter()
@@ -1417,6 +1492,7 @@ mod tests {
                     cwd: ".".into(),
                     routing: "session-key".into(),
                     paused: false,
+                    position: 0,
                     channels: Vec::new(),
                 },
             },
@@ -1636,6 +1712,7 @@ mod tests {
             cwd: ".".into(),
             routing: "session-key".into(),
             paused: false,
+            position: 0,
             channels: Vec::new(),
         };
         let first = put_definition(
@@ -1724,6 +1801,7 @@ mod tests {
                     cwd: ".".into(),
                     routing: "session-key".into(),
                     paused: false,
+                    position: 0,
                     channels: Vec::new(),
                 },
             },
@@ -1795,6 +1873,7 @@ mod tests {
                     cwd: ".".into(),
                     routing: "session-key".into(),
                     paused: false,
+                    position: 0,
                     channels: Vec::new(),
                 },
             },
@@ -1863,6 +1942,7 @@ mod tests {
                         cwd: ".".into(),
                         routing: "session-key".into(),
                         paused: false,
+                        position: 0,
                         channels: Vec::new(),
                     },
                 },
@@ -1951,6 +2031,7 @@ mod tests {
                     cwd: ".".into(),
                     routing: "session-key".into(),
                     paused: false,
+                    position: 0,
                     channels: Vec::new(),
                 },
             },
@@ -2210,6 +2291,7 @@ mod tests {
                     cwd: ".".into(),
                     routing: "session-key".into(),
                     paused: false,
+                    position: 0,
                     channels: Vec::new(),
                 },
             },

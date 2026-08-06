@@ -1478,6 +1478,18 @@ impl Client {
             .await?;
         Ok(())
     }
+    pub async fn move_service(&self, name: &str, direction: MoveDirection) -> Result<()> {
+        let _: serde_json::Value = self
+            .request(
+                ipc_method::SERVICE_MOVE,
+                &construct_protocol::ServiceMoveParams {
+                    service_name: name.to_string(),
+                    direction,
+                },
+            )
+            .await?;
+        Ok(())
+    }
     pub async fn diff(&self, id: &str) -> Result<DiffResult> {
         self.request(
             ipc_method::SESSION_DIFF,

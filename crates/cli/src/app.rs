@@ -5131,7 +5131,7 @@ async fn run_with_socket_initial_selection(
     let sessions = client.list().await.unwrap_or_default();
     let groups = client.list_projects().await.unwrap_or_default();
     let mut services = client.list_services().await.unwrap_or_default();
-    services.sort_by(|a, b| a.name.cmp(&b.name));
+    services.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.name.cmp(&b.name)));
     let mut service_channel_catalog = client
         .list_service_channel_catalog()
         .await
@@ -8120,11 +8120,10 @@ impl App {
         let mut out: Vec<ListItem> = Vec::new();
 
         // Services are ordinary top-level list rows rather than a separate
-        // sidebar section. Keep their order stable even if a notification
-        // arrives with an unsorted service vector. Their routed sessions are
-        // inserted below each row after the session-tree indexes exist.
+        // sidebar section, ordered like projects by `position` (stable fallback
+        // to name for legacy definitions with identical positions).
         let mut services = self.services.clone();
-        services.sort_by(|a, b| a.name.cmp(&b.name));
+        services.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.name.cmp(&b.name)));
 
         let orch_id = self.orchestrator_id.as_deref();
         let mut subagents_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
@@ -8975,7 +8974,12 @@ impl App {
                     self.set_status(format!("move failed: {e}"));
                 }
             }
-            Selection::Service(_) => {}
+            Selection::Service(name) => {
+                match self.client.move_service(&name, dir).await {
+                    Ok(()) => self.refresh_services().await,
+                    Err(e) => self.set_status(format!("move failed: {e}")),
+                }
+            }
             Selection::None => self.set_status("nothing selected".into()),
             // The "N archived" disclosure row isn't reorderable.
             Selection::ArchivedRow(_) => {}
@@ -41597,6 +41601,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             routing: "session-key".to_string(),
             paused: false,
+            position: 0,
             channels: vec![construct_protocol::ServiceChannelSummary {
                 id: "http".to_string(),
                 kind: "http".to_string(),
