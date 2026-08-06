@@ -22,8 +22,9 @@ More screenshots and demos: [gallery](gallery.md).
 
 ## Why construct?
 
-- **tmux for agent fleets** — manage Codex, Claude Code, OpenCode, Antigravity,
-  Grok, and smith sessions from your terminal — or let an agent coordinate them.
+- **tmux for agent fleets** — manage Codex, Claude Code, OpenCode, Muse,
+  Antigravity, Grok, and smith sessions from your terminal — or let an agent
+  coordinate them.
   SSH-friendly, single Rust binary.
 - **Lineage** — sessions branch like ideas do: fork one when you want a
   parallel attempt (new idea, side quest, or a long shot) — even a
@@ -68,6 +69,7 @@ first:
   plan to use.
 - **Antigravity** — install the `agy` CLI and complete its OAuth login.
 - **Grok** — install the `grok` CLI and complete its OAuth login.
+- **Muse** — install the `muse` CLI and run `muse login`.
 - **smith** — built in to construct. Talks to OpenAI, Anthropic, Google Gemini,
   or xAI Grok via API key, a local Ollama, a ChatGPT subscription via Codex
   OAuth, a Claude subscription via the authenticated Claude Code CLI, or a Grok
@@ -108,6 +110,7 @@ favorite CLI harness command:
 ```sh
 construct new codex
 construct new claude --model opus
+construct new muse
 ```
 
 To open construct on a remote machine with working copy and paste of text and

@@ -1,7 +1,7 @@
 //! Real per-harness availability probing (spec 0068).
 //!
 //! Every built-in wrapper adapter (claude, codex, opencode, agy, grok, kimi,
-//! hermes, pi)
+//! hermes, pi, muse)
 //! declares `binary = "construct"` — the agentd wrapper itself, which is
 //! always the currently-running binary, so it always resolves. Checking
 //! *that* binary told a user nothing about whether the CLI it wraps (or a
@@ -155,6 +155,14 @@ pub async fn probe_harness(
             ),
         ),
         "pi" => probe_wrapper_cli("CONSTRUCT_PI_CMD", "CONSTRUCT_PI_BIN", "pi"),
+        "muse" => probe_wrapper_cli(
+            "CONSTRUCT_MUSE_CMD",
+            "CONSTRUCT_MUSE_BIN",
+            &construct_protocol::adapter::default_cli_bin_with_home_fallback(
+                "muse",
+                std::path::Path::new(".local/bin/muse"),
+            ),
+        ),
         "smith" => probe_smith(cache).await,
         _ => probe_generic_adapter(binary_spec, resolved_binary),
     }

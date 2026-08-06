@@ -108,6 +108,7 @@ env = { CONSTRUCT_CODEX_CMD = "exec codex" }
 | `kimi` | `CONSTRUCT_KIMI_CMD` | `CONSTRUCT_KIMI_BIN` |
 | `hermes` | `CONSTRUCT_HERMES_CMD` | `CONSTRUCT_HERMES_BIN` |
 | `pi` | `CONSTRUCT_PI_CMD` | `CONSTRUCT_PI_BIN` |
+| `muse` | `CONSTRUCT_MUSE_CMD` | `CONSTRUCT_MUSE_BIN` |
 | `shell` | `CONSTRUCT_SHELL_CMD` | `CONSTRUCT_SHELL_BIN` |
 
 OpenCode discovery checks `opencode` on the daemon's `PATH`, then the standard
@@ -116,6 +117,7 @@ checks `kimi` on `PATH`, then `~/.kimi-code/bin/kimi`. The explicit command and
 binary overrides above take precedence over both. Hermes discovery checks
 `hermes` on `PATH`, then `~/.local/bin/hermes`; set `CONSTRUCT_HERMES_HOME`
 when its config and `state.db` live outside the default `~/.hermes`.
+Muse discovery checks `muse` on `PATH`, then `~/.local/bin/muse`.
 
 ## TUI Theme
 

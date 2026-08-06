@@ -673,6 +673,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-adapter-muse"
+version = "0.17.2"
+dependencies = [
+ "anyhow",
+ "construct-adapter-common",
+ "construct-protocol",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "construct-adapter-opencode"
 version = "0.17.2"
 dependencies = [
@@ -749,6 +762,7 @@ dependencies = [
  "construct-adapter-grok",
  "construct-adapter-hermes",
  "construct-adapter-kimi",
+ "construct-adapter-muse",
  "construct-adapter-opencode",
  "construct-adapter-pi",
  "construct-adapter-shell",
