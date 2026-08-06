@@ -174,6 +174,7 @@ The table below summarizes router capability across all supported harness adapte
 | **Codex** | `codex` | ✅ Yes | ✅ Yes | `chatgpt.com`, `api.openai.com`<br>(`SSL_CERT_FILE`, replacing bundle) | Publishes session-local model catalog; entries appear in `/model` and native subagent scheduler as `<model> · <route>`. |
 | **Grok** | `grok` | ✅ Yes | ❌ No | `cli-chat-proxy.grok.com`<br>(`SSL_CERT_FILE`, additive) | Probe-verified interception of native Grok CLI traffic when redirected. |
 | **Pi** | `pi` | ✅ Yes | ❌ No | `chatgpt.com`<br>(`NODE_EXTRA_CA_CERTS`, additive) | Probe-verified interception of native Pi CLI traffic when redirected. |
+| **Prime Agent** | `prime-agent` | ❌ No | ❌ No | Pass-through only | Provider and endpoint vary with Prime Agent configuration; no fixed interception contract is declared. |
 | **Hermes** | `hermes` | ✅ Yes | ❌ No | `inference-api.nousresearch.com`<br>(`SSL_CERT_FILE`, replacing bundle) | Probe-verified interception of native Hermes CLI traffic when redirected. |
 | **OpenCode** | `opencode` | ❌ No | ❌ No | Pass-through only | Endpoint host varies per user configuration (no fixed intercept host). |
 | **Kimi** | `kimi` | ❌ No | ❌ No | None | No proxy routing probe or native picker catalog injection. |

@@ -5216,7 +5216,7 @@ impl SessionManager {
             let s = entry.summary.read().await;
             let native_fork = matches!(
                 s.harness.as_str(),
-                "claude" | "codex" | "opencode" | "grok" | "pi"
+                "claude" | "codex" | "opencode" | "grok" | "pi" | "prime-agent"
             ) && s.has_pty
                 && s.mode.as_deref() != Some("headless");
             let forked_from = native_fork.then(|| construct_protocol::ForkedFrom {
@@ -6381,6 +6381,7 @@ impl SessionManager {
             "kimi" => Some("kimi_session_id.txt"),
             "hermes" => Some("hermes_session_id.txt"),
             "pi" => Some("pi_session_id.txt"),
+            "prime-agent" => Some("prime_agent_session_id.txt"),
             "muse" => Some("muse_session_id.txt"),
             _ => None,
         }
@@ -7175,8 +7176,17 @@ fn harness_uses_quiescence(s: &SessionSummary) -> bool {
     s.has_pty
         && matches!(
             s.harness.as_str(),
-            "claude" | "codex" | "antigravity" | "agy" | "grok" | "hermes" | "kimi" | "opencode"
-            | "pi" | "muse"
+            "claude"
+                | "codex"
+                | "antigravity"
+                | "agy"
+                | "grok"
+                | "hermes"
+                | "kimi"
+                | "opencode"
+                | "pi"
+                | "prime-agent"
+                | "muse"
         )
 }
 
@@ -7228,7 +7238,7 @@ fn effective_mode(params: &CreateSessionParams) -> String {
 fn builtin_harness_capabilities(name: &str) -> construct_protocol::Capabilities {
     match name {
         "shell" | "claude" | "codex" | "opencode" | "antigravity" | "agy" | "grok" | "kimi"
-        | "hermes" | "pi" | "muse" | "smith" => construct_protocol::Capabilities {
+        | "hermes" | "pi" | "prime-agent" | "muse" | "smith" => construct_protocol::Capabilities {
             supports_pty: true,
             ..Default::default()
         },
@@ -10533,6 +10543,7 @@ mod tests {
             "kimi",
             "opencode",
             "pi",
+            "prime-agent",
             "muse",
         ] {
             s.harness = h.into();
@@ -11458,6 +11469,7 @@ mod tests {
             "kimi",
             "hermes",
             "pi",
+            "prime-agent",
             "muse",
             "smith",
         ] {

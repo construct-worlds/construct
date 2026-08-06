@@ -15,6 +15,7 @@ members = [
     "crates/adapter-kimi",
     "crates/adapter-hermes",
     "crates/adapter-pi",
+    "crates/adapter-prime-agent",
     "crates/adapter-muse",
     "crates/adapter-common",
     "crates/adapter-smith",

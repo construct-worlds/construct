@@ -1,7 +1,7 @@
 # Harnesses
 
 A **harness** is an agent or shell runner inside construct. Harnesses let you run
-smith, Claude, Codex, OpenCode, Muse, Hermes, Antigravity, and local shells
+smith, Claude, Codex, OpenCode, Prime Agent, Muse, Hermes, Antigravity, and local shells
 side by side while construct gives them one UI, history, widgets, control
 plane, and shared approval surface where supported.
 
@@ -27,6 +27,7 @@ developer-facing integration checklist lives in
 | `kimi` | The Kimi Code CLI | You already use Kimi Code and want its native TUI inside the same construct session fleet. |
 | `hermes` | The Hermes Agent CLI | You use Hermes for coding and want its native UI, persisted sessions, and usage data in the same construct fleet. |
 | `pi` | The pi coding agent CLI | You already use pi and want it inside the same construct UI and session fleet. |
+| `prime-agent` | Prime Agent | You use Prime Agent and want its native TUI, structured headless mode, and sessions in the same construct fleet. |
 | `muse` | Meta's Muse Code CLI | You use Muse and want its native TUI, headless mode, and resumable sessions in the same construct fleet. |
 
 Create a session with:
@@ -39,6 +40,7 @@ construct new --prompt "implement the failing test" opencode
 construct new --prompt "implement the failing test" kimi
 construct new --prompt "implement the failing test" hermes
 construct new --prompt "implement the failing test" pi
+construct new --prompt "implement the failing test" prime-agent
 construct new --prompt "implement the failing test" muse
 ```
 
@@ -107,7 +109,7 @@ See [smith built-in agent](smith.md) for details.
 ### CLI-backed harnesses
 
 `claude`, `codex`, `opencode`, `antigravity`, `grok`, `kimi`, `hermes`, `pi`,
-and `muse` wrap existing CLIs. Use them when you want those tools exactly as
+`prime-agent`, and `muse` wrap existing CLIs. Use them when you want those tools exactly as
 installed on your machine, but inside the same construct fleet.
 
 Because these depend on binaries and logins construct does not own, `construct
@@ -161,7 +163,7 @@ construct new --no-tui claude
 construct new --mode headless --prompt "summarize the last run" smith
 ```
 
-`smith`, `claude`, `codex`, `antigravity`, `grok`, `hermes`, `pi`, and `muse`
+`smith`, `claude`, `codex`, `antigravity`, `grok`, `hermes`, `pi`, `prime-agent`, and `muse`
 support both modes. `opencode` and `kimi` are interactive-only and always run
 their native TUIs. `shell` always
 owns a PTY (there is no structured "headless" shell), so it presents a terminal
@@ -191,6 +193,7 @@ and ask you.
 | `kimi` | interactive only | Kimi Code's native TUI | No | Not translated | Not injected |
 | `hermes` | interactive, headless | Hermes' own defaults | No | Not translated | Not injected |
 | `pi` | interactive, headless | pi's own defaults | No | Not translated | Not injected |
+| `prime-agent` | interactive, headless | Prime Agent's own defaults | No | Not translated | Not injected |
 | `muse` | interactive, headless | Muse's approval and sandbox policy | No | Not translated | Not injected |
 
 ### Reading the table

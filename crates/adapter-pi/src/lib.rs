@@ -1,15 +1,17 @@
-//! pi coding agent adapter.
+//! Shared Pi-family coding agent adapter core.
 //!
-//! Wraps the `pi` CLI (npm `@earendil-works/pi-coding-agent`). pi persists
-//! each conversation as a JSONL session file whose records carry everything
-//! construct wants to mirror: user/assistant messages with `thinking`,
+//! Wraps the `pi` CLI and Prime Agent. Prime Agent is independently shipped,
+//! but intentionally retains Pi's JSON event and JSONL session schemas. Each
+//! persists conversations whose records carry everything Construct wants to
+//! mirror: user/assistant messages with `thinking`,
 //! `text`, and `toolCall` content blocks, `toolResult` messages, live
 //! `model_change` / `thinking_level_change` records, and per-assistant-call
 //! `usage` with a full token split *and* exact USD cost.
 //!
-//! Instead of tailing pi's global store (`~/.pi/agent/sessions/<cwd-slug>/`),
-//! the adapter passes `--session-dir <CONSTRUCT_SESSION_DATA_DIR>/pi-sessions`
-//! so every construct session owns a private store. That removes the
+//! Instead of tailing either CLI's global store, the adapter passes a private
+//! `--session-dir` under `CONSTRUCT_SESSION_DATA_DIR` so every Construct
+//! session owns its store. Pi and Prime Agent use distinct subdirectories and
+//! native-id sidecars. That removes the
 //! whole sibling-disambiguation problem other adapters fight (codex
 //! originator tags, kimi sibling scans): the newest session file in the
 //! private dir is ours by construction.
@@ -17,19 +19,19 @@
 //! Session files are named `<iso-timestamp>_<uuid>.jsonl`, so lexicographic
 //! filename order is chronological order, and the file for a known uuid is
 //! findable by suffix. The uuid from the `session` header record is the
-//! native id persisted to `pi_session_id.txt` (resume via `--session
-//! <path>`, native fork via `--fork <path>` — spec 0031/0078; reset
+//! native id persisted to a flavor-specific sidecar (resume via the flavor's
+//! path flag, native fork via `--fork <path>` — spec 0031/0078; reset
 //! detection via newest-file rebinds — specs 0138/0085).
 //!
-//! Interactive mode runs pi's TUI under construct's PTY with the initial
-//! prompt passed as a CLI argument (pi submits leading message arguments
-//! itself). Headless mode spawns `pi -p --mode json` per turn and parses
+//! Interactive mode runs the native TUI under Construct's PTY with the initial
+//! prompt passed as a CLI argument. Headless mode spawns the selected CLI with
+//! `-p --mode json` per turn and parses
 //! the event stream from stdout; `message_end` records carry the same
 //! message shape as the session file, so both modes share one translator.
 //!
-//! Honors `CONSTRUCT_PI_CMD` (full command prefix) then `CONSTRUCT_PI_BIN`,
-//! defaulting to `pi` on PATH (npm installs there; pi has no fixed
-//! installer home to fall back to).
+//! Pi honors `CONSTRUCT_PI_CMD` / `CONSTRUCT_PI_BIN`; Prime Agent honors
+//! `CONSTRUCT_PRIME_AGENT_CMD` / `CONSTRUCT_PRIME_AGENT_BIN` and launches the
+//! `prime-agent` binary. Both default to PATH lookup.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -54,12 +56,55 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-const SESSION_ID_FILE: &str = "pi_session_id.txt";
-const SESSIONS_SUBDIR: &str = "pi-sessions";
+#[derive(Clone, Copy)]
+struct HarnessFlavor {
+    name: &'static str,
+    command_env: &'static str,
+    binary_env: &'static str,
+    default_binary: &'static str,
+    mode_env: &'static str,
+    fork_env: &'static str,
+    session_id_file: &'static str,
+    sessions_subdir: &'static str,
+    resume_flag: &'static str,
+}
+
+const PI: HarnessFlavor = HarnessFlavor {
+    name: "pi",
+    command_env: "CONSTRUCT_PI_CMD",
+    binary_env: "CONSTRUCT_PI_BIN",
+    default_binary: "pi",
+    mode_env: "CONSTRUCT_PI_MODE",
+    fork_env: "CONSTRUCT_PI_FORK_FROM",
+    session_id_file: "pi_session_id.txt",
+    sessions_subdir: "pi-sessions",
+    resume_flag: "--session",
+};
+
+const PRIME_AGENT: HarnessFlavor = HarnessFlavor {
+    name: "prime-agent",
+    command_env: "CONSTRUCT_PRIME_AGENT_CMD",
+    binary_env: "CONSTRUCT_PRIME_AGENT_BIN",
+    default_binary: "prime-agent",
+    mode_env: "CONSTRUCT_PRIME_AGENT_MODE",
+    fork_env: "CONSTRUCT_PRIME_AGENT_FORK_FROM",
+    session_id_file: "prime_agent_session_id.txt",
+    sessions_subdir: "prime-agent-sessions",
+    resume_flag: "--resume",
+};
 
 pub async fn run() -> anyhow::Result<()> {
+    run_flavor(PI).await
+}
+
+/// Run Prime Agent through the shared Pi-compatible adapter core.
+pub async fn run_prime_agent() -> anyhow::Result<()> {
+    run_flavor(PRIME_AGENT).await
+}
+
+async fn run_flavor(flavor: HarnessFlavor) -> anyhow::Result<()> {
     let metadata = InitializeResult {
-        name: "pi".into(),
+        name: flavor.name.into(),
         version: env!("CARGO_PKG_VERSION").into(),
         capabilities: Capabilities {
             supports_input: true,
@@ -69,10 +114,10 @@ pub async fn run() -> anyhow::Result<()> {
             ..Default::default()
         },
     };
-    adapter_run(metadata, |params, ctx| async move {
-        match resolve_mode(&params) {
-            Mode::Interactive => run_interactive(params, ctx).await,
-            Mode::Headless => run_headless(params, ctx).await,
+    adapter_run(metadata, move |params, ctx| async move {
+        match resolve_mode(&params, flavor) {
+            Mode::Interactive => run_interactive(params, ctx, flavor).await,
+            Mode::Headless => run_headless(params, ctx, flavor).await,
         }
     })
     .await
@@ -84,8 +129,8 @@ enum Mode {
     Headless,
 }
 
-fn resolve_mode(params: &SessionStartParams) -> Mode {
-    if let Ok(m) = std::env::var("CONSTRUCT_PI_MODE") {
+fn resolve_mode(params: &SessionStartParams, flavor: HarnessFlavor) -> Mode {
+    if let Ok(m) = std::env::var(flavor.mode_env) {
         match m.as_str() {
             "interactive" => return Mode::Interactive,
             "headless" => return Mode::Headless,
@@ -107,27 +152,27 @@ fn session_data_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// This construct session's private pi session store, created on demand.
-fn pi_sessions_dir() -> Option<PathBuf> {
-    let dir = session_data_dir()?.join(SESSIONS_SUBDIR);
+/// This construct session's private harness session store, created on demand.
+fn sessions_dir(flavor: HarnessFlavor) -> Option<PathBuf> {
+    let dir = session_data_dir()?.join(flavor.sessions_subdir);
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
 }
 
-fn conv_id_file() -> Option<PathBuf> {
-    Some(session_data_dir()?.join(SESSION_ID_FILE))
+fn conv_id_file(flavor: HarnessFlavor) -> Option<PathBuf> {
+    Some(session_data_dir()?.join(flavor.session_id_file))
 }
 
-fn read_conv_id() -> Option<String> {
-    let path = conv_id_file()?;
+fn read_conv_id(flavor: HarnessFlavor) -> Option<String> {
+    let path = conv_id_file(flavor)?;
     std::fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| is_pi_session_id(s))
 }
 
-fn write_conv_id(id: &str) {
-    if let Some(path) = conv_id_file() {
+fn write_conv_id(flavor: HarnessFlavor, id: &str) {
+    if let Some(path) = conv_id_file(flavor) {
         let _ = std::fs::write(path, id);
     }
 }
@@ -163,17 +208,29 @@ fn newest_session_file(dir: &Path) -> Option<PathBuf> {
     best.map(|(_, path)| path)
 }
 
-/// The session file for a known uuid, by filename suffix.
+/// The session file for a known native uuid. Pi includes the header id in the
+/// filename, while Prime Agent 0.7.0 names the file with a different UUID, so
+/// the authoritative fallback scans each JSONL header.
 fn session_file_for_id(dir: &Path, id: &str) -> Option<PathBuf> {
     let suffix = format!("_{id}.jsonl");
-    std::fs::read_dir(dir)
+    let paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
-        .map(|e| e.path())
-        .find(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with(&suffix))
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .collect();
+    paths
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(&suffix))
+        })
+        .cloned()
+        .or_else(|| {
+            paths
+                .into_iter()
+                .find(|path| header_session_id(path).as_deref() == Some(id))
         })
 }
 
@@ -195,15 +252,15 @@ fn header_session_id(path: &Path) -> Option<String> {
 /// sessions root. The sibling walk is what makes forking from a reset
 /// snapshot work — the snapshot's data dir holds the retired id, but the
 /// file itself still lives in the original session's store.
-fn resolve_session_file(id: &str) -> Option<PathBuf> {
+fn resolve_session_file(flavor: HarnessFlavor, id: &str) -> Option<PathBuf> {
     let own_data_dir = session_data_dir()?;
-    if let Some(path) = session_file_for_id(&own_data_dir.join(SESSIONS_SUBDIR), id) {
+    if let Some(path) = session_file_for_id(&own_data_dir.join(flavor.sessions_subdir), id) {
         return Some(path);
     }
     let sessions_root = own_data_dir.parent()?;
     for entry in std::fs::read_dir(sessions_root).ok()?.flatten() {
-        let candidate = entry.path().join(SESSIONS_SUBDIR);
-        if candidate == own_data_dir.join(SESSIONS_SUBDIR) {
+        let candidate = entry.path().join(flavor.sessions_subdir);
+        if candidate == own_data_dir.join(flavor.sessions_subdir) {
             continue;
         }
         if let Some(path) = session_file_for_id(&candidate, id) {
@@ -472,6 +529,16 @@ fn message_events(message: &Value, meta: &mut MetaState) -> Vec<SessionEvent> {
                     _ => {}
                 }
             }
+            if message.get("stopReason").and_then(Value::as_str) == Some("error") {
+                events.push(SessionEvent::Error {
+                    message: message
+                        .get("errorMessage")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.trim().is_empty())
+                        .unwrap_or("Agent turn failed")
+                        .to_string(),
+                });
+            }
             if let Some(usage) = message.get("usage") {
                 // `last_model` was just refreshed from this same message's
                 // `model`/`provider` fields above, so it is this call's model
@@ -578,23 +645,28 @@ fn interpose_typed_input(
     rx
 }
 
-async fn run_interactive(params: SessionStartParams, mut ctx: AdapterContext) {
+async fn run_interactive(
+    params: SessionStartParams,
+    mut ctx: AdapterContext,
+    flavor: HarnessFlavor,
+) {
     let command = construct_protocol::adapter::resolve_command_override(
-        "CONSTRUCT_PI_CMD",
-        "CONSTRUCT_PI_BIN",
-        "pi",
+        flavor.command_env,
+        flavor.binary_env,
+        flavor.default_binary,
     );
     let mut args = command.args.clone();
     args.extend(params.args.clone());
 
-    let store = pi_sessions_dir();
+    let store = sessions_dir(flavor);
     if let Some(dir) = store.as_ref() {
         args.extend(["--session-dir".into(), dir.to_string_lossy().into_owned()]);
     } else {
-        ctx.emit.log(
-            "pi: no CONSTRUCT_SESSION_DATA_DIR — falling back to pi's global session store; \
-             resume and native-id tracking are disabled",
-        );
+        ctx.emit.log(format!(
+            "{}: no CONSTRUCT_SESSION_DATA_DIR — falling back to its global session store; \
+                 resume and native-id tracking are disabled",
+            flavor.name
+        ));
     }
 
     let resuming = std::env::var("CONSTRUCT_RESUME").as_deref() == Ok("1");
@@ -605,37 +677,44 @@ async fn run_interactive(params: SessionStartParams, mut ctx: AdapterContext) {
     // than silently re-entering something we can't name.
     let resume_path = resuming
         .then(|| {
-            let id = read_conv_id()?;
+            let id = read_conv_id(flavor)?;
             let path = store.as_ref().and_then(|d| session_file_for_id(d, &id));
             if path.is_none() {
                 ctx.emit.log(format!(
-                    "pi respawn: captured session {id} has no file in the private store; \
-                     starting a fresh conversation"
+                    "{} respawn: captured session {id} has no file in the private store; \
+                     starting a fresh conversation",
+                    flavor.name
                 ));
             }
             path
         })
         .flatten();
-    if resuming && resume_path.is_none() && read_conv_id().is_none() {
-        ctx.emit
-            .log("pi respawn: no captured native session id; starting a fresh conversation");
+    if resuming && resume_path.is_none() && read_conv_id(flavor).is_none() {
+        ctx.emit.log(format!(
+            "{} respawn: no captured native session id; starting a fresh conversation",
+            flavor.name
+        ));
     }
     if let Some(path) = resume_path.as_ref() {
-        args.extend(["--session".into(), path.to_string_lossy().into_owned()]);
+        args.extend([
+            flavor.resume_flag.into(),
+            path.to_string_lossy().into_owned(),
+        ]);
     }
 
     // Same-harness fork (spec 0031/0078): the daemon passes the parent's
     // captured uuid; pi forks a session file into OUR private store.
     let fork_path = (!resuming)
         .then(|| {
-            let parent = std::env::var("CONSTRUCT_PI_FORK_FROM")
+            let parent = std::env::var(flavor.fork_env)
                 .ok()
                 .filter(|s| is_pi_session_id(s))?;
-            let path = resolve_session_file(&parent);
+            let path = resolve_session_file(flavor, &parent);
             if path.is_none() {
                 ctx.emit.log(format!(
-                    "pi fork: parent session {parent} not found in any construct pi store; \
-                     starting fresh without parent context"
+                    "{} fork: parent session {parent} not found in any construct store; \
+                     starting fresh without parent context",
+                    flavor.name
                 ));
             }
             path
@@ -679,6 +758,7 @@ async fn run_interactive(params: SessionStartParams, mut ctx: AdapterContext) {
                 dir,
                 resume_path,
                 initial_model: params.model.clone(),
+                flavor,
             },
             ctx.emit.clone(),
         );
@@ -712,6 +792,7 @@ struct WatcherSetup {
     /// Model the daemon asked for at launch; seeds change detection so a
     /// spawn on the requested model stays quiet.
     initial_model: Option<String>,
+    flavor: HarnessFlavor,
 }
 
 /// Watch the private session store: bind to the newest session file, mirror
@@ -724,6 +805,7 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
             dir,
             resume_path,
             initial_model,
+            flavor,
         } = setup;
         let mut meta = MetaState {
             last_model: initial_model,
@@ -752,14 +834,15 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
                     if let Some(id) = header_session_id(&newest) {
                         if let Some((_, prior_id)) = current.as_ref() {
                             emit.log(format!(
-                                "pi: native session id changed {prior_id} -> {id}; rebinding"
+                                "{}: native session id changed {prior_id} -> {id}; rebinding",
+                                flavor.name
                             ));
                             emit.emit(SessionEvent::NativeIdChanged {
                                 prior_native_id: prior_id.clone(),
                                 new_native_id: id.clone(),
                             });
                         }
-                        write_conv_id(&id);
+                        write_conv_id(flavor, &id);
                         cursor = 0;
                         current = Some((newest, id));
                     }
@@ -778,7 +861,7 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
                             prior_native_id: prior_id,
                             new_native_id: new_id.clone(),
                         });
-                        write_conv_id(&new_id);
+                        write_conv_id(flavor, &new_id);
                         current = Some((path, new_id));
                     }
                 }
@@ -811,28 +894,28 @@ fn spawn_session_watcher(setup: WatcherSetup, emit: EventEmitter) {
     });
 }
 
-async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext) {
+async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext, flavor: HarnessFlavor) {
     let command = construct_protocol::adapter::resolve_command_override(
-        "CONSTRUCT_PI_CMD",
-        "CONSTRUCT_PI_BIN",
-        "pi",
+        flavor.command_env,
+        flavor.binary_env,
+        flavor.default_binary,
     );
     let emit = ctx.emit.clone();
-    let store = pi_sessions_dir();
+    let store = sessions_dir(flavor);
 
     let resuming = std::env::var("CONSTRUCT_RESUME").as_deref() == Ok("1");
     let mut session_path: Option<PathBuf> = resuming
         .then(|| {
-            let id = read_conv_id()?;
+            let id = read_conv_id(flavor)?;
             store.as_ref().and_then(|d| session_file_for_id(d, &id))
         })
         .flatten();
     let mut fork_path = (!resuming)
         .then(|| {
-            let parent = std::env::var("CONSTRUCT_PI_FORK_FROM")
+            let parent = std::env::var(flavor.fork_env)
                 .ok()
                 .filter(|s| is_pi_session_id(s))?;
-            resolve_session_file(&parent)
+            resolve_session_file(flavor, &parent)
         })
         .flatten();
 
@@ -884,7 +967,10 @@ async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext) {
             child_args.extend(["--session-dir".into(), dir.to_string_lossy().into_owned()]);
         }
         if let Some(path) = session_path.as_ref() {
-            child_args.extend(["--session".into(), path.to_string_lossy().into_owned()]);
+            child_args.extend([
+                flavor.resume_flag.into(),
+                path.to_string_lossy().into_owned(),
+            ]);
         } else if let Some(path) = fork_path.take() {
             child_args.extend(["--fork".into(), path.to_string_lossy().into_owned()]);
         }
@@ -931,6 +1017,7 @@ async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext) {
             emit.clone(),
             meta.clone(),
             captured_sid.clone(),
+            flavor,
         );
         let stderr_task = spawn_stderr_log(child_stderr, emit.clone());
 
@@ -944,7 +1031,7 @@ async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext) {
         // a continue that re-minted the uuid) so the next turn and a daemon
         // respawn both target it.
         if let Some(sid) = captured_sid.lock().unwrap().clone() {
-            write_conv_id(&sid);
+            write_conv_id(flavor, &sid);
             if let Some(dir) = store.as_ref() {
                 // The file lands on child exit, which has already happened.
                 if let Some(path) = session_file_for_id(dir, &sid) {
@@ -984,6 +1071,7 @@ fn spawn_stdout<R>(
     emit: EventEmitter,
     meta: Arc<StdMutex<MetaState>>,
     captured_sid: Arc<StdMutex<Option<String>>>,
+    flavor: HarnessFlavor,
 ) -> tokio::task::JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -995,7 +1083,7 @@ where
                 continue;
             }
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                emit.log(format!("pi stdout: {line}"));
+                emit.log(format!("{} stdout: {line}", flavor.name));
                 continue;
             };
             match v.get("type").and_then(Value::as_str) {
@@ -1030,6 +1118,46 @@ mod tests {
 
     fn meta() -> MetaState {
         MetaState::default()
+    }
+
+    #[test]
+    fn prime_flavor_is_isolated_and_uses_public_cli_contract() {
+        assert_eq!(PRIME_AGENT.name, "prime-agent");
+        assert_eq!(PRIME_AGENT.default_binary, "prime-agent");
+        assert_eq!(PRIME_AGENT.session_id_file, "prime_agent_session_id.txt");
+        assert_eq!(PRIME_AGENT.sessions_subdir, "prime-agent-sessions");
+        assert_eq!(PRIME_AGENT.resume_flag, "--resume");
+        assert_eq!(PRIME_AGENT.command_env, "CONSTRUCT_PRIME_AGENT_CMD");
+        assert_eq!(PRIME_AGENT.binary_env, "CONSTRUCT_PRIME_AGENT_BIN");
+        assert_eq!(PRIME_AGENT.mode_env, "CONSTRUCT_PRIME_AGENT_MODE");
+        assert_eq!(PRIME_AGENT.fork_env, "CONSTRUCT_PRIME_AGENT_FORK_FROM");
+
+        assert_ne!(PRIME_AGENT.session_id_file, PI.session_id_file);
+        assert_ne!(PRIME_AGENT.sessions_subdir, PI.sessions_subdir);
+    }
+
+    #[test]
+    fn prime_error_message_is_not_silently_dropped() {
+        // Captured from Prime Agent 0.7.0 `--mode json` on 2026-08-05.
+        let message = serde_json::json!({
+            "role":"assistant",
+            "content":[],
+            "api":"openai-responses",
+            "provider":"openai",
+            "model":"gpt-5.4",
+            "usage":{
+                "input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,
+                "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}
+            },
+            "stopReason":"error",
+            "errorMessage":"Connection error."
+        });
+
+        let events = message_events(&message, &mut meta());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SessionEvent::Error { message } if message == "Connection error."
+        )));
     }
 
     #[test]
@@ -1078,6 +1206,29 @@ mod tests {
             Some("2026-07-24T16-12-49-586Z_019f94e6-9e32-75b8-99c4-150adee35c8a.jsonl".into())
         );
         assert_eq!(session_file_for_id(tmp.path(), "missing-id"), None);
+    }
+
+    #[test]
+    fn prime_session_file_resolves_by_header_when_filename_id_differs() {
+        // Prime Agent 0.7.0 writes a file UUID that differs from the native
+        // session UUID in its header; `--resume` addresses the header id.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp
+            .path()
+            .join("019fd5b7-7938-71de-88db-e00d504d3ad4.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session","version":3,"id":"019fd5b7-7a60-755b-9f9e-4d5d3349196d","timestamp":"2026-08-06T06:16:39.264Z","cwd":"/w"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            session_file_for_id(tmp.path(), "019fd5b7-7a60-755b-9f9e-4d5d3349196d"),
+            Some(path)
+        );
     }
 
     #[test]

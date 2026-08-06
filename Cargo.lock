@@ -709,6 +709,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "construct-adapter-prime-agent"
+version = "0.17.3"
+dependencies = [
+ "anyhow",
+ "construct-adapter-pi",
+]
+
+[[package]]
 name = "construct-adapter-shell"
 version = "0.17.3"
 dependencies = [
@@ -765,6 +773,7 @@ dependencies = [
  "construct-adapter-muse",
  "construct-adapter-opencode",
  "construct-adapter-pi",
+ "construct-adapter-prime-agent",
  "construct-adapter-shell",
  "construct-adapter-smith",
  "construct-client",

@@ -155,6 +155,11 @@ pub async fn probe_harness(
             ),
         ),
         "pi" => probe_wrapper_cli("CONSTRUCT_PI_CMD", "CONSTRUCT_PI_BIN", "pi"),
+        "prime-agent" => probe_wrapper_cli(
+            "CONSTRUCT_PRIME_AGENT_CMD",
+            "CONSTRUCT_PRIME_AGENT_BIN",
+            "prime-agent",
+        ),
         "muse" => probe_wrapper_cli(
             "CONSTRUCT_MUSE_CMD",
             "CONSTRUCT_MUSE_BIN",

@@ -25,7 +25,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # Active config:  ~/.config/construct/config.toml  (or $CONSTRUCT_CONFIG_DIR/config.toml)
 # This template:  ~/.config/construct/config.toml.template
 #
-# All built-in adapters (shell, claude, codex, opencode, antigravity, grok, kimi, hermes, pi, muse, smith) are
+# All built-in adapters (shell, claude, codex, opencode, antigravity, grok, kimi, hermes, pi, prime-agent, muse, smith) are
 # registered automatically — you do not need to declare them unless you want
 # to change a field.
 
@@ -45,6 +45,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 #   kimi        — Kimi Code
 #   hermes      — Hermes Agent
 #   pi          — pi coding agent
+#   prime-agent — Prime Agent
 #   muse        — Meta Muse Code
 #   smith       — native multi-provider agent (OpenAI / Anthropic / Gemini / Meta / Ollama / Grok)
 
@@ -117,7 +118,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # the adapter's generated arguments. Wins over the binary-only CONSTRUCT_*_BIN.
 #
 # [adapters.codex.env]
-# CONSTRUCT_CODEX_CMD = "exec codex"        # also: CONSTRUCT_CLAUDE_CMD, CONSTRUCT_OPENCODE_CMD, CONSTRUCT_SHELL_CMD, CONSTRUCT_ANTIGRAVITY_CMD, CONSTRUCT_GROK_CMD, CONSTRUCT_KIMI_CMD, CONSTRUCT_HERMES_CMD, CONSTRUCT_PI_CMD, CONSTRUCT_MUSE_CMD
+# CONSTRUCT_CODEX_CMD = "exec codex"        # also: CONSTRUCT_CLAUDE_CMD, CONSTRUCT_OPENCODE_CMD, CONSTRUCT_SHELL_CMD, CONSTRUCT_ANTIGRAVITY_CMD, CONSTRUCT_GROK_CMD, CONSTRUCT_KIMI_CMD, CONSTRUCT_HERMES_CMD, CONSTRUCT_PI_CMD, CONSTRUCT_PRIME_AGENT_CMD, CONSTRUCT_MUSE_CMD
 
 # Usage-probe command ────────────────────────────────────────────────────────
 #
@@ -377,6 +378,7 @@ enabled = true
 #   CONSTRUCT_KIMI_CMD        — command prefix for the kimi adapter
 #   CONSTRUCT_HERMES_CMD      — command prefix for the hermes adapter
 #   CONSTRUCT_PI_CMD          — command prefix for the pi adapter
+#   CONSTRUCT_PRIME_AGENT_CMD — command prefix for the Prime Agent adapter
 #   CONSTRUCT_MUSE_CMD        — command prefix for the muse adapter
 #   CONSTRUCT_SHELL_CMD       — command prefix for the shell adapter
 #   CONSTRUCT_CLAUDE_BIN      — binary path fallback for the claude adapter
@@ -387,6 +389,7 @@ enabled = true
 #   CONSTRUCT_KIMI_BIN        — binary path fallback for the kimi adapter
 #   CONSTRUCT_HERMES_BIN      — binary path fallback for the hermes adapter
 #   CONSTRUCT_PI_BIN          — binary path fallback for the pi adapter
+#   CONSTRUCT_PRIME_AGENT_BIN — binary path fallback for the Prime Agent adapter
 #   CONSTRUCT_MUSE_BIN        — binary path fallback for the muse adapter
 #
 # ---------------------------------------------------------------------------
@@ -1095,6 +1098,12 @@ pub const BUILTIN_ADAPTERS: &[BuiltinAdapter] = &[
         description: "pi coding agent",
     },
     BuiltinAdapter {
+        name: "prime-agent",
+        binary: "construct",
+        args: &["__adapter", "prime-agent"],
+        description: "Prime Agent",
+    },
+    BuiltinAdapter {
         name: "muse",
         binary: "construct",
         args: &["__adapter", "muse"],
@@ -1446,6 +1455,16 @@ mod tests {
             .expect("pi builtin");
         assert_eq!(adapter.binary, "construct");
         assert_eq!(adapter.args, &["__adapter", "pi"]);
+    }
+
+    #[test]
+    fn prime_agent_is_registered_as_a_builtin_wrapper() {
+        let adapter = BUILTIN_ADAPTERS
+            .iter()
+            .find(|adapter| adapter.name == "prime-agent")
+            .expect("prime-agent builtin");
+        assert_eq!(adapter.binary, "construct");
+        assert_eq!(adapter.args, &["__adapter", "prime-agent"]);
     }
 
     #[test]
