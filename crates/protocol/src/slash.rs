@@ -413,6 +413,7 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     "gemini:gemini-2.5-pro",
     "gemini:gemini-2.5-flash",
     // Meta Model API path.
+    "meta:muse-spark-1.2",
     "meta:muse-spark-1.1",
     // DeepSeek platform API path.
     "deepseek:deepseek-v4-pro",
@@ -589,6 +590,11 @@ mod tests {
         assert!(matches.contains(&"/model claude-oauth:sonnet".to_string()));
         assert!(matches.contains(&"/model claude-oauth:opus".to_string()));
         assert!(matches.contains(&"/model claude-oauth:fable".to_string()));
+
+        assert_eq!(
+            models_for_provider("meta"),
+            vec!["muse-spark-1.2", "muse-spark-1.1"]
+        );
     }
 
     #[test]
