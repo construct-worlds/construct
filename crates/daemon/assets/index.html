@@ -4899,6 +4899,9 @@ const state = {
   sessionListVisible: true,
   // Sidebar lineage section (spec 0081 web parity).
   lineageCollapsed: false,
+  // Collapse preferences are independent across the narrow mobile menu and
+  // the persistent wide sidebar. Tracks which responsive preference is live.
+  sidebarPanelLayout: null,
   // "boxes" (full, default) | "rails" (compact) — matches TUI LineageViewMode.
   lineageMode: "boxes",
   lineageSubagentsExpanded: new Set(),
@@ -5068,6 +5071,9 @@ function setComposerEnabled(on) {
 // Sidebar lineage + operator token meter (web parity for specs 0081 / 0019 / 0167)
 // ---------------------------------------------------------------------------
 
+// The unsuffixed keys predate responsive preferences. Keep them as read-only
+// fallbacks so an explicit pre-upgrade choice is not discarded; all new
+// writes go to independent `.narrow` / `.wide` keys.
 const LINEAGE_COLLAPSED_KEY = "agentd.web.lineageCollapsed";
 const LINEAGE_MODE_KEY = "agentd.web.lineageMode";
 const LINEAGE_H_KEY = "agentd.web.lineageH";
@@ -5115,10 +5121,36 @@ const operatorMeterEmptyEl = $("operatorMeterEmpty");
 const operatorMeterLegendEl = $("operatorMeterLegend");
 const operatorRainEl = $("operatorRain");
 
+function sidebarPanelLayout() {
+  return isNarrowLayout() ? "narrow" : "wide";
+}
+
+function loadSidebarPanelCollapsed(storageKey, layout) {
+  const stored = localStorage.getItem(`${storageKey}.${layout}`);
+  if (stored === "1" || stored === "0") return stored === "1";
+
+  const legacy = localStorage.getItem(storageKey);
+  if (legacy === "1" || legacy === "0") return legacy === "1";
+
+  return layout === "narrow";
+}
+
+function saveSidebarPanelCollapsed(storageKey, collapsed) {
+  const layout = state.sidebarPanelLayout || sidebarPanelLayout();
+  localStorage.setItem(`${storageKey}.${layout}`, collapsed ? "1" : "0");
+}
+
 function loadSidebarPanelPrefs() {
-  state.lineageCollapsed = localStorage.getItem(LINEAGE_COLLAPSED_KEY) === "1";
+  state.sidebarPanelLayout = sidebarPanelLayout();
+  state.lineageCollapsed = loadSidebarPanelCollapsed(
+    LINEAGE_COLLAPSED_KEY,
+    state.sidebarPanelLayout,
+  );
   state.lineageMode = localStorage.getItem(LINEAGE_MODE_KEY) === "rails" ? "rails" : "boxes";
-  state.operatorCollapsed = localStorage.getItem(OPERATOR_COLLAPSED_KEY) === "1";
+  state.operatorCollapsed = loadSidebarPanelCollapsed(
+    OPERATOR_COLLAPSED_KEY,
+    state.sidebarPanelLayout,
+  );
   const mode = localStorage.getItem(OPERATOR_MODE_KEY);
   state.operatorPanelMode = mode === "rain" ? "rain" : "tokens";
   const lh = Number(localStorage.getItem(LINEAGE_H_KEY));
@@ -5650,7 +5682,7 @@ function bindLineageSection() {
     lineageCollapseBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       state.lineageCollapsed = !state.lineageCollapsed;
-      localStorage.setItem(LINEAGE_COLLAPSED_KEY, state.lineageCollapsed ? "1" : "0");
+      saveSidebarPanelCollapsed(LINEAGE_COLLAPSED_KEY, state.lineageCollapsed);
       renderLineageSection();
     });
   }
@@ -6306,7 +6338,7 @@ function bindOperatorPanel() {
     operatorCollapseBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       state.operatorCollapsed = !state.operatorCollapsed;
-      localStorage.setItem(OPERATOR_COLLAPSED_KEY, state.operatorCollapsed ? "1" : "0");
+      saveSidebarPanelCollapsed(OPERATOR_COLLAPSED_KEY, state.operatorCollapsed);
       applyOperatorPanelMode();
     });
   }
@@ -6338,6 +6370,17 @@ function initSidebarAmbientPanels() {
   bindOperatorPanel();
   applyOperatorPanelMode();
   startOperatorPanelLoop();
+}
+
+function syncSidebarPanelLayout() {
+  const layout = sidebarPanelLayout();
+  if (layout === state.sidebarPanelLayout) return;
+
+  state.sidebarPanelLayout = layout;
+  state.lineageCollapsed = loadSidebarPanelCollapsed(LINEAGE_COLLAPSED_KEY, layout);
+  state.operatorCollapsed = loadSidebarPanelCollapsed(OPERATOR_COLLAPSED_KEY, layout);
+  renderLineageSection();
+  applyOperatorPanelMode();
 }
 
 function connect() {
@@ -13076,6 +13119,7 @@ if (sessionListResizerEl) {
 }
 
 window.addEventListener("resize", () => {
+  syncSidebarPanelLayout();
   setSessionListWidth(currentSessionListWidth(), false);
   setSessionListVisible(state.sessionListVisible, false);
 });
