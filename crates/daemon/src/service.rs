@@ -1175,6 +1175,7 @@ mod tests {
             cwd: ".".into(),
             routing: ServiceRouting::SessionKey,
             paused,
+            position: 0,
             approval_timeout_secs: 0,
             sandbox: ServiceSandboxConfig::default(),
             channels: BTreeMap::from([(
@@ -1471,6 +1472,7 @@ mod tests {
             cwd: ".".into(),
             routing: ServiceRouting::SessionKey,
             paused: false,
+            position: 0,
             approval_timeout_secs: 0,
             sandbox: ServiceSandboxConfig::default(),
             channels: BTreeMap::new(),
@@ -2336,5 +2338,46 @@ mod tests {
         assert!(validate_slack_token("app", Some("xapp-good"), "xapp-").is_ok());
         assert!(validate_slack_token("bot", Some("xoxp-user"), "xoxb-").is_err());
         assert!(validate_slack_token("bot", None, "xoxb-").is_err());
+    }
+
+    #[test]
+    fn service_move_reorders_like_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let services = dir.path().join("services");
+        std::fs::create_dir_all(&services).unwrap();
+        for name in ["alpha", "beta"] {
+            put_definition(
+                &services,
+                construct_protocol::ServicePutParams {
+                    service: construct_protocol::ServiceSummary {
+                        name: name.into(),
+                        instruction: String::new(),
+                        harness: "smith".into(),
+                        model: None,
+                        session_mode: "headless".into(),
+                        cwd: ".".into(),
+                        routing: "session-key".into(),
+                        paused: false,
+                        position: 0,
+                        channels: Vec::new(),
+                    },
+                },
+            )
+            .unwrap();
+        }
+        let list = list_summaries(&services).unwrap();
+        assert_eq!(list[0].name, "alpha");
+        assert_eq!(list[1].name, "beta");
+        move_service(&services, "beta", construct_protocol::MoveDirection::Up).unwrap();
+        let list = list_summaries(&services).unwrap();
+        assert_eq!(list[0].name, "beta");
+        assert_eq!(list[1].name, "alpha");
+        move_service(&services, "beta", construct_protocol::MoveDirection::Down).unwrap();
+        let list = list_summaries(&services).unwrap();
+        assert_eq!(list[0].name, "alpha");
+        assert_eq!(list[1].name, "beta");
+        move_service(&services, "alpha", construct_protocol::MoveDirection::Up).unwrap();
+        let list = list_summaries(&services).unwrap();
+        assert_eq!(list[0].name, "alpha");
     }
 }

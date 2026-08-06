@@ -747,6 +747,7 @@ mod tests {
             cwd: ".".into(),
             routing: ServiceRouting::SessionKey,
             paused,
+            position: 0,
             approval_timeout_secs: 0,
             sandbox: ServiceSandboxConfig::default(),
             channels: channels
@@ -804,6 +805,7 @@ mod tests {
             cwd: ".".into(),
             routing: ServiceRouting::SessionKey,
             paused,
+            position: 0,
             approval_timeout_secs: 0,
             sandbox: ServiceSandboxConfig::default(),
             channels: BTreeMap::from([(
