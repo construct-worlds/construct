@@ -39,7 +39,9 @@ More screenshots and demos: [gallery](gallery.md).
   <img src="https://raw.githubusercontent.com/construct-worlds/construct/90d02bd2c1e6108eaa5c763bde9e2d78f8786691/demos/program.gif" alt="construct playbook demo" width="70%">
 - **Agent-to-agent orchestration** — let your Codex and Claude Code sessions
   talk to each other: one agent can hand a task to another, check how it's
-  going, and pick up the results.
+  going, and pick up the results. Every session gets construct's MCP tools,
+  so any harness can spawn subagents, send them input, and read their output
+  — no glue code.
 - **ACP (Agent Client Protocol) server** — point Agent Client Protocol clients at
   `construct acp` to create, load, resume, prompt, cancel, and close construct
   daemon sessions through the same installed binary.
