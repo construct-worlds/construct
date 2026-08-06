@@ -1,7 +1,7 @@
 # 0186-webui-lineage-and-token-meter
 
 Status: accepted
-Date: 2026-08-02 (amended 2026-08-03)
+Date: 2026-08-02 (amended 2026-08-05)
 Area: webui
 Scope: The web UI sidebar and persistent header expose the fleet token meter alongside the selected-session lineage section.
 
@@ -26,7 +26,9 @@ The lineage section is a master–detail panel for the *selected* session
 - Clicking a node selects that session; clicking the subagent toggle
   expands or collapses that parent's group.
 - Collapse state and section height persist in the browser across
-  reloads (global, not per session).
+  reloads (global, not per session). Collapse state is remembered
+  independently for narrow and wide layouts: it defaults collapsed in the
+  narrow mobile menu and expanded in the wide desktop sidebar.
 
 The web layout is an interactive tree rather than a cell-grid boxed-lane
 or rails diagram. The data model, visibility rules, edge kinds (fork /
@@ -43,8 +45,10 @@ named body modes as the TUI (spec 0019):
   grouped by model (spec 0167).
 - **rain** — a decorative matrix-rain body.
 
-The panel opens expanded on first run. Collapse state, height, and mode
-persist in the browser. Switching modes never collapses the panel.
+The panel opens collapsed on first run in the narrow mobile menu and expanded
+in the wide desktop sidebar. Its collapse state is remembered independently
+for those layouts. Height and mode remain shared browser preferences, and
+switching modes never collapses the panel.
 
 ### Token meter feed
 
@@ -87,6 +91,8 @@ the gap was client presentation.
 - Future web sidebar work must preserve the stack order: list → lineage
   → operator, and must not drop Cost events that arrive for unfocused
   sessions.
+- A collapse or expansion in the narrow mobile menu must not consume the
+  corresponding wide-sidebar preference, or vice versa.
 - The header graph and sidebar meter must continue to share one fleet token
   history; connection loss changes presentation, not the recorded graph.
 - The lineage section may later adopt the full boxed-lane diagram
