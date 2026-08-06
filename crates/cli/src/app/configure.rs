@@ -82,6 +82,13 @@ pub fn harness_guidance(name: &str) -> String {
                   provider API key; it must be on the PATH of the shell that starts the construct \
                   daemon (or set CONSTRUCT_PI_BIN)"
             .to_string(),
+        "prime-agent" => {
+            "install Prime Agent from https://github.com/PrimeIntellect-ai/prime-agent \
+                           and configure a provider or subscription; `prime-agent` must be on the \
+                           PATH of the shell that starts the construct daemon (or set \
+                           CONSTRUCT_PRIME_AGENT_BIN)"
+                .to_string()
+        }
         "muse" => "install the `muse` CLI and run `muse login`; it must be on the PATH of the \
                     shell that starts the construct daemon (or installed at ~/.local/bin/muse, \
                     or set CONSTRUCT_MUSE_BIN)"

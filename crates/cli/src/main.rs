@@ -385,6 +385,8 @@ enum AdapterCommand {
     #[command(hide = true)]
     Pi,
     #[command(hide = true)]
+    PrimeAgent,
+    #[command(hide = true)]
     Muse,
     #[command(hide = true)]
     Smith {
@@ -836,6 +838,10 @@ async fn main() -> Result<()> {
             }
             AdapterCommand::Pi => {
                 construct_adapter_pi::run().await?;
+                Ok(())
+            }
+            AdapterCommand::PrimeAgent => {
+                construct_adapter_prime_agent::run().await?;
                 Ok(())
             }
             AdapterCommand::Muse => {

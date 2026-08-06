@@ -259,11 +259,16 @@ pub fn primary_label(s: &SessionSummary) -> String {
 }
 
 fn harness_label(s: &SessionSummary) -> String {
+    let harness = if s.harness == "prime-agent" {
+        "prime"
+    } else {
+        &s.harness
+    };
     let mode = s.mode.as_deref().unwrap_or("");
     if mode.eq_ignore_ascii_case("headless") {
-        format!("h:{}", s.harness)
+        format!("h:{harness}")
     } else {
-        s.harness.clone()
+        harness.to_string()
     }
 }
 
@@ -1048,6 +1053,16 @@ mod tests {
             forked_from: None,
             merge: None,
         }
+    }
+
+    #[test]
+    fn prime_agent_uses_compact_dashboard_label() {
+        let mut interactive = session("s1", None, SessionState::Running, false);
+        interactive.harness = "prime-agent".into();
+        assert_eq!(harness_label(&interactive), "prime");
+
+        interactive.mode = Some("headless".into());
+        assert_eq!(harness_label(&interactive), "h:prime");
     }
 
     #[test]

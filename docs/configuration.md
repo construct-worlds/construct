@@ -108,6 +108,7 @@ env = { CONSTRUCT_CODEX_CMD = "exec codex" }
 | `kimi` | `CONSTRUCT_KIMI_CMD` | `CONSTRUCT_KIMI_BIN` |
 | `hermes` | `CONSTRUCT_HERMES_CMD` | `CONSTRUCT_HERMES_BIN` |
 | `pi` | `CONSTRUCT_PI_CMD` | `CONSTRUCT_PI_BIN` |
+| `prime-agent` | `CONSTRUCT_PRIME_AGENT_CMD` | `CONSTRUCT_PRIME_AGENT_BIN` |
 | `muse` | `CONSTRUCT_MUSE_CMD` | `CONSTRUCT_MUSE_BIN` |
 | `shell` | `CONSTRUCT_SHELL_CMD` | `CONSTRUCT_SHELL_BIN` |
 
@@ -118,6 +119,7 @@ binary overrides above take precedence over both. Hermes discovery checks
 `hermes` on `PATH`, then `~/.local/bin/hermes`; set `CONSTRUCT_HERMES_HOME`
 when its config and `state.db` live outside the default `~/.hermes`.
 Muse discovery checks `muse` on `PATH`, then `~/.local/bin/muse`.
+Prime Agent discovery checks `prime-agent` on the daemon's `PATH`.
 
 ## TUI Theme
 

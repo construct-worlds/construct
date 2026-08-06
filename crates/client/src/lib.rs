@@ -1601,14 +1601,17 @@ impl Default for ForkOptions {
 /// id and the harness forks it byte-for-byte (claude: `--resume <id>
 /// --fork-session`; codex: `codex fork <id>`; opencode: `--session <id>
 /// --fork`; grok: `-r <id>
-/// --fork-session`; pi: `--fork <session-file>` — wired through the
+/// --fork-session`; pi / Prime Agent: `--fork <session-file>` — wired through the
 /// daemon's session lifecycle). For
 /// these, `fork_session` skips the rendered seed — the harness already
 /// holds the full context with better fidelity. Antigravity has no native
 /// fork primitive (only in-place `--conversation` resume, backed by an
 /// indexed store a state-copy would desync), so it keeps the seed.
 fn harness_forks_natively(harness: &str) -> bool {
-    matches!(harness, "claude" | "codex" | "opencode" | "grok" | "pi")
+    matches!(
+        harness,
+        "claude" | "codex" | "opencode" | "grok" | "pi" | "prime-agent"
+    )
 }
 
 /// Build the `ForkedFrom` stamp for a fork anchored at `anchor` (an
@@ -2223,8 +2226,8 @@ mod fork_lineage_tests {
         let _ = std::fs::remove_file(&sock);
     }
 
-    /// codex (`codex fork <id>`), opencode (`--session <id> --fork`), and
-    /// grok (`-r <id> --fork-session`) fork
+    /// codex (`codex fork <id>`), opencode (`--session <id> --fork`), grok
+    /// (`-r <id> --fork-session`), pi, and Prime Agent (`--fork <path>`) fork
     /// natively like claude — same-harness terminal forks skip the seed.
     /// Antigravity has no native fork primitive, so it keeps the seed.
     #[tokio::test]
@@ -2233,6 +2236,8 @@ mod fork_lineage_tests {
             ("codex", false),
             ("opencode", false),
             ("grok", false),
+            ("pi", false),
+            ("prime-agent", false),
             ("antigravity", true),
             ("agy", true),
         ] {

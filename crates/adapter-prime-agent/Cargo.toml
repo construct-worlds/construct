@@ -1,0 +1,17 @@
+[package]
+name = "construct-adapter-prime-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Prime Agent adapter for construct (wraps the `prime-agent` CLI)"
+
+[lib]
+name = "construct_adapter_prime_agent"
+path = "src/lib.rs"
+
+[dependencies]
+construct-adapter-pi = { path = "../adapter-pi" }
+anyhow.workspace = true

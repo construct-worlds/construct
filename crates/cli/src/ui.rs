@@ -15376,6 +15376,8 @@ pub fn is_headless(s: &construct_protocol::SessionSummary) -> bool {
 fn harness_label(s: &construct_protocol::SessionSummary) -> String {
     let harness = if s.harness == "antigravity" {
         "agy"
+    } else if s.harness == "prime-agent" {
+        "prime"
     } else {
         &s.harness
     };
@@ -28293,6 +28295,14 @@ mod tests {
             "smith"
         );
         assert_eq!(harness_label(&summary_with_mode("shell", None)), "shell");
+        assert_eq!(
+            harness_label(&summary_with_mode("prime-agent", Some("interactive"))),
+            "prime"
+        );
+        assert_eq!(
+            harness_label(&summary_with_mode("prime-agent", Some("headless"))),
+            "(headless) prime"
+        );
     }
 
     #[test]

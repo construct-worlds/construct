@@ -43,7 +43,7 @@ sessions; it should be able to use `agentd_list_sessions` without running the
 | OpenCode | Enabled by default. | Adapter merges a `construct` entry into the config content it hands the session, pointing at `construct __mcp`. |
 | Antigravity | Not injected yet. | Receives `CONSTRUCT_SESSION_ID`; browser/tools can be injected once `agy` exposes an MCP config flag. |
 | Hermes | Not injected yet. | Hermes supports MCP in persistent config, but the adapter does not mutate user configuration; injection waits for a per-invocation config surface. |
-| Grok, Kimi, pi | Not injected yet. | These adapters receive `CONSTRUCT_SESSION_ID` but do not inject an MCP entry today. |
+| Grok, Kimi, pi, Prime Agent | Not injected yet. | These adapters receive `CONSTRUCT_SESSION_ID` but do not inject an MCP entry today. |
 
 ## Fleet-control tools
 

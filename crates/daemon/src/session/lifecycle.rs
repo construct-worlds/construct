@@ -861,6 +861,10 @@ pub(super) fn native_fork_spec(harness: &str) -> Option<(&'static str, &'static 
         "opencode" => Some(("opencode_session_id.txt", "CONSTRUCT_OPENCODE_FORK_FROM")),
         "grok" => Some(("grok_session_id.txt", "CONSTRUCT_GROK_FORK_FROM")),
         "pi" => Some(("pi_session_id.txt", "CONSTRUCT_PI_FORK_FROM")),
+        "prime-agent" => Some((
+            "prime_agent_session_id.txt",
+            "CONSTRUCT_PRIME_AGENT_FORK_FROM",
+        )),
         _ => None,
     }
 }
