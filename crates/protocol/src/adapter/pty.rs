@@ -12,7 +12,7 @@ use portable_pty::{native_pty_system, CommandBuilder};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 const READ_BUF: usize = 8 * 1024;
 
@@ -40,6 +40,27 @@ pub struct PtySpec {
 ///
 /// Returns the child's exit code (or `-1` if not available).
 pub async fn run_session(spec: PtySpec, ctx: AdapterContext) -> i32 {
+    run_session_inner(spec, ctx, None).await
+}
+
+/// Drive a PTY-backed session and report the spawned child's process id.
+///
+/// This lets adapters bind native session metadata that records the wrapped
+/// process id without guessing from global file modification order. Failure
+/// to spawn drops the sender.
+pub async fn run_session_with_pid(
+    spec: PtySpec,
+    ctx: AdapterContext,
+    spawned_pid: oneshot::Sender<Option<u32>>,
+) -> i32 {
+    run_session_inner(spec, ctx, Some(spawned_pid)).await
+}
+
+async fn run_session_inner(
+    spec: PtySpec,
+    ctx: AdapterContext,
+    spawned_pid: Option<oneshot::Sender<Option<u32>>>,
+) -> i32 {
     let AdapterContext {
         session_id: _,
         emit,
@@ -95,6 +116,9 @@ pub async fn run_session(spec: PtySpec, ctx: AdapterContext) -> i32 {
     // Captured for foreground-process-group prompt detection. portable-pty puts
     // the child in its own session/group as leader, so its pid is its pgid.
     let child_pid = child.process_id();
+    if let Some(spawned_pid) = spawned_pid {
+        let _ = spawned_pid.send(child_pid);
+    }
     let master = pair.master;
     let slave = pair.slave;
 

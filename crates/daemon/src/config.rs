@@ -25,7 +25,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # Active config:  ~/.config/construct/config.toml  (or $CONSTRUCT_CONFIG_DIR/config.toml)
 # This template:  ~/.config/construct/config.toml.template
 #
-# All built-in adapters (shell, claude, codex, opencode, antigravity, grok, kimi, hermes, pi, smith) are
+# All built-in adapters (shell, claude, codex, opencode, antigravity, grok, kimi, hermes, pi, muse, smith) are
 # registered automatically — you do not need to declare them unless you want
 # to change a field.
 
@@ -45,6 +45,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 #   kimi        — Kimi Code
 #   hermes      — Hermes Agent
 #   pi          — pi coding agent
+#   muse        — Meta Muse Code
 #   smith       — native multi-provider agent (OpenAI / Anthropic / Gemini / Meta / Ollama / Grok)
 
 # [adapters.shell]
@@ -116,7 +117,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # the adapter's generated arguments. Wins over the binary-only CONSTRUCT_*_BIN.
 #
 # [adapters.codex.env]
-# CONSTRUCT_CODEX_CMD = "exec codex"        # also: CONSTRUCT_CLAUDE_CMD, CONSTRUCT_OPENCODE_CMD, CONSTRUCT_SHELL_CMD, CONSTRUCT_ANTIGRAVITY_CMD, CONSTRUCT_GROK_CMD, CONSTRUCT_KIMI_CMD
+# CONSTRUCT_CODEX_CMD = "exec codex"        # also: CONSTRUCT_CLAUDE_CMD, CONSTRUCT_OPENCODE_CMD, CONSTRUCT_SHELL_CMD, CONSTRUCT_ANTIGRAVITY_CMD, CONSTRUCT_GROK_CMD, CONSTRUCT_KIMI_CMD, CONSTRUCT_HERMES_CMD, CONSTRUCT_PI_CMD, CONSTRUCT_MUSE_CMD
 
 # Usage-probe command ────────────────────────────────────────────────────────
 #
@@ -376,6 +377,7 @@ enabled = true
 #   CONSTRUCT_KIMI_CMD        — command prefix for the kimi adapter
 #   CONSTRUCT_HERMES_CMD      — command prefix for the hermes adapter
 #   CONSTRUCT_PI_CMD          — command prefix for the pi adapter
+#   CONSTRUCT_MUSE_CMD        — command prefix for the muse adapter
 #   CONSTRUCT_SHELL_CMD       — command prefix for the shell adapter
 #   CONSTRUCT_CLAUDE_BIN      — binary path fallback for the claude adapter
 #   CONSTRUCT_CODEX_BIN       — binary path fallback for the codex adapter
@@ -385,6 +387,7 @@ enabled = true
 #   CONSTRUCT_KIMI_BIN        — binary path fallback for the kimi adapter
 #   CONSTRUCT_HERMES_BIN      — binary path fallback for the hermes adapter
 #   CONSTRUCT_PI_BIN          — binary path fallback for the pi adapter
+#   CONSTRUCT_MUSE_BIN        — binary path fallback for the muse adapter
 #
 # ---------------------------------------------------------------------------
 # Model routing (specs 0113/0114/0115/0116/0117)
@@ -1092,6 +1095,12 @@ pub const BUILTIN_ADAPTERS: &[BuiltinAdapter] = &[
         description: "pi coding agent",
     },
     BuiltinAdapter {
+        name: "muse",
+        binary: "construct",
+        args: &["__adapter", "muse"],
+        description: "Meta Muse Code",
+    },
+    BuiltinAdapter {
         name: "smith",
         binary: "construct",
         args: &["__adapter", "smith"],
@@ -1437,6 +1446,16 @@ mod tests {
             .expect("pi builtin");
         assert_eq!(adapter.binary, "construct");
         assert_eq!(adapter.args, &["__adapter", "pi"]);
+    }
+
+    #[test]
+    fn muse_is_registered_as_a_builtin_wrapper() {
+        let adapter = BUILTIN_ADAPTERS
+            .iter()
+            .find(|adapter| adapter.name == "muse")
+            .expect("muse builtin");
+        assert_eq!(adapter.binary, "construct");
+        assert_eq!(adapter.args, &["__adapter", "muse"]);
     }
 
     #[test]

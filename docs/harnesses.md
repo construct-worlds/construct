@@ -1,9 +1,9 @@
 # Harnesses
 
 A **harness** is an agent or shell runner inside construct. Harnesses let you run
-smith, Claude, Codex, OpenCode, Hermes, Antigravity, and local shells side by side while construct
-gives them one UI, history, widgets, control plane, and shared approval surface
-where supported.
+smith, Claude, Codex, OpenCode, Muse, Hermes, Antigravity, and local shells
+side by side while construct gives them one UI, history, widgets, control
+plane, and shared approval surface where supported.
 
 A **fleet** is the set of sessions managed by one construct daemon. For example,
 you can keep a shell running tests, ask Codex to implement a fix, ask Claude to
@@ -27,6 +27,7 @@ developer-facing integration checklist lives in
 | `kimi` | The Kimi Code CLI | You already use Kimi Code and want its native TUI inside the same construct session fleet. |
 | `hermes` | The Hermes Agent CLI | You use Hermes for coding and want its native UI, persisted sessions, and usage data in the same construct fleet. |
 | `pi` | The pi coding agent CLI | You already use pi and want it inside the same construct UI and session fleet. |
+| `muse` | Meta's Muse Code CLI | You use Muse and want its native TUI, headless mode, and resumable sessions in the same construct fleet. |
 
 Create a session with:
 
@@ -38,6 +39,7 @@ construct new --prompt "implement the failing test" opencode
 construct new --prompt "implement the failing test" kimi
 construct new --prompt "implement the failing test" hermes
 construct new --prompt "implement the failing test" pi
+construct new --prompt "implement the failing test" muse
 ```
 
 Construct-owned options go before the harness name. Tokens after the harness name
@@ -104,9 +106,9 @@ See [smith built-in agent](smith.md) for details.
 
 ### CLI-backed harnesses
 
-`claude`, `codex`, `opencode`, `antigravity`, `grok`, `kimi`, `hermes`, and `pi` wrap existing CLIs. Use them when you want
-those tools exactly as installed on your machine, but inside the same construct
-fleet.
+`claude`, `codex`, `opencode`, `antigravity`, `grok`, `kimi`, `hermes`, `pi`,
+and `muse` wrap existing CLIs. Use them when you want those tools exactly as
+installed on your machine, but inside the same construct fleet.
 
 Because these depend on binaries and logins construct does not own, `construct
 doctor` reports which ones it can find, which logins have expired, and whether
@@ -159,9 +161,9 @@ construct new --no-tui claude
 construct new --mode headless --prompt "summarize the last run" smith
 ```
 
-`smith`, `claude`, `codex`, `antigravity`, `grok`, `hermes`, and `pi` support
-both modes. `opencode` and `kimi` are interactive-only and always run their
-native TUIs. `shell` always
+`smith`, `claude`, `codex`, `antigravity`, `grok`, `hermes`, `pi`, and `muse`
+support both modes. `opencode` and `kimi` are interactive-only and always run
+their native TUIs. `shell` always
 owns a PTY (there is no structured "headless" shell), so it presents a terminal
 regardless of the mode label.
 
@@ -189,6 +191,7 @@ and ask you.
 | `kimi` | interactive only | Kimi Code's native TUI | No | Not translated | Not injected |
 | `hermes` | interactive, headless | Hermes' own defaults | No | Not translated | Not injected |
 | `pi` | interactive, headless | pi's own defaults | No | Not translated | Not injected |
+| `muse` | interactive, headless | Muse's approval and sandbox policy | No | Not translated | Not injected |
 
 ### Reading the table
 
@@ -231,6 +234,9 @@ harness's file writes.
 - **Interactive CLI-backed sessions approve in their own TUI.** The prompt
   appears inside the session pane, not in construct's minibuffer. Answer it
   there.
+- **`muse` keeps its safety defaults.** Construct does not pass bypass flags;
+  Muse starts with approvals and its sandbox enabled unless you explicitly pass
+  different Muse arguments after the harness name.
 
 Aligning these defaults would require either upstream CLI support or construct
 intercepting each harness's tool calls; today the difference is intentional and
@@ -256,9 +262,9 @@ You normally do not need these, but they are useful for scripting and debugging:
 | Setting | Purpose |
 | --- | --- |
 | `--mode interactive\|headless` | Choose the session mode at creation time. |
-| `CONSTRUCT_SMITH_MODE`, `CONSTRUCT_CLAUDE_MODE`, `CONSTRUCT_CODEX_MODE`, `CONSTRUCT_ANTIGRAVITY_MODE`, `CONSTRUCT_HERMES_MODE` | Default mode per harness. |
-| `CONSTRUCT_CLAUDE_CMD`, `CONSTRUCT_CODEX_CMD`, `CONSTRUCT_OPENCODE_CMD`, `CONSTRUCT_ANTIGRAVITY_CMD`, `CONSTRUCT_KIMI_CMD`, `CONSTRUCT_HERMES_CMD`, `CONSTRUCT_SHELL_CMD` | Override the full command used for a CLI-backed harness or shell. |
-| `CONSTRUCT_CLAUDE_BIN`, `CONSTRUCT_CODEX_BIN`, `CONSTRUCT_OPENCODE_BIN`, `CONSTRUCT_ANTIGRAVITY_BIN`, `CONSTRUCT_KIMI_BIN`, `CONSTRUCT_HERMES_BIN`, `CONSTRUCT_SHELL_BIN` | Override just the binary path when no full command override is set. |
+| `CONSTRUCT_SMITH_MODE`, `CONSTRUCT_CLAUDE_MODE`, `CONSTRUCT_CODEX_MODE`, `CONSTRUCT_ANTIGRAVITY_MODE`, `CONSTRUCT_HERMES_MODE`, `CONSTRUCT_MUSE_MODE` | Default mode per harness. |
+| `CONSTRUCT_CLAUDE_CMD`, `CONSTRUCT_CODEX_CMD`, `CONSTRUCT_OPENCODE_CMD`, `CONSTRUCT_ANTIGRAVITY_CMD`, `CONSTRUCT_KIMI_CMD`, `CONSTRUCT_HERMES_CMD`, `CONSTRUCT_MUSE_CMD`, `CONSTRUCT_SHELL_CMD` | Override the full command used for a CLI-backed harness or shell. |
+| `CONSTRUCT_CLAUDE_BIN`, `CONSTRUCT_CODEX_BIN`, `CONSTRUCT_OPENCODE_BIN`, `CONSTRUCT_ANTIGRAVITY_BIN`, `CONSTRUCT_KIMI_BIN`, `CONSTRUCT_HERMES_BIN`, `CONSTRUCT_MUSE_BIN`, `CONSTRUCT_SHELL_BIN` | Override just the binary path when no full command override is set. |
 | `CONSTRUCT_HERMES_HOME` | Override the Hermes home whose `state.db` the adapter follows. |
 | `CONSTRUCT_SMITH_MODEL` | Default model for the built-in smith harness. |
 | `CONSTRUCT_AUTO_APPROVE_PATHS` | Path allow-list injected into adapters that can translate it. Set by the daemon to the session's widget directory; see [Write access and approvals](#write-access-and-approvals). |

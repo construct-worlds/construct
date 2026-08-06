@@ -811,6 +811,7 @@ const HARNESS_FIX: &[(&str, &str)] = &[
     ("kimi", "curl -fsSL https://kimi.com/code/install.sh | bash"),
     ("hermes", "install the Hermes agent, then ensure `hermes` is on PATH"),
     ("pi", "install the pi coding agent, then ensure `pi` is on PATH"),
+    ("muse", "install Muse Code and run `muse login`, then ensure `muse` is on PATH"),
     (
         "smith",
         "give smith a credential: set ANTHROPIC_API_KEY or OPENAI_API_KEY, or run `claude` to sign in",

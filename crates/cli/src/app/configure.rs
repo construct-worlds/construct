@@ -82,6 +82,10 @@ pub fn harness_guidance(name: &str) -> String {
                   provider API key; it must be on the PATH of the shell that starts the construct \
                   daemon (or set CONSTRUCT_PI_BIN)"
             .to_string(),
+        "muse" => "install the `muse` CLI and run `muse login`; it must be on the PATH of the \
+                    shell that starts the construct daemon (or installed at ~/.local/bin/muse, \
+                    or set CONSTRUCT_MUSE_BIN)"
+            .to_string(),
         "shell" => "nothing needed — always available".to_string(),
         "smith" => "see the Smith auth tab (→) for the auth methods smith supports and their \
                      live status"

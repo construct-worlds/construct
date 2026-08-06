@@ -50,6 +50,7 @@ construct-adapter-grok = { path = "../adapter-grok" }
 construct-adapter-kimi = { path = "../adapter-kimi" }
 construct-adapter-hermes = { path = "../adapter-hermes" }
 construct-adapter-pi = { path = "../adapter-pi" }
+construct-adapter-muse = { path = "../adapter-muse" }
 construct-adapter-smith = { path = "../adapter-smith" }
 async-trait = { workspace = true }
 eventsource-stream = { workspace = true }

@@ -251,28 +251,28 @@ daemon once the events above are emitted.
 
 ## 3. Capability matrix
 
-Snapshot of where each harness stands (2026-07-28). Re-audit by checking the
+Snapshot of where each harness stands (2026-08-05). Re-audit by checking the
 listed data surface, not by trusting this table — upstream CLIs grow
 surfaces between releases (codex's token splits and grok's context figures
 both existed for months before we consumed them).
 
-| Capability | smith | claude | codex | opencode | kimi | hermes | pi | grok | antigravity | shell |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Interactive / headless | both | both | both | interactive | interactive | both | both | both | both | PTY |
-| Structured chat events | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
-| ModelChanged | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓¹ | ✓ | n/a |
-| EffortChanged | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
-| Token split (0103) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | gap² | ✓³ | n/a |
-| Context gauge (0104) | ✓ | ✓ | ✓ | ✓ | ✓ | gap | ✓⁶ | ✓ | ✓³ | n/a |
-| Context breakdown (0156) | ✓ | ✓ | ✓ | gap⁸ | ✓ | gap⁹ | ✓ | ✓ | ✓ | n/a |
-| USD cost | ✓ | headless only | — | gap⁴ | — | ✓ | ✓ | — | — | n/a |
-| Native resume | ✓ (own state) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | fresh shell |
-| Reset detection (0085) | n/a | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
-| Native fork | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | — | n/a |
-| Native subagent mirrors | n/a⁵ | ✓ | ✓ | — | — | gap | — | ✓ | ✓ | n/a |
-| MCP injection | native tools | ✓ | ✓ | ✓ | gap | gap | gap⁷ | gap | gap | — |
-| Approval translation | native | ✓ | — | — | — | — | — | ✓ | — | n/a |
-| Usage probe (0086) | disabled | `/usage` | `/status` | — | — | `/usage` | — | `/usage show` | `/usage` | disabled |
+| Capability | smith | claude | codex | opencode | kimi | hermes | pi | muse | grok | antigravity | shell |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Interactive / headless | both | both | both | interactive | interactive | both | both | both | both | both | PTY |
+| Structured chat events | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
+| ModelChanged | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | when stated | ✓¹ | ✓ | n/a |
+| EffortChanged | ✓ | — | ✓ | — | ✓ | ✓ | ✓ | when stated | ✓ | ✓ | n/a |
+| Token split (0103) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | gap² | ✓³ | n/a |
+| Context gauge (0104) | ✓ | ✓ | ✓ | ✓ | ✓ | gap | ✓⁶ | used-only | ✓ | ✓³ | n/a |
+| Context breakdown (0156) | ✓ | ✓ | ✓ | gap⁸ | ✓ | gap⁹ | ✓ | gap | ✓ | ✓ | n/a |
+| USD cost | ✓ | headless only | — | gap⁴ | — | ✓ | ✓ | — | — | — | n/a |
+| Native resume | ✓ (own state) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | fresh shell |
+| Reset detection (0085) | n/a | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a |
+| Native fork | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ | — | ✓ | — | n/a |
+| Native subagent mirrors | n/a⁵ | ✓ | ✓ | — | — | gap | — | gap | ✓ | ✓ | n/a |
+| MCP injection | native tools | ✓ | ✓ | ✓ | gap | gap | gap⁷ | gap | gap | gap | — |
+| Approval translation | native | ✓ | — | — | — | — | — | — | ✓ | — | n/a |
+| Usage probe (0086) | disabled | `/usage` | `/status` | — | — | `/usage` | — | — | `/usage show` | `/usage` | disabled |
 
 ¹ grok reports the model, but its upstream `model_id` was observed frozen
 per session — a mid-session switch may go unreported (investigation note in
@@ -319,6 +319,7 @@ short real session:
 | hermes | `$HERMES_HOME/state.db` (`sessions`, `messages`) | source-tagged native id, model/reasoning config, full structured messages/tool calls, token split, estimated/actual USD cost |
 | antigravity | `~/.gemini/antigravity-cli/conversations/<id>.db` (`gen_metadata` blobs), `brain/<id>/.system_generated/logs/transcript.jsonl` | per-generation usage varints at blob path `1.4` (`2` fresh input, `3` output incl. thoughts, `5` cached prefix, `9` thoughts), model display label (ASCII scrape); transcript carries conversation content (`USER_INPUT`/`PLANNER_RESPONSE`/tool records, `CHECKPOINT` = truncation summary) but no usage |
 | pi | `<CONSTRUCT_SESSION_DATA_DIR>/pi-sessions/<ts>_<uuid>.jsonl` (private store the adapter selects via `--session-dir`; pi's global default is `~/.pi/agent/sessions/<cwd-slug>/`) | per-assistant-message `usage` (input/output/cacheRead/cacheWrite/reasoning + exact USD `cost.total`; `input` EXCLUDES cache reads), `model_change` / `thinking_level_change` records, `thinking`/`text`/`toolCall` content blocks, `toolResult` messages |
+| muse | `${XDG_DATA_HOME:-~/.local/share}/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl` | process-tagged root identity, committed assistant messages, per-call input/output/cache/reasoning usage, model/effort when stated, and nested subagent logs (excluded from parent binding) |
 
 ## 5. Verification checklist
 

@@ -623,7 +623,7 @@ struct PtyInputCapture {
 fn should_record_pty_user_message(harness: &str) -> bool {
     matches!(
         harness,
-        "claude" | "antigravity" | "agy" | "grok" | "hermes"
+        "claude" | "antigravity" | "agy" | "grok" | "hermes" | "muse"
     )
 }
 
@@ -641,11 +641,15 @@ enum SessionInputDelivery {
 fn session_input_delivery(
     summary: &construct_protocol::SessionSummary,
 ) -> SessionInputDelivery {
-    if !summary.has_pty {
+    // `has_pty` describes an adapter's capability, while `mode` describes
+    // the shape of this particular session. A PTY-capable adapter running in
+    // headless mode still consumes structured `session.input`; sending a
+    // bracketed paste to it leaves the turn stranded in the adapter inbox.
+    if !summary.has_pty || summary.mode.as_deref() == Some("headless") {
         SessionInputDelivery::AdapterInput
     } else if matches!(
         summary.harness.as_str(),
-        "claude" | "codex" | "antigravity" | "agy" | "grok" | "hermes"
+        "claude" | "codex" | "antigravity" | "agy" | "grok" | "hermes" | "muse"
     ) {
         SessionInputDelivery::ExternalPtyTypedSubmit
     } else {
@@ -6377,6 +6381,7 @@ impl SessionManager {
             "kimi" => Some("kimi_session_id.txt"),
             "hermes" => Some("hermes_session_id.txt"),
             "pi" => Some("pi_session_id.txt"),
+            "muse" => Some("muse_session_id.txt"),
             _ => None,
         }
     }
@@ -7171,7 +7176,7 @@ fn harness_uses_quiescence(s: &SessionSummary) -> bool {
         && matches!(
             s.harness.as_str(),
             "claude" | "codex" | "antigravity" | "agy" | "grok" | "hermes" | "kimi" | "opencode"
-            | "pi"
+            | "pi" | "muse"
         )
 }
 
@@ -7223,7 +7228,7 @@ fn effective_mode(params: &CreateSessionParams) -> String {
 fn builtin_harness_capabilities(name: &str) -> construct_protocol::Capabilities {
     match name {
         "shell" | "claude" | "codex" | "opencode" | "antigravity" | "agy" | "grok" | "kimi"
-        | "hermes" | "pi" | "smith" => construct_protocol::Capabilities {
+        | "hermes" | "pi" | "muse" | "smith" => construct_protocol::Capabilities {
             supports_pty: true,
             ..Default::default()
         },
@@ -8136,6 +8141,19 @@ mod tests {
     fn playbook_execution_uses_adapter_input_for_headless_sessions() {
         let mut summary = placement_summary("s1", 0, None, construct_protocol::SessionKind::User);
         summary.has_pty = false;
+
+        assert_eq!(
+            session_input_delivery(&summary),
+            SessionInputDelivery::AdapterInput
+        );
+    }
+
+    #[test]
+    fn pty_capable_headless_session_uses_adapter_input() {
+        let mut summary = placement_summary("s1", 0, None, construct_protocol::SessionKind::User);
+        summary.harness = "muse".to_string();
+        summary.has_pty = true;
+        summary.mode = Some("headless".to_string());
 
         assert_eq!(
             session_input_delivery(&summary),
@@ -10515,6 +10533,7 @@ mod tests {
             "kimi",
             "opencode",
             "pi",
+            "muse",
         ] {
             s.harness = h.into();
             assert!(harness_uses_quiescence(&s), "{h} should use quiescence");
@@ -11439,6 +11458,7 @@ mod tests {
             "kimi",
             "hermes",
             "pi",
+            "muse",
             "smith",
         ] {
             assert!(

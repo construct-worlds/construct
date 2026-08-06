@@ -385,6 +385,8 @@ enum AdapterCommand {
     #[command(hide = true)]
     Pi,
     #[command(hide = true)]
+    Muse,
+    #[command(hide = true)]
     Smith {
         /// Auto-title mode: generate a short title for the given prompt.
         #[arg(long)]
@@ -834,6 +836,10 @@ async fn main() -> Result<()> {
             }
             AdapterCommand::Pi => {
                 construct_adapter_pi::run().await?;
+                Ok(())
+            }
+            AdapterCommand::Muse => {
+                construct_adapter_muse::run().await?;
                 Ok(())
             }
             AdapterCommand::Smith {
