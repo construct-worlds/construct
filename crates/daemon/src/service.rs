@@ -23,6 +23,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
     #[serde(default)]
@@ -39,7 +43,7 @@ pub struct ServiceConfig {
     pub routing: ServiceRouting,
     #[serde(default)]
     pub paused: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub position: i64,
     /// Seconds to hold a turn stopped at an approval before denying it on the
     /// caller's behalf. `0` waits indefinitely, which keeps the operator as

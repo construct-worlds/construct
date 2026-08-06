@@ -422,6 +422,10 @@ fn is_zero(v: &u64) -> bool {
     *v == 0
 }
 
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum UiPlacement {
@@ -3458,7 +3462,7 @@ pub struct ServiceSummary {
     #[serde(default)]
     pub paused: bool,
     /// Sort key among services (smaller = nearer the top of the list).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub position: i64,
     #[serde(default)]
     pub channels: Vec<ServiceChannelSummary>,
@@ -4431,7 +4435,7 @@ pub struct GroupSummary {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Sort key among groups (smaller = nearer the top of the groups
     /// region). Groups never sort above ungrouped sessions.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub position: i64,
     /// When true, the group's members are hidden from the list view —
     /// only the header is shown. Toggled by `Space` in the TUI.
