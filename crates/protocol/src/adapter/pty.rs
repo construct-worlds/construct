@@ -15,6 +15,77 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 const READ_BUF: usize = 8 * 1024;
+const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+
+/// Answers terminal queries that require a live terminal counterpart.
+///
+/// The child PTY cannot talk directly to the user's outer terminal: Construct
+/// sits between them and renders the byte stream itself. Cursor-position
+/// reports therefore have to be answered here, where every client surface
+/// (native TUI, web, detached/no client) shares the same live-only behavior.
+/// Handled queries are removed from the emitted stream so downstream terminal
+/// emulators cannot answer a second time and persisted replay stays inert.
+struct TerminalQueryResponder {
+    parser: vt100::Parser,
+    tail: Vec<u8>,
+}
+
+impl TerminalQueryResponder {
+    fn new(size: PtySize) -> Self {
+        Self {
+            parser: vt100::Parser::new(size.rows.max(2), size.cols.max(2), 0),
+            tail: Vec::new(),
+        }
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) {
+        self.parser.screen_mut().set_size(rows.max(2), cols.max(2));
+    }
+
+    /// Feed one child-output chunk, returning bytes safe to emit/persist and
+    /// terminal replies to write directly back to the child PTY.
+    fn feed(&mut self, chunk: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+        let mut combined = std::mem::take(&mut self.tail);
+        combined.extend_from_slice(chunk);
+
+        let mut passthrough = Vec::with_capacity(combined.len());
+        let mut responses = Vec::new();
+        let mut parsed = 0usize;
+        let mut i = 0usize;
+        while i < combined.len() {
+            let rest = &combined[i..];
+            if rest.starts_with(CURSOR_POSITION_QUERY) {
+                self.parser.process(&passthrough[parsed..]);
+                parsed = passthrough.len();
+                let (row, col) = self.parser.screen().cursor_position();
+                responses.push(format!("\x1b[{};{}R", row + 1, col + 1).into_bytes());
+                i += CURSOR_POSITION_QUERY.len();
+                continue;
+            }
+            if is_cursor_position_query_prefix(rest) {
+                self.tail.extend_from_slice(rest);
+                break;
+            }
+            passthrough.push(combined[i]);
+            i += 1;
+        }
+        self.parser.process(&passthrough[parsed..]);
+        (passthrough, responses)
+    }
+
+    /// Flush bytes held only because they might have begun a split query.
+    fn finish(&mut self) -> Vec<u8> {
+        let tail = std::mem::take(&mut self.tail);
+        self.parser.process(&tail);
+        tail
+    }
+}
+
+fn is_cursor_position_query_prefix(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && bytes.len() < CURSOR_POSITION_QUERY.len()
+        && CURSOR_POSITION_QUERY.starts_with(bytes)
+}
 
 /// What to spawn under the PTY and how.
 pub struct PtySpec {
@@ -189,6 +260,7 @@ async fn run_session_inner(
     let mut pgrp_timer = tokio::time::interval(Duration::from_millis(400));
     pgrp_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pgrp_state: Option<SessionState> = None;
+    let mut terminal_queries = TerminalQueryResponder::new(spec.size);
 
     let mut read_closed = false;
     let mut inbox_closed = false;
@@ -198,8 +270,22 @@ async fn run_session_inner(
             biased;
             bytes = read_rx.recv(), if !read_closed => {
                 match bytes {
-                    Some(b) => emit.emit_pty(&b),
-                    None => { read_closed = true; }
+                    Some(b) => {
+                        let (passthrough, responses) = terminal_queries.feed(&b);
+                        for response in responses {
+                            let _ = write_tx.send(response);
+                        }
+                        if !passthrough.is_empty() {
+                            emit.emit_pty(&passthrough);
+                        }
+                    }
+                    None => {
+                        read_closed = true;
+                        let tail = terminal_queries.finish();
+                        if !tail.is_empty() {
+                            emit.emit_pty(&tail);
+                        }
+                    }
                 }
             }
             msg = inbox.recv(), if !inbox_closed => {
@@ -221,6 +307,7 @@ async fn run_session_inner(
                             cols, rows,
                             pixel_width: 0, pixel_height: 0,
                         });
+                        terminal_queries.resize(cols, rows);
                     }
                     Some(AdapterInboxMsg::Input(text)) => {
                         let mut b = text.into_bytes();
@@ -260,7 +347,14 @@ async fn run_session_inner(
                     _ => -1,
                 };
                 while let Ok(b) = read_rx.try_recv() {
-                    emit.emit_pty(&b);
+                    let (passthrough, _) = terminal_queries.feed(&b);
+                    if !passthrough.is_empty() {
+                        emit.emit_pty(&passthrough);
+                    }
+                }
+                let tail = terminal_queries.finish();
+                if !tail.is_empty() {
+                    emit.emit_pty(&tail);
                 }
                 break;
             }
@@ -268,4 +362,73 @@ async fn run_session_inner(
     }
     emit.emit(SessionEvent::Done { exit_code });
     exit_code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn responder() -> TerminalQueryResponder {
+        TerminalQueryResponder::new(PtySize { cols: 80, rows: 24 })
+    }
+
+    #[test]
+    fn cursor_position_query_is_answered_and_not_emitted() {
+        let mut responder = responder();
+        let (output, responses) = responder.feed(b"hello\r\nxy\x1b[6nworld");
+
+        assert_eq!(output, b"hello\r\nxyworld");
+        assert_eq!(responses, vec![b"\x1b[2;3R".to_vec()]);
+        assert!(!output
+            .windows(CURSOR_POSITION_QUERY.len())
+            .any(|window| window == CURSOR_POSITION_QUERY));
+    }
+
+    #[test]
+    fn split_cursor_position_query_waits_for_completion() {
+        let mut responder = responder();
+
+        let (first, responses) = responder.feed(b"abc\x1b[");
+        assert_eq!(first, b"abc");
+        assert!(responses.is_empty());
+
+        let (second, responses) = responder.feed(b"6n");
+        assert!(second.is_empty());
+        assert_eq!(responses, vec![b"\x1b[1;4R".to_vec()]);
+    }
+
+    #[test]
+    fn false_query_prefix_is_preserved() {
+        let mut responder = responder();
+
+        let (first, responses) = responder.feed(b"before\x1b[");
+        assert_eq!(first, b"before");
+        assert!(responses.is_empty());
+
+        let (second, responses) = responder.feed(b"2Jafter");
+        assert_eq!(second, b"\x1b[2Jafter");
+        assert!(responses.is_empty());
+    }
+
+    #[test]
+    fn incomplete_query_prefix_is_preserved_at_end_of_stream() {
+        let mut responder = responder();
+
+        let (output, responses) = responder.feed(b"before\x1b[");
+        assert_eq!(output, b"before");
+        assert!(responses.is_empty());
+        assert_eq!(responder.finish(), b"\x1b[");
+    }
+
+    #[test]
+    fn each_query_observes_cursor_at_its_stream_position() {
+        let mut responder = responder();
+        let (output, responses) = responder.feed(b"a\x1b[6n\r\nbc\x1b[6n");
+
+        assert_eq!(output, b"a\r\nbc");
+        assert_eq!(
+            responses,
+            vec![b"\x1b[1;2R".to_vec(), b"\x1b[2;3R".to_vec()]
+        );
+    }
 }
