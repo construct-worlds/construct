@@ -23,9 +23,10 @@ More screenshots and demos: [gallery](gallery.md).
 ## Why construct?
 
 - **tmux for agent fleets** — manage Codex, Claude Code, OpenCode, Muse,
-  Antigravity, Grok, and smith sessions from your terminal — or let an agent
-  coordinate them.
-  SSH-friendly, single Rust binary.
+  Antigravity, Grok, and smith sessions from your terminal. Sessions live in
+  the daemon, not your terminal: SSH drops, laptop sleeps — agents keep
+  working, and you reattach exactly where you left off, scrollback and all.
+  Single Rust binary.
 - **Lineage** — sessions branch like ideas do: fork one when you want a
   parallel attempt (new idea, side quest, or a long shot) — even a
   cross-harness fork — and merge the results back.
