@@ -7099,7 +7099,10 @@ async function saveServiceDraft() {
   const service = { ...state.serviceDraft, model: state.serviceDraft.model || null };
   try {
     const result = await rpc("service.put", { service });
-    state.services = state.services.filter((item) => item.name !== service.name).concat(result.service).sort((a, b) => a.name.localeCompare(b.name));
+    state.services = state.services
+      .filter((item) => item.name !== service.name)
+      .concat(result.service)
+      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name));
     if (previousName && previousName !== result.service.name) {
       renameServiceInLayout(previousName, result.service.name);
     }
@@ -7317,7 +7320,7 @@ function orderedItems() {
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   const services = state.services
     .slice()
-    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+    .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || String(a.name || "").localeCompare(String(b.name || "")));
   const items = [];
   if (operator) items.push({ kind: "session", session: operator, isOperator: true, depth: 0 });
   for (const service of services) items.push({ kind: "service", service, depth: 0 });
@@ -7541,11 +7544,10 @@ function bindSessionListClicks() {
 //
 // Rows reorder by direct manipulation: grab with the mouse, or
 // press-and-hold on touch (so plain swipes keep scrolling the list),
-// then drop on the target position. The daemon's reorder primitive is
-// single-step `session.move` — which enforces region boundaries
-// (pinned block, fork sibling runs, group membership) — so a drop
-// replays one step per row crossed and stops early at a region edge,
-// exactly like tapping the old ↑/↓ buttons repeatedly.
+// then drop on the target position. The daemon's reorder primitives are
+// single-step moves within each row kind, so a drop replays one step per row
+// crossed and respects the same session, service, and project boundaries as
+// the keyboard commands.
 const listDrag = {
   armed: false,        // pointer is down on a draggable row
   active: false,       // drag visuals engaged
@@ -7556,6 +7558,7 @@ const listDrag = {
   holdTimer: null,     // touch press-and-hold timer
   sourceId: null,
   sourceGroupId: null,
+  sourceServiceName: null,
   targetEl: null,
   dropAfter: false,
   suppressClick: false, // swallow the click that follows a drag
@@ -7638,6 +7641,7 @@ function handleSessionListKey(ev) {
     const steps = key === "ArrowDown" ? 1 : -1;
     if (sessionId) moveSessionSteps(sessionId, steps);
     else if (groupId) moveGroupSteps(groupId, steps);
+    else if (serviceName) moveServiceSteps(serviceName, steps);
     else return;
     ev.preventDefault();
     return;
@@ -7697,6 +7701,9 @@ function listDragSourceEl() {
   if (listDrag.sourceGroupId) {
     return sessionListEl.querySelector(`.group-header[data-group-id="${CSS.escape(listDrag.sourceGroupId)}"]`);
   }
+  if (listDrag.sourceServiceName) {
+    return sessionListEl.querySelector(`.item[data-service-name="${CSS.escape(listDrag.sourceServiceName)}"]`);
+  }
   return null;
 }
 
@@ -7726,9 +7733,16 @@ function listDragTrack(x, y) {
   listDragClearIndicator();
   const under = document.elementFromPoint(x, y);
   const isGroup = !!listDrag.sourceGroupId;
-  const row = under && under.closest ? under.closest(isGroup ? ".session-list .group-header[data-group-id]" : ".session-list .item[data-id]") : null;
+  const isService = !!listDrag.sourceServiceName;
+  const selector = isGroup
+    ? ".session-list .group-header[data-group-id]"
+    : isService
+      ? ".session-list .item[data-service-name]"
+      : ".session-list .item[data-id]";
+  const row = under && under.closest ? under.closest(selector) : null;
   if (!row || !sessionListEl.contains(row)) return;
   if (isGroup && row.dataset.groupId === listDrag.sourceGroupId) return;
+  if (isService && row.dataset.serviceName === listDrag.sourceServiceName) return;
   if (!isGroup && (row.dataset.id === listDrag.sourceId || row.classList.contains("is-operator"))) return;
   const r = row.getBoundingClientRect();
   listDrag.dropAfter = y > r.top + r.height / 2;
@@ -7765,12 +7779,27 @@ async function moveGroupSteps(groupId, steps) {
   }
 }
 
+async function moveServiceSteps(serviceName, steps) {
+  const direction = steps > 0 ? "down" : "up";
+  for (let i = 0; i < Math.abs(steps); i += 1) {
+    try {
+      await rpc("service.move", { name: serviceName, direction });
+    } catch (e) {
+      appendError(`reorder failed: ${e.message}`);
+      break;
+    }
+  }
+  await refreshSessions();
+  refocusListRow(serviceName, true);
+}
+
 function listDragFinish(commit) {
   clearTimeout(listDrag.holdTimer);
   listDrag.holdTimer = null;
   const wasActive = listDrag.active;
   const sourceId = listDrag.sourceId;
   const sourceGroupId = listDrag.sourceGroupId;
+  const sourceServiceName = listDrag.sourceServiceName;
   const targetEl = listDrag.targetEl;
   const dropAfter = listDrag.dropAfter;
   listDrag.armed = false;
@@ -7778,24 +7807,33 @@ function listDragFinish(commit) {
   listDrag.pointerId = null;
   listDrag.sourceId = null;
   listDrag.sourceGroupId = null;
+  listDrag.sourceServiceName = null;
   sessionListEl.classList.remove("drag-active");
   const src = sourceId
     ? sessionListEl.querySelector(`.item[data-id="${CSS.escape(sourceId)}"]`)
     : sourceGroupId
       ? sessionListEl.querySelector(`.group-header[data-group-id="${CSS.escape(sourceGroupId)}"]`)
-      : null;
+      : sourceServiceName
+        ? sessionListEl.querySelector(`.item[data-service-name="${CSS.escape(sourceServiceName)}"]`)
+        : null;
   if (src) src.classList.remove("drag-source");
   listDragClearIndicator();
   if (!wasActive) return;
   listDrag.suppressClick = true;
-  if (commit && (sourceId || sourceGroupId) && targetEl) {
+  if (commit && (sourceId || sourceGroupId || sourceServiceName) && targetEl) {
     const isGroup = !!sourceGroupId;
+    const isService = !!sourceServiceName;
+    const selector = isGroup
+      ? ".group-header[data-group-id]"
+      : isService
+        ? ".item[data-service-name]"
+        : ".item[data-id]:not(.is-operator)";
     const ids = Array.from(
-      sessionListEl.querySelectorAll(isGroup ? ".group-header[data-group-id]" : ".item[data-id]:not(.is-operator)")
-    ).map((el) => isGroup ? el.dataset.groupId : el.dataset.id);
-    const idToMove = isGroup ? sourceGroupId : sourceId;
+      sessionListEl.querySelectorAll(selector)
+    ).map((el) => isGroup ? el.dataset.groupId : isService ? el.dataset.serviceName : el.dataset.id);
+    const idToMove = isGroup ? sourceGroupId : isService ? sourceServiceName : sourceId;
     const from = ids.indexOf(idToMove);
-    const targetId = isGroup ? targetEl.dataset.groupId : targetEl.dataset.id;
+    const targetId = isGroup ? targetEl.dataset.groupId : isService ? targetEl.dataset.serviceName : targetEl.dataset.id;
     const slot = ids.indexOf(targetId) + (dropAfter ? 1 : 0);
     if (from >= 0 && slot >= 0) {
       // Removing the row from its old index shifts every later slot
@@ -7805,6 +7843,8 @@ function listDragFinish(commit) {
       if (steps !== 0) {
         if (isGroup) {
           moveGroupSteps(idToMove, steps);
+        } else if (isService) {
+          moveServiceSteps(idToMove, steps);
         } else {
           moveSessionSteps(idToMove, steps);
         }
@@ -7822,7 +7862,7 @@ function bindSessionListDrag() {
   sessionListEl.__dragBound = true;
   sessionListEl.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0 || listDrag.armed) return;
-    const row = ev.target.closest(".item[data-id], .group-header[data-group-id]");
+    const row = ev.target.closest(".item[data-id], .item[data-service-name], .group-header[data-group-id]");
     if (!row || row.classList.contains("is-operator")) return;
     if (ev.target.closest(".disclosure.can-toggle")) return;
     listDrag.armed = true;
@@ -7832,6 +7872,8 @@ function bindSessionListDrag() {
     listDrag.startY = ev.clientY;
     if (row.classList.contains("group-header")) {
       listDrag.sourceGroupId = row.dataset.groupId;
+    } else if (row.dataset.serviceName) {
+      listDrag.sourceServiceName = row.dataset.serviceName;
     } else {
       listDrag.sourceId = row.dataset.id;
     }

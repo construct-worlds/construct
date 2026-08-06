@@ -25,6 +25,10 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
+    /// Stable position among service rows. This is display metadata only;
+    /// service runtime behavior does not depend on it.
+    #[serde(default)]
+    pub position: u64,
     #[serde(default)]
     pub instruction: String,
     #[serde(default = "default_service_harness")]
@@ -298,10 +302,16 @@ pub fn load_definitions(dir: &std::path::Path) -> Result<BTreeMap<String, Servic
 }
 
 pub fn list_summaries(dir: &std::path::Path) -> Result<Vec<construct_protocol::ServiceSummary>> {
-    Ok(load_definitions(dir)?
+    let mut services: Vec<_> = load_definitions(dir)?
         .into_iter()
         .map(|(name, config)| summary(name, &config))
-        .collect())
+        .collect();
+    services.sort_by(|a, b| {
+        a.position
+            .cmp(&b.position)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(services)
 }
 
 pub fn put_definition(
@@ -333,7 +343,17 @@ pub fn put_definition(
     };
     let session_mode =
         parse_service_session_mode(&params.service.harness, &params.service.session_mode)?;
+    let position = match existing.as_ref() {
+        Some(config) => config.position,
+        None => load_definitions(dir)?
+            .values()
+            .map(|config| config.position)
+            .max()
+            .map(|position| position.saturating_add(1))
+            .unwrap_or_default(),
+    };
     let config = ServiceConfig {
+        position,
         instruction: params.service.instruction,
         harness: params.service.harness,
         model: params.service.model,
@@ -353,6 +373,46 @@ pub fn put_definition(
         service: summary(params.service.name, &config),
         applied: Default::default(),
     })
+}
+
+/// Move one service past its adjacent service row. Legacy definitions may all
+/// have position zero, so every successful move first materializes the full
+/// deterministic `(position, name)` order as contiguous persisted positions.
+pub fn move_definition(
+    dir: &std::path::Path,
+    name: &str,
+    direction: construct_protocol::MoveDirection,
+) -> Result<()> {
+    let mut services = load_definitions(dir)?;
+    let mut ordered: Vec<String> = services.keys().cloned().collect();
+    ordered.sort_by(|a, b| {
+        services[a]
+            .position
+            .cmp(&services[b].position)
+            .then_with(|| a.cmp(b))
+    });
+    let index = ordered
+        .iter()
+        .position(|candidate| candidate == name)
+        .ok_or_else(|| anyhow!("service not found: {name}"))?;
+    let neighbor = match direction {
+        construct_protocol::MoveDirection::Up if index > 0 => index - 1,
+        construct_protocol::MoveDirection::Down if index + 1 < ordered.len() => index + 1,
+        _ => return Ok(()),
+    };
+    ordered.swap(index, neighbor);
+
+    for (position, service_name) in ordered.into_iter().enumerate() {
+        let config = services
+            .get_mut(&service_name)
+            .ok_or_else(|| anyhow!("service disappeared while reordering: {service_name}"))?;
+        let position = position as u64;
+        if config.position != position {
+            config.position = position;
+            write_definition(dir, &service_name, config)?;
+        }
+    }
+    Ok(())
 }
 
 fn parse_service_session_mode(harness: &str, mode: &str) -> Result<ServiceSessionMode> {
@@ -920,6 +980,7 @@ fn summary(name: String, config: &ServiceConfig) -> construct_protocol::ServiceS
     let service_name = name.clone();
     construct_protocol::ServiceSummary {
         name,
+        position: config.position,
         instruction: config.instruction.clone(),
         harness: config.harness.clone(),
         model: config.model.clone(),
@@ -1093,6 +1154,7 @@ mod tests {
 
     fn config_with_channel(token: &str, enabled: bool, paused: bool) -> ServiceConfig {
         ServiceConfig {
+            position: 0,
             instruction: String::new(),
             harness: "smith".into(),
             model: None,
@@ -1389,6 +1451,7 @@ mod tests {
     fn sandbox_limits_survive_an_unrelated_edit() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = ServiceConfig {
+            position: 0,
             instruction: "hi".into(),
             harness: "smith".into(),
             model: None,
@@ -1410,6 +1473,7 @@ mod tests {
             construct_protocol::ServicePutParams {
                 service: construct_protocol::ServiceSummary {
                     name: "svc".into(),
+                    position: 0,
                     instruction: "changed".into(),
                     harness: "smith".into(),
                     model: None,
@@ -1581,6 +1645,48 @@ mod tests {
     }
 
     #[test]
+    fn service_reorder_materializes_and_preserves_positions() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["alpha", "bravo", "charlie"] {
+            std::fs::write(
+                dir.path().join(format!("{name}.toml")),
+                "harness = \"smith\"\n",
+            )
+            .unwrap();
+        }
+
+        let names = || {
+            list_summaries(dir.path())
+                .unwrap()
+                .into_iter()
+                .map(|service| service.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(), ["alpha", "bravo", "charlie"]);
+
+        move_definition(dir.path(), "charlie", construct_protocol::MoveDirection::Up).unwrap();
+        assert_eq!(names(), ["alpha", "charlie", "bravo"]);
+        assert_eq!(
+            list_summaries(dir.path())
+                .unwrap()
+                .iter()
+                .map(|service| service.position)
+                .collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+
+        let mut edited = list_summaries(dir.path()).unwrap()[1].clone();
+        edited.instruction = "changed".into();
+        edited.position = 99;
+        put_definition(
+            dir.path(),
+            construct_protocol::ServicePutParams { service: edited },
+        )
+        .unwrap();
+        assert_eq!(names(), ["alpha", "charlie", "bravo"]);
+    }
+
+    #[test]
     fn a_slack_channel_chooses_its_progress_affordance() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1629,6 +1735,7 @@ mod tests {
         std::fs::create_dir_all(&services).unwrap();
         let service = construct_protocol::ServiceSummary {
             name: "alerts".into(),
+            position: 0,
             instruction: "triage".into(),
             harness: "smith".into(),
             model: None,
@@ -1717,6 +1824,7 @@ mod tests {
             construct_protocol::ServicePutParams {
                 service: construct_protocol::ServiceSummary {
                     name: "alerts".into(),
+                    position: 0,
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,
@@ -1788,6 +1896,7 @@ mod tests {
             construct_protocol::ServicePutParams {
                 service: construct_protocol::ServiceSummary {
                     name: "backup".into(),
+                    position: 0,
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,
@@ -1856,6 +1965,7 @@ mod tests {
                 construct_protocol::ServicePutParams {
                     service: construct_protocol::ServiceSummary {
                         name: name.into(),
+                        position: 0,
                         instruction: String::new(),
                         harness: "smith".into(),
                         model: None,
@@ -1944,6 +2054,7 @@ mod tests {
             construct_protocol::ServicePutParams {
                 service: construct_protocol::ServiceSummary {
                     name: "alerts".into(),
+                    position: 0,
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,
@@ -2203,6 +2314,7 @@ mod tests {
             construct_protocol::ServicePutParams {
                 service: construct_protocol::ServiceSummary {
                     name: "chat".into(),
+                    position: 0,
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,

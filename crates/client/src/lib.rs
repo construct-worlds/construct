@@ -491,6 +491,16 @@ impl Client {
         )
         .await
     }
+    pub async fn move_service(&self, name: &str, direction: MoveDirection) -> Result<()> {
+        self.request(
+            ipc_method::SERVICE_MOVE,
+            &construct_protocol::ServiceMoveParams {
+                name: name.to_string(),
+                direction,
+            },
+        )
+        .await
+    }
     pub async fn list_service_channels(
         &self,
         service_name: &str,

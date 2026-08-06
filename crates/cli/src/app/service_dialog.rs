@@ -473,6 +473,13 @@ fn default_service(app: &App, suggested: String) -> ServiceSummary {
     let selected = app.selected_session();
     ServiceSummary {
         name: suggested,
+        position: app
+            .services
+            .iter()
+            .map(|service| service.position)
+            .max()
+            .map(|position| position.saturating_add(1))
+            .unwrap_or_default(),
         instruction: String::new(),
         harness: selected
             .map(|session| session.harness.clone())
@@ -502,7 +509,11 @@ impl App {
     pub async fn refresh_services(&mut self) {
         match self.client.list_services().await {
             Ok(mut services) => {
-                services.sort_by(|a, b| a.name.cmp(&b.name));
+                services.sort_by(|a, b| {
+                    a.position
+                        .cmp(&b.position)
+                        .then_with(|| a.name.cmp(&b.name))
+                });
                 self.services = services;
             }
             Err(error) => self.set_status(format!("services refresh failed: {error}")),
