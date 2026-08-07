@@ -497,6 +497,7 @@ pub struct AdapterContext {
 pub struct EventEmitter {
     out_tx: mpsc::UnboundedSender<serde_json::Value>,
     session_id: String,
+    events_emitted: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EventEmitter {
@@ -512,12 +513,22 @@ impl EventEmitter {
             Self {
                 out_tx,
                 session_id: session_id.into(),
+                events_emitted: Default::default(),
             },
             out_rx,
         )
     }
 
+    /// Number of [`SessionEvent`]s emitted so far, shared across clones.
+    /// Adapters snapshot this before spawning a harness child to tell a turn
+    /// that produced output apart from one that died silently at launch.
+    pub fn events_emitted(&self) -> u64 {
+        self.events_emitted.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn emit(&self, event: SessionEvent) {
+        self.events_emitted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let env = EventEnvelope {
             session_id: self.session_id.clone(),
             event,
@@ -795,6 +806,7 @@ where
                 emit: EventEmitter {
                     out_tx: out_tx.clone(),
                     session_id: params.session_id.clone(),
+                    events_emitted: Default::default(),
                 },
                 inbox: rx,
             };
@@ -1043,6 +1055,7 @@ where
                     emit: EventEmitter {
                         out_tx: out_tx.clone(),
                         session_id: params.session_id.clone(),
+                        events_emitted: Default::default(),
                     },
                     inbox: rx,
                 };

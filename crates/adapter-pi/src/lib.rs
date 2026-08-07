@@ -42,7 +42,9 @@ use std::time::Duration;
 use construct_adapter_common::context_breakdown::{
     estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin,
 };
-use construct_adapter_common::{drive_turn, spawn_stderr_log, TurnOutcome};
+use construct_adapter_common::{
+    drive_turn, emit_launch_failure_if_silent, spawn_stderr_tail, TurnOutcome,
+};
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
 use construct_protocol::adapter::{
     run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter,
@@ -996,6 +998,7 @@ async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext, flavo
         }
         cmd.env("CONSTRUCT_SESSION_ID", &ctx.session_id);
 
+        let events_before_spawn = emit.events_emitted();
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -1019,13 +1022,21 @@ async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext, flavo
             captured_sid.clone(),
             flavor,
         );
-        let stderr_task = spawn_stderr_log(child_stderr, emit.clone());
+        let (stderr_task, stderr_tail) = spawn_stderr_tail(child_stderr, emit.clone());
 
         let outcome = drive_turn(&mut child, &mut ctx.inbox, &emit, &mut pending).await;
 
         let _ = stdout_task.await;
         let _ = stderr_task.await;
-        let _ = child.wait().await;
+        let exit_status = child.wait().await.ok();
+        if matches!(outcome, TurnOutcome::Completed) {
+            emit_launch_failure_if_silent(
+                &emit,
+                events_before_spawn,
+                exit_status.as_ref(),
+                &stderr_tail.snapshot(),
+            );
+        }
 
         // Adopt the session the turn actually ran as (fresh spawn, fork, or
         // a continue that re-minted the uuid) so the next turn and a daemon

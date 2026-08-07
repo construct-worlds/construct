@@ -21,7 +21,8 @@ use construct_adapter_common::context_breakdown::{
     estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin,
 };
 use construct_adapter_common::{
-    codex_sessions_root, drive_turn, next_native_seq, short, TurnOutcome,
+    codex_sessions_root, drive_turn, emit_launch_failure_if_silent, next_native_seq, short,
+    StderrTail, TurnOutcome,
 };
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
 use construct_protocol::adapter::{
@@ -1337,6 +1338,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         }
         command.env("CONSTRUCT_SESSION_ID", &agentd_session_id);
 
+        let events_before_spawn = emit.events_emitted();
         let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -1353,20 +1355,35 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         let child_stdout = child.stdout.take().expect("piped");
         let child_stderr = child.stderr.take().expect("piped");
         let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
+        let stderr_tail = StderrTail::default();
         let stdout_task = spawn_stdout(child_stdout, emit.clone(), diagnostics.clone());
-        let stderr_task = spawn_headless_stderr(child_stderr, emit.clone(), diagnostics.clone());
+        let stderr_task = spawn_headless_stderr(
+            child_stderr,
+            emit.clone(),
+            diagnostics.clone(),
+            stderr_tail.clone(),
+        );
 
         let outcome = drive_turn(&mut child, &mut inbox, &emit, &mut pending).await;
 
         let _ = stdout_task.await;
         let stderr_error = stderr_task.await.ok().flatten();
-        let _ = child.wait().await;
+        let exit_status = child.wait().await.ok();
 
         let diagnostics = diagnostics.lock().unwrap().clone();
 
         if let Some(message) = stderr_error {
             emit.emit(SessionEvent::Error { message });
             break 1;
+        }
+
+        if matches!(outcome, TurnOutcome::Completed) {
+            emit_launch_failure_if_silent(
+                &emit,
+                events_before_spawn,
+                exit_status.as_ref(),
+                &stderr_tail.snapshot(),
+            );
         }
 
         // Always adopt the latest native id so a mid-run reset is honored
@@ -1412,6 +1429,7 @@ fn spawn_headless_stderr<R>(
     reader: R,
     emit: EventEmitter,
     diagnostics: Arc<StdMutex<HeadlessTurnDiagnostics>>,
+    tail: StderrTail,
 ) -> tokio::task::JoinHandle<Option<String>>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -1432,6 +1450,7 @@ where
                 }
             }
             emit.log(format!("stderr: {line}"));
+            tail.push(line);
         }
         error
     })
@@ -1856,7 +1875,12 @@ tokens used
         let (emit, _rx) = EventEmitter::channel("session");
         let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
 
-        spawn_headless_stderr(REAL_REFUSAL_STDERR.as_bytes(), emit, diagnostics.clone())
+        spawn_headless_stderr(
+            REAL_REFUSAL_STDERR.as_bytes(),
+            emit,
+            diagnostics.clone(),
+            StderrTail::default(),
+        )
             .await
             .expect("stderr task should finish");
 
@@ -1876,7 +1900,12 @@ tokens used
         let (emit, _rx) = EventEmitter::channel("session");
         let diagnostics = Arc::new(StdMutex::new(HeadlessTurnDiagnostics::default()));
 
-        spawn_headless_stderr(OUTPUT.as_bytes(), emit, diagnostics.clone())
+        spawn_headless_stderr(
+            OUTPUT.as_bytes(),
+            emit,
+            diagnostics.clone(),
+            StderrTail::default(),
+        )
             .await
             .expect("stderr task should finish");
 
