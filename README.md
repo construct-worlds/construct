@@ -233,6 +233,9 @@ For an optimized build, use `cargo build --workspace --release` and replace
   LAN binding, authentication, public tunnel providers, and local debug mode.
 - [Services and channels](docs/services.md) — authenticated headless session
   ingress, routing, and explicit per-channel publication.
+- [Contributing](CONTRIBUTING.md) — building from source and the dev loop:
+  run your changes as an isolated instance with
+  `CONSTRUCT_HOME=/tmp/construct-dev ./target/debug/construct`.
 
 ## License
 
