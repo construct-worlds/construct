@@ -13,7 +13,9 @@
 //! location at `~/.local/bin/hermes`. `CONSTRUCT_HERMES_HOME` can point the
 //! adapter and child at a non-default Hermes home.
 
-use construct_adapter_common::{drive_turn, spawn_stderr_log, TurnOutcome};
+use construct_adapter_common::{
+    drive_turn, emit_launch_failure_if_silent, spawn_stderr_tail, StderrTail, TurnOutcome,
+};
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
 use construct_protocol::adapter::{
     run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter,
@@ -335,8 +337,10 @@ async fn run_headless(params: SessionStartParams, ctx: AdapterContext) {
             break 127;
         };
         let stdout = child.stdout.take();
+        let mut stderr_tail = StderrTail::default();
         if let Some(stderr) = child.stderr.take() {
-            spawn_stderr_log(stderr, emit.clone());
+            let (_task, tail) = spawn_stderr_tail(stderr, emit.clone());
+            stderr_tail = tail;
         }
         let stdout_task = tokio::spawn(async move {
             let mut bytes = Vec::new();
@@ -350,6 +354,7 @@ async fn run_headless(params: SessionStartParams, ctx: AdapterContext) {
             state: SessionState::Running,
             detail: Some(format!("{} --oneshot", command.argv_preview())),
         });
+        let events_before_turn = emit.events_emitted();
         let outcome = drive_turn(&mut child, &mut inbox, &emit, &mut pending).await;
         let output = stdout_task.await.unwrap_or_default();
         match outcome {
@@ -361,6 +366,13 @@ async fn run_headless(params: SessionStartParams, ctx: AdapterContext) {
                         let message = String::from_utf8_lossy(&output).trim().to_string();
                         if !message.is_empty() {
                             emit.emit(SessionEvent::Error { message });
+                        } else {
+                            emit_launch_failure_if_silent(
+                                &emit,
+                                events_before_turn,
+                                Some(&status),
+                                &stderr_tail.snapshot(),
+                            );
                         }
                     }
                 }

@@ -25,7 +25,8 @@ use construct_adapter_common::context_breakdown::{
     estimate_tokens_from_chars, BreakdownGate, FixedOverheadPin,
 };
 use construct_adapter_common::{
-    claude_transcript_path, drive_turn, next_native_seq, spawn_stderr_log, TurnOutcome,
+    claude_transcript_path, drive_turn, emit_launch_failure_if_silent, next_native_seq,
+    spawn_stderr_tail, TurnOutcome,
 };
 use construct_protocol::adapter::pty::{run_session as run_pty, PtySpec};
 use construct_protocol::adapter::{
@@ -1110,6 +1111,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         }
         command.env("CONSTRUCT_SESSION_ID", &agentd_session_id);
 
+        let events_before_spawn = emit.events_emitted();
         let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -1129,7 +1131,7 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
 
         // Write the user message, then close stdin so claude knows we're done.
         let writer_task = spawn_writer(child_stdin, user_text.clone());
-        let stderr_task = spawn_stderr_log(child_stderr, emit.clone());
+        let (stderr_task, stderr_tail) = spawn_stderr_tail(child_stderr, emit.clone());
         let captured_sid = Arc::new(StdMutex::new(None::<String>));
         let parser_task = spawn_parser(child_stdout, emit.clone(), captured_sid.clone());
 
@@ -1140,7 +1142,15 @@ async fn run_session(params: SessionStartParams, ctx: AdapterContext) {
         let _ = parser_task.await;
         let _ = stderr_task.await;
         // Make sure the child is fully reaped.
-        let _ = child.wait().await;
+        let exit_status = child.wait().await.ok();
+        if matches!(outcome, TurnOutcome::Completed) {
+            emit_launch_failure_if_silent(
+                &emit,
+                events_before_spawn,
+                exit_status.as_ref(),
+                &stderr_tail.snapshot(),
+            );
+        }
 
         // Always adopt the latest native id. A turn can report a new id (e.g.
         // after the interactive equivalent of a context reset); subsequent

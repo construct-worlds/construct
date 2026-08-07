@@ -13,7 +13,9 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
 
-use construct_adapter_common::{drive_turn, spawn_stderr_log, TurnOutcome};
+use construct_adapter_common::{
+    drive_turn, emit_launch_failure_if_silent, spawn_stderr_tail, TurnOutcome,
+};
 use construct_protocol::adapter::pty::{run_session_with_pid as run_pty_with_pid, PtySpec};
 use construct_protocol::adapter::{
     run as adapter_run, AdapterContext, AdapterInboxMsg, EventEmitter,
@@ -280,11 +282,13 @@ async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext) {
             ctx.emit.clone(),
             meta.clone(),
         );
-        let stderr_task = spawn_stderr_log(child.stderr.take().expect("piped"), ctx.emit.clone());
+        let (stderr_task, stderr_tail) =
+            spawn_stderr_tail(child.stderr.take().expect("piped"), ctx.emit.clone());
         ctx.emit.emit(SessionEvent::Status {
             state: SessionState::Running,
             detail: Some(format!("{} exec", command.argv_preview())),
         });
+        let events_before_turn = ctx.emit.events_emitted();
 
         let outcome = drive_turn(&mut child, &mut ctx.inbox, &ctx.emit, &mut pending).await;
         let _ = stdout_task.await;
@@ -296,10 +300,18 @@ async fn run_headless(params: SessionStartParams, mut ctx: AdapterContext) {
                 ctx.emit.log("muse turn interrupted; awaiting next input");
             }
             TurnOutcome::Completed => {
-                if let Some(status) = status.filter(|status| !status.success()) {
-                    ctx.emit.emit(SessionEvent::Error {
-                        message: format!("muse exec exited with {status}"),
-                    });
+                let reported = emit_launch_failure_if_silent(
+                    &ctx.emit,
+                    events_before_turn,
+                    status.as_ref(),
+                    &stderr_tail.snapshot(),
+                );
+                if !reported {
+                    if let Some(status) = status.filter(|status| !status.success()) {
+                        ctx.emit.emit(SessionEvent::Error {
+                            message: format!("muse exec exited with {status}"),
+                        });
+                    }
                 }
             }
         }
