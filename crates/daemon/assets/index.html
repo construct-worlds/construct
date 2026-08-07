@@ -6418,6 +6418,10 @@ function connect() {
     // disconnected (playbook/state pushes were missed); drop them so the next
     // widget render refetches.
     state.widgetPlaybookById.clear();
+    // Harness roster for the Playbook clip picker (and the New Session
+    // dialog). Refetched on every (re)connect: the set can change across a
+    // daemon restart, which is exactly when reconnects happen.
+    refreshHarnesses().catch(() => {});
     // Fetch the shared layout on every (re)connect, not just the first: a
     // client that was disconnected missed the broadcasts, so its tree is
     // stale by definition. Read it before the session-list selection, but do
@@ -6534,6 +6538,16 @@ function rpc(method, params) {
 }
 
 // --- Sessions list -------------------------------------------------------
+
+// The harness roster is fleet state, not New-Session-dialog state: the
+// Playbook clip picker builds its `@{harness:…}` rows from it, so it must be
+// populated on every (re)connect, not only after the New Session sheet has
+// been opened once (#1098).
+async function refreshHarnesses() {
+  const harnesses = await rpc("harness.list", null);
+  state.harnesses = Array.isArray(harnesses) ? harnesses : [];
+  return state.harnesses;
+}
 
 async function refreshSessions(startingLayoutTree = null) {
   try {
@@ -17872,13 +17886,12 @@ const newSessionCreateBtn = $("newSessionCreate");
 async function openNewSessionDialog() {
   // Capture before anything in this dialog takes the caret (issue #1074).
   const invoker = captureOverlayInvoker();
-  // Populate the harness dropdown from `harness.list`. Filtered to
+  // Populate the harness dropdown from the shared roster. Re-fetched on
+  // open (not just read from state) so availability is current, filtered to
   // available harnesses so the user can't pick one that the daemon
   // would reject.
-  let harnesses = [];
   try {
-    harnesses = await rpc("harness.list", null);
-    state.harnesses = Array.isArray(harnesses) ? harnesses : [];
+    await refreshHarnesses();
   } catch (e) {
     newSessionErrorEl.textContent = `harness.list failed: ${e.message}`;
     newSessionErrorEl.hidden = false;
