@@ -130,6 +130,56 @@ async fn web_client_loads_and_websocket_connects() {
         "expected 'session(s)' in rendered body, got:\n{body}"
     );
 
+    // Regression #1098: the Playbook clip picker builds its harness rows from
+    // `state.harnesses`, which used to be populated only by opening the New
+    // Session dialog. On a fresh page load — no dialog visit — typing `@`
+    // must already offer harness clips and the `harness ▸` category, so the
+    // roster has to arrive with the connect flow itself.
+    let clip_probe = wait_for_harness_roster(&page).await;
+    let row_kinds: Vec<String> = clip_probe["rowKinds"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        row_kinds.iter().any(|k| k == "category:harness"),
+        "fresh load must offer the harness category in the clip picker root, got {clip_probe:?}"
+    );
+    let clips: Vec<String> = clip_probe["clips"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        clips.iter().any(|c| c.starts_with("@{harness:")),
+        "fresh load must offer @{{harness:…}} clips in the relevance section, got {clip_probe:?}"
+    );
+
+    // …and the roster must survive a websocket reconnect: clear it, drop the
+    // socket, and expect the reconnect's open handler to refetch it.
+    page.evaluate(
+        r#"
+        (() => {
+          state.harnesses = [];
+          state.reconnectDelay = 1000;
+          state.ws.close();
+        })()
+        "#,
+    )
+    .await
+    .expect("force ws reconnect");
+    let after_reconnect = wait_for_harness_roster(&page).await;
+    assert!(
+        after_reconnect["harnessCount"].as_u64().unwrap_or(0) > 0,
+        "harness roster must be refetched after reconnect, got {after_reconnect:?}"
+    );
+
     // Creating a session while viewing a session inside a project should
     // inherit that project, matching the TUI's new-session semantics.
     let inherited_project: serde_json::Value = page
@@ -4410,6 +4460,47 @@ impl Drop for ScreencastRecording {
 /// screencast in JPEG mode, and spawn a task that writes each
 /// frame to `<artifact_dir>/<name>_frames/frame_NNNN.jpg`
 /// (zero-padded so ffmpeg's image2 demuxer can sequence them).
+/// Poll until `state.harnesses` is populated (the connect flow fetches it
+/// asynchronously after the socket opens), then return a probe of the
+/// Playbook clip picker's root rows built from it (#1098).
+async fn wait_for_harness_roster(page: &Page) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let probe: serde_json::Value = page
+            .evaluate(
+                r#"
+                (() => {
+                  const rows = playbookClipRootRows("");
+                  return {
+                    harnessCount: state.harnesses.length,
+                    rowKinds: rows.map((r) =>
+                      r.type === "clip"
+                        ? `clip:${r.item.kind}`
+                        : r.type === "category"
+                          ? `category:${r.group}`
+                          : r.type
+                    ),
+                    clips: rows
+                      .filter((r) => r.type === "clip")
+                      .map((r) => r.item.clip),
+                  };
+                })()
+                "#,
+            )
+            .await
+            .expect("evaluate clip picker probe")
+            .into_value()
+            .expect("json value");
+        if probe["harnessCount"].as_u64().unwrap_or(0) > 0 {
+            return probe;
+        }
+        if Instant::now() > deadline {
+            panic!("state.harnesses never populated from the connect flow: {probe:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
 async fn start_screencast(page: &Page, name: &str) -> anyhow::Result<ScreencastRecording> {
     let frames_dir = artifact_dir()?.join(format!("{name}_frames"));
     let _ = std::fs::remove_dir_all(&frames_dir);
