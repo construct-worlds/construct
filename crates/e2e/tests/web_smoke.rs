@@ -3040,6 +3040,131 @@ async fn web_client_loads_and_websocket_connects() {
         "visible row text should not spell out the status: {status_icons:?}"
     );
 
+    // Issue #1075: the session list is an ARIA tree — rows are treeitems
+    // carrying selection, expansion, and tree-coordinate state, and exactly
+    // one row (the selected one) is the list's Tab entry point.
+    let list_aria: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const saved = {
+                currentId: state.currentId,
+                sessions: state.sessions,
+                groups: state.groups,
+                services: state.services,
+              };
+              try {
+                state.currentId = 's-child';
+                state.services = [{ name: 'proxy', harness: 'shell', position: 0 }];
+                state.groups = [
+                  { id: 'g-open', name: 'Open', collapsed: false, position: 0 },
+                  { id: 'g-shut', name: 'Shut', collapsed: true, position: 1 },
+                ];
+                state.sessions = [
+                  { id: 's-parent', title: 'Parent', harness: 'shell', state: 'running', kind: 'user', position: 0 },
+                  { id: 's-child', title: 'Child', harness: 'smith', state: 'running', kind: 'subagent', parent_session_id: 's-parent', position: 0 },
+                  { id: 's-solo', title: 'Solo', harness: 'shell', state: 'running', kind: 'user', position: 1 },
+                  { id: 's-member', title: 'Member', harness: 'shell', state: 'running', kind: 'user', group_id: 'g-open', position: 0 },
+                ];
+                renderSessions();
+                const list = document.getElementById('sessionList');
+                const attrsOf = (el) => el ? {
+                  role: el.getAttribute('role'),
+                  selected: el.getAttribute('aria-selected'),
+                  expanded: el.getAttribute('aria-expanded'),
+                  level: el.getAttribute('aria-level'),
+                  pos: el.getAttribute('aria-posinset'),
+                  size: el.getAttribute('aria-setsize'),
+                  tab: el.getAttribute('tabindex'),
+                } : null;
+                return {
+                  listRole: list.getAttribute('role'),
+                  listLabel: list.getAttribute('aria-label'),
+                  service: attrsOf(list.querySelector('[data-service-name="proxy"]')),
+                  parent: attrsOf(list.querySelector('[data-id="s-parent"]')),
+                  child: attrsOf(list.querySelector('[data-id="s-child"]')),
+                  solo: attrsOf(list.querySelector('[data-id="s-solo"]')),
+                  openGroup: attrsOf(list.querySelector('[data-group-id="g-open"]')),
+                  shutGroup: attrsOf(list.querySelector('[data-group-id="g-shut"]')),
+                  member: attrsOf(list.querySelector('[data-id="s-member"]')),
+                  tabStops: list.querySelectorAll('[tabindex="0"]').length,
+                  entryId: list.querySelector('[tabindex="0"]')?.dataset.id || '',
+                };
+              } finally {
+                state.currentId = saved.currentId;
+                state.sessions = saved.sessions;
+                state.groups = saved.groups;
+                state.services = saved.services;
+                renderSessions();
+              }
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate session list aria")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(list_aria["listRole"], "tree");
+    assert_eq!(list_aria["listLabel"], "sessions");
+    // Top level (level 1) is service + two top sessions + two group headers.
+    assert_eq!(
+        list_aria["service"],
+        serde_json::json!({
+            "role": "treeitem", "selected": "false", "expanded": null,
+            "level": "1", "pos": "1", "size": "5", "tab": "-1"
+        }),
+        "service row aria: {list_aria:?}"
+    );
+    assert_eq!(
+        list_aria["parent"],
+        serde_json::json!({
+            "role": "treeitem", "selected": "false", "expanded": "true",
+            "level": "1", "pos": "2", "size": "5", "tab": "-1"
+        }),
+        "session with expanded subagent children: {list_aria:?}"
+    );
+    // The selected subagent row: nested one level down, selected, and the
+    // list's single Tab stop.
+    assert_eq!(
+        list_aria["child"],
+        serde_json::json!({
+            "role": "treeitem", "selected": "true", "expanded": null,
+            "level": "2", "pos": "1", "size": "1", "tab": "0"
+        }),
+        "selected subagent row aria: {list_aria:?}"
+    );
+    assert_eq!(
+        list_aria["solo"]["expanded"],
+        serde_json::Value::Null,
+        "a leaf session must not advertise expandability: {list_aria:?}"
+    );
+    assert_eq!(
+        list_aria["openGroup"],
+        serde_json::json!({
+            "role": "treeitem", "selected": null, "expanded": "true",
+            "level": "1", "pos": "4", "size": "5", "tab": "-1"
+        }),
+        "expanded group header aria: {list_aria:?}"
+    );
+    assert_eq!(
+        list_aria["shutGroup"]["expanded"],
+        "false",
+        "collapsed group header must announce collapsed: {list_aria:?}"
+    );
+    assert_eq!(
+        list_aria["member"],
+        serde_json::json!({
+            "role": "treeitem", "selected": "false", "expanded": null,
+            "level": "2", "pos": "1", "size": "1", "tab": "-1"
+        }),
+        "group member row aria: {list_aria:?}"
+    );
+    assert_eq!(
+        list_aria["tabStops"], 1,
+        "exactly one row is the roving Tab entry point: {list_aria:?}"
+    );
+    assert_eq!(list_aria["entryId"], "s-child");
+
     // Issue #75: pasted image/file clipboard items and very large text
     // are uploaded to the daemon as session attachments, and the prompt
     // receives a compact [#file:...] reference instead of raw bytes/text.

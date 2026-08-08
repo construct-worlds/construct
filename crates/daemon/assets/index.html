@@ -3859,7 +3859,7 @@
                 aria-label="new session">+ new session</button>
       </div>
       <span class="session-list-sr-label">sessions</span>
-      <aside class="session-list" id="sessionList">
+      <aside class="session-list" id="sessionList" role="tree" aria-label="sessions">
         <div class="empty">connecting…</div>
       </aside>
       <!--
@@ -7600,7 +7600,12 @@ function listFocusRows() {
 
 function focusListRow(row) {
   if (!row) return;
-  row.setAttribute("tabindex", "-1");
+  // Roving tabindex: the row that holds the list caret is the list's single
+  // Tab stop, so leaving and re-Tabbing returns to where the user was.
+  for (const other of listFocusRows()) {
+    if (other !== row) other.setAttribute("tabindex", "-1");
+  }
+  row.setAttribute("tabindex", "0");
   row.focus();
   row.scrollIntoView({ block: "nearest" });
 }
@@ -7610,6 +7615,24 @@ function listFocusedRow() {
   return active && active.closest
     ? active.closest(".item[data-id], .item[data-service-name], .group-header[data-group-id]")
     : null;
+}
+
+/** Keep exactly one list row in the tab order (issue #1075): the row that
+ *  holds the list caret when focus is inside the list, else the selected
+ *  row, else the first row. Tab from outside therefore reaches the list
+ *  exactly once, and the arrow keys take over from there. Runs after every
+ *  re-render because rebuilt rows come back without a tabindex. */
+function syncListTabStops() {
+  const rows = listFocusRows();
+  if (!rows.length) return;
+  const focused = listFocusedRow();
+  const entry =
+    (focused && rows.includes(focused) ? focused : null) ||
+    sessionListEl.querySelector(".item.active") ||
+    rows[0];
+  for (const row of rows) {
+    row.setAttribute("tabindex", row === entry ? "0" : "-1");
+  }
 }
 
 /** Re-find a list row after a re-render and put the caret back on it. */
@@ -7935,8 +7958,70 @@ function bindSessionListDrag() {
   });
 }
 
-/** Build a row descriptor: a stable key plus the outer class and inner
- *  HTML. renderSessions() diffs class and inner separately so a pure
+/** Annotate the flat `orderedItems()` list with tree coordinates for
+ *  aria-level / aria-posinset / aria-setsize. Items arrive in DFS order;
+ *  a sibling run is a maximal stretch of rows at one depth uninterrupted
+ *  by a shallower row — the same grouping the indentation shows visually.
+ *  (Group headers, services, and the operator carry no `depth` and count
+ *  as depth 0.) */
+function annotateTreePositions(items) {
+  const stack = []; // stack[d] = the sibling run currently open at depth d
+  const settle = (downTo) => {
+    while (stack.length > downTo) {
+      const run = stack.pop();
+      run.forEach((it, i) => {
+        it.posinset = i + 1;
+        it.setsize = run.length;
+      });
+    }
+  };
+  for (const it of items) {
+    const depth = it.depth ?? 0;
+    settle(depth + 1);
+    while (stack.length <= depth) stack.push([]);
+    stack[depth].push(it);
+    it.level = depth + 1;
+  }
+  settle(0);
+  return items;
+}
+
+/** The row attributes renderSessions() owns. Listed exhaustively so a row
+ *  that changes shape across renders (e.g. loses its children and with them
+ *  aria-expanded) has the stale attribute removed, not left behind. */
+const ROW_ARIA_ATTRS = Object.freeze([
+  "role",
+  "aria-selected",
+  "aria-expanded",
+  "aria-level",
+  "aria-posinset",
+  "aria-setsize",
+]);
+
+function rowTreePositionAria(item) {
+  const aria = {};
+  if (item.level) aria["aria-level"] = String(item.level);
+  if (item.posinset) aria["aria-posinset"] = String(item.posinset);
+  if (item.setsize) aria["aria-setsize"] = String(item.setsize);
+  return aria;
+}
+
+function applyRowAria(node, aria) {
+  for (const name of ROW_ARIA_ATTRS) {
+    const v = aria ? aria[name] : undefined;
+    if (v == null) node.removeAttribute(name);
+    else node.setAttribute(name, v);
+  }
+}
+
+function rowAriaSignature(aria) {
+  return ROW_ARIA_ATTRS.map((name) => (aria && aria[name]) ?? "").join("|");
+}
+
+/** Build a row descriptor: a stable key plus the outer class, inner HTML,
+ *  and ARIA attributes (issue #1075: the list is a `tree` — groups nest
+ *  sessions, sessions nest subagents/forks — so rows are `treeitem`s).
+ *  renderSessions() diffs class, inner, and aria separately so a pure
  *  selection change (class only) never rebuilds a row's status element. */
 function sessionRowDescriptor(item) {
   const depthClass = " depth-" + Math.min(item.depth ?? 0, 4);
@@ -7947,6 +8032,11 @@ function sessionRowDescriptor(item) {
       datasetKey: "archivedSection",
       datasetVal: item.section,
       className: "archived-row" + depthClass,
+      aria: {
+        role: "treeitem",
+        "aria-expanded": item.expanded ? "true" : "false",
+        ...rowTreePositionAria(item),
+      },
       inner:
         `<span class="archived-glyph">${glyph}</span>` +
         `<span class="archived-label">${item.count} archived</span>`,
@@ -7960,6 +8050,11 @@ function sessionRowDescriptor(item) {
       datasetKey: "groupId",
       datasetVal: g.id,
       className: "group-header",
+      aria: {
+        role: "treeitem",
+        "aria-expanded": g.collapsed ? "false" : "true",
+        ...rowTreePositionAria(item),
+      },
       inner:
         `<span class="group-glyph">${glyph}</span>` +
         `<span class="group-name">${escape(g.name || "(unnamed)")}</span>` +
@@ -7976,6 +8071,11 @@ function sessionRowDescriptor(item) {
       datasetKey: "serviceName",
       datasetVal: service.name,
       className: "item is-service" + active + paused,
+      aria: {
+        role: "treeitem",
+        "aria-selected": active ? "true" : "false",
+        ...rowTreePositionAria(item),
+      },
       inner:
         `<div class="title-row">` +
         `<span class="disclosure"></span>` +
@@ -7996,6 +8096,11 @@ function sessionRowDescriptor(item) {
       datasetKey: "id",
       datasetVal: s.id,
       className: "item is-operator" + active,
+      aria: {
+        role: "treeitem",
+        "aria-selected": active ? "true" : "false",
+        ...rowTreePositionAria(item),
+      },
       inner:
         `<div class="title-row">` +
         `<span class="disclosure"></span>` +
@@ -8027,6 +8132,16 @@ function sessionRowDescriptor(item) {
     key: "s:" + s.id,
     datasetKey: "id",
     datasetVal: s.id,
+    aria: {
+      role: "treeitem",
+      "aria-selected": active ? "true" : "false",
+      // Only rows that actually have children advertise expandability; a
+      // leaf with aria-expanded would announce as a collapsed empty branch.
+      ...(item.hasChildren
+        ? { "aria-expanded": item.childrenExpanded ? "true" : "false" }
+        : null),
+      ...rowTreePositionAria(item),
+    },
     className:
       "item" + depthClass + active +
       (s.kind === "subagent" ? " is-subagent" : "") +
@@ -8057,7 +8172,7 @@ function renderSessions() {
   }
   bindSessionListClicks();
   bindSessionListDrag();
-  const items = orderedItems();
+  const items = annotateTreePositions(orderedItems());
   if (!items.length) {
     const only = sessionListEl.firstElementChild;
     if (!only || sessionListEl.children.length !== 1 || !only.classList.contains("empty")) {
@@ -8100,11 +8215,17 @@ function renderSessions() {
       node.innerHTML = d.inner;
       node.__isig = d.inner;
     }
+    const asig = rowAriaSignature(d.aria);
+    if (node.__asig !== asig) {
+      applyRowAria(node, d.aria);
+      node.__asig = asig;
+    }
     const ref = prev ? prev.nextSibling : sessionListEl.firstChild;
     if (ref !== node) sessionListEl.insertBefore(node, ref);
     prev = node;
   }
   for (const node of existing.values()) node.remove();
+  syncListTabStops();
   if (state.currentServiceName) renderServiceView();
   refreshSessionActions();
   renderLineageSection();
@@ -18960,14 +19081,15 @@ function toggleListFocus() {
     return;
   }
   if (!isSessionListVisible()) setSessionListVisible(true);
+  // Enter through the roving Tab stop, i.e. wherever the list caret last
+  // was — the same row a Tab press would land on. (The old query looked
+  // for `.item.selected`, a class no row ever carries, so entry always
+  // fell back to the first session row.)
   const selected =
-    sessionListEl.querySelector(".item.selected") || sessionListEl.querySelector(".item[data-id]");
-  if (selected) {
-    selected.setAttribute("tabindex", "-1");
-    selected.focus();
-  } else {
-    sessionListEl.focus();
-  }
+    sessionListEl.querySelector('[tabindex="0"]') ||
+    sessionListEl.querySelector(".item.active") ||
+    sessionListEl.querySelector(".item[data-id]");
+  if (selected) focusListRow(selected);
 }
 
 /**
