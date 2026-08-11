@@ -19,6 +19,11 @@ pub enum KeyAction {
     OpenNewSession,
     OpenDeleteConfirm,
     OpenRename,
+    /// Copy the selected fleet item's stable identity: session id, project id,
+    /// or service name. Bound to `M-w` in the emacs profile and `y` in vim
+    /// NORMAL mode; editors keep the native meaning of those keys while they
+    /// own input.
+    CopySelectedId,
     /// Open the fork flow for the selected session. When the session has
     /// past user turns, a turn picker comes first (spec 0163) with "now —
     /// fork from the present" preselected, so Enter keeps the head-fork
@@ -356,6 +361,9 @@ fn emacs() -> Keymap {
         // Refresh moved to the command palette (M-x refresh) — it's rarely
         // needed since the daemon pushes state changes automatically.
         (Chord(vec![ctrl('x'), ch('r')]), OpenRename),
+        // Emacs kill-ring-save mnemonic. Scoped naturally by input routing:
+        // Playbook selections and focused child PTYs keep their own M-w.
+        (Chord(vec![alt('w')]), CopySelectedId),
         // Unified fork flow: turn picker (when turns exist), then harness.
         (Chord(vec![ctrl('x'), ch('f')]), OpenFork),
         // Merge is no longer a dedicated chord — forked sessions get
@@ -431,6 +439,9 @@ fn vim() -> Keymap {
         (Chord(vec![ctrl('c')]), Interrupt),
         // `r` opens the rename minibuffer; refresh moved to M-x refresh.
         (Chord(vec![ch('r')]), OpenRename),
+        // Yank the selected fleet identity in NORMAL mode. Editors capture
+        // their own input before this global keymap sees it.
+        (Chord(vec![ch('y')]), CopySelectedId),
         // Unified fork flow (turn picker + harness picker); uppercase `O`
         // is intentionally unbound.
         (Chord(vec![ch('f')]), OpenFork),
@@ -647,6 +658,20 @@ mod tests {
             assert_action(&km, vec![ctrl('x'), ch('.')], KeyAction::OpenSuggestions);
             assert_action(&km, vec![ctrl('x'), ctrl('s')], KeyAction::SavePlaybook);
         }
+    }
+
+    #[test]
+    fn copy_selected_id_uses_profile_native_yank_bindings() {
+        assert_action(
+            &default_for(Profile::Emacs),
+            vec![alt('w')],
+            KeyAction::CopySelectedId,
+        );
+        assert_action(
+            &default_for(Profile::Vim),
+            vec![ch('y')],
+            KeyAction::CopySelectedId,
+        );
     }
 
     #[test]

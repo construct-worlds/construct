@@ -31,6 +31,10 @@ impl App {
         }
 
         match action {
+            ServiceTitleMenuAction::CopyId => {
+                self.run_action(crate::keymap::KeyAction::CopySelectedId)
+                    .await
+            }
             ServiceTitleMenuAction::SplitHorizontal => {
                 self.split_active_window(WindowSplitDirection::Right)
             }

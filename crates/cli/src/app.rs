@@ -669,6 +669,17 @@ impl Selection {
             None
         }
     }
+    /// The stable fleet identity represented by this selection. Service
+    /// names are service ids in the protocol; archived disclosure rows are
+    /// navigation controls and therefore have no identity of their own.
+    pub fn fleet_identity(&self) -> Option<(&'static str, &str)> {
+        match self {
+            Self::Session(id) => Some(("session", id)),
+            Self::Group(id) => Some(("project", id)),
+            Self::Service(name) => Some(("service", name)),
+            Self::None | Self::ArchivedRow(_) => None,
+        }
+    }
     pub fn archive_section(&self) -> Option<&ArchiveSection> {
         if let Self::ArchivedRow(section) = self {
             Some(section)
@@ -1481,6 +1492,7 @@ pub struct DynamicUiHover {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionTitleMenuAction {
     Rename,
+    CopyId,
     Fork,
     PlaybookTerminalMode,
     SplitHorizontal,
@@ -1495,6 +1507,7 @@ pub enum SessionTitleMenuAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceTitleMenuAction {
+    CopyId,
     SplitHorizontal,
     SplitVertical,
     CloseSplit,
@@ -1502,7 +1515,8 @@ pub enum ServiceTitleMenuAction {
 }
 
 impl ServiceTitleMenuAction {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
+        Self::CopyId,
         Self::SplitHorizontal,
         Self::SplitVertical,
         Self::CloseSplit,
@@ -1511,6 +1525,7 @@ impl ServiceTitleMenuAction {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::CopyId => "copy id",
             Self::SplitHorizontal => "split horizontal",
             Self::SplitVertical => "split vertical",
             Self::CloseSplit => "close split",
@@ -1520,8 +1535,9 @@ impl ServiceTitleMenuAction {
 }
 
 impl SessionTitleMenuAction {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Rename,
+        Self::CopyId,
         Self::Fork,
         Self::PlaybookTerminalMode,
         Self::SplitHorizontal,
@@ -1535,6 +1551,7 @@ impl SessionTitleMenuAction {
     pub fn label(self) -> &'static str {
         match self {
             Self::Rename => "rename",
+            Self::CopyId => "copy id",
             Self::Fork => "fork",
             Self::PlaybookTerminalMode => "playbook mode",
             Self::SplitHorizontal => "split horizontal",
@@ -12966,6 +12983,28 @@ impl App {
             && live
     }
 
+    fn copy_selected_id(&mut self) {
+        self.copy_selected_id_with(copy_to_clipboard);
+    }
+
+    fn copy_selected_id_with<F>(&mut self, copy: F)
+    where
+        F: FnOnce(&str) -> Result<ClipboardCopyOutcome>,
+    {
+        let Some((noun, value)) = self.selection.fleet_identity() else {
+            self.set_status("copy id: select a session, project, or service".to_string());
+            return;
+        };
+        let value = value.to_string();
+        match copy(&value) {
+            Ok(outcome) => self.set_status(format!(
+                "{noun} id · {}",
+                outcome.status(value.chars().count())
+            )),
+            Err(error) => self.set_status(format!("copy {noun} id failed: {error}")),
+        }
+    }
+
     async fn run_action(&mut self, action: KeyAction) {
         use KeyAction::*;
         // Tutorial hook (a) — spec 0077: `run_action` is the one chokepoint
@@ -13134,6 +13173,7 @@ impl App {
                 // The "N archived" disclosure row has no name to rename.
                 Selection::ArchivedRow(_) => {}
             },
+            CopySelectedId => self.copy_selected_id(),
             OpenDeleteConfirm => match self.selection.clone() {
                 Selection::Session(id) => {
                     // The `[d]`/`[a]`/`[m]`/`[N]` choice cluster and its
@@ -14210,6 +14250,7 @@ impl App {
             "send" | "send-input" => self.run_action(KeyAction::OpenSendInput).await,
             "delete" | "kill" | "rm" => self.run_action(KeyAction::OpenDeleteConfirm).await,
             "rename" => self.run_action(KeyAction::OpenRename).await,
+            "copy-id" | "copy-identity" => self.run_action(KeyAction::CopySelectedId).await,
             "fork" => self.run_action(KeyAction::OpenFork).await,
             "playbook" | "edit-playbook" => self.run_action(KeyAction::OpenPlaybook).await,
             "zoom" | "fullscreen" => self.run_action(KeyAction::ToggleZoom).await,
@@ -16665,6 +16706,50 @@ mod tests {
             ClipboardCopyOutcome::Requested(Osc52Mode::Tmux).status(7),
             "sent copy request for 7 chars via OSC 52 tmux"
         );
+    }
+
+    #[tokio::test]
+    async fn copy_selected_id_uses_exact_typed_fleet_identity() {
+        let (mut app, _dir, server) = captured_app().await;
+        for (selection, expected, noun) in [
+            (
+                Selection::Session("session-full-id".into()),
+                "session-full-id",
+                "session",
+            ),
+            (
+                Selection::Group("project-full-id".into()),
+                "project-full-id",
+                "project",
+            ),
+            (
+                Selection::Service("service-name".into()),
+                "service-name",
+                "service",
+            ),
+        ] {
+            app.selection = selection;
+            let mut copied = None;
+            app.copy_selected_id_with(|value| {
+                copied = Some(value.to_string());
+                Ok(ClipboardCopyOutcome::Copied)
+            });
+            assert_eq!(copied.as_deref(), Some(expected));
+            let expected_status =
+                format!("{noun} id · copied {} chars", expected.chars().count());
+            assert_eq!(
+                app.status.as_ref().map(|(message, _)| message.as_str()),
+                Some(expected_status.as_str())
+            );
+        }
+
+        app.selection = Selection::None;
+        app.copy_selected_id_with(|_| panic!("no selection must not touch the clipboard"));
+        assert_eq!(
+            app.status.as_ref().map(|(message, _)| message.as_str()),
+            Some("copy id: select a session, project, or service")
+        );
+        server.abort();
     }
 
     #[test]

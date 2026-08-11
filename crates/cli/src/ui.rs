@@ -7834,6 +7834,8 @@ fn service_title_menu_action_binding(
     action: ServiceTitleMenuAction,
 ) -> Option<&'static str> {
     match (action, app.profile) {
+        (ServiceTitleMenuAction::CopyId, Profile::Emacs) => Some("M-w"),
+        (ServiceTitleMenuAction::CopyId, Profile::Vim) => Some("y"),
         (ServiceTitleMenuAction::SplitHorizontal, Profile::Emacs) => Some("C-x 3"),
         (ServiceTitleMenuAction::SplitHorizontal, Profile::Vim) => Some("C-w v"),
         (ServiceTitleMenuAction::SplitVertical, Profile::Emacs) => Some("C-x 2"),
@@ -7903,6 +7905,8 @@ fn session_title_menu_action_label(
     let binding = match (action, app.profile) {
         (SessionTitleMenuAction::Rename, Profile::Emacs) => Some("C-x r"),
         (SessionTitleMenuAction::Rename, Profile::Vim) => Some("r"),
+        (SessionTitleMenuAction::CopyId, Profile::Emacs) => Some("M-w"),
+        (SessionTitleMenuAction::CopyId, Profile::Vim) => Some("y"),
         (SessionTitleMenuAction::Fork, Profile::Emacs) => Some("C-x f"),
         (SessionTitleMenuAction::Fork, Profile::Vim) => Some("f"),
         (SessionTitleMenuAction::PlaybookTerminalMode, _) => Some("C-x Space"),
@@ -13963,13 +13967,14 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
 
   mouse + clipboard
     drag text       select visible TUI text and copy to terminal clipboard
+    M-w (on list)   copy selected session/project/service id
     C-x c           toggle mouse capture off/on for native selection fallback
     C-x v           paste local clipboard (image/file attaches; via construct ssh)
     C-x .           suggestion deck (next-prompt picks + prompt history)
 
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
-                    palette commands: new fork send delete rename playbook diff border
+                    palette commands: new fork send delete rename copy-id playbook diff border
                                       theme zoom interrupt refresh harnesses configure
                                       paste help
     ?               toggle this help
@@ -14035,13 +14040,14 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
 
   mouse + clipboard
     drag text       select visible TUI text and copy to terminal clipboard
+    y (NORMAL)      copy selected session/project/service id
     C-x c           toggle mouse capture off/on for native selection fallback
     C-x v           paste local clipboard (image/file attaches; via construct ssh)
     C-x .           suggestion deck (next-prompt picks + prompt history)
 
   global
     :               command palette
-                    palette commands: new fork send delete rename playbook diff border
+                    palette commands: new fork send delete rename copy-id playbook diff border
                                       theme zoom interrupt refresh harnesses configure
                                       paste help
     A               cycle approval mode

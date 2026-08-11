@@ -41,6 +41,10 @@ impl App {
             SessionTitleMenuAction::Rename => {
                 self.run_action(crate::keymap::KeyAction::OpenRename).await
             }
+            SessionTitleMenuAction::CopyId => {
+                self.run_action(crate::keymap::KeyAction::CopySelectedId)
+                    .await
+            }
             SessionTitleMenuAction::Fork => {
                 self.run_action(crate::keymap::KeyAction::OpenFork).await
             }
