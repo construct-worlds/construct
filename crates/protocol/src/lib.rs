@@ -3472,6 +3472,11 @@ pub struct ServiceSummary {
     /// until the first reorder materializes explicit positions.
     #[serde(default)]
     pub position: u64,
+    /// Where this row sits when the operator has moved it out of the leading
+    /// service block and into the top-level session/project flow. `None`
+    /// keeps the row in the leading block (legacy behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ServicePlacement>,
     pub instruction: String,
     pub harness: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3487,6 +3492,27 @@ pub struct ServiceSummary {
     pub paused: bool,
     #[serde(default)]
     pub channels: Vec<ServiceChannelSummary>,
+}
+
+/// A service row's slot in the top-level list flow. The row is pinned to the
+/// `position` value of the session or project row it renders after: at equal
+/// positions the session/project row sorts first, then services by their own
+/// service position. Pinning to a value (not an id) keeps the row in place
+/// when the neighbor it was dropped after is archived, deleted, or moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServicePlacement {
+    pub region: ServicePlacementRegion,
+    /// Compared within the region's own session/project position space.
+    pub position: i64,
+}
+
+/// Which top-level region a placed service row is interleaved into: the
+/// ungrouped-session run or the projects run that follows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServicePlacementRegion {
+    Sessions,
+    Projects,
 }
 
 fn default_service_session_mode() -> String {

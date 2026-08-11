@@ -741,6 +741,7 @@ mod tests {
     fn service(channels: &[(&str, u16, bool)], paused: bool) -> ServiceConfig {
         ServiceConfig {
             position: 0,
+            placement: None,
             instruction: String::new(),
             harness: "smith".into(),
             model: None,
@@ -799,6 +800,7 @@ mod tests {
     fn slack_channels_are_outbound_tasks_and_credential_edits_change_revision() {
         let slack_service = |app_token: &str, paused: bool| ServiceConfig {
             position: 0,
+            placement: None,
             instruction: String::new(),
             harness: "smith".into(),
             model: None,

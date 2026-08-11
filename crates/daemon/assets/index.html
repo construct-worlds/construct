@@ -7335,10 +7335,36 @@ function orderedItems() {
   const services = state.services
     .slice()
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || String(a.name || "").localeCompare(String(b.name || "")));
+  // Services without a placement form the leading block; placed ones are
+  // spliced into the session/project flow, pinned to the position value of
+  // the row they were dropped after (row first on ties, then service order —
+  // the same rule the daemon's reorder and the terminal client use).
+  const placedIn = (region) => services.filter(
+    (service) => service.placement && service.placement.region === region,
+  ).sort((a, b) => (a.placement.position - b.placement.position)
+    || ((a.position ?? 0) - (b.position ?? 0))
+    || String(a.name || "").localeCompare(String(b.name || "")));
+  const sessionRegionServices = placedIn("sessions");
+  const projectRegionServices = placedIn("projects");
+  let sessionServiceIdx = 0;
+  let projectServiceIdx = 0;
   const items = [];
   if (operator) items.push({ kind: "session", session: operator, isOperator: true, depth: 0 });
-  for (const service of services) items.push({ kind: "service", service, depth: 0 });
-  for (const s of ungrouped) pushSession(items, s);
+  for (const service of services) {
+    if (!service.placement) items.push({ kind: "service", service, depth: 0 });
+  }
+  for (const s of ungrouped) {
+    while (sessionServiceIdx < sessionRegionServices.length
+        && sessionRegionServices[sessionServiceIdx].placement.position < (s.position ?? 0)) {
+      items.push({ kind: "service", service: sessionRegionServices[sessionServiceIdx++], depth: 0 });
+    }
+    pushSession(items, s);
+  }
+  // Services placed below every ungrouped session still belong to the
+  // session run: they render above its trailing archived row.
+  while (sessionServiceIdx < sessionRegionServices.length) {
+    items.push({ kind: "service", service: sessionRegionServices[sessionServiceIdx++], depth: 0 });
+  }
   if (archivedUngrouped.length > 0) {
     const expanded = state.showArchivedUngrouped;
     items.push({ kind: "archived-row", section: "ungrouped", count: archivedUngrouped.length, expanded, depth: 1 });
@@ -7347,6 +7373,10 @@ function orderedItems() {
     }
   }
   for (const g of groups) {
+    while (projectServiceIdx < projectRegionServices.length
+        && projectRegionServices[projectServiceIdx].placement.position < (g.position ?? 0)) {
+      items.push({ kind: "service", service: projectRegionServices[projectServiceIdx++], depth: 0 });
+    }
     const membersAll = userSessions
       .filter((s) => s.group_id === g.id && !forkParentId(s))
       .slice()
@@ -7365,6 +7395,9 @@ function orderedItems() {
         for (const s of archivedMembers) pushSession(items, s, 1);
       }
     }
+  }
+  while (projectServiceIdx < projectRegionServices.length) {
+    items.push({ kind: "service", service: projectRegionServices[projectServiceIdx++], depth: 0 });
   }
   return items;
 }
@@ -7860,17 +7893,35 @@ function listDragFinish(commit) {
   if (commit && (sourceId || sourceGroupId || sourceServiceName) && targetEl) {
     const isGroup = !!sourceGroupId;
     const isService = !!sourceServiceName;
+    // A dragged service steps through the whole top-level flow — other
+    // services, top-level sessions, and project blocks — one daemon move per
+    // row, so its step count runs over the same rows the daemon walks.
+    // Sessions outside that flow are skipped: archived rows, and routed
+    // service sessions (which nest under their service row in the daemon's
+    // flow).
+    const outsideServiceFlow = (el) => {
+      const id = el.dataset.id;
+      if (!id) return false;
+      const session = state.sessions.find((s) => s.id === id);
+      if (!session) return true;
+      if (session.archived) return true;
+      const title = session.title || "";
+      return (state.services || []).some(
+        (svc) => title === `service:${svc.name}` || title.startsWith(`service:${svc.name}:`),
+      );
+    };
     const selector = isGroup
       ? ".group-header[data-group-id]"
       : isService
-        ? ".item[data-service-name]"
+        ? ".item[data-service-name], .item[data-id].depth-0:not(.is-operator), .group-header[data-group-id]"
         : ".item[data-id]:not(.is-operator)";
-    const ids = Array.from(
-      sessionListEl.querySelectorAll(selector)
-    ).map((el) => isGroup ? el.dataset.groupId : isService ? el.dataset.serviceName : el.dataset.id);
+    const rowKey = (el) => el.dataset.serviceName || el.dataset.groupId || el.dataset.id;
+    const ids = Array.from(sessionListEl.querySelectorAll(selector))
+      .filter((el) => !(isService && outsideServiceFlow(el)))
+      .map((el) => isGroup ? el.dataset.groupId : isService ? rowKey(el) : el.dataset.id);
     const idToMove = isGroup ? sourceGroupId : isService ? sourceServiceName : sourceId;
     const from = ids.indexOf(idToMove);
-    const targetId = isGroup ? targetEl.dataset.groupId : isService ? targetEl.dataset.serviceName : targetEl.dataset.id;
+    const targetId = isGroup ? targetEl.dataset.groupId : isService ? rowKey(targetEl) : targetEl.dataset.id;
     const slot = ids.indexOf(targetId) + (dropAfter ? 1 : 0);
     if (from >= 0 && slot >= 0) {
       // Removing the row from its old index shifts every later slot

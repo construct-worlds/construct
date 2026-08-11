@@ -480,6 +480,7 @@ fn default_service(app: &App, suggested: String) -> ServiceSummary {
             .max()
             .map(|position| position.saturating_add(1))
             .unwrap_or_default(),
+        placement: None,
         instruction: String::new(),
         harness: selected
             .map(|session| session.harness.clone())
