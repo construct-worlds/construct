@@ -8481,6 +8481,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         .into_iter()
         .cloned()
         .collect();
+    let routed_tokens: u64 = routed.iter().map(|session| session.tokens.total()).sum();
     let selected_channel_actions = app.selected_service_channel_actions(name);
     let catalog = app.service_channel_catalog.clone();
     let attached_count = catalog
@@ -8598,7 +8599,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         append_service_channel_actions(&mut activity, &mut action_hits, app, chunks[2], actions);
     }
     activity.push(Line::from(""));
-    activity.push(Line::from(vec![
+    let mut session_heading = vec![
         Span::styled(
             "Sessions  ",
             Style::default()
@@ -8609,7 +8610,17 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
             format!("{} routed", routed.len()),
             Style::default().fg(app.theme.text),
         ),
-    ]));
+    ];
+    if routed_tokens > 0 {
+        session_heading.push(Span::styled(
+            format!(
+                " · {} tok",
+                crate::lineage::format_token_count(routed_tokens)
+            ),
+            Style::default().fg(app.theme.dim),
+        ));
+    }
+    activity.push(Line::from(session_heading));
     if routed.is_empty() {
         push_wrapped_service_line(
             &mut activity,

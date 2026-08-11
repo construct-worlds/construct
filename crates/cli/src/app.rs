@@ -42505,7 +42505,30 @@ mod tests {
         routed.id = "service-session".into();
         routed.title = Some("service:assistant:http:demo-conversation".into());
         routed.state = construct_protocol::SessionState::AwaitingInput;
+        routed.tokens = construct_protocol::TokenTally {
+            input: 120_000,
+            output: 10_000,
+            cached: 80_000,
+        };
         app.sessions.push(routed);
+        let mut second = summary_with_kind(construct_protocol::SessionKind::User);
+        second.id = "second-service-session".into();
+        second.title = Some("service:assistant:http:another-conversation".into());
+        second.tokens = construct_protocol::TokenTally {
+            input: 30_000,
+            output: 3_000,
+            cached: 20_000,
+        };
+        app.sessions.push(second);
+        let mut other_service = summary_with_kind(construct_protocol::SessionKind::User);
+        other_service.id = "other-service-session".into();
+        other_service.title = Some("service:reviewer:http:review".into());
+        other_service.tokens = construct_protocol::TokenTally {
+            input: 1_000_000,
+            output: 0,
+            cached: 0,
+        };
+        app.sessions.push(other_service);
         app.services.push(service_summary_for_test("assistant"));
         app.select_service("assistant".into());
         app.session_transitions.clear();
@@ -42526,6 +42549,10 @@ mod tests {
             "rendered service view:\n{text}"
         );
         assert!(text.contains("demo-conversation"));
+        assert!(
+            text.contains("2 routed · 163k tok"),
+            "service lifetime usage should sum every routed session without double-counting cached input:\n{text}"
+        );
 
         let hit = app
             .layout
