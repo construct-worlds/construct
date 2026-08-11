@@ -18744,9 +18744,24 @@ fn render_playbook_selection_context_menu(
             .add_modifier(Modifier::UNDERLINED)
     };
     let run_style = row_style(run_selected);
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border));
+    // While the menu is passive, advertise the key that focuses it
+    // (issues #1106/#1092): every editing key — including Tab / S-Tab
+    // list nesting on the selected lines — keeps reaching the editor
+    // until C-o hands the menu focus, and nothing else on screen says so.
+    if !menu.focused {
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                " C-o menu ",
+                Style::default()
+                    .fg(app.theme.dim)
+                    .add_modifier(Modifier::ITALIC),
+            ))
+            .right_aligned(),
+        );
+    }
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
     if rect.height >= 3 {

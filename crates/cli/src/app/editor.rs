@@ -1116,7 +1116,13 @@ impl App {
             .and_then(|popup| popup.selection_menu.as_ref())
             .is_some_and(|menu| menu.focused);
         if !menu_focused {
-            if matches!(key.code, KeyCode::Tab) && !ctrl && !alt && !super_mod {
+            // C-o focuses the menu (advertised on its unfocused frame). It
+            // must NOT be Tab: while the menu is merely shown the editor's
+            // own keymap keeps working, and Tab / S-Tab there nest and
+            // un-nest every list line the selection spans (spec 0094) —
+            // claiming Tab here made multi-line indent unreachable while
+            // leaving S-Tab live, an asymmetry reported as issue #1106.
+            if ctrl_char == Some('o') && !alt && !super_mod {
                 let Some(popup) = self.playbook_popup.as_mut() else {
                     return true;
                 };

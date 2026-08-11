@@ -22694,27 +22694,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playbook_tab_focuses_selection_menu_for_multi_line_selection() {
+    async fn playbook_tab_indents_every_line_of_a_multi_line_selection() {
         let (mut app, _dir, server) = empty_app().await;
-        app.playbook_popup = Some(playbook_popup_for_test("s1", "- one\n- two", 0));
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "- one\n- two\n- three\n", 0));
         // Select from the start of the buffer through the end of the second
-        // list line so both lines fall inside the selection.
+        // list line (char offset 11), so the first two lines fall inside the
+        // selection and the (unfocused) selection menu is showing — issue
+        // #1106's repro. The head is set directly because cursor stepping
+        // treats list markers as atomic, which makes step counts opaque here.
         app.begin_playbook_selection();
-        app.move_playbook_cursor(11);
+        {
+            let popup = app.playbook_popup.as_mut().unwrap();
+            popup.selection.as_mut().unwrap().head = 11;
+            popup.cursor = 11;
+        }
 
         app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
 
         let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
+            popup.buffer, "  - one\n  - two\n- three\n",
+            "Tab nests every list line the selection spans (spec 0094)"
+        );
+        assert!(
+            popup
+                .selection_menu
+                .as_ref()
+                .is_some_and(|menu| !menu.focused),
+            "the selection menu stays visible but must not steal Tab to focus itself"
+        );
+
+        // S-Tab is the symmetric outdent over the same (remapped) selection.
+        app.handle_playbook_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .await;
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(
+            popup.buffer, "- one\n- two\n- three\n",
+            "S-Tab un-nests the same selected lines"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn playbook_ctrl_o_focuses_selection_menu_without_editing() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "- one\n- two", 0));
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(11);
+
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
+            .await;
+
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(
             popup.buffer, "- one\n- two",
-            "Tab focuses the selected-text run menu instead of editing the selection"
+            "C-o only moves focus; the document is untouched"
         );
         let menu = popup
             .selection_menu
             .as_ref()
             .expect("selection run menu should be present");
-        assert!(menu.focused, "Tab should focus the selection run menu");
+        assert!(menu.focused, "C-o should focus the selection run menu");
         server.abort();
     }
 
@@ -22895,12 +22936,16 @@ mod tests {
             !text.contains("reduce to the minimum")
                 && !text.contains("Execute the selection")
                 && !text.contains("Free-text guidance"),
-            "no description shows before Tab focuses the menu: {text:?}"
+            "no description shows before C-o focuses the menu: {text:?}"
+        );
+        assert!(
+            text.contains("C-o menu"),
+            "the unfocused menu must advertise its focus key (issue #1106): {text:?}"
         );
         server.abort();
     }
 
-    /// spec 0089: once Tab focuses the menu, the highlighted row's
+    /// spec 0089: once C-o focuses the menu, the highlighted row's
     /// description appears, and it updates as Up/Down moves the highlight
     /// to a different row instead of getting stuck on the first one shown.
     #[tokio::test]
@@ -23449,10 +23494,10 @@ mod tests {
         assert_ne!(
             run_cell.style().bg,
             Some(app.theme.accent),
-            "Run button should not be highlighted before Tab focuses the menu"
+            "Run button should not be highlighted before C-o focuses the menu"
         );
 
-        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
             .await;
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("playbook should render after focus");
@@ -23461,13 +23506,13 @@ mod tests {
             .layout
             .playbook_selection_run_hit
             .expect("selection menu hit registered");
-        let tab_focused_run_cell = buf
+        let focused_run_cell = buf
             .cell((hit.1.saturating_sub(3), hit.2))
-            .expect("Run text cell right after Tab");
+            .expect("Run text cell right after C-o");
         assert_ne!(
-            tab_focused_run_cell.style().bg,
+            focused_run_cell.style().bg,
             Some(app.theme.accent),
-            "Tab focuses the comment row by default (spec 0089) — Run stays plain until Down selects it"
+            "C-o focuses the comment row by default (spec 0089) — Run stays plain until Down selects it"
         );
 
         // Down moves keyboard selection off Comment onto Run (spec 0089).
@@ -27120,7 +27165,7 @@ mod tests {
         app.begin_playbook_selection();
         app.move_playbook_cursor(5);
 
-        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
             .await;
         for ch in "focus tests".chars() {
             app.handle_playbook_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
@@ -27160,7 +27205,7 @@ mod tests {
         app.begin_playbook_selection();
         app.move_playbook_cursor(5);
 
-        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
             .await;
         for ch in "abcd".chars() {
             app.handle_playbook_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
@@ -27242,12 +27287,12 @@ mod tests {
                 .selected_action
         };
 
-        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
             selected_action(&app),
             PlaybookSelectionAction::Comment,
-            "Tab focuses the menu with Comment selected by default"
+            "C-o focuses the menu with Comment selected by default"
         );
 
         app.handle_playbook_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
