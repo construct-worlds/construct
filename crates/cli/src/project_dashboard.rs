@@ -19,10 +19,12 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Theme;
-use crate::token_meter::{self, TokenMeter};
+use crate::token_meter::TokenMeter;
 
-/// Compact meter height when the pane is tall enough.
-const METER_HEIGHT: u16 = 4;
+/// Compact meter height when the pane is tall enough. One row belongs to the
+/// shared legend, leaving four graph rows — roughly 30% taller than the
+/// previous three-row graph while keeping the scoped dashboards compact.
+pub(crate) const METER_HEIGHT: u16 = 5;
 
 /// Rows kept for member cards even when the meter would like more.
 const CARDS_MIN_HEIGHT: u16 = 6;
@@ -642,7 +644,7 @@ pub fn render(
                     width: w,
                     height: meter_h,
                 };
-                meter_graph = render_project_meter(f, meter_area, theme, meter, now);
+                meter_graph = crate::ui::render_token_meter_surface(f, meter_area, theme, meter);
                 row = row.saturating_add(meter_h);
             }
         } else if row < bottom {
@@ -685,87 +687,6 @@ pub fn render(
         interactive,
         now_ms,
     );
-}
-
-/// Returns the rect the columns occupy, so the caller can record it as the
-/// hover-detail hit zone (the legend row below them is not part of it).
-fn render_project_meter(
-    f: &mut Frame,
-    area: Rect,
-    theme: &Theme,
-    meter: &TokenMeter,
-    _now: Instant,
-) -> Option<Rect> {
-    let dim = Style::default().fg(theme.dim);
-    if meter.is_idle() {
-        f.render_widget(
-            Paragraph::new(Span::styled(" no token usage reported yet ", dim)),
-            area,
-        );
-        return None;
-    }
-
-    let graph_h = area.height.saturating_sub(1).max(1);
-    let graph = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: graph_h,
-    };
-    let width = graph.width as usize;
-    let scale = meter.scale(width).max(1);
-    let cells = graph.height as usize;
-    let eighths_total = cells * 8;
-    let history: Vec<_> = meter.window(width).collect();
-    let hist_len = history.len();
-
-    // Same column paint as the fleet token meter (#1183): full cells as
-    // background fill so fonts whose FULL BLOCK is short of the line box
-    // don't leave hairline seams between rows.
-    for (col, bucket) in history.iter().enumerate() {
-        let x = graph.x + (width - hist_len + col) as u16;
-        let total = bucket.total();
-        if total == 0 {
-            continue;
-        }
-        let filled = ((total as f64 / scale as f64) * eighths_total as f64).round() as usize;
-        let filled = filled.clamp(1, eighths_total);
-        let segments = token_meter::stacked_eighths(&bucket.stacked(), total, filled);
-        for cell in token_meter::column_cells(&segments, filled, cells) {
-            let y = graph.y + graph.height.saturating_sub(cell.row + 1);
-            let mut style = Style::default().fg(meter.band_color(cell.fg));
-            if let Some(bg) = cell.bg {
-                style = style.bg(meter.band_color(bg));
-            }
-            f.buffer_mut().set_string(x, y, cell.glyph, style);
-        }
-    }
-
-    // Legend / rate line.
-    let legend_y = area.y.saturating_add(area.height.saturating_sub(1));
-    let entries = meter.legend(width.min(area.width as usize));
-    let rate = meter
-        .recent_fleet_rate()
-        .map(|r| format!("{:.0}/s", r))
-        .unwrap_or_else(|| "—".into());
-    let total = format_token_count(meter.window_total(width));
-    let mut legend = format!(" {total} tok · {rate}");
-    for e in entries.iter().take(3) {
-        legend.push_str(&format!("  {} {}", "●", e.label));
-    }
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            truncate_width(&legend, area.width as usize),
-            dim,
-        )),
-        Rect {
-            x: area.x,
-            y: legend_y,
-            width: area.width,
-            height: 1,
-        },
-    );
-    Some(graph)
 }
 
 /// Rows one member card occupies given the pane's shape: 1 (title only) on
@@ -1208,22 +1129,37 @@ mod tests {
                 )
             })
             .expect("draw");
+            term.backend().buffer().clone()
         };
 
         // No meter for this project yet: nothing to hover.
-        draw(&mut dash);
+        let _ = draw(&mut dash);
         assert_eq!(dash.meter_graph, None);
 
         let mut meter = TokenMeter::new(now);
         meter.observe(Some("claude-opus-5"), 12_000, 4_000, now);
         dash.token_meters.insert("p".into(), meter);
-        draw(&mut dash);
+        let buffer = draw(&mut dash);
         let (project, graph) = dash.meter_graph.clone().expect("the meter drew columns");
         assert_eq!(project, "p");
         assert!(graph.width > 0 && graph.height > 0, "{graph:?}");
+        assert_eq!(graph.height, METER_HEIGHT - 1, "one row is the legend");
         assert!(
             graph.y + graph.height < area.y + area.height,
             "the graph rect stops above the legend row: {graph:?}"
+        );
+        let entries = dash.token_meters["p"].legend(graph.width as usize);
+        let legend_y = graph.y + graph.height;
+        assert_eq!(buffer[(graph.x, legend_y)].fg, entries[0].dot_color);
+        assert_eq!(buffer[(graph.x + 2, legend_y)].fg, entries[0].color);
+        let legend: String = (graph.x..graph.x + graph.width)
+            .map(|x| buffer[(x, legend_y)].symbol())
+            .collect();
+        assert!(
+            legend.contains("● claude-opus-5")
+                && legend.contains("idle")
+                && legend.contains("Σ idle"),
+            "project legend should use the operator legend layout: {legend:?}"
         );
 
         // A pane too short for a meter draws none, and clears the rect.

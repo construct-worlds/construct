@@ -2536,6 +2536,11 @@ pub struct TokenSample {
     /// so a client binning these into a history graph places them where they
     /// actually happened rather than where it happened to learn of them.
     pub at_ms: i64,
+    /// Session that reported this usage. Newer daemons always include it;
+    /// `None` keeps clients compatible with history returned by an older
+    /// daemon that only supported the fleet-wide meter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Model this usage is attributed to, already resolved by the daemon:
     /// the model the report named, else the one the session had in effect at
     /// that moment. `None` only when the session had never named one.
@@ -2569,6 +2574,24 @@ pub struct TokenHistoryResult {
     /// Daemon time when the window was taken, so a client can convert
     /// `at_ms` into an age without trusting the two clocks to agree.
     pub now_ms: i64,
+}
+
+#[cfg(test)]
+mod token_history_compat_tests {
+    use super::TokenSample;
+
+    #[test]
+    fn legacy_samples_without_session_identity_still_decode() {
+        let sample: TokenSample = serde_json::from_value(serde_json::json!({
+            "at_ms": 1,
+            "model": "opus",
+            "tokens": 2,
+            "cached": 1
+        }))
+        .expect("legacy token sample");
+
+        assert_eq!(sample.session_id, None);
+    }
 }
 
 /// Result of `usage.query`.

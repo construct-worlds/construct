@@ -28,7 +28,8 @@ Top to bottom, dropping lower-priority regions when the pane is short:
 2. **Token meter** — project-scoped throughput history fed from the same
    `Cost` / busy-time path as the fleet meter, filtered to members of this
    project. Idle projects show a quiet empty line rather than a blank grid.
-   Hovering a column details it exactly as the fleet meter's does (spec 0167).
+   Its colored legend follows the operator meter's layout and rate formatting;
+   hovering a column details it exactly as the fleet meter's does (spec 0167).
 3. **Member cards** — a single full-width column, one card per member.
 
 ### Members
@@ -115,6 +116,9 @@ already carried.
   args summary (not just call ids) so cards can say what wants approval.
 - Cost and busy events must feed project-scoped meters even when the project
   pane is not visible, so switching to a project shows real history.
+- Recent token samples identify their reporting session, allowing a starting
+  client to rebuild each project meter from daemon history. Restarting the TUI
+  or daemon must not clear the graph for sessions still in that project.
 - Focus routing (list vs view) is load-bearing: view-focused navigation must
   not steal list keys while the list holds focus.
 

@@ -476,6 +476,7 @@ impl SessionManager {
                     // than being added on top of a prompt side that already
                     // contains it.
                     self.record_cost_sample(
+                        &entry.id,
                         model.clone().or_else(|| s.model.clone()),
                         tokens_in.saturating_add(*tokens_out),
                         *tokens_cached,

@@ -93,6 +93,7 @@ mod tests {
     fn sample(at_ms: i64, tokens: u64) -> TokenSample {
         TokenSample {
             at_ms,
+            session_id: Some("s1".into()),
             model: Some("opus".into()),
             tokens,
             cached: 0,
@@ -113,6 +114,10 @@ mod tests {
             .map(|s| s.at_ms)
             .collect();
         assert_eq!(times, vec![100, 200, 300]);
+        assert!(history
+            .recent(WINDOW_SECS, 10, 1_000)
+            .iter()
+            .all(|sample| sample.session_id.as_deref() == Some("s1")));
     }
 
     #[test]

@@ -327,6 +327,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.service_session_hits.clear();
     app.layout.service_channel_row_hits.clear();
     app.layout.service_channel_action_hits.clear();
+    app.layout.service_token_graphs.clear();
     app.layout.lineage_subagent_toggle_hits.clear();
     app.layout.lineage_segment_tooltip = None;
     // Cleared here rather than only in the dashboard's own render, which every
@@ -442,6 +443,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_lineage_segment_tooltip(f, app);
     render_matrix_token_tooltip(f, app);
     render_project_meter_tooltip(f, app);
+    render_service_meter_tooltip(f, app);
     render_harness_hover_tooltip(f, app);
     // A session switch affects the pane's final composited surface, not just
     // the terminal/chat layer underneath it. Paint transitions after Playbook
@@ -4435,22 +4437,36 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
 fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
     app.layout.matrix_token_graph_area = None;
     app.token_meter.advance_to(now);
-    let dim = Style::default().fg(app.theme.dim);
+    app.layout.matrix_token_graph_area =
+        render_token_meter_surface(f, area, &app.theme, &app.token_meter);
+}
 
-    if app.token_meter.is_idle() {
+/// Shared token-meter graph and legend used by the operator, project, and
+/// service surfaces. Keeping the complete renderer here makes model colors,
+/// grid layout, rate formatting, overflow counts, and the right-aligned sum
+/// one visual contract rather than three approximations.
+pub(crate) fn render_token_meter_surface(
+    f: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    meter: &crate::token_meter::TokenMeter,
+) -> Option<Rect> {
+    let dim = Style::default().fg(theme.dim);
+
+    if meter.is_idle() {
         // An empty grid is indistinguishable from a broken one. Say why.
         let msg = "no token usage reported yet";
         let x = area.x + area.width.saturating_sub(msg.len() as u16) / 2;
         let y = area.y + area.height / 2;
         f.buffer_mut().set_string(x, y, msg, dim);
-        return;
+        return None;
     }
 
     // The legend names every series, wrapping onto as many rows of aligned
     // columns as that takes: a colored bar whose model isn't named anywhere
     // is unreadable, and on a narrow panel a single row only ever fits one
     // name. The graph keeps the rest of the panel.
-    let entries = app.token_meter.legend(area.width as usize);
+    let entries = meter.legend(area.width as usize);
     let grid = layout_legend(&entries, area.width as usize, legend_max_rows(area.height));
     let legend_h = grid.rows.len() as u16;
     let graph = Rect {
@@ -4460,19 +4476,18 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
         height: area.height.saturating_sub(legend_h),
     };
     if graph.height == 0 || graph.width == 0 {
-        return;
+        return None;
     }
-    app.layout.matrix_token_graph_area = Some(graph);
 
     let width = graph.width as usize;
-    let scale = app.token_meter.scale(width);
+    let scale = meter.scale(width);
     let cells = graph.height as usize;
     let eighths_total = cells * 8;
+    let history = meter.window(width).count();
 
-    for (col, bucket) in app.token_meter.window(width).enumerate() {
+    for (col, bucket) in meter.window(width).enumerate() {
         // History shorter than the panel draws flush right, so the newest
         // column is always the rightmost one.
-        let history = app.token_meter.window(width).count();
         let x = graph.x + (width - history + col) as u16;
         let total = bucket.total();
         if total == 0 {
@@ -4486,22 +4501,23 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
         // Paint bottom-up: each band owns a contiguous run of eighths.
         for cell in crate::token_meter::column_cells(&segments, filled, cells) {
             let y = graph.y + graph.height.saturating_sub(cell.row + 1);
-            let mut style = Style::default().fg(app.token_meter.band_color(cell.fg));
+            let mut style = Style::default().fg(meter.band_color(cell.fg));
             // A terminal cell holds one glyph, so a boundary landing inside
             // one is drawn as a partial block whose *filled* part is the
             // lower band and whose background is the upper one. Painting
             // both as foreground glyphs would mean the second overwrites the
             // first, and the lower band would vanish from the stack.
             if let Some(bg) = cell.bg {
-                style = style.bg(app.token_meter.band_color(bg));
+                style = style.bg(meter.band_color(bg));
             }
             f.buffer_mut().set_string(x, y, cell.glyph, style);
         }
     }
 
     if legend_h > 0 {
-        render_token_meter_legend(f, area, app, &entries, &grid, legend_h);
+        render_token_meter_legend(f, area, theme, meter, &entries, &grid, legend_h);
     }
+    Some(graph)
 }
 
 /// Rows the bars keep no matter how many series need naming. Three is the
@@ -4678,12 +4694,13 @@ fn legend_cell(
 fn render_token_meter_legend(
     f: &mut Frame,
     area: Rect,
-    app: &mut App,
+    theme: &Theme,
+    meter: &crate::token_meter::TokenMeter,
     entries: &[crate::token_meter::LegendEntry],
     grid: &LegendGrid,
     legend_h: u16,
 ) {
-    let dim = Style::default().fg(app.theme.dim);
+    let dim = Style::default().fg(theme.dim);
     let top = area.y + area.height.saturating_sub(legend_h);
     let limit = area.x + area.width;
     let rows = &grid.rows;
@@ -4742,10 +4759,10 @@ fn render_token_meter_legend(
                 x += w;
             }
         }
-        // Fleet rate, right-aligned, only if it costs no legend space. Same
-        // basis as the entries — tokens over compute time — so concurrent
+        // Summed scoped rate, right-aligned, only if it costs no legend space.
+        // Same basis as the entries — tokens over compute time — so concurrent
         // sessions don't make it exceed the sum of the parts.
-        let sum = format!(" Σ {}", legend_rate(app.token_meter.recent_fleet_rate()));
+        let sum = format!(" Σ {}", legend_rate(meter.recent_fleet_rate()));
         let sum_w = UnicodeWidthStr::width(sum.as_str()) as u16;
         if x + sum_w < limit {
             f.buffer_mut()
@@ -4806,6 +4823,32 @@ fn render_project_meter_tooltip(f: &mut Frame, app: &App) {
         return;
     };
     render_token_meter_hover(f, &app.theme, meter, graph, (mx, my));
+}
+
+/// Hover detail for the service view's scoped meter. A split layout can show
+/// several services, so resolve the graph under the pointer before selecting
+/// its meter.
+fn render_service_meter_tooltip(f: &mut Frame, app: &App) {
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    let Some((service_name, graph)) = app
+        .layout
+        .service_token_graphs
+        .iter()
+        .find(|(_, graph)| {
+            mx >= graph.x
+                && mx < graph.x.saturating_add(graph.width)
+                && my >= graph.y
+                && my < graph.y.saturating_add(graph.height)
+        })
+    else {
+        return;
+    };
+    let Some(meter) = app.service_token_meters.get(service_name) else {
+        return;
+    };
+    render_token_meter_hover(f, &app.theme, meter, *graph, (mx, my));
 }
 
 /// Widest a model name gets in the hover detail before it is clipped. Long
@@ -8476,6 +8519,42 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         columns[2],
     );
 
+    // Keep the service-scoped meter fixed above the scrolling channel/session
+    // section, matching the project dashboard's graph without making it part
+    // of keyboard navigation. Short panes give the rows all available space.
+    let mut section = chunks[2];
+    if section.width >= 24
+        && section.height >= crate::project_dashboard::METER_HEIGHT.saturating_add(4)
+    {
+        let lower = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(crate::project_dashboard::METER_HEIGHT),
+                Constraint::Length(1),
+                Constraint::Min(3),
+            ])
+            .split(section);
+        let meter_area = lower[0];
+        section = lower[2];
+        let now = Instant::now();
+        if let Some(meter) = app.service_token_meters.get_mut(name) {
+            meter.advance_to(now);
+            if let Some(graph) = render_token_meter_surface(f, meter_area, &app.theme, meter) {
+                app.layout
+                    .service_token_graphs
+                    .push((name.to_string(), graph));
+            }
+        } else {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    " no token usage reported yet for this service ",
+                    Style::default().fg(app.theme.dim),
+                )),
+                meter_area,
+            );
+        }
+    }
+
     let routed: Vec<_> = app
         .routed_service_sessions(name)
         .into_iter()
@@ -8516,7 +8595,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         push_wrapped_service_line(
             &mut activity,
             "  No channels in the catalog. Press a or Enter to create an HTTP channel.",
-            chunks[2].width,
+            section.width,
             if selected {
                 Style::default()
                     .fg(app.theme.highlight_fg)
@@ -8589,13 +8668,13 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
             }
             channel_rows.push((index, activity.len()));
             activity.push(Line::from(Span::styled(
-                truncate_to_width(&row, chunks[2].width as usize),
+                truncate_to_width(&row, section.width as usize),
                 style,
             )));
         }
     }
     if let Some(actions) = selected_channel_actions.as_ref() {
-        append_service_channel_actions(&mut activity, &mut action_hits, app, chunks[2], actions);
+        append_service_channel_actions(&mut activity, &mut action_hits, app, section, actions);
     }
     activity.push(Line::from(""));
     activity.push(Line::from(vec![
@@ -8614,7 +8693,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         push_wrapped_service_line(
             &mut activity,
             "No requests have created a session yet.",
-            chunks[2].width,
+            section.width,
             Style::default().fg(app.theme.dim),
         );
     } else {
@@ -8669,7 +8748,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         push_wrapped_service_line(
             &mut activity,
             note,
-            chunks[2].width,
+            section.width,
             Style::default().fg(if dialog.confirm_delete {
                 app.theme.danger
             } else {
@@ -8693,11 +8772,10 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
     push_wrapped_service_line(
         &mut activity,
         footer,
-        chunks[2].width,
+        section.width,
         Style::default().fg(app.theme.dim),
     );
 
-    let section = chunks[2];
     let viewport_h = section.height as usize;
     // Every line was built to fit the width, so rows and lines are the same
     // thing here and the scroll offset means exactly what it says.

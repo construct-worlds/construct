@@ -514,6 +514,8 @@ impl App {
                         .cmp(&b.position)
                         .then_with(|| a.name.cmp(&b.name))
                 });
+                self.service_token_meters
+                    .retain(|name, _| services.iter().any(|service| service.name == *name));
                 self.services = services;
             }
             Err(error) => self.set_status(format!("services refresh failed: {error}")),
@@ -541,6 +543,39 @@ impl App {
                     .is_some_and(|title| title == prefix || title.starts_with(&nested))
             })
             .collect()
+    }
+
+    /// Service whose routing namespace owns this session or one of its
+    /// ancestors. Native subagents and forks contribute to the service that
+    /// owns their routed root even when their own title has no service prefix.
+    pub fn routed_service_name<'a>(&'a self, session: &SessionSummary) -> Option<&'a str> {
+        let mut current = session;
+        // Session ancestry is acyclic by contract. The bound is a defensive
+        // stop for malformed summaries so meter attribution can never loop.
+        for _ in 0..=self.sessions.len() {
+            if let Some(service_name) = current
+                .title
+                .as_deref()
+                .and_then(|title| title.strip_prefix("service:"))
+                .and_then(|suffix| suffix.split(':').next())
+            {
+                if let Some(service) = self
+                    .services
+                    .iter()
+                    .find(|service| service.name == service_name)
+                {
+                    return Some(service.name.as_str());
+                }
+            }
+            let parent_id = current
+                .native_subagent
+                .as_ref()
+                .map(|native| native.owner_session_id.as_str())
+                .or(current.parent_session_id.as_deref())
+                .or_else(|| current.forked_from.as_ref().map(|fork| fork.session_id.as_str()))?;
+            current = self.sessions.iter().find(|candidate| candidate.id == parent_id)?;
+        }
+        None
     }
 
     /// Navigable row counts below the definition fields. The channel section
