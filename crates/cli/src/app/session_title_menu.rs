@@ -2,11 +2,10 @@ use super::*;
 
 impl App {
     pub fn open_session_title_menu(&mut self, session_id: String, view: ratatui::layout::Rect) {
-        const MENU_W: u16 = 34;
         // One floating surface at a time.
         self.fleet_panel = None;
         let menu_h = SessionTitleMenuAction::ALL.len() as u16 + 2;
-        let width = MENU_W.min(view.width.saturating_sub(2).max(1));
+        let width = fleet_title_menu_width(&session_id, view.width);
         let x = view
             .x
             .saturating_add(view.width)

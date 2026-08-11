@@ -1564,6 +1564,17 @@ impl SessionTitleMenuAction {
     }
 }
 
+fn fleet_title_menu_width(identity: &str, view_width: u16) -> u16 {
+    const BASE_WIDTH: u16 = 34;
+    let label = format!("copy id ({identity})");
+    let desired = unicode_width::UnicodeWidthStr::width(label.as_str())
+        .saturating_add(2)
+        .min(u16::MAX as usize) as u16;
+    BASE_WIDTH
+        .max(desired)
+        .min(view_width.saturating_sub(2).max(1))
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionTitleMenu {
     pub session_id: String,
@@ -14250,7 +14261,7 @@ impl App {
             "send" | "send-input" => self.run_action(KeyAction::OpenSendInput).await,
             "delete" | "kill" | "rm" => self.run_action(KeyAction::OpenDeleteConfirm).await,
             "rename" => self.run_action(KeyAction::OpenRename).await,
-            "copy-id" | "copy-identity" => self.run_action(KeyAction::CopySelectedId).await,
+            "copy-id" => self.run_action(KeyAction::CopySelectedId).await,
             "fork" => self.run_action(KeyAction::OpenFork).await,
             "playbook" | "edit-playbook" => self.run_action(KeyAction::OpenPlaybook).await,
             "zoom" | "fullscreen" => self.run_action(KeyAction::ToggleZoom).await,
@@ -31743,6 +31754,13 @@ mod tests {
             .session_title_menu
             .clone()
             .expect("clicking the actions button opens the session menu");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render open menu");
+        let menu_text = rendered_text(term.backend().buffer());
+        assert!(
+            menu_text.contains("copy id (s1)"),
+            "session action should preview the exact id: {menu_text}"
+        );
 
         // Click the "split horizontal" row, which sits over the pane content the
         // child is tracking. With the fix it dispatches; without it, the click
@@ -31821,6 +31839,22 @@ mod tests {
         assert_eq!(
             fork_menu.item_at(area.x + 2, merge_row),
             Some(SessionTitleMenuAction::Merge)
+        );
+    }
+
+    #[test]
+    fn fleet_title_menu_expands_to_show_full_copy_identity() {
+        let identity = "s18abe9381bf74f85aa7282940c695fc7";
+        let label = format!("copy id ({identity})");
+        assert_eq!(
+            fleet_title_menu_width(identity, 120) as usize,
+            label.len() + 2,
+            "the bordered menu should fit the complete copy label"
+        );
+        assert_eq!(
+            fleet_title_menu_width(identity, 20),
+            18,
+            "the menu still clamps to the available pane width"
         );
     }
 
@@ -42725,6 +42759,10 @@ mod tests {
         for action in ServiceTitleMenuAction::ALL {
             assert!(menu_text.contains(action.label()));
         }
+        assert!(
+            menu_text.contains("copy id (assistant)"),
+            "service action should preview the exact id: {menu_text}"
+        );
         assert!(app.service_title_menu.is_some());
         server.abort();
     }

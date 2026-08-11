@@ -2,9 +2,8 @@ use super::*;
 
 impl App {
     pub fn open_service_title_menu(&mut self, name: String, view: ratatui::layout::Rect) {
-        const MENU_W: u16 = 34;
         let menu_h = ServiceTitleMenuAction::ALL.len() as u16 + 2;
-        let width = MENU_W.min(view.width.saturating_sub(2).max(1));
+        let width = fleet_title_menu_width(&name, view.width);
         let x = view
             .x
             .saturating_add(view.width)

@@ -252,7 +252,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         id: CommandId::CopyId,
         name: "/copy-id",
-        aliases: &["copy-identity"],
+        aliases: &[],
         args: Args::None,
         routing: Routing::Client,
         visibility: ModelVisibility::Hidden,
@@ -579,6 +579,14 @@ mod tests {
         assert_eq!(cmd.id, CommandId::Theme);
         assert_eq!(cmd.routing, Routing::Client);
         assert!(popup_names().any(|name| name == "/theme"));
+    }
+
+    #[test]
+    fn copy_id_has_one_spelling() {
+        let cmd = SlashCommand::resolve("/copy-id").expect("/copy-id command");
+        assert_eq!(cmd.id, CommandId::CopyId);
+        assert!(cmd.aliases.is_empty());
+        assert!(SlashCommand::resolve("/copy-identity").is_none());
     }
 
     #[test]
