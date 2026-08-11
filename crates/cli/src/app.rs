@@ -11863,7 +11863,6 @@ impl App {
                     let field = row.saturating_sub(modal.y.saturating_add(1)) as usize;
                     if field < SERVICE_FIELD_COUNT {
                         dialog.focus = ServiceDialogFocus::Field(field);
-                        dialog.confirm_delete = false;
                     }
                     return;
                 }
@@ -12832,18 +12831,6 @@ impl App {
                     }
                     return;
                 }
-                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
-                        self.open_edit_service_view(&name);
-                        if let Some(dialog) = self.service_dialog.as_mut() {
-                            dialog.confirm_delete = true;
-                            dialog.note = Some(
-                                "Delete this service? Enter/y confirms; Esc/n cancels.".to_string(),
-                            );
-                        }
-                    }
-                    return;
-                }
                 _ => {}
             }
             let is_ctrl_x = matches!(key.code, KeyCode::Char('x'))
@@ -13322,8 +13309,27 @@ impl App {
                         error: None,
                     });
                 }
-                Selection::Service(_) => {
-                    self.set_status("delete the service from its view (C-d)".into())
+                Selection::Service(name) => {
+                    // An unsaved create draft is not on the daemon yet — kill
+                    // is discard, the same as Esc in create mode.
+                    if self.service_dialog.as_ref().is_some_and(|dialog| {
+                        dialog.mode == ServiceDialogMode::Create
+                            && dialog.service.name == name
+                    }) {
+                        self.escape_service_dialog();
+                        return;
+                    }
+                    if !self.services.iter().any(|service| service.name == name) {
+                        self.set_status(format!("service {name} not found"));
+                        return;
+                    }
+                    self.minibuffer = Some(Minibuffer {
+                        prompt: format!("Delete service {name}? "),
+                        input: String::new(),
+                        cursor: 0,
+                        intent: MinibufferIntent::ServiceDeleteConfirm { name },
+                        error: None,
+                    });
                 }
                 Selection::None => {}
                 // The "N archived" disclosure row cascade-deletes every
@@ -14592,10 +14598,12 @@ impl App {
                     }
                     ("delete", Some(service)) => {
                         self.minibuffer = Some(Minibuffer {
-                            prompt: format!("Delete service {}? [y/N] ", service.name),
+                            prompt: format!("Delete service {}? ", service.name),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::ServiceDeleteConfirm { name: service.name },
+                            intent: MinibufferIntent::ServiceDeleteConfirm {
+                                name: service.name,
+                            },
                             error: None,
                         });
                     }
@@ -43041,7 +43049,51 @@ mod tests {
             menu_text.contains("copy id (assistant)"),
             "service action should preview the exact id: {menu_text}"
         );
+        assert!(
+            menu_text.contains("C-x k"),
+            "service delete should advertise the global kill chord: {menu_text}"
+        );
+        assert!(
+            !menu_text.contains("C-d"),
+            "service delete must not advertise retired C-d: {menu_text}"
+        );
         assert!(app.service_title_menu.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_open_delete_confirm_uses_global_kill_chord() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.select_service("assistant".into());
+        assert!(app.service_dialog.is_some());
+
+        // Retired form-local delete: C-d no longer arms an in-view confirm.
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .await;
+        assert!(app.minibuffer.is_none());
+        assert!(
+            !app
+                .service_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.note.as_deref())
+                .is_some_and(|note| note.contains("Delete this service")),
+            "C-d must not open the old inline service-delete confirm"
+        );
+
+        // Global kill chord (C-x k / dd / OpenDeleteConfirm) opens the
+        // same minibuffer confirm sessions and projects use.
+        app.run_action(KeyAction::OpenDeleteConfirm).await;
+        let mb = app.minibuffer.as_ref().expect("delete confirm minibuffer");
+        assert!(
+            matches!(
+                &mb.intent,
+                MinibufferIntent::ServiceDeleteConfirm { name } if name == "assistant"
+            ),
+            "expected ServiceDeleteConfirm, got {:?}",
+            mb.intent
+        );
+        assert!(mb.prompt.contains("assistant"));
         server.abort();
     }
 
@@ -43862,7 +43914,6 @@ mod tests {
         assert!(options
             .iter()
             .any(|option| option.label == "anthropic / claude-sonnet"));
-        assert!(!app.service_dialog.as_ref().unwrap().confirm_delete);
 
         // The first move leaves Default and selects the same first model that
         // the pin router would show under the openai target.

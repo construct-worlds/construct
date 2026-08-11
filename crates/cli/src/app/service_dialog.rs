@@ -161,7 +161,6 @@ pub struct ServiceDialog {
     pub saved: ServiceSummary,
     pub focus: ServiceDialogFocus,
     pub note: Option<String>,
-    pub confirm_delete: bool,
     pub picker: Option<ServiceDialogPickerKind>,
     pub picker_selected: usize,
     pub picker_scroll: usize,
@@ -297,7 +296,6 @@ impl ServiceDialog {
             service,
             focus: ServiceDialogFocus::Field(1),
             note: Some("Saved edits apply live — see each field for when.".to_string()),
-            confirm_delete: false,
             picker: None,
             picker_selected: 0,
             picker_scroll: 0,
@@ -624,7 +622,6 @@ impl App {
             service,
             focus: ServiceDialogFocus::Field(0),
             note: Some("Enter saves this service as its own TOML file.".to_string()),
-            confirm_delete: false,
             picker: None,
             picker_selected: 0,
             picker_scroll: 0,
@@ -1443,7 +1440,6 @@ impl App {
             dialog.picker_selected = 0;
             dialog.picker_scroll = 0;
             dialog.note = None;
-            dialog.confirm_delete = false;
         }
     }
 
@@ -1471,7 +1467,6 @@ impl App {
             _ => {}
         }
         dialog.note = None;
-        dialog.confirm_delete = false;
         // A service being named doesn't exist yet, so the pane is bound to it
         // by the name in the editor. Keep the selection following the field or
         // the next selection sync finds no such service and drops the draft.
@@ -1523,7 +1518,6 @@ impl App {
             _ => {}
         }
         dialog.note = None;
-        dialog.confirm_delete = false;
     }
 
     async fn save_service_dialog(&mut self) {
@@ -1569,7 +1563,6 @@ impl App {
                 if let Some(dialog) = self.service_dialog.as_mut() {
                     dialog.mode = ServiceDialogMode::Edit;
                     dialog.adopt_saved(result.service);
-                    dialog.confirm_delete = false;
                     dialog.note = Some(applied);
                 }
             }
@@ -1581,21 +1574,21 @@ impl App {
         }
     }
 
-    async fn delete_service_dialog(&mut self) {
-        let Some(name) = self
-            .service_dialog
-            .as_ref()
-            .map(|dialog| dialog.service.name.clone())
-        else {
-            return;
-        };
+    /// Delete a saved service definition (C-x k / title-menu delete / palette).
+    pub(super) async fn delete_service_by_name(&mut self, name: String) {
         match self.client.delete_service(name.clone()).await {
             Ok(()) => {
                 let was_selected = self.selection.service_name() == Some(name.as_str());
                 if self.main_windows.clear_service(&name) {
                     self.push_layout();
                 }
-                self.service_dialog = None;
+                if self
+                    .service_dialog
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.service.name == name)
+                {
+                    self.service_dialog = None;
+                }
                 self.refresh_services().await;
                 if was_selected {
                     self.selection = Selection::None;
@@ -1604,12 +1597,7 @@ impl App {
                 }
                 self.set_status(format!("{name} deleted; its endpoint is withdrawn"));
             }
-            Err(error) => {
-                if let Some(dialog) = self.service_dialog.as_mut() {
-                    dialog.note = Some(format!("Delete failed: {error}"));
-                    dialog.confirm_delete = false;
-                }
-            }
+            Err(error) => self.set_status(format!("service delete failed: {error}")),
         }
     }
 
@@ -1617,7 +1605,7 @@ impl App {
     /// view-only state to fall back to: Esc first throws away unsaved edits,
     /// and once there is nothing to discard it hands keyboard focus back to
     /// the session list (spec 0175).
-    fn escape_service_dialog(&mut self) {
+    pub(super) fn escape_service_dialog(&mut self) {
         let Some(dialog) = self.service_dialog.as_mut() else {
             return;
         };
@@ -1648,7 +1636,6 @@ impl App {
             dialog.picker = None;
             dialog.picker_selected = 0;
             dialog.picker_scroll = 0;
-            dialog.confirm_delete = false;
             dialog.note = Some("Unsaved edits reverted.".to_string());
             return;
         }
@@ -1668,19 +1655,6 @@ impl App {
         };
         if snapshot.channel_editor.is_some() {
             return self.handle_service_channel_dialog_key(key).await;
-        }
-        if snapshot.confirm_delete {
-            match key.code {
-                KeyCode::Enter | KeyCode::Char('y') => self.delete_service_dialog().await,
-                KeyCode::Esc | KeyCode::Char('n') => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
-                        dialog.confirm_delete = false;
-                        dialog.note = Some("Delete cancelled.".to_string());
-                    }
-                }
-                _ => {}
-            }
-            return true;
         }
         if snapshot.picker.is_some() {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1713,15 +1687,6 @@ impl App {
             match key.code {
                 KeyCode::Char('s') => {
                     self.save_service_dialog().await;
-                    return true;
-                }
-                KeyCode::Char('d') if snapshot.mode == ServiceDialogMode::Edit => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
-                        dialog.confirm_delete = true;
-                        dialog.note = Some(
-                            "Delete this service? Enter/y confirms; Esc/n cancels.".to_string(),
-                        );
-                    }
                     return true;
                 }
                 KeyCode::Char('x') => {

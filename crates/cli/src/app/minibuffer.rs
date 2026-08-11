@@ -800,15 +800,7 @@ impl App {
                     self.set_status("service delete cancelled".to_string());
                     return;
                 }
-                match self.client.delete_service(name.clone()).await {
-                    Ok(()) => {
-                        self.refresh_services().await;
-                        self.set_status(format!(
-                            "{name} deleted; restart daemon to withdraw endpoint"
-                        ));
-                    }
-                    Err(error) => self.set_status(format!("service delete failed: {error}")),
-                }
+                self.delete_service_by_name(name).await;
             }
             MinibufferIntent::Orchestrator => {
                 // Unreachable in PTY-orchestrator mode — the
