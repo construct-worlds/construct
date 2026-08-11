@@ -42,13 +42,9 @@ impl App {
             }
             ServiceTitleMenuAction::CloseSplit => self.delete_active_window(),
             ServiceTitleMenuAction::Delete => {
-                self.minibuffer = Some(Minibuffer {
-                    prompt: format!("Delete service {name}? [y/N] "),
-                    input: String::new(),
-                    cursor: 0,
-                    intent: MinibufferIntent::ServiceDeleteConfirm { name },
-                    error: None,
-                });
+                // Same path as C-x k / dd on a selected service.
+                self.run_action(crate::keymap::KeyAction::OpenDeleteConfirm)
+                    .await
             }
         }
     }

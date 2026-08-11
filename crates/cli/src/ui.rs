@@ -2092,7 +2092,10 @@ fn minibuffer_choice_suffix(intent: &MinibufferIntent) -> Option<Vec<PromptPart>
             PromptPart::Text(" = cancel): "),
         ],
         // Typed-then-submit path, plain y/N.
-        ArchivedDeleteConfirm { .. } | MenuArchiveConfirm { .. } | MenuUnarchiveConfirm { .. } => {
+        ArchivedDeleteConfirm { .. }
+        | MenuArchiveConfirm { .. }
+        | MenuUnarchiveConfirm { .. }
+        | ServiceDeleteConfirm { .. } => {
             vec![
                 PromptPart::Text("("),
                 PromptPart::Choice {
@@ -7888,7 +7891,8 @@ fn service_title_menu_action_binding(
         (ServiceTitleMenuAction::SplitVertical, Profile::Vim) => Some("C-w s"),
         (ServiceTitleMenuAction::CloseSplit, Profile::Emacs) => Some("C-x 0"),
         (ServiceTitleMenuAction::CloseSplit, Profile::Vim) => Some("C-w c"),
-        (ServiceTitleMenuAction::Delete, _) => Some("C-d"),
+        (ServiceTitleMenuAction::Delete, Profile::Emacs) => Some("C-x k"),
+        (ServiceTitleMenuAction::Delete, Profile::Vim) => Some("d d"),
     }
 }
 
@@ -8757,11 +8761,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
             &mut activity,
             note,
             section.width,
-            Style::default().fg(if dialog.confirm_delete {
-                app.theme.danger
-            } else {
-                app.theme.dim
-            }),
+            Style::default().fg(app.theme.dim),
         );
     }
     // Esc no longer "closes to a view-only state" — there isn't one. It backs
@@ -14024,7 +14024,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
     C-x C-f         new session
     C-x b           switch session (picker dialog: type to filter, ↑↓ move)
     C-x i           send input to selected session
-    C-x k           delete selected session (confirms; kills if running)
+    C-x k           delete selected session / project / service (confirms)
     C-x Space       open selected session's playbook
     C-x C-o         focus session terminal / refocus Playbook
     C-x d           show diff
