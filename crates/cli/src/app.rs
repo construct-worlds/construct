@@ -1492,7 +1492,6 @@ pub struct DynamicUiHover {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionTitleMenuAction {
     Rename,
-    CopyId,
     Fork,
     PlaybookTerminalMode,
     SplitHorizontal,
@@ -1503,24 +1502,25 @@ pub enum SessionTitleMenuAction {
     /// Placed directly below Archive so the close-out actions group together.
     Merge,
     Delete,
+    CopyId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceTitleMenuAction {
-    CopyId,
     SplitHorizontal,
     SplitVertical,
     CloseSplit,
     Delete,
+    CopyId,
 }
 
 impl ServiceTitleMenuAction {
     pub const ALL: [Self; 5] = [
-        Self::CopyId,
         Self::SplitHorizontal,
         Self::SplitVertical,
         Self::CloseSplit,
         Self::Delete,
+        Self::CopyId,
     ];
 
     pub fn label(self) -> &'static str {
@@ -1537,7 +1537,6 @@ impl ServiceTitleMenuAction {
 impl SessionTitleMenuAction {
     pub const ALL: [Self; 10] = [
         Self::Rename,
-        Self::CopyId,
         Self::Fork,
         Self::PlaybookTerminalMode,
         Self::SplitHorizontal,
@@ -1546,6 +1545,7 @@ impl SessionTitleMenuAction {
         Self::Archive,
         Self::Merge,
         Self::Delete,
+        Self::CopyId,
     ];
 
     pub fn label(self) -> &'static str {
@@ -31855,6 +31855,14 @@ mod tests {
             fleet_title_menu_width(identity, 20),
             18,
             "the menu still clamps to the available pane width"
+        );
+        assert_eq!(
+            SessionTitleMenuAction::ALL.last(),
+            Some(&SessionTitleMenuAction::CopyId)
+        );
+        assert_eq!(
+            ServiceTitleMenuAction::ALL.last(),
+            Some(&ServiceTitleMenuAction::CopyId)
         );
     }
 

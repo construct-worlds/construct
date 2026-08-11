@@ -7,7 +7,7 @@ Scope: Copy the exact stable identity of a selected session, project, or service
 
 ## Decision
 
-The TUI exposes one copy-ID action for every selectable fleet object. It copies the raw session id for a session, the raw project id for a project, and the stable service name for a service. The action is available as `/copy-id`; pane title menus expose it where those menus already exist and show the exact identity in the action label before it is copied.
+The TUI exposes one copy-ID action for every selectable fleet object. It copies the raw session id for a session, the raw project id for a project, and the stable service name for a service. The action is available as `/copy-id`; pane title menus expose it as the final action where those menus already exist and show the exact identity in the label before it is copied.
 
 Archived disclosure rows do not invent an identity. Invoking the action without a session, project, or service selected leaves the clipboard unchanged and reports that an identifiable fleet item must be selected.
 
