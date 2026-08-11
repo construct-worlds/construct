@@ -42625,10 +42625,10 @@ mod tests {
         );
         assert!(text.contains("demo-conversation"));
         assert!(
-            text.contains("170k tok"),
-            "the graph legend should include routed descendants without double-counting cached input:\n{text}"
+            text.contains("opus") && text.contains("gpt") && text.contains("helper-model"),
+            "the graph legend should name every model used by this service:\n{text}"
         );
-        assert!(!text.contains("1.0M tok"), "another service leaked in:\n{text}");
+        assert!(!text.contains("reviewer-model"), "another service leaked in:\n{text}");
         let (meter_service, graph) = app
             .layout
             .service_token_graphs
@@ -42636,6 +42636,19 @@ mod tests {
             .cloned()
             .expect("the service view should paint a token graph");
         assert_eq!(meter_service, "assistant");
+        let meter = app.service_token_meters.get("assistant").unwrap();
+        let entries = meter.legend(graph.width as usize);
+        let legend_y = graph.y + graph.height;
+        assert_eq!(
+            buffer[(graph.x, legend_y)].fg,
+            entries[0].dot_color,
+            "the service legend dot should use the operator legend's cache tone"
+        );
+        assert_eq!(
+            buffer[(graph.x + 2, legend_y)].fg,
+            entries[0].color,
+            "the service legend text should use the operator legend's model color"
+        );
         let painted = (graph.y..graph.y + graph.height)
             .flat_map(|y| (graph.x..graph.x + graph.width).map(move |x| (x, y)))
             .any(|(x, y)| {

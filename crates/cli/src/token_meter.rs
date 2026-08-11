@@ -627,7 +627,8 @@ impl TokenMeter {
         named
     }
 
-    /// Total tokens across the visible window — the header readout.
+    /// Total tokens across a visible window, used by accounting tests.
+    #[cfg(test)]
     pub fn window_total(&self, width: usize) -> u64 {
         self.window(width)
             .fold(0u64, |acc, b| acc.saturating_add(b.total()))

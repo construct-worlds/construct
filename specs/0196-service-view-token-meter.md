@@ -13,7 +13,9 @@ compute-time observations feed the service meter even while its view is
 closed, so opening the service reveals activity the TUI has already observed.
 
 The graph keeps the shared meter semantics: time buckets, stacked model bands,
-cache-served shading, compact totals and rates, and per-column hover detail.
+cache-served shading, and per-column hover detail. Its legend uses the same
+colored model names and dots, equal-width column layout, per-model rates,
+overflow count, and right-aligned summed rate as the operator-session graph.
 Cached input remains a subset of input rather than an additional token count.
 When no usage has been observed, the meter region states that quietly. A short
 pane omits the graph to preserve usable room for service fields and rows.
