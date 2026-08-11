@@ -1462,10 +1462,17 @@ pub(crate) async fn dispatch(
     });
     dispatch_entry!(ipc_method::SERVICE_MOVE, {
         let p = params!(req, construct_protocol::ServiceMoveParams);
+        // The step is computed against the same top-level flow the list
+        // clients render, so the move needs the fleet's sessions and
+        // projects, not just the service definitions.
+        let sessions = manager.list().await;
+        let groups = manager.list_groups().await;
         match crate::service::move_definition(
             &construct_protocol::paths::Paths::discover().services_dir(),
             &p.name,
             p.direction,
+            &sessions,
+            &groups,
         ) {
             Ok(()) => Response::ok(req.id.clone(), serde_json::Value::Null),
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),

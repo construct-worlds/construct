@@ -48,6 +48,10 @@ pub struct ServiceConfig {
     /// the only one who can decide.
     #[serde(default)]
     pub approval_timeout_secs: u64,
+    /// Slot in the top-level list flow when the row has been moved out of the
+    /// leading service block (display metadata only; `None` = leading block).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<construct_protocol::ServicePlacement>,
     #[serde(default)]
     pub sandbox: ServiceSandboxConfig,
     #[serde(default)]
@@ -365,6 +369,10 @@ pub fn put_definition(
             .as_ref()
             .map(|config| config.approval_timeout_secs)
             .unwrap_or_default(),
+        // Like `position`, a row's slot in the list is not part of the edit
+        // surface: an unrelated field change must not snap the row back to
+        // the leading service block.
+        placement: existing.as_ref().and_then(|config| config.placement),
         sandbox,
         channels,
     };
@@ -375,41 +383,190 @@ pub fn put_definition(
     })
 }
 
-/// Move one service past its adjacent service row. Legacy definitions may all
-/// have position zero, so every successful move first materializes the full
-/// deterministic `(position, name)` order as contiguous persisted positions.
+/// One row of the top-level list flow a service row can step across: another
+/// service, an ungrouped session, or a whole project block (services never
+/// nest inside a project, so a project is a single hop).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FlowRow {
+    Service(String),
+    Session { position: i64 },
+    Project { position: i64 },
+}
+
+/// Whether a session renders as a top-level ungrouped row in every
+/// first-party list client. Routed service sessions nest under their service
+/// row, so they are matched by title key the same way clients match them.
+fn is_top_level_ungrouped_session(
+    session: &construct_protocol::SessionSummary,
+    service_names: &[&str],
+) -> bool {
+    session.kind == construct_protocol::SessionKind::User
+        && !session.archived
+        && session.group_id.is_none()
+        && session.forked_from.is_none()
+        && !service_names.iter().any(|name| {
+            let Some(title) = session.title.as_deref() else {
+                return false;
+            };
+            let prefix = format!("service:{name}");
+            title == prefix || title.starts_with(&format!("{prefix}:"))
+        })
+}
+
+/// Current top-level display flow: the leading service block, then the
+/// ungrouped-session run with placed services interleaved, then the projects
+/// run likewise. Mirrors the order every list client renders.
+fn top_level_flow(
+    services: &BTreeMap<String, ServiceConfig>,
+    sessions: &[construct_protocol::SessionSummary],
+    groups: &[construct_protocol::GroupSummary],
+) -> Vec<FlowRow> {
+    use construct_protocol::ServicePlacementRegion as Region;
+
+    let service_order = |name: &str| {
+        let config = &services[name];
+        (config.position, name.to_string())
+    };
+    let mut block: Vec<&String> = services
+        .iter()
+        .filter(|(_, config)| config.placement.is_none())
+        .map(|(name, _)| name)
+        .collect();
+    block.sort_by_key(|name| service_order(name));
+
+    let service_names: Vec<&str> = services.keys().map(String::as_str).collect();
+    let mut ungrouped: Vec<&construct_protocol::SessionSummary> = sessions
+        .iter()
+        .filter(|session| is_top_level_ungrouped_session(session, &service_names))
+        .collect();
+    ungrouped.sort_by(|a, b| {
+        a.position
+            .cmp(&b.position)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    });
+    let mut projects: Vec<&construct_protocol::GroupSummary> = groups.iter().collect();
+    projects.sort_by_key(|group| group.position);
+
+    // Placed services merge into a region by (position, row-first, service
+    // order): at equal positions the session/project row they were dropped
+    // after renders first.
+    let placed_in = |region: Region| {
+        let mut placed: Vec<(&String, i64)> = services
+            .iter()
+            .filter_map(|(name, config)| {
+                config
+                    .placement
+                    .filter(|placement| placement.region == region)
+                    .map(|placement| (name, placement.position))
+            })
+            .collect();
+        placed.sort_by_key(|(name, position)| (*position, service_order(name)));
+        placed
+    };
+
+    let mut rows: Vec<FlowRow> = block
+        .into_iter()
+        .map(|name| FlowRow::Service(name.clone()))
+        .collect();
+    let mut sessions_region = placed_in(Region::Sessions).into_iter().peekable();
+    for session in ungrouped {
+        while sessions_region
+            .peek()
+            .is_some_and(|(_, position)| *position < session.position)
+        {
+            let (name, _) = sessions_region.next().unwrap();
+            rows.push(FlowRow::Service(name.clone()));
+        }
+        rows.push(FlowRow::Session {
+            position: session.position,
+        });
+    }
+    for (name, _) in sessions_region {
+        rows.push(FlowRow::Service(name.clone()));
+    }
+    let mut projects_region = placed_in(Region::Projects).into_iter().peekable();
+    for project in projects {
+        while projects_region
+            .peek()
+            .is_some_and(|(_, position)| *position < project.position)
+        {
+            let (name, _) = projects_region.next().unwrap();
+            rows.push(FlowRow::Service(name.clone()));
+        }
+        rows.push(FlowRow::Project {
+            position: project.position,
+        });
+    }
+    for (name, _) in projects_region {
+        rows.push(FlowRow::Service(name.clone()));
+    }
+    rows
+}
+
+/// Move one service row past its adjacent top-level row: another service, an
+/// ungrouped session, or a whole project block. The step is applied to the
+/// current display flow, then every service's persisted order is re-derived
+/// from the result — contiguous service positions in flow order, and each
+/// interleaved service re-pinned to the position value of the session or
+/// project row it now renders after (`None` placement = leading block). That
+/// normalization also heals placements whose pinned row has since vanished.
 pub fn move_definition(
     dir: &std::path::Path,
     name: &str,
     direction: construct_protocol::MoveDirection,
+    sessions: &[construct_protocol::SessionSummary],
+    groups: &[construct_protocol::GroupSummary],
 ) -> Result<()> {
+    use construct_protocol::ServicePlacement;
+    use construct_protocol::ServicePlacementRegion as Region;
+
     let mut services = load_definitions(dir)?;
-    let mut ordered: Vec<String> = services.keys().cloned().collect();
-    ordered.sort_by(|a, b| {
-        services[a]
-            .position
-            .cmp(&services[b].position)
-            .then_with(|| a.cmp(b))
-    });
-    let index = ordered
+    if !services.contains_key(name) {
+        return Err(anyhow!("service not found: {name}"));
+    }
+    let mut rows = top_level_flow(&services, sessions, groups);
+    let index = rows
         .iter()
-        .position(|candidate| candidate == name)
-        .ok_or_else(|| anyhow!("service not found: {name}"))?;
+        .position(|row| matches!(row, FlowRow::Service(candidate) if candidate == name))
+        .expect("every service has a flow row");
     let neighbor = match direction {
         construct_protocol::MoveDirection::Up if index > 0 => index - 1,
-        construct_protocol::MoveDirection::Down if index + 1 < ordered.len() => index + 1,
+        construct_protocol::MoveDirection::Down if index + 1 < rows.len() => index + 1,
         _ => return Ok(()),
     };
-    ordered.swap(index, neighbor);
+    rows.swap(index, neighbor);
 
-    for (position, service_name) in ordered.into_iter().enumerate() {
-        let config = services
-            .get_mut(&service_name)
-            .ok_or_else(|| anyhow!("service disappeared while reordering: {service_name}"))?;
-        let position = position as u64;
-        if config.position != position {
-            config.position = position;
-            write_definition(dir, &service_name, config)?;
+    // Re-derive persisted state from the desired order. A service row's
+    // placement is the position value of the nearest preceding session or
+    // project row; with none it belongs to the leading block.
+    let mut preceding: Option<ServicePlacement> = None;
+    let mut next_position: u64 = 0;
+    for row in &rows {
+        match row {
+            FlowRow::Session { position } => {
+                preceding = Some(ServicePlacement {
+                    region: Region::Sessions,
+                    position: *position,
+                });
+            }
+            FlowRow::Project { position } => {
+                preceding = Some(ServicePlacement {
+                    region: Region::Projects,
+                    position: *position,
+                });
+            }
+            FlowRow::Service(service_name) => {
+                let config = services
+                    .get_mut(service_name)
+                    .ok_or_else(|| anyhow!("service disappeared while reordering: {service_name}"))?;
+                let position = next_position;
+                next_position += 1;
+                if config.position != position || config.placement != preceding {
+                    config.position = position;
+                    config.placement = preceding;
+                    write_definition(dir, service_name, config)?;
+                }
+            }
         }
     }
     Ok(())
@@ -981,6 +1138,7 @@ fn summary(name: String, config: &ServiceConfig) -> construct_protocol::ServiceS
     construct_protocol::ServiceSummary {
         name,
         position: config.position,
+        placement: config.placement,
         instruction: config.instruction.clone(),
         harness: config.harness.clone(),
         model: config.model.clone(),
@@ -1155,6 +1313,7 @@ mod tests {
     fn config_with_channel(token: &str, enabled: bool, paused: bool) -> ServiceConfig {
         ServiceConfig {
             position: 0,
+            placement: None,
             instruction: String::new(),
             harness: "smith".into(),
             model: None,
@@ -1452,6 +1611,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = ServiceConfig {
             position: 0,
+            placement: None,
             instruction: "hi".into(),
             harness: "smith".into(),
             model: None,
@@ -1474,6 +1634,7 @@ mod tests {
                 service: construct_protocol::ServiceSummary {
                     name: "svc".into(),
                     position: 0,
+                    placement: None,
                     instruction: "changed".into(),
                     harness: "smith".into(),
                     model: None,
@@ -1664,7 +1825,14 @@ mod tests {
         };
         assert_eq!(names(), ["alpha", "bravo", "charlie"]);
 
-        move_definition(dir.path(), "charlie", construct_protocol::MoveDirection::Up).unwrap();
+        move_definition(
+            dir.path(),
+            "charlie",
+            construct_protocol::MoveDirection::Up,
+            &[],
+            &[],
+        )
+        .unwrap();
         assert_eq!(names(), ["alpha", "charlie", "bravo"]);
         assert_eq!(
             list_summaries(dir.path())
@@ -1684,6 +1852,225 @@ mod tests {
         )
         .unwrap();
         assert_eq!(names(), ["alpha", "charlie", "bravo"]);
+    }
+
+    fn flow_session(id: &str, position: i64) -> construct_protocol::SessionSummary {
+        construct_protocol::SessionSummary {
+            id: id.to_string(),
+            harness: "smith".to_string(),
+            cwd: "/tmp".to_string(),
+            title: None,
+            auto_title_pending: false,
+            state: construct_protocol::SessionState::Running,
+            created_at: "2026-06-17T00:00:00Z".parse().expect("timestamp"),
+            last_event_at: None,
+            last_message_at: None,
+            cost_usd: None,
+            model: None,
+            effort: None,
+            route: None,
+            route_capable: false,
+            worktree: None,
+            pending_input: false,
+            last_prompt: None,
+            last_message_role: None,
+            last_message: None,
+            last_error: None,
+            event_count: 0,
+            has_pty: true,
+            mode: Some("interactive".to_string()),
+            pinned: false,
+            position,
+            group_id: None,
+            parent_session_id: None,
+            native_subagent: None,
+            last_pty_at_ms: None,
+            busy_ms: 0,
+            busy_running_since_ms: None,
+            message_count: 0,
+            tokens: Default::default(),
+            context_used: None,
+            context_window: None,
+            context_segments: Vec::new(),
+            approval_mode: construct_protocol::ApprovalMode::Manual,
+            kind: construct_protocol::SessionKind::User,
+            archived: false,
+            operator_loop_disabled: false,
+            needs_attention: false,
+            forked_from: None,
+            merge: None,
+        }
+    }
+
+    fn flow_project(id: &str, position: i64) -> construct_protocol::GroupSummary {
+        construct_protocol::GroupSummary {
+            id: id.to_string(),
+            name: id.to_string(),
+            created_at: "2026-06-17T00:00:00Z".parse().expect("timestamp"),
+            position,
+            collapsed: false,
+        }
+    }
+
+    /// The full display flow, as reconstructed from persisted state, so the
+    /// assertions cover exactly what a list client would render.
+    fn flow_names(
+        dir: &std::path::Path,
+        sessions: &[construct_protocol::SessionSummary],
+        groups: &[construct_protocol::GroupSummary],
+    ) -> Vec<String> {
+        let services = load_definitions(dir).unwrap();
+        super::top_level_flow(&services, sessions, groups)
+            .into_iter()
+            .map(|row| match row {
+                super::FlowRow::Service(name) => format!("svc:{name}"),
+                super::FlowRow::Session { position } => format!("sess@{position}"),
+                super::FlowRow::Project { position } => format!("proj@{position}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn service_reorders_across_sessions_and_projects_at_top_level() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["alpha", "bravo"] {
+            std::fs::write(
+                dir.path().join(format!("{name}.toml")),
+                "harness = \"smith\"\n",
+            )
+            .unwrap();
+        }
+        let sessions = vec![flow_session("s1", 10), flow_session("s2", 20)];
+        let groups = vec![flow_project("p1", 5), flow_project("p2", 6)];
+        let down = |name: &str, sessions: &_, groups: &_| {
+            move_definition(
+                dir.path(),
+                name,
+                construct_protocol::MoveDirection::Down,
+                sessions,
+                groups,
+            )
+            .unwrap()
+        };
+        let up = |name: &str, sessions: &_, groups: &_| {
+            move_definition(
+                dir.path(),
+                name,
+                construct_protocol::MoveDirection::Up,
+                sessions,
+                groups,
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            flow_names(dir.path(), &sessions, &groups),
+            ["svc:alpha", "svc:bravo", "sess@10", "sess@20", "proj@5", "proj@6"]
+        );
+
+        // Walk bravo all the way to the bottom: past each session, then over
+        // each whole project block.
+        down("bravo", &sessions, &groups);
+        assert_eq!(
+            flow_names(dir.path(), &sessions, &groups),
+            ["svc:alpha", "sess@10", "svc:bravo", "sess@20", "proj@5", "proj@6"]
+        );
+        down("bravo", &sessions, &groups);
+        down("bravo", &sessions, &groups);
+        assert_eq!(
+            flow_names(dir.path(), &sessions, &groups),
+            ["svc:alpha", "sess@10", "sess@20", "proj@5", "svc:bravo", "proj@6"]
+        );
+        down("bravo", &sessions, &groups);
+        assert_eq!(
+            flow_names(dir.path(), &sessions, &groups),
+            ["svc:alpha", "sess@10", "sess@20", "proj@5", "proj@6", "svc:bravo"]
+        );
+        // At the bottom edge the move is a no-op.
+        down("bravo", &sessions, &groups);
+        assert_eq!(
+            flow_names(dir.path(), &sessions, &groups),
+            ["svc:alpha", "sess@10", "sess@20", "proj@5", "proj@6", "svc:bravo"]
+        );
+
+        // And back up: over the projects, past each session, rejoining the
+        // leading block above alpha only after one more step.
+        up("bravo", &sessions, &groups);
+        up("bravo", &sessions, &groups);
+        up("bravo", &sessions, &groups);
+        assert_eq!(
+            flow_names(dir.path(), &sessions, &groups),
+            ["svc:alpha", "sess@10", "svc:bravo", "sess@20", "proj@5", "proj@6"]
+        );
+        up("bravo", &sessions, &groups);
+        assert_eq!(
+            flow_names(dir.path(), &sessions, &groups),
+            ["svc:alpha", "svc:bravo", "sess@10", "sess@20", "proj@5", "proj@6"]
+        );
+        up("bravo", &sessions, &groups);
+        assert_eq!(
+            flow_names(dir.path(), &sessions, &groups),
+            ["svc:bravo", "svc:alpha", "sess@10", "sess@20", "proj@5", "proj@6"]
+        );
+    }
+
+    #[test]
+    fn placed_service_stays_put_when_its_pinned_neighbor_vanishes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.toml"), "harness = \"smith\"\n").unwrap();
+        let sessions = vec![
+            flow_session("s1", 10),
+            flow_session("s2", 20),
+            flow_session("s3", 30),
+        ];
+        for _ in 0..2 {
+            move_definition(
+                dir.path(),
+                "alpha",
+                construct_protocol::MoveDirection::Down,
+                &sessions,
+                &[],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            flow_names(dir.path(), &sessions, &[]),
+            ["sess@10", "sess@20", "svc:alpha", "sess@30"]
+        );
+
+        // The row alpha was dropped after disappears (archived / deleted /
+        // moved into a project): alpha keeps its slot between the remaining
+        // neighbors instead of snapping back to the leading block.
+        let remaining = vec![flow_session("s1", 10), flow_session("s3", 30)];
+        assert_eq!(
+            flow_names(dir.path(), &remaining, &[]),
+            ["sess@10", "svc:alpha", "sess@30"]
+        );
+    }
+
+    #[test]
+    fn routed_service_sessions_are_not_reorder_neighbors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.toml"), "harness = \"smith\"\n").unwrap();
+        let mut routed = flow_session("routed", 10);
+        routed.title = Some("service:alpha:key".to_string());
+        let plain = flow_session("s1", 20);
+        let sessions = vec![routed, plain];
+
+        move_definition(
+            dir.path(),
+            "alpha",
+            construct_protocol::MoveDirection::Down,
+            &sessions,
+            &[],
+        )
+        .unwrap();
+        // The routed session nests under the service row in every client, so
+        // one step down lands past the first *top-level* session.
+        assert_eq!(
+            flow_names(dir.path(), &sessions, &[]),
+            ["sess@20", "svc:alpha"]
+        );
     }
 
     #[test]
@@ -1736,6 +2123,7 @@ mod tests {
         let service = construct_protocol::ServiceSummary {
             name: "alerts".into(),
             position: 0,
+            placement: None,
             instruction: "triage".into(),
             harness: "smith".into(),
             model: None,
@@ -1825,6 +2213,7 @@ mod tests {
                 service: construct_protocol::ServiceSummary {
                     name: "alerts".into(),
                     position: 0,
+                    placement: None,
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,
@@ -1897,6 +2286,7 @@ mod tests {
                 service: construct_protocol::ServiceSummary {
                     name: "backup".into(),
                     position: 0,
+                    placement: None,
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,
@@ -1966,6 +2356,7 @@ mod tests {
                     service: construct_protocol::ServiceSummary {
                         name: name.into(),
                         position: 0,
+                        placement: None,
                         instruction: String::new(),
                         harness: "smith".into(),
                         model: None,
@@ -2055,6 +2446,7 @@ mod tests {
                 service: construct_protocol::ServiceSummary {
                     name: "alerts".into(),
                     position: 0,
+                    placement: None,
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,
@@ -2315,6 +2707,7 @@ mod tests {
                 service: construct_protocol::ServiceSummary {
                     name: "chat".into(),
                     position: 0,
+                    placement: None,
                     instruction: String::new(),
                     harness: "smith".into(),
                     model: None,

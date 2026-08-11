@@ -8403,7 +8403,7 @@ impl App {
             );
         };
 
-        for service in &services {
+        let push_service = |out: &mut Vec<ListItem>, service: &construct_protocol::ServiceSummary| {
             let mut routed: Vec<&SessionSummary> = self
                 .sessions
                 .iter()
@@ -8431,9 +8431,42 @@ impl App {
             });
             if sessions_expanded {
                 for session in routed {
-                    push_session(&mut out, session, 1);
+                    push_session(out, session, 1);
                 }
             }
+        };
+
+        // Services without a placement form the leading block; placed ones
+        // are spliced into the session/project flow below, pinned to the
+        // position value of the row they were dropped after (row first on
+        // ties, then service order — the same rule the daemon's reorder and
+        // the web client use).
+        let placed_in = |region: construct_protocol::ServicePlacementRegion| {
+            let mut placed: Vec<(&construct_protocol::ServiceSummary, i64)> = services
+                .iter()
+                .filter_map(|service| {
+                    service
+                        .placement
+                        .filter(|placement| placement.region == region)
+                        .map(|placement| (service, placement.position))
+                })
+                .collect();
+            placed.sort_by(|(a, a_pos), (b, b_pos)| {
+                a_pos
+                    .cmp(b_pos)
+                    .then_with(|| a.position.cmp(&b.position))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+            placed
+        };
+        let mut sessions_region = placed_in(construct_protocol::ServicePlacementRegion::Sessions)
+            .into_iter()
+            .peekable();
+        let mut projects_region = placed_in(construct_protocol::ServicePlacementRegion::Projects)
+            .into_iter()
+            .peekable();
+        for service in services.iter().filter(|s| s.placement.is_none()) {
+            push_service(&mut out, service);
         }
 
         let mut ungrouped: Vec<&SessionSummary> = self
@@ -8462,7 +8495,19 @@ impl App {
         let (ungrouped_active, ungrouped_archived): (Vec<&SessionSummary>, Vec<&SessionSummary>) =
             ungrouped.into_iter().partition(|s| !s.archived);
         for s in ungrouped_active {
+            while sessions_region
+                .peek()
+                .is_some_and(|(_, position)| *position < s.position)
+            {
+                let (service, _) = sessions_region.next().unwrap();
+                push_service(&mut out, service);
+            }
             push_session(&mut out, s, 0);
+        }
+        // Services placed below every ungrouped session still belong to the
+        // session run: they render above its trailing "N archived" row.
+        for (service, _) in sessions_region {
+            push_service(&mut out, service);
         }
         if !ungrouped_archived.is_empty() {
             let expanded = self.show_archived_ungrouped;
@@ -8482,6 +8527,13 @@ impl App {
         let mut groups: Vec<&GroupSummary> = self.groups.iter().collect();
         groups.sort_by_key(|g| g.position);
         for g in groups {
+            while projects_region
+                .peek()
+                .is_some_and(|(_, position)| *position < g.position)
+            {
+                let (service, _) = projects_region.next().unwrap();
+                push_service(&mut out, service);
+            }
             let mut members: Vec<&SessionSummary> = self
                 .sessions
                 .iter()
@@ -8530,6 +8582,9 @@ impl App {
                     }
                 }
             }
+        }
+        for (service, _) in projects_region {
+            push_service(&mut out, service);
         }
         out
     }
@@ -41976,6 +42031,7 @@ mod tests {
         construct_protocol::ServiceSummary {
             name: name.to_string(),
             position: 0,
+            placement: None,
             instruction: "Answer briefly.".to_string(),
             harness: "smith".to_string(),
             model: Some("test-model".to_string()),
@@ -42167,7 +42223,9 @@ mod tests {
             Some(ServiceDialogMode::Edit)
         ));
         assert_eq!(app.selection, Selection::Service("assistant".into()));
-        assert_eq!(app.focus, PaneFocus::View);
+        // Like a session-row click, the sidebar keeps keyboard focus (and the
+        // focused selection highlight); the prepared editor is one Tab away.
+        assert_eq!(app.focus, PaneFocus::List);
         assert_eq!(
             app.service_dialog.as_ref().map(|dialog| dialog.focus),
             Some(ServiceDialogFocus::Field(1))
@@ -44052,6 +44110,68 @@ mod tests {
             .await;
         assert_eq!(app.selection, Selection::Session("s1".into()));
         assert_eq!(app.focus, PaneFocus::List);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn placed_services_interleave_with_sessions_and_projects() {
+        let (mut app, _dir, server) = captured_app().await;
+        let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
+        s1.id = "s1".into();
+        s1.position = 10;
+        let mut s2 = summary_with_kind(construct_protocol::SessionKind::User);
+        s2.id = "s2".into();
+        s2.position = 20;
+        app.sessions = vec![s1, s2];
+        app.groups = vec![
+            GroupSummary {
+                id: "g1".into(),
+                name: "g1".into(),
+                created_at: chrono::Utc::now(),
+                position: 5,
+                collapsed: true,
+            },
+            GroupSummary {
+                id: "g2".into(),
+                name: "g2".into(),
+                created_at: chrono::Utc::now(),
+                position: 6,
+                collapsed: true,
+            },
+        ];
+        let mut alpha = service_summary_for_test("alpha");
+        alpha.position = 0;
+        let mut bravo = service_summary_for_test("bravo");
+        bravo.position = 1;
+        bravo.placement = Some(construct_protocol::ServicePlacement {
+            region: construct_protocol::ServicePlacementRegion::Sessions,
+            position: 10,
+        });
+        let mut charlie = service_summary_for_test("charlie");
+        charlie.position = 2;
+        charlie.placement = Some(construct_protocol::ServicePlacement {
+            region: construct_protocol::ServicePlacementRegion::Projects,
+            position: 5,
+        });
+        app.services = vec![alpha, bravo, charlie];
+
+        let labels: Vec<String> = app
+            .list_items()
+            .iter()
+            .map(|item| match item {
+                ListItem::Service { summary, .. } => format!("svc:{}", summary.name),
+                ListItem::Session { summary, .. } => summary.id.clone(),
+                ListItem::GroupHeader { group, .. } => format!("proj:{}", group.id),
+                ListItem::ArchivedRow { .. } => "archived".into(),
+            })
+            .collect();
+        // The unplaced service leads; a service pinned at a session's
+        // position renders right after that session; a service pinned at a
+        // project's position renders after that whole project block.
+        assert_eq!(
+            labels,
+            ["svc:alpha", "s1", "svc:bravo", "s2", "proj:g1", "svc:charlie", "proj:g2"]
+        );
         server.abort();
     }
 

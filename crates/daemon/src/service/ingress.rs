@@ -1095,6 +1095,7 @@ pub(super) mod tests {
             "svc".to_string(),
             ServiceConfig {
                 position: 0,
+                placement: None,
                 instruction: String::new(),
                 harness: "codex".into(),
                 model: None,
@@ -1597,6 +1598,7 @@ pub(super) mod tests {
     fn interactive_service_mcp_profile_is_least_privilege_unless_granted() {
         let mut config = ServiceConfig {
             position: 0,
+            placement: None,
             instruction: String::new(),
             harness: "codex".into(),
             model: None,

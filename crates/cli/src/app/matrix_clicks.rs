@@ -455,7 +455,11 @@ impl App {
                     }
                     return;
                 }
-                self.select_service(summary.name.clone());
+                // From-list variant: like a session-row click, selecting a
+                // service with the mouse must leave keyboard focus (and the
+                // focused selection highlight) on the list rows rather than
+                // handing focus to the service view.
+                self.select_service_from_list(summary.name.clone());
                 self.sync_active_window_selection();
             }
             ListItem::Session { summary, .. } => {

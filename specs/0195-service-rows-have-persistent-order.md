@@ -1,9 +1,13 @@
 # 0195-service-rows-have-persistent-order
 
-Status: accepted
+Status: superseded by 0198-services-reorder-across-the-top-level
 Date: 2026-08-05
 Area: ux
 Scope: Ordering and reordering of service rows in the unified session list.
+
+> Superseded 2026-08-11: services still have a persistent user-controlled
+> order, but they are no longer confined to a distinct region — a service row
+> now reorders across the whole top level (see 0198).
 
 ## Decision
 
