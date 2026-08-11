@@ -669,6 +669,17 @@ impl Selection {
             None
         }
     }
+    /// The stable fleet identity represented by this selection. Service
+    /// names are service ids in the protocol; archived disclosure rows are
+    /// navigation controls and therefore have no identity of their own.
+    pub fn fleet_identity(&self) -> Option<(&'static str, &str)> {
+        match self {
+            Self::Session(id) => Some(("session", id)),
+            Self::Group(id) => Some(("project", id)),
+            Self::Service(name) => Some(("service", name)),
+            Self::None | Self::ArchivedRow(_) => None,
+        }
+    }
     pub fn archive_section(&self) -> Option<&ArchiveSection> {
         if let Self::ArchivedRow(section) = self {
             Some(section)
@@ -1491,6 +1502,7 @@ pub enum SessionTitleMenuAction {
     /// Placed directly below Archive so the close-out actions group together.
     Merge,
     Delete,
+    CopyId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1499,18 +1511,21 @@ pub enum ServiceTitleMenuAction {
     SplitVertical,
     CloseSplit,
     Delete,
+    CopyId,
 }
 
 impl ServiceTitleMenuAction {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::SplitHorizontal,
         Self::SplitVertical,
         Self::CloseSplit,
         Self::Delete,
+        Self::CopyId,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::CopyId => "copy id",
             Self::SplitHorizontal => "split horizontal",
             Self::SplitVertical => "split vertical",
             Self::CloseSplit => "close split",
@@ -1520,7 +1535,7 @@ impl ServiceTitleMenuAction {
 }
 
 impl SessionTitleMenuAction {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Rename,
         Self::Fork,
         Self::PlaybookTerminalMode,
@@ -1530,11 +1545,13 @@ impl SessionTitleMenuAction {
         Self::Archive,
         Self::Merge,
         Self::Delete,
+        Self::CopyId,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Rename => "rename",
+            Self::CopyId => "copy id",
             Self::Fork => "fork",
             Self::PlaybookTerminalMode => "playbook mode",
             Self::SplitHorizontal => "split horizontal",
@@ -1545,6 +1562,17 @@ impl SessionTitleMenuAction {
             Self::Delete => "delete",
         }
     }
+}
+
+fn fleet_title_menu_width(identity: &str, view_width: u16) -> u16 {
+    const BASE_WIDTH: u16 = 34;
+    let label = format!("copy id ({identity})");
+    let desired = unicode_width::UnicodeWidthStr::width(label.as_str())
+        .saturating_add(2)
+        .min(u16::MAX as usize) as u16;
+    BASE_WIDTH
+        .max(desired)
+        .min(view_width.saturating_sub(2).max(1))
 }
 
 #[derive(Debug, Clone)]
@@ -13066,6 +13094,28 @@ impl App {
             && live
     }
 
+    fn copy_selected_id(&mut self) {
+        self.copy_selected_id_with(copy_to_clipboard);
+    }
+
+    fn copy_selected_id_with<F>(&mut self, copy: F)
+    where
+        F: FnOnce(&str) -> Result<ClipboardCopyOutcome>,
+    {
+        let Some((noun, value)) = self.selection.fleet_identity() else {
+            self.set_status("copy id: select a session, project, or service".to_string());
+            return;
+        };
+        let value = value.to_string();
+        match copy(&value) {
+            Ok(outcome) => self.set_status(format!(
+                "{noun} id · {}",
+                outcome.status(value.chars().count())
+            )),
+            Err(error) => self.set_status(format!("copy {noun} id failed: {error}")),
+        }
+    }
+
     async fn run_action(&mut self, action: KeyAction) {
         use KeyAction::*;
         // Tutorial hook (a) — spec 0077: `run_action` is the one chokepoint
@@ -13234,6 +13284,7 @@ impl App {
                 // The "N archived" disclosure row has no name to rename.
                 Selection::ArchivedRow(_) => {}
             },
+            CopySelectedId => self.copy_selected_id(),
             OpenDeleteConfirm => match self.selection.clone() {
                 Selection::Session(id) => {
                     // The `[d]`/`[a]`/`[m]`/`[N]` choice cluster and its
@@ -14310,6 +14361,7 @@ impl App {
             "send" | "send-input" => self.run_action(KeyAction::OpenSendInput).await,
             "delete" | "kill" | "rm" => self.run_action(KeyAction::OpenDeleteConfirm).await,
             "rename" => self.run_action(KeyAction::OpenRename).await,
+            "copy-id" => self.run_action(KeyAction::CopySelectedId).await,
             "fork" => self.run_action(KeyAction::OpenFork).await,
             "playbook" | "edit-playbook" => self.run_action(KeyAction::OpenPlaybook).await,
             "zoom" | "fullscreen" => self.run_action(KeyAction::ToggleZoom).await,
@@ -16765,6 +16817,50 @@ mod tests {
             ClipboardCopyOutcome::Requested(Osc52Mode::Tmux).status(7),
             "sent copy request for 7 chars via OSC 52 tmux"
         );
+    }
+
+    #[tokio::test]
+    async fn copy_selected_id_uses_exact_typed_fleet_identity() {
+        let (mut app, _dir, server) = captured_app().await;
+        for (selection, expected, noun) in [
+            (
+                Selection::Session("session-full-id".into()),
+                "session-full-id",
+                "session",
+            ),
+            (
+                Selection::Group("project-full-id".into()),
+                "project-full-id",
+                "project",
+            ),
+            (
+                Selection::Service("service-name".into()),
+                "service-name",
+                "service",
+            ),
+        ] {
+            app.selection = selection;
+            let mut copied = None;
+            app.copy_selected_id_with(|value| {
+                copied = Some(value.to_string());
+                Ok(ClipboardCopyOutcome::Copied)
+            });
+            assert_eq!(copied.as_deref(), Some(expected));
+            let expected_status =
+                format!("{noun} id · copied {} chars", expected.chars().count());
+            assert_eq!(
+                app.status.as_ref().map(|(message, _)| message.as_str()),
+                Some(expected_status.as_str())
+            );
+        }
+
+        app.selection = Selection::None;
+        app.copy_selected_id_with(|_| panic!("no selection must not touch the clipboard"));
+        assert_eq!(
+            app.status.as_ref().map(|(message, _)| message.as_str()),
+            Some("copy id: select a session, project, or service")
+        );
+        server.abort();
     }
 
     #[test]
@@ -31851,6 +31947,13 @@ mod tests {
             .session_title_menu
             .clone()
             .expect("clicking the actions button opens the session menu");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render open menu");
+        let menu_text = rendered_text(term.backend().buffer());
+        assert!(
+            menu_text.contains("copy id (s1)"),
+            "session action should preview the exact id: {menu_text}"
+        );
 
         // Click the "split horizontal" row, which sits over the pane content the
         // child is tracking. With the fix it dispatches; without it, the click
@@ -31929,6 +32032,30 @@ mod tests {
         assert_eq!(
             fork_menu.item_at(area.x + 2, merge_row),
             Some(SessionTitleMenuAction::Merge)
+        );
+    }
+
+    #[test]
+    fn fleet_title_menu_expands_to_show_full_copy_identity() {
+        let identity = "s18abe9381bf74f85aa7282940c695fc7";
+        let label = format!("copy id ({identity})");
+        assert_eq!(
+            fleet_title_menu_width(identity, 120) as usize,
+            label.len() + 2,
+            "the bordered menu should fit the complete copy label"
+        );
+        assert_eq!(
+            fleet_title_menu_width(identity, 20),
+            18,
+            "the menu still clamps to the available pane width"
+        );
+        assert_eq!(
+            SessionTitleMenuAction::ALL.last(),
+            Some(&SessionTitleMenuAction::CopyId)
+        );
+        assert_eq!(
+            ServiceTitleMenuAction::ALL.last(),
+            Some(&ServiceTitleMenuAction::CopyId)
         );
     }
 
@@ -42910,6 +43037,10 @@ mod tests {
         for action in ServiceTitleMenuAction::ALL {
             assert!(menu_text.contains(action.label()));
         }
+        assert!(
+            menu_text.contains("copy id (assistant)"),
+            "service action should preview the exact id: {menu_text}"
+        );
         assert!(app.service_title_menu.is_some());
         server.abort();
     }

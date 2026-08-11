@@ -33,6 +33,7 @@ pub enum CommandId {
     Agentd,
     Border,
     Compact,
+    CopyId,
     Help,
     Loop,
     Model,
@@ -246,6 +247,18 @@ pub const COMMANDS: &[SlashCommand] = &[
         transcript: TranscriptPolicy::AuditOnly,
         render: Render::SystemNote,
         help: "Rename the focused session",
+        in_popup: true,
+    },
+    SlashCommand {
+        id: CommandId::CopyId,
+        name: "/copy-id",
+        aliases: &[],
+        args: Args::None,
+        routing: Routing::Client,
+        visibility: ModelVisibility::Hidden,
+        transcript: TranscriptPolicy::Omit,
+        render: Render::Hidden,
+        help: "Copy the selected session, project, or service id",
         in_popup: true,
     },
     SlashCommand {
@@ -566,6 +579,14 @@ mod tests {
         assert_eq!(cmd.id, CommandId::Theme);
         assert_eq!(cmd.routing, Routing::Client);
         assert!(popup_names().any(|name| name == "/theme"));
+    }
+
+    #[test]
+    fn copy_id_has_one_spelling() {
+        let cmd = SlashCommand::resolve("/copy-id").expect("/copy-id command");
+        assert_eq!(cmd.id, CommandId::CopyId);
+        assert!(cmd.aliases.is_empty());
+        assert!(SlashCommand::resolve("/copy-identity").is_none());
     }
 
     #[test]

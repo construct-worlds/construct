@@ -7819,7 +7819,7 @@ fn render_session_title_menu(f: &mut Frame, app: &App) {
             playbook_open,
             terminal_focus,
         );
-        render_session_title_menu_row(f, area, row, label_text, binding, style);
+        render_session_title_menu_row(f, area, row, &label_text, binding, style);
     }
 }
 
@@ -7861,11 +7861,15 @@ fn render_service_title_menu(f: &mut Frame, app: &App) {
         } else {
             Style::default().fg(app.theme.text)
         };
+        let label = match action {
+            ServiceTitleMenuAction::CopyId => format!("copy id ({})", menu.name),
+            _ => action.label().to_string(),
+        };
         render_session_title_menu_row(
             f,
             area,
             row,
-            action.label(),
+            &label,
             service_title_menu_action_binding(app, action),
             style,
         );
@@ -7877,6 +7881,7 @@ fn service_title_menu_action_binding(
     action: ServiceTitleMenuAction,
 ) -> Option<&'static str> {
     match (action, app.profile) {
+        (ServiceTitleMenuAction::CopyId, _) => None,
         (ServiceTitleMenuAction::SplitHorizontal, Profile::Emacs) => Some("C-x 3"),
         (ServiceTitleMenuAction::SplitHorizontal, Profile::Vim) => Some("C-w v"),
         (ServiceTitleMenuAction::SplitVertical, Profile::Emacs) => Some("C-x 2"),
@@ -7929,19 +7934,22 @@ fn session_title_menu_action_label(
     session_id: &str,
     playbook_open: bool,
     terminal_focus: bool,
-) -> (&'static str, Option<&'static str>) {
+) -> (String, Option<&'static str>) {
     let archived = app
         .sessions
         .iter()
         .find(|s| s.id == session_id)
         .is_some_and(|s| s.archived);
     let label = match action {
-        SessionTitleMenuAction::Archive if archived => "unarchive",
+        SessionTitleMenuAction::CopyId => format!("copy id ({session_id})"),
+        SessionTitleMenuAction::Archive if archived => "unarchive".to_string(),
         SessionTitleMenuAction::PlaybookTerminalMode if playbook_open && terminal_focus => {
-            "playbook mode"
+            "playbook mode".to_string()
         }
-        SessionTitleMenuAction::PlaybookTerminalMode if playbook_open => "terminal mode",
-        _ => action.label(),
+        SessionTitleMenuAction::PlaybookTerminalMode if playbook_open => {
+            "terminal mode".to_string()
+        }
+        _ => action.label().to_string(),
     };
     let binding = match (action, app.profile) {
         (SessionTitleMenuAction::Rename, Profile::Emacs) => Some("C-x r"),
@@ -14047,7 +14055,7 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
 
   global
     M-x / C-x x     command palette (C-x x is Meta-free)
-                    palette commands: new fork send delete rename playbook diff border
+                    palette commands: new fork send delete rename copy-id playbook diff border
                                       theme zoom interrupt refresh harnesses configure
                                       paste help
     ?               toggle this help
@@ -14119,7 +14127,7 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
 
   global
     :               command palette
-                    palette commands: new fork send delete rename playbook diff border
+                    palette commands: new fork send delete rename copy-id playbook diff border
                                       theme zoom interrupt refresh harnesses configure
                                       paste help
     A               cycle approval mode

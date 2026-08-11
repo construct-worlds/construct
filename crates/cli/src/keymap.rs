@@ -19,6 +19,10 @@ pub enum KeyAction {
     OpenNewSession,
     OpenDeleteConfirm,
     OpenRename,
+    /// Copy the selected fleet item's stable identity: session id, project id,
+    /// or service name. Intentionally unbound; invoked by `/copy-id` and the
+    /// pane action menus.
+    CopySelectedId,
     /// Open the fork flow for the selected session. When the session has
     /// past user turns, a turn picker comes first (spec 0163) with "now —
     /// fork from the present" preselected, so Enter keeps the head-fork
@@ -647,6 +651,18 @@ mod tests {
             assert_action(&km, vec![ctrl('x'), ch('.')], KeyAction::OpenSuggestions);
             assert_action(&km, vec![ctrl('x'), ctrl('s')], KeyAction::SavePlaybook);
         }
+    }
+
+    #[test]
+    fn copy_selected_id_has_no_dedicated_keybinding() {
+        assert!(matches!(
+            resolve(&default_for(Profile::Emacs), vec![alt('w')]),
+            KeymapResult::Unhandled
+        ));
+        assert!(matches!(
+            resolve(&default_for(Profile::Vim), vec![ch('y')]),
+            KeymapResult::Unhandled
+        ));
     }
 
     #[test]
