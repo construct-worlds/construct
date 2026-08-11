@@ -21,8 +21,10 @@ use unicode_width::UnicodeWidthStr;
 use crate::theme::Theme;
 use crate::token_meter::TokenMeter;
 
-/// Compact meter height when the pane is tall enough.
-pub(crate) const METER_HEIGHT: u16 = 4;
+/// Compact meter height when the pane is tall enough. One row belongs to the
+/// shared legend, leaving four graph rows — roughly 30% taller than the
+/// previous three-row graph while keeping the scoped dashboards compact.
+pub(crate) const METER_HEIGHT: u16 = 5;
 
 /// Rows kept for member cards even when the meter would like more.
 const CARDS_MIN_HEIGHT: u16 = 6;
@@ -1141,6 +1143,7 @@ mod tests {
         let (project, graph) = dash.meter_graph.clone().expect("the meter drew columns");
         assert_eq!(project, "p");
         assert!(graph.width > 0 && graph.height > 0, "{graph:?}");
+        assert_eq!(graph.height, METER_HEIGHT - 1, "one row is the legend");
         assert!(
             graph.y + graph.height < area.y + area.height,
             "the graph rect stops above the legend row: {graph:?}"

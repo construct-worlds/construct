@@ -42636,6 +42636,11 @@ mod tests {
             .cloned()
             .expect("the service view should paint a token graph");
         assert_eq!(meter_service, "assistant");
+        assert_eq!(
+            graph.height,
+            crate::project_dashboard::METER_HEIGHT - 1,
+            "the service graph should use the full scoped meter height"
+        );
         let meter = app.service_token_meters.get("assistant").unwrap();
         let entries = meter.legend(graph.width as usize);
         let legend_y = graph.y + graph.height;
