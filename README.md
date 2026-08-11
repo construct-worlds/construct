@@ -115,7 +115,7 @@ favorite CLI harness command:
 ```sh
 construct new codex
 construct new claude --model opus
-construct new prime-agent
+construct new pi
 construct new muse
 ```
 
