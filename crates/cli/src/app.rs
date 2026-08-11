@@ -5510,15 +5510,22 @@ async fn run_with_socket_initial_selection(
         matrix_panel_mode: persisted.matrix_panel_mode,
         token_meter: {
             let mut meter = crate::token_meter::TokenMeter::new(now);
-            if let Some(history) = token_history {
+            if let Some(history) = token_history.as_ref() {
                 // Ages are measured against the daemon's own clock reading,
                 // not this process's, so the two never have to agree.
                 meter.reserve_history(TOKEN_HISTORY_WINDOW_SECS as u64);
                 meter.seed(
                     history
                         .samples
-                        .into_iter()
-                        .map(|s| (history.now_ms - s.at_ms, s.model, s.tokens, s.cached)),
+                        .iter()
+                        .map(|s| {
+                            (
+                                history.now_ms - s.at_ms,
+                                s.model.clone(),
+                                s.tokens,
+                                s.cached,
+                            )
+                        }),
                 );
             }
             meter
@@ -5541,6 +5548,9 @@ async fn run_with_socket_initial_selection(
         pty_input_errors,
         tutorial: None,
     };
+    if let Some(history) = token_history.as_ref() {
+        app.seed_scoped_token_meters(history, now);
+    }
     if let Some(step) = persisted.tutorial_step {
         app.tutorial_resume(step);
     }
@@ -9667,12 +9677,64 @@ impl App {
             .unwrap_or(Selection::None);
     }
 
-    /// True when the session is currently rendered somewhere on screen:
-    /// a pane of the active window (including splits), the orchestrator
-    /// panel. Used to decide whether a background `Pty` chunk needs an
-    /// immediate full-frame repaint. Conservative — treats the orchestrator
-    /// as always-visible so the gate never drops a needed redraw; the cost
-    /// of an occasional extra paint is far cheaper than missing one.
+    /// Rebuild project- and service-scoped histories from the daemon's fleet
+    /// window. The session id on each sample supplies the missing filter;
+    /// current summaries supply project membership and service ancestry.
+    fn seed_scoped_token_meters(
+        &mut self,
+        history: &construct_protocol::TokenHistoryResult,
+        now: Instant,
+    ) {
+        type SeedSample = (i64, Option<String>, u64, u64);
+
+        let mut project_samples: HashMap<String, Vec<SeedSample>> = HashMap::new();
+        let mut service_samples: HashMap<String, Vec<SeedSample>> = HashMap::new();
+        for sample in &history.samples {
+            let Some(session_id) = sample.session_id.as_deref() else {
+                // An older daemon can still seed the fleet meter, but its
+                // samples predate session attribution on the wire.
+                continue;
+            };
+            let Some(session) = self.sessions.iter().find(|session| session.id == session_id)
+            else {
+                continue;
+            };
+            let seed = (
+                history.now_ms - sample.at_ms,
+                sample.model.clone(),
+                sample.tokens,
+                sample.cached,
+            );
+            if let Some(project_id) = session.group_id.as_ref() {
+                project_samples
+                    .entry(project_id.clone())
+                    .or_default()
+                    .push(seed.clone());
+            }
+            if let Some(service_name) = self.routed_service_name(session) {
+                service_samples
+                    .entry(service_name.to_string())
+                    .or_default()
+                    .push(seed);
+            }
+        }
+
+        for (project_id, samples) in project_samples {
+            let mut meter = crate::token_meter::TokenMeter::new(now);
+            meter.reserve_history(TOKEN_HISTORY_WINDOW_SECS as u64);
+            meter.seed(samples);
+            self.project_dashboard
+                .token_meters
+                .insert(project_id, meter);
+        }
+        for (service_name, samples) in service_samples {
+            let mut meter = crate::token_meter::TokenMeter::new(now);
+            meter.reserve_history(TOKEN_HISTORY_WINDOW_SECS as u64);
+            meter.seed(samples);
+            self.service_token_meters.insert(service_name, meter);
+        }
+    }
+
     /// Bin one session's `Cost` report into the fleet token meter (spec
     /// 0167). Attribution prefers the model the report itself names; when
     /// the harness stated none, the session's currently-tracked model stands
@@ -9785,6 +9847,12 @@ impl App {
         }
     }
 
+    /// True when the session is currently rendered somewhere on screen:
+    /// a pane of the active window (including splits), or the orchestrator
+    /// panel. Used to decide whether a background `Pty` chunk needs an
+    /// immediate full-frame repaint. Conservative — treats the orchestrator
+    /// as always-visible so the gate never drops a needed redraw; the cost
+    /// of an occasional extra paint is far cheaper than missing one.
     fn session_visible_on_screen(&self, id: &str) -> bool {
         if self
             .main_windows
@@ -18717,6 +18785,64 @@ mod tests {
             .expect("the service meter should receive routed activity");
         assert_eq!(meter.window_total(64), 100_000);
         assert_eq!(meter.recent_fleet_rate(), Some(5_000.0));
+    }
+
+    /// A fresh TUI rebuilds scoped graph buckets from the daemon's durable
+    /// fleet window. Session identity is what lets the same samples be
+    /// filtered without leaking unrelated project or service activity.
+    #[tokio::test]
+    async fn scoped_token_meters_seed_from_daemon_history_after_restart() {
+        let (mut app, _dir, _server) = token_meter_app(&[]).await;
+        app.services.push(service_summary_for_test("assistant"));
+
+        app.sessions[0].id = "routed-root".into();
+        app.sessions[0].title = Some("service:assistant:http:conversation".into());
+        app.sessions[0].group_id = Some("project-a".into());
+
+        let mut descendant = summary_with_kind(construct_protocol::SessionKind::User);
+        descendant.id = "descendant".into();
+        descendant.parent_session_id = Some("routed-root".into());
+        descendant.group_id = Some("project-a".into());
+
+        let mut unrelated = summary_with_kind(construct_protocol::SessionKind::User);
+        unrelated.id = "unrelated".into();
+        unrelated.group_id = Some("project-b".into());
+        app.sessions.extend([descendant, unrelated]);
+
+        let sample = |session_id: Option<&str>, tokens| construct_protocol::TokenSample {
+            at_ms: 9_000,
+            session_id: session_id.map(str::to_string),
+            model: Some("opus".into()),
+            tokens,
+            cached: tokens / 2,
+        };
+        let history = construct_protocol::TokenHistoryResult {
+            samples: vec![
+                sample(Some("routed-root"), 100),
+                sample(Some("descendant"), 200),
+                sample(Some("unrelated"), 400),
+                // Backward-compatible history from an older daemon has no
+                // session id and must not be guessed into either scope.
+                sample(None, 800),
+            ],
+            now_ms: 10_000,
+        };
+
+        app.seed_scoped_token_meters(&history, Instant::now());
+
+        assert_eq!(
+            app.project_dashboard.token_meters["project-a"].window_total(64),
+            300
+        );
+        assert_eq!(
+            app.project_dashboard.token_meters["project-b"].window_total(64),
+            400
+        );
+        assert_eq!(
+            app.service_token_meters["assistant"].window_total(64),
+            300,
+            "the routed root and descendant seed the service, unrelated history does not"
+        );
     }
 
     /// The picker opens on the model indicator and lists Default plus

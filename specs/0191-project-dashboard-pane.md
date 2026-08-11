@@ -116,6 +116,9 @@ already carried.
   args summary (not just call ids) so cards can say what wants approval.
 - Cost and busy events must feed project-scoped meters even when the project
   pane is not visible, so switching to a project shows real history.
+- Recent token samples identify their reporting session, allowing a starting
+  client to rebuild each project meter from daemon history. Restarting the TUI
+  or daemon must not clear the graph for sessions still in that project.
 - Focus routing (list vs view) is load-bearing: view-focused navigation must
   not steal list keys while the list holds focus.
 

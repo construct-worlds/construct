@@ -10,7 +10,10 @@ Scope: A service view shows a live token-usage graph scoped to its routed sessio
 The service view shows the same token-usage history graph as the project view,
 scoped to sessions routed by that service and their descendants. Cost and
 compute-time observations feed the service meter even while its view is
-closed, so opening the service reveals activity the TUI has already observed.
+closed. Recent token samples identify their reporting session, so a starting
+client can rebuild service history from daemon data by applying the same
+routed-root and descendant filter used for live events. Opening a service
+therefore reveals recent activity even after the TUI or daemon restarts.
 
 The graph keeps the shared meter semantics: time buckets, stacked model bands,
 cache-served shading, and per-column hover detail. Its legend uses the same
@@ -35,9 +38,9 @@ without mixing in unrelated fleet or project work.
   to the scoped throughput rates.
 - Sessions from other services never contribute to the displayed history.
 - Split panes may show independent service meters and hover details at once.
-- Service meters begin with observations made by the current TUI process;
-  daemon token-history samples cannot seed them because those samples do not
-  carry session identity.
+- Service meters seed from daemon token history when its samples carry session
+  identity; samples from older daemons remain fleet-only rather than being
+  guessed into a service.
 
 ## Non-Goals
 

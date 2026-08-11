@@ -1816,6 +1816,7 @@ impl SessionManager {
                                     if ts.at >= history_cutoff {
                                         cost_samples.push(construct_protocol::TokenSample {
                                             at_ms: ts.at.timestamp_millis(),
+                                            session_id: Some(s.id.clone()),
                                             model: model.clone().or_else(|| scan_model.clone()),
                                             // Cached input is a subset of the
                                             // prompt side; adding it would

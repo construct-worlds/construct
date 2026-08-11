@@ -84,6 +84,7 @@ impl SessionManager {
     /// Record one usage sample into the fleet history (spec 0167).
     pub(crate) fn record_cost_sample(
         &self,
+        session_id: &str,
         model: Option<String>,
         tokens: u64,
         cached: u64,
@@ -93,6 +94,7 @@ impl SessionManager {
             history.push(
                 construct_protocol::TokenSample {
                     at_ms,
+                    session_id: Some(session_id.to_string()),
                     model,
                     tokens,
                     cached,
