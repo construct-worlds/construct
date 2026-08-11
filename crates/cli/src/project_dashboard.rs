@@ -22,7 +22,7 @@ use crate::theme::Theme;
 use crate::token_meter::{self, TokenMeter};
 
 /// Compact meter height when the pane is tall enough.
-const METER_HEIGHT: u16 = 4;
+pub(crate) const METER_HEIGHT: u16 = 4;
 
 /// Rows kept for member cards even when the meter would like more.
 const CARDS_MIN_HEIGHT: u16 = 6;
@@ -642,7 +642,7 @@ pub fn render(
                     width: w,
                     height: meter_h,
                 };
-                meter_graph = render_project_meter(f, meter_area, theme, meter, now);
+                meter_graph = render_token_meter(f, meter_area, theme, meter, now);
                 row = row.saturating_add(meter_h);
             }
         } else if row < bottom {
@@ -689,7 +689,7 @@ pub fn render(
 
 /// Returns the rect the columns occupy, so the caller can record it as the
 /// hover-detail hit zone (the legend row below them is not part of it).
-fn render_project_meter(
+pub(crate) fn render_token_meter(
     f: &mut Frame,
     area: Rect,
     theme: &Theme,

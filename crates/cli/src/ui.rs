@@ -327,6 +327,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.service_session_hits.clear();
     app.layout.service_channel_row_hits.clear();
     app.layout.service_channel_action_hits.clear();
+    app.layout.service_token_graphs.clear();
     app.layout.lineage_subagent_toggle_hits.clear();
     app.layout.lineage_segment_tooltip = None;
     // Cleared here rather than only in the dashboard's own render, which every
@@ -442,6 +443,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_lineage_segment_tooltip(f, app);
     render_matrix_token_tooltip(f, app);
     render_project_meter_tooltip(f, app);
+    render_service_meter_tooltip(f, app);
     render_harness_hover_tooltip(f, app);
     // A session switch affects the pane's final composited surface, not just
     // the terminal/chat layer underneath it. Paint transitions after Playbook
@@ -4808,6 +4810,32 @@ fn render_project_meter_tooltip(f: &mut Frame, app: &App) {
     render_token_meter_hover(f, &app.theme, meter, graph, (mx, my));
 }
 
+/// Hover detail for the service view's scoped meter. A split layout can show
+/// several services, so resolve the graph under the pointer before selecting
+/// its meter.
+fn render_service_meter_tooltip(f: &mut Frame, app: &App) {
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    let Some((service_name, graph)) = app
+        .layout
+        .service_token_graphs
+        .iter()
+        .find(|(_, graph)| {
+            mx >= graph.x
+                && mx < graph.x.saturating_add(graph.width)
+                && my >= graph.y
+                && my < graph.y.saturating_add(graph.height)
+        })
+    else {
+        return;
+    };
+    let Some(meter) = app.service_token_meters.get(service_name) else {
+        return;
+    };
+    render_token_meter_hover(f, &app.theme, meter, *graph, (mx, my));
+}
+
 /// Widest a model name gets in the hover detail before it is clipped. Long
 /// enough for the catalog ids in practice, short enough that one outlier
 /// can't push the figures off a narrow terminal.
@@ -8476,12 +8504,53 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         columns[2],
     );
 
+    // Keep the service-scoped meter fixed above the scrolling channel/session
+    // section, matching the project dashboard's graph without making it part
+    // of keyboard navigation. Short panes give the rows all available space.
+    let mut section = chunks[2];
+    if section.width >= 24
+        && section.height >= crate::project_dashboard::METER_HEIGHT.saturating_add(4)
+    {
+        let lower = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(crate::project_dashboard::METER_HEIGHT),
+                Constraint::Length(1),
+                Constraint::Min(3),
+            ])
+            .split(section);
+        let meter_area = lower[0];
+        section = lower[2];
+        let now = Instant::now();
+        if let Some(meter) = app.service_token_meters.get_mut(name) {
+            meter.advance_to(now);
+            if let Some(graph) = crate::project_dashboard::render_token_meter(
+                f,
+                meter_area,
+                &app.theme,
+                meter,
+                now,
+            ) {
+                app.layout
+                    .service_token_graphs
+                    .push((name.to_string(), graph));
+            }
+        } else {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    " no token usage reported yet for this service ",
+                    Style::default().fg(app.theme.dim),
+                )),
+                meter_area,
+            );
+        }
+    }
+
     let routed: Vec<_> = app
         .routed_service_sessions(name)
         .into_iter()
         .cloned()
         .collect();
-    let routed_tokens: u64 = routed.iter().map(|session| session.tokens.total()).sum();
     let selected_channel_actions = app.selected_service_channel_actions(name);
     let catalog = app.service_channel_catalog.clone();
     let attached_count = catalog
@@ -8517,7 +8586,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         push_wrapped_service_line(
             &mut activity,
             "  No channels in the catalog. Press a or Enter to create an HTTP channel.",
-            chunks[2].width,
+            section.width,
             if selected {
                 Style::default()
                     .fg(app.theme.highlight_fg)
@@ -8590,16 +8659,16 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
             }
             channel_rows.push((index, activity.len()));
             activity.push(Line::from(Span::styled(
-                truncate_to_width(&row, chunks[2].width as usize),
+                truncate_to_width(&row, section.width as usize),
                 style,
             )));
         }
     }
     if let Some(actions) = selected_channel_actions.as_ref() {
-        append_service_channel_actions(&mut activity, &mut action_hits, app, chunks[2], actions);
+        append_service_channel_actions(&mut activity, &mut action_hits, app, section, actions);
     }
     activity.push(Line::from(""));
-    let mut session_heading = vec![
+    activity.push(Line::from(vec![
         Span::styled(
             "Sessions  ",
             Style::default()
@@ -8610,22 +8679,12 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
             format!("{} routed", routed.len()),
             Style::default().fg(app.theme.text),
         ),
-    ];
-    if routed_tokens > 0 {
-        session_heading.push(Span::styled(
-            format!(
-                " · {} tok",
-                crate::lineage::format_token_count(routed_tokens)
-            ),
-            Style::default().fg(app.theme.dim),
-        ));
-    }
-    activity.push(Line::from(session_heading));
+    ]));
     if routed.is_empty() {
         push_wrapped_service_line(
             &mut activity,
             "No requests have created a session yet.",
-            chunks[2].width,
+            section.width,
             Style::default().fg(app.theme.dim),
         );
     } else {
@@ -8680,7 +8739,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
         push_wrapped_service_line(
             &mut activity,
             note,
-            chunks[2].width,
+            section.width,
             Style::default().fg(if dialog.confirm_delete {
                 app.theme.danger
             } else {
@@ -8704,11 +8763,10 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
     push_wrapped_service_line(
         &mut activity,
         footer,
-        chunks[2].width,
+        section.width,
         Style::default().fg(app.theme.dim),
     );
 
-    let section = chunks[2];
     let viewport_h = section.height as usize;
     // Every line was built to fit the width, so rows and lines are the same
     // thing here and the scroll offset means exactly what it says.

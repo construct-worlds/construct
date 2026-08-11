@@ -2368,6 +2368,10 @@ pub struct App {
     /// 0167). Keyed by session id; entries for vanished sessions are pruned
     /// as they are noticed.
     pub token_meter_busy: HashMap<String, u64>,
+    /// Service name → live token history for sessions routed by that service.
+    /// Fed alongside the fleet and project meters even while no service view
+    /// is open, so opening one reveals the activity already observed.
+    pub service_token_meters: HashMap<String, crate::token_meter::TokenMeter>,
     /// Project dashboard state: activity feed, per-project token meters,
     /// chat-preview cache, and cursor when a project header is selected.
     pub project_dashboard: crate::project_dashboard::ProjectDashboard,
@@ -4154,6 +4158,10 @@ pub struct LayoutSnapshot {
     pub service_channel_row_hits: Vec<ServiceChannelRowHit>,
     /// Visible Publish/Withdraw/Open/Copy buttons for the selected channel.
     pub service_channel_action_hits: Vec<ServiceChannelActionHit>,
+    /// `(service name, graph rect)` for every service-scoped token meter
+    /// painted in the last frame. Split panes can show more than one service,
+    /// so this is a collection rather than a single active hit zone.
+    pub service_token_graphs: Vec<(String, ratatui::layout::Rect)>,
     /// The "▸/▾ N subagents" group-toggle rows — click toggles that
     /// parent's group between collapsed and expanded.
     pub lineage_subagent_toggle_hits: Vec<LineageBoxHit>,
@@ -4482,6 +4490,7 @@ impl LayoutSnapshot {
             service_session_hits,
             service_channel_row_hits,
             service_channel_action_hits,
+            service_token_graphs,
             lineage_subagent_toggle_hits,
             playbook_title_run_hit,
             playbook_title_toggle_hit,
@@ -4628,6 +4637,7 @@ impl LayoutSnapshot {
         shift.retain_rects(service_session_hits, |hit| &mut hit.area);
         shift.retain_rects(service_channel_row_hits, |hit| &mut hit.area);
         shift.retain_rects(service_channel_action_hits, |hit| &mut hit.area);
+        shift.retain_rects(service_token_graphs, |hit| &mut hit.1);
         shift.retain_rects(lineage_subagent_toggle_hits, |hit| &mut hit.area);
 
         *dynamic_ui_inline_hit = dynamic_ui_inline_hit.take().and_then(|mut hit| {
@@ -5514,6 +5524,7 @@ async fn run_with_socket_initial_selection(
             meter
         },
         token_meter_busy: HashMap::new(),
+        service_token_meters: HashMap::new(),
         project_dashboard: crate::project_dashboard::ProjectDashboard::default(),
         show_archived_ungrouped: false,
         show_archived_groups: HashSet::new(),
@@ -9688,6 +9699,9 @@ impl App {
         let label = model
             .clone()
             .or_else(|| session.and_then(|s| s.model.clone()));
+        let service_name = session
+            .and_then(|session| self.routed_service_name(session))
+            .map(str::to_string);
         let now = Instant::now();
         self.token_meter
             .observe(label.as_deref(), tokens, *tokens_cached, now);
@@ -9701,6 +9715,12 @@ impl App {
                 *tokens_cached,
                 now,
             );
+        }
+        if let Some(service_name) = service_name {
+            self.service_token_meters
+                .entry(service_name)
+                .or_insert_with(|| crate::token_meter::TokenMeter::new(now))
+                .observe(label.as_deref(), tokens, *tokens_cached, now);
         }
     }
 
@@ -9719,7 +9739,7 @@ impl App {
     fn sample_compute_time(&mut self, now: Instant) {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut seen: HashSet<&str> = HashSet::with_capacity(self.sessions.len());
-        let mut deltas: Vec<(Option<String>, Option<String>, u64)> = Vec::new();
+        let mut deltas: Vec<(Option<String>, Option<String>, Option<String>, u64)> = Vec::new();
         for session in &self.sessions {
             let Some(model) = session.model.clone() else {
                 continue;
@@ -9733,14 +9753,20 @@ impl App {
             if let Some(previous) = previous {
                 let delta = busy.saturating_sub(previous);
                 if delta > 0 {
-                    deltas.push((Some(model), session.group_id.clone(), delta));
+                    let service_name = self.routed_service_name(session).map(str::to_string);
+                    deltas.push((
+                        Some(model),
+                        session.group_id.clone(),
+                        service_name,
+                        delta,
+                    ));
                 }
             }
             self.token_meter_busy.insert(session.id.clone(), busy);
         }
         let live: HashSet<String> = seen.into_iter().map(str::to_string).collect();
         self.token_meter_busy.retain(|id, _| live.contains(id));
-        for (model, project_id, delta) in deltas {
+        for (model, project_id, service_name, delta) in deltas {
             self.token_meter.observe_busy(model.as_deref(), delta, now);
             if let Some(project_id) = project_id {
                 self.project_dashboard.observe_busy(
@@ -9749,6 +9775,12 @@ impl App {
                     delta,
                     now,
                 );
+            }
+            if let Some(service_name) = service_name {
+                self.service_token_meters
+                    .entry(service_name)
+                    .or_insert_with(|| crate::token_meter::TokenMeter::new(now))
+                    .observe_busy(model.as_deref(), delta, now);
             }
         }
     }
@@ -16868,6 +16900,7 @@ mod tests {
             service_session_hits: Vec::new(),
             service_channel_row_hits: Vec::new(),
             service_channel_action_hits: Vec::new(),
+            service_token_graphs: Vec::new(),
             lineage_subagent_toggle_hits: Vec::new(),
             lineage_segment_tooltip: None,
             playbook_title_run_hit: None,
@@ -17196,6 +17229,7 @@ mod tests {
             matrix_panel_mode: MatrixPanelMode::default(),
             token_meter: crate::token_meter::TokenMeter::new(now),
             token_meter_busy: HashMap::new(),
+            service_token_meters: HashMap::new(),
             project_dashboard: crate::project_dashboard::ProjectDashboard::default(),
             show_archived_ungrouped: false,
             show_archived_groups: HashSet::new(),
@@ -18650,6 +18684,39 @@ mod tests {
         assert_eq!(bucket.by_model(), vec![(0, 1_500, 900)]);
         let out = rendered(&mut app, 120, 30);
         assert!(out.contains("kimi-k3"), "{out}");
+    }
+
+    /// A routed session's measured compute time feeds the same service scope
+    /// as its Cost events, so the service graph reports throughput rather than
+    /// an idle token total.
+    #[tokio::test]
+    async fn service_view_meter_tracks_routed_session_compute_time() {
+        let (mut app, _dir, _server) = token_meter_app(&[]).await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.sessions[0].title = Some("service:assistant:http:conversation".into());
+        app.sessions[0].model = Some("opus".into());
+        app.observe_cost_for_meter(
+            "s1",
+            &SessionEvent::Cost {
+                usd: 0.0,
+                tokens_in: 100_000,
+                tokens_out: 0,
+                tokens_cached: 40_000,
+                model: Some("opus".into()),
+            },
+        );
+
+        let now = Instant::now();
+        app.sample_compute_time(now); // establish the per-session baseline
+        app.sessions[0].busy_ms = 20_000;
+        app.sample_compute_time(now);
+
+        let meter = app
+            .service_token_meters
+            .get("assistant")
+            .expect("the service meter should receive routed activity");
+        assert_eq!(meter.window_total(64), 100_000);
+        assert_eq!(meter.recent_fleet_rate(), Some(5_000.0));
     }
 
     /// The picker opens on the model indicator and lists Default plus
@@ -42278,6 +42345,7 @@ mod tests {
         );
         assert!(text.contains("Instruction"));
         assert!(text.contains("Service name"));
+        assert!(text.contains("no token usage reported yet for this service"));
         assert!(text.contains("Channels"));
         assert!(text.contains("Sessions"));
         assert!(!text.contains("Activity"));
@@ -42497,7 +42565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_view_session_rows_show_channel_and_select_session_on_click() {
+    async fn service_view_draws_scoped_token_graph_and_session_rows_are_clickable() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
         let (mut app, _dir, server) = captured_app().await;
@@ -42505,31 +42573,39 @@ mod tests {
         routed.id = "service-session".into();
         routed.title = Some("service:assistant:http:demo-conversation".into());
         routed.state = construct_protocol::SessionState::AwaitingInput;
-        routed.tokens = construct_protocol::TokenTally {
-            input: 120_000,
-            output: 10_000,
-            cached: 80_000,
-        };
         app.sessions.push(routed);
         let mut second = summary_with_kind(construct_protocol::SessionKind::User);
         second.id = "second-service-session".into();
         second.title = Some("service:assistant:http:another-conversation".into());
-        second.tokens = construct_protocol::TokenTally {
-            input: 30_000,
-            output: 3_000,
-            cached: 20_000,
-        };
         app.sessions.push(second);
+        let mut child = summary_with_kind(construct_protocol::SessionKind::User);
+        child.id = "service-child".into();
+        child.title = Some("native helper".into());
+        child.parent_session_id = Some("service-session".into());
+        app.sessions.push(child);
         let mut other_service = summary_with_kind(construct_protocol::SessionKind::User);
         other_service.id = "other-service-session".into();
         other_service.title = Some("service:reviewer:http:review".into());
-        other_service.tokens = construct_protocol::TokenTally {
-            input: 1_000_000,
-            output: 0,
-            cached: 0,
-        };
         app.sessions.push(other_service);
         app.services.push(service_summary_for_test("assistant"));
+        app.services.push(service_summary_for_test("reviewer"));
+        for (session_id, input, output, cached, model) in [
+            ("service-session", 120_000, 10_000, 80_000, "opus"),
+            ("second-service-session", 30_000, 3_000, 20_000, "gpt"),
+            ("service-child", 7_000, 0, 0, "helper-model"),
+            ("other-service-session", 1_000_000, 0, 0, "reviewer-model"),
+        ] {
+            app.observe_cost_for_meter(
+                session_id,
+                &SessionEvent::Cost {
+                    usd: 0.0,
+                    tokens_in: input,
+                    tokens_out: output,
+                    tokens_cached: cached,
+                    model: Some(model.into()),
+                },
+            );
+        }
         app.select_service("assistant".into());
         app.session_transitions.clear();
 
@@ -42537,9 +42613,8 @@ mod tests {
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
 
-        let text = term
-            .backend()
-            .buffer()
+        let buffer = term.backend().buffer();
+        let text = buffer
             .content()
             .iter()
             .map(|cell| cell.symbol())
@@ -42550,8 +42625,32 @@ mod tests {
         );
         assert!(text.contains("demo-conversation"));
         assert!(
-            text.contains("2 routed · 163k tok"),
-            "service lifetime usage should sum every routed session without double-counting cached input:\n{text}"
+            text.contains("170k tok"),
+            "the graph legend should include routed descendants without double-counting cached input:\n{text}"
+        );
+        assert!(!text.contains("1.0M tok"), "another service leaked in:\n{text}");
+        let (meter_service, graph) = app
+            .layout
+            .service_token_graphs
+            .first()
+            .cloned()
+            .expect("the service view should paint a token graph");
+        assert_eq!(meter_service, "assistant");
+        let painted = (graph.y..graph.y + graph.height)
+            .flat_map(|y| (graph.x..graph.x + graph.width).map(move |x| (x, y)))
+            .any(|(x, y)| {
+                let cell = &buffer[(x, y)];
+                cell.bg != ratatui::style::Color::Reset || "▁▂▃▄▅▆▇".contains(cell.symbol())
+            });
+        assert!(painted, "the service meter has no painted bars:\n{text}");
+
+        app.mouse_pos = Some((graph.x + graph.width - 1, graph.y));
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("hover draw");
+        let hover_text = rendered_text(term.backend().buffer());
+        assert!(
+            hover_text.contains("80k cached"),
+            "the service graph should share exact per-column hover detail:\n{hover_text}"
         );
 
         let hit = app
