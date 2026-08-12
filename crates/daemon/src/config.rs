@@ -106,7 +106,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # # CONSTRUCT_SMITH_MODEL = "claude-oauth:claude-sonnet-4-6"  # via Claude subscription
 # # CONSTRUCT_SMITH_MODEL = "openai:gpt-5.5"                  # direct API via OPENAI_API_KEY
 # # CONSTRUCT_SMITH_MODEL = "codex-oauth:gpt-5.5"             # via OpenAI subscription
-# # CONSTRUCT_SMITH_MODEL = "grok-oauth:grok-2-latest"        # via Grok subscription
+# # CONSTRUCT_SMITH_MODEL = "grok-oauth:grok-4.6"             # via Grok subscription
 # # CONSTRUCT_SMITH_MODEL = "kimi-oauth:k3"                    # via Kimi subscription
 # # CONSTRUCT_SMITH_MODEL = "gemini:gemini-2.5-pro"           # via GEMINI_API_KEY
 # # CONSTRUCT_SMITH_MODEL = "meta:muse-spark-1.1"             # via META_API_KEY / MODEL_API_KEY
@@ -230,7 +230,7 @@ enabled = true
 #   OPENAI_API_KEY                 -> openai     (gpt-5)
 #   GEMINI_API_KEY / GOOGLE_API_KEY-> gemini     (gemini-2.5-pro)
 #   META_API_KEY / MODEL_API_KEY   -> meta       (muse-spark-1.1)
-#   GROK_API_KEY / XAI_API_KEY     -> grok       (grok-4.5)
+#   GROK_API_KEY / XAI_API_KEY     -> grok       (grok-4.6)
 #   DEEPSEEK_API_KEY               -> deepseek   (deepseek-v4-pro)
 #
 # The key must be in the DAEMON's environment (or [daemon.env] below), and a
@@ -297,7 +297,7 @@ enabled = true
 # [smith.models.grok]
 # provider    = "grok"
 # api_key_env = "GROK_API_KEY"   # or XAI_API_KEY
-# model       = "grok-4.3"
+# model       = "grok-4.6"
 
 # ── Daemon environment ────────────────────────────────────────────────────────
 #
@@ -475,7 +475,7 @@ enabled = true
 # # first entry the default.
 # claude-oauth = ["opus", "sonnet"]
 # codex-oauth  = ["gpt-5.6-sol", "gpt-5.5"]
-# grok-oauth   = "grok-4.5"
+# grok-oauth   = "grok-4.6"
 # kimi-oauth   = "k3"
 #
 "#;
@@ -734,7 +734,7 @@ pub const BUILTIN_TARGETS: &[BuiltinTarget] = &[
         provider: "grok",
         base_url: "https://api.x.ai/v1",
         key_envs: &["GROK_API_KEY", "XAI_API_KEY"],
-        default_model: "grok-4.5",
+        default_model: "grok-4.6",
     },
     BuiltinTarget {
         route: DEEPSEEK_ROUTE_NAME,
@@ -1013,7 +1013,7 @@ pub struct AdapterConfig {
     /// [adapters.smith]
     /// env = { CONSTRUCT_SMITH_MODEL = "codex-oauth:gpt-5.5" }
     /// # or: env = { CONSTRUCT_SMITH_MODEL = "claude-oauth:sonnet" }
-    /// # or: env = { CONSTRUCT_SMITH_MODEL = "grok-oauth:grok-2-latest" }
+    /// # or: env = { CONSTRUCT_SMITH_MODEL = "grok-oauth:grok-4.6" }
     /// ```
     #[serde(default)]
     pub env: HashMap<String, String>,

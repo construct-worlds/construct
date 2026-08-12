@@ -37,7 +37,7 @@ A target is somewhere the router can send a model request:
   | `OPENAI_API_KEY` | `openai` | `gpt-5` |
   | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `gemini` | `gemini-2.5-pro` |
   | `META_API_KEY` / `MODEL_API_KEY` | `meta` | `muse-spark-1.1` |
-  | `GROK_API_KEY` / `XAI_API_KEY` | `grok` | `grok-4.5` |
+  | `GROK_API_KEY` / `XAI_API_KEY` | `grok` | `grok-4.6` |
   | `DEEPSEEK_API_KEY` | `deepseek` | `deepseek-v4-pro` |
 
   The default model is only the default — the picker offers the rest of that
@@ -231,7 +231,7 @@ featured_models = [
 # a single model; a list becomes the picker's second step.
 claude-oauth = ["opus", "sonnet"]
 codex-oauth  = ["gpt-5.6-sol", "gpt-5.5"]
-grok-oauth   = "grok-4.5"
+grok-oauth   = "grok-4.6"
 ```
 
 ## Troubleshooting
