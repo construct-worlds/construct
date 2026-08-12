@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn effort_support_matches_subscription_model_capabilities() {
         assert_eq!(
-            effort_support(OauthProvider::Grok, "grok-4.5"),
+            effort_support(OauthProvider::Grok, "grok-4.6"),
             super::super::EffortSupport::Grok
         );
         assert_eq!(

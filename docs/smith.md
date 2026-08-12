@@ -19,7 +19,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # or  export DEEPSEEK_API_KEY=...
 # or  codex login, then use --model codex-oauth:gpt-5.4-mini
 # or  claude login, then use --model claude-oauth:sonnet
-# or  grok login, then use --model grok-oauth:grok-4.3
+# or  grok login, then use --model grok-oauth:grok-4.6
 # or  kimi login, then use --model kimi-oauth:k3
 # or  run a local ollama (default http://localhost:11434)
 
@@ -37,9 +37,9 @@ The spec is one of:
 - `gemini:<name>` — e.g. `gemini:gemini-2.5-pro`
 - `meta:<name>` — e.g. `meta:muse-spark-1.1` using `META_API_KEY` or
   `MODEL_API_KEY`
-- `grok:<name>` — e.g. `grok:grok-4.3` using `GROK_API_KEY` or `XAI_API_KEY`
+- `grok:<name>` — e.g. `grok:grok-4.6` using `GROK_API_KEY` or `XAI_API_KEY`
 - `deepseek:<name>` — e.g. `deepseek:deepseek-v4-pro` using `DEEPSEEK_API_KEY`
-- `grok-oauth:<name>` — e.g. `grok-oauth:grok-4.3` using the Grok CLI auth file
+- `grok-oauth:<name>` — e.g. `grok-oauth:grok-4.6` using the Grok CLI auth file
 - `kimi-oauth:<name>` — e.g. `kimi-oauth:k3` using the Kimi Code CLI login
 - `ollama:<name>` — e.g. `ollama:llama3.1`
 - `codex-oauth:<name>` — e.g. `codex-oauth:gpt-5.4-mini`
@@ -138,7 +138,7 @@ model       = "llama-3.3-70b-versatile"
 [smith.models.xai]
 provider    = "grok"
 api_key_env = "XAI_API_KEY"
-model       = "grok-4.3"
+model       = "grok-4.6"
 
 [smith.models.meta]
 provider    = "meta"

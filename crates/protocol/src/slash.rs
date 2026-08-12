@@ -436,9 +436,11 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     "ollama:qwen3-coder",
     // xAI platform API path. Same models as the OAuth path below, billed
     // against an API key instead of a Grok subscription.
+    "grok:grok-4.6",
     "grok:grok-4.5",
     "grok:grok-4.3",
     // Grok / xAI OAuth path.
+    "grok-oauth:grok-4.6",
     "grok-oauth:grok-4.5",
     "grok-oauth:grok-4.3",
     "grok-oauth:grok-build-0.1",
@@ -615,6 +617,14 @@ mod tests {
         assert_eq!(
             models_for_provider("meta"),
             vec!["muse-spark-1.2", "muse-spark-1.1"]
+        );
+        assert_eq!(
+            models_for_provider("grok"),
+            vec!["grok-4.6", "grok-4.5", "grok-4.3"]
+        );
+        assert_eq!(
+            models_for_provider("grok-oauth"),
+            vec!["grok-4.6", "grok-4.5", "grok-4.3", "grok-build-0.1"]
         );
     }
 

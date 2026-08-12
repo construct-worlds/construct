@@ -35,9 +35,9 @@ pub fn context_window_tokens(provider: &str, model: &str) -> usize {
         ("meta", "muse-spark-1.1") => 1_000_000,
         ("meta", _) => 128_000,
         ("ollama", _) => 8_000,
-        // xAI Grok models currently expose large context windows on the
-        // cloud endpoint (order-of-magnitude in the same class as recent
-        // OpenAI models); this is a safe conservative starting value.
+        // Grok 4.6 advertises a 500K window on both the API-key and
+        // subscription paths. Older models keep the conservative cap below.
+        ("grok" | "grok-oauth", "grok-4.6") => 500_000,
         ("grok", _) => 100_000,
         // DeepSeek's V4 line (pro and flash) both advertise a 1M-token
         // context window. Without an entry here the `_` arm would cap the
@@ -400,6 +400,12 @@ mod tests {
             context_window_tokens("deepseek", "some-future-model") > 8_000,
             "an unrecognized DeepSeek model must not fall to the generic default"
         );
+    }
+
+    #[test]
+    fn grok_4_6_gets_its_advertised_context_window_on_both_auth_paths() {
+        assert_eq!(context_window_tokens("grok", "grok-4.6"), 500_000);
+        assert_eq!(context_window_tokens("grok-oauth", "grok-4.6"), 500_000);
     }
 
     #[test]

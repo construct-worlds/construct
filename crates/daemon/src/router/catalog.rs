@@ -556,9 +556,9 @@ mod tests {
     #[test]
     fn grok_and_kimi_advertise_their_native_scales() {
         let grok = PublishedModel {
-            id: published_model_id("grok-oauth", "grok-4.5"),
+            id: published_model_id("grok-oauth", "grok-4.6"),
             route: "grok-oauth".into(),
-            model: "grok-4.5".into(),
+            model: "grok-4.6".into(),
             effort: EffortSupport::Grok,
         };
         let kimi = PublishedModel {

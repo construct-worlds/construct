@@ -446,7 +446,7 @@ pub async fn smith_auth_methods(
         "grok_api_key",
         "Grok API key",
         "grok",
-        "grok-2-latest",
+        "grok-4.6",
         &["GROK_API_KEY", "XAI_API_KEY"],
     );
     let deepseek_key = env_key_method(
@@ -487,7 +487,7 @@ pub async fn smith_auth_methods(
         id: "grok_subscription",
         label: "Grok subscription",
         model_prefix: "grok-oauth",
-        default_model: "grok-2-latest",
+        default_model: "grok-4.6",
         available: grok_sub_present,
         detail: if grok_sub_present {
             "~/.grok/auth.json found".to_string()
@@ -927,6 +927,13 @@ mod tests {
             codex.available,
             "fixture ~/.codex/auth.json should be detected"
         );
+        for id in ["grok_api_key", "grok_subscription"] {
+            let grok = methods
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("{id} entry present"));
+            assert_eq!(grok.default_model, "grok-4.6");
+        }
         let auto = methods
             .iter()
             .find(|m| m.id == "auto")
