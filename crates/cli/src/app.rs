@@ -6918,6 +6918,13 @@ impl App {
             return;
         }
 
+        // An inline title edit has the same modal precedence for terminal
+        // paste events as it does for ordinary keys. Consume the whole paste
+        // at the edit cursor instead of leaking it into the pane's PTY.
+        if self.session_title_rename_insert_text(&text) {
+            return;
+        }
+
         if self.insert_service_dialog_text(&text) {
             return;
         }
@@ -32260,6 +32267,47 @@ mod tests {
         .await;
         assert_eq!(app.session_title_rename.as_ref().unwrap().buffer, "a");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn session_title_rename_paste_inserts_at_cursor_without_reaching_pty() {
+        let (mut app, _dir, server) = captured_app().await;
+        let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
+        app.pty_input_tx = tx;
+        app.sessions[0].title = Some("ac".into());
+        app.start_session_title_rename("s1".into(), TitleRenameOrigin::Pane(Some(1)), None);
+        app.handle_session_title_rename_key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        ))
+        .await;
+
+        app.on_paste("b🙂".to_string()).await;
+
+        let rename = app.session_title_rename.as_ref().expect("rename stays open");
+        assert_eq!(rename.buffer, "ab🙂c");
+        assert_eq!(rename.cursor, 3, "cursor advances by pasted characters");
+        assert!(
+            rx.try_recv().is_err(),
+            "title paste must not leak into the pane's PTY"
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn session_title_rename_accepts_platform_and_emacs_paste_shortcuts() {
+        for (code, modifiers) in [
+            (KeyCode::Char('v'), KeyModifiers::SUPER),
+            (KeyCode::Char('v'), KeyModifiers::CONTROL),
+            (KeyCode::Char('y'), KeyModifiers::CONTROL),
+        ] {
+            assert!(super::session_title_rename::is_session_title_paste_shortcut(
+                KeyEvent::new(code, modifiers)
+            ));
+        }
+        assert!(!super::session_title_rename::is_session_title_paste_shortcut(
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)
+        ));
     }
 
     #[tokio::test]
