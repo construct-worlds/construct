@@ -6,6 +6,13 @@
 
 use super::*;
 
+pub(super) fn is_session_title_paste_shortcut(key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let super_mod = key.modifiers.contains(KeyModifiers::SUPER);
+    matches!(key.code, KeyCode::Char('v' | 'V')) && (ctrl || super_mod)
+        || matches!(key.code, KeyCode::Char('y' | 'Y')) && ctrl
+}
+
 /// Map a click at `display_col` (columns right of the rendered label's left
 /// edge) to a char index into `text`, given the label rendered `text` from
 /// char offset `window_start_chars`. The cursor lands before the clicked
@@ -83,6 +90,18 @@ impl App {
             rename.buffer.insert(pos, c);
             rename.cursor += 1;
         }
+    }
+
+    /// Insert a terminal or clipboard paste at the rename cursor as one edit.
+    /// Returns whether an active inline rename consumed the text.
+    pub(super) fn session_title_rename_insert_text(&mut self, text: &str) -> bool {
+        let Some(rename) = self.session_title_rename.as_mut() else {
+            return false;
+        };
+        let pos = byte_pos(&rename.buffer, rename.cursor);
+        rename.buffer.insert_str(pos, text);
+        rename.cursor += text.chars().count();
+        true
     }
 
     fn session_title_rename_backspace(&mut self) {
@@ -179,6 +198,10 @@ impl App {
         match key.code {
             KeyCode::Esc => self.cancel_session_title_rename(),
             KeyCode::Char('g') if ctrl => self.cancel_session_title_rename(),
+            // Most terminal emulators turn the platform paste shortcut into
+            // `Event::Paste`, but some pass the key through. Support both the
+            // platform spellings and Emacs yank while this modal owns input.
+            _ if is_session_title_paste_shortcut(key) => self.paste_from_local_clipboard().await,
             KeyCode::Enter => self.commit_session_title_rename().await,
             KeyCode::Left => self.session_title_rename_move_cursor(-1),
             KeyCode::Right => self.session_title_rename_move_cursor(1),
