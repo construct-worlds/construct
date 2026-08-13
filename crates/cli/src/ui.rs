@@ -16770,6 +16770,7 @@ fn apply_playbook_settle_flourish(
 fn playbook_empty_placeholder(
     theme: &crate::theme::Theme,
     templates: &[construct_protocol::PlaybookTemplate],
+    selected_template_id: Option<&str>,
     mouse_pos: Option<(u16, u16)>,
     inner: Rect,
 ) -> (Vec<Line<'static>>, Vec<crate::app::PlaybookTemplateHit>) {
@@ -16829,6 +16830,17 @@ fn playbook_empty_placeholder(
         .iter()
         .map(|t| truncate_to_width(&t.name, label_budget))
         .collect();
+    let descriptions: Vec<Option<String>> = ordered
+        .iter()
+        .map(|t| {
+            t.description
+                .as_deref()
+                .filter(|description| !description.trim().is_empty())
+                .map(|description| {
+                    truncate_to_width(description, label_budget.saturating_sub(2))
+                })
+        })
+        .collect();
     let max_name_w = names
         .iter()
         .map(|n| UnicodeWidthStr::width(n.as_str()))
@@ -16855,13 +16867,22 @@ fn playbook_empty_placeholder(
     if avail < 1 {
         return plain();
     }
-    let max_item_rows = avail;
-    let fits_all = total <= max_item_rows;
-    let (shown, reserve_overflow) = if fits_all {
-        (total, false)
-    } else {
-        (max_item_rows.saturating_sub(1), true)
-    };
+    let item_heights: Vec<usize> = descriptions
+        .iter()
+        .map(|description| 1 + usize::from(description.is_some()))
+        .collect();
+    let total_item_rows: usize = item_heights.iter().sum();
+    let reserve_overflow = total_item_rows > avail;
+    let item_budget = avail.saturating_sub(usize::from(reserve_overflow));
+    let mut shown = 0usize;
+    let mut used_rows = 0usize;
+    for height in &item_heights {
+        if used_rows + height > item_budget {
+            break;
+        }
+        shown += 1;
+        used_rows += height;
+    }
 
     // Widen the row to fit the overflow indicator too (truncated to
     // `label_budget` like any other row if the pane is too narrow for it), so
@@ -16871,7 +16892,7 @@ fn playbook_empty_placeholder(
     let content_w = overflow_text.as_ref().map_or(max_name_w, |t| {
         max_name_w.max(UnicodeWidthStr::width(t.as_str()))
     });
-    let row_w = content_w as u16 + BULLET.len() as u16;
+    let row_w = (inner.width - INDENT).max(content_w as u16 + BULLET.len() as u16);
 
     let bullet_style = Style::default().fg(theme.dim);
     let indent = || Span::styled(" ".repeat(INDENT as usize), Style::default());
@@ -16885,19 +16906,32 @@ fn playbook_empty_placeholder(
     let mut lines = vec![
         desc_line,
         Line::from(""),
-        Line::from(Span::styled(
-            HEADER,
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-        )),
+        Line::from(vec![
+            Span::styled(
+                HEADER,
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                truncate_to_width(
+                    "  ↑/↓ select · Enter apply",
+                    width.saturating_sub(UnicodeWidthStr::width(HEADER)),
+                ),
+                dim,
+            ),
+        ]),
         Line::from(""),
     ];
 
     let mut hits = Vec::new();
+    let mut row = item_start_row;
     for (i, (t, name)) in ordered.iter().zip(names.iter()).take(shown).enumerate() {
-        let row = item_start_row + i as u16;
-        let hovered =
-            mouse_pos.is_some_and(|(mx, my)| my == row && mx >= row_left && mx < row_left + row_w);
-        let label_style = if hovered {
+        let row_end = row + u16::from(descriptions[i].is_some());
+        let hovered = mouse_pos.is_some_and(|(mx, my)| {
+            my >= row && my <= row_end && mx >= row_left && mx < row_left + row_w
+        });
+        let focused = selected_template_id == Some(t.id.as_str());
+        let highlighted = hovered || focused;
+        let label_style = if highlighted {
             Style::default()
                 .fg(theme.text)
                 .bg(theme.accent)
@@ -16908,17 +16942,28 @@ fn playbook_empty_placeholder(
         let label = pad_to_width(name, content_w);
         lines.push(Line::from(vec![
             indent(),
-            Span::styled(BULLET, if hovered { label_style } else { bullet_style }),
+            Span::styled(BULLET, if highlighted { label_style } else { bullet_style }),
             Span::styled(label, label_style),
         ]));
+        if let Some(description) = &descriptions[i] {
+            lines.push(Line::from(vec![
+                indent(),
+                Span::styled("  ", label_style),
+                Span::styled(
+                    pad_to_width(description, content_w),
+                    if highlighted { label_style } else { dim },
+                ),
+            ]));
+        }
         hits.push(crate::app::PlaybookTemplateHit {
             col_start: row_left,
             col_end: row_left + row_w,
             row_start: row,
-            row_end: row,
+            row_end,
             template_id: t.id.clone(),
             markdown: t.markdown.clone(),
         });
+        row = row_end + 1;
     }
     if let Some(overflow_text) = &overflow_text {
         let label = pad_to_width(overflow_text, content_w);
@@ -17184,12 +17229,18 @@ fn render_playbook_popup_at(
         apply_playbook_settle_flourish(&mut lines, &flourish, &app.theme, now);
     }
     // Empty playbook: replace the bare body with a richer onboarding placeholder —
-    // a one-line description, a grouped list of clickable templates, a divider,
+    // a one-line description, a grouped list of interactive templates, a divider,
     // and a tip. The row hitboxes are returned so the active playbook can publish
     // them for the mouse handler. Non-empty playbookes get no hits.
     let placeholder_hits = if lines.is_empty() {
         let (placeholder_lines, hits) =
-            playbook_empty_placeholder(&app.theme, &app.playbook_templates, app.mouse_pos, inner);
+            playbook_empty_placeholder(
+                &app.theme,
+                &app.playbook_templates,
+                popup.template_selection.as_deref(),
+                app.mouse_pos,
+                inner,
+            );
         lines = placeholder_lines;
         hits
     } else {
@@ -17203,7 +17254,7 @@ fn render_playbook_popup_at(
         // Remember the live viewport so cursor-move handlers can keep the caret
         // visible on the next keystroke, and persist the clamped offset.
         app.layout.playbook_inner_area = Some(inner);
-        // Publish (or clear) the empty-state template buttons. Only the active
+        // Publish (or clear) the empty-state template rows. Only the active
         // playbook owns the hitboxes, so a click never targets an inactive split.
         app.layout.playbook_template_hits = placeholder_hits;
         if let Some(real) = app.playbook_popup.as_mut() {
@@ -25863,6 +25914,16 @@ mod tests {
         }
     }
 
+    fn placeholder_template_with_description(
+        id: &str,
+        name: &str,
+        description: &str,
+    ) -> construct_protocol::PlaybookTemplate {
+        let mut template = placeholder_template(id, name);
+        template.description = Some(description.to_string());
+        template
+    }
+
     #[test]
     fn playbook_empty_placeholder_offers_clickable_template_rows() {
         let theme = crate::theme::Theme::default();
@@ -25873,7 +25934,7 @@ mod tests {
         ];
         // Inner rect offset from origin to confirm hits use absolute coordinates.
         let inner = Rect::new(2, 1, 76, 20);
-        let (lines, hits) = playbook_empty_placeholder(&theme, &templates, None, inner);
+        let (lines, hits) = playbook_empty_placeholder(&theme, &templates, None, None, inner);
 
         // Two rows — "blank" is the empty state itself, so it's filtered out.
         // Ordered by name (case-insensitive): Investigation before Tasks.
@@ -25936,7 +25997,7 @@ mod tests {
         custom.built_in = false;
         let templates = vec![placeholder_template("tasks", "Tasks"), custom];
         let (lines, _) =
-            playbook_empty_placeholder(&theme, &templates, None, Rect::new(2, 1, 76, 20));
+            playbook_empty_placeholder(&theme, &templates, None, None, Rect::new(2, 1, 76, 20));
         let rendered: String = lines
             .iter()
             .map(|l| {
@@ -25954,6 +26015,60 @@ mod tests {
     }
 
     #[test]
+    fn playbook_empty_placeholder_shows_descriptions_and_keyboard_focus() {
+        let theme = crate::theme::Theme::default();
+        let templates = vec![
+            placeholder_template_with_description(
+                "investigation",
+                "Investigation",
+                "Question, context, plan, findings, and done — run to investigate",
+            ),
+            placeholder_template_with_description(
+                "tasks",
+                "Tasks",
+                "Todo / Progress / Done board the agent runs and delegates",
+            ),
+        ];
+        let inner = Rect::new(2, 1, 76, 20);
+        let (lines, hits) =
+            playbook_empty_placeholder(&theme, &templates, Some("tasks"), None, inner);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("↑/↓ select · Enter apply"));
+        assert!(rendered.contains("Question, context, plan, findings"));
+        assert!(rendered.contains("Todo / Progress / Done board"));
+        assert_eq!(hits[0].row_end, hits[0].row_start + 1);
+        assert_eq!(hits[1].row_start, hits[0].row_end + 1);
+
+        let investigation_line = &lines[(hits[0].row_start - inner.y) as usize];
+        assert!(
+            investigation_line
+                .spans
+                .iter()
+                .all(|span| span.style.bg != Some(theme.accent)),
+            "unselected row should remain idle: {lines:?}"
+        );
+        for row in hits[1].row_start..=hits[1].row_end {
+            assert!(
+                lines[(row - inner.y) as usize]
+                    .spans
+                    .iter()
+                    .any(|span| span.style.bg == Some(theme.accent)),
+                "focused name and description rows should highlight: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
     fn playbook_empty_placeholder_orders_rows_by_name() {
         let theme = crate::theme::Theme::default();
         // Deliberately out of order, mixed case, with "blank" mixed in.
@@ -25964,7 +26079,7 @@ mod tests {
             placeholder_template("mid", "mid"),
         ];
         let (_, hits) =
-            playbook_empty_placeholder(&theme, &templates, None, Rect::new(0, 0, 80, 30));
+            playbook_empty_placeholder(&theme, &templates, None, None, Rect::new(0, 0, 80, 30));
         let ids: Vec<&str> = hits.iter().map(|h| h.template_id.as_str()).collect();
         // Case-insensitive name order; "blank" excluded.
         assert_eq!(ids, vec!["alpha", "mid", "zeta"]);
@@ -25978,10 +26093,11 @@ mod tests {
             placeholder_template("investigation", "Investigation"),
         ];
         let inner = Rect::new(2, 1, 76, 20);
-        let (_, hits) = playbook_empty_placeholder(&theme, &templates, None, inner);
+        let (_, hits) = playbook_empty_placeholder(&theme, &templates, None, None, inner);
         let second = &hits[1];
         let hovered_pos = Some((second.col_start, second.row_start));
-        let (lines, _) = playbook_empty_placeholder(&theme, &templates, hovered_pos, inner);
+        let (lines, _) =
+            playbook_empty_placeholder(&theme, &templates, None, hovered_pos, inner);
 
         // The hovered row's label span carries the accent background; the other
         // rows and the border characters do not.
@@ -26015,7 +26131,7 @@ mod tests {
             placeholder_template("eee", "Eee"),
         ];
         let inner = Rect::new(2, 1, 20, 30);
-        let (lines, hits) = playbook_empty_placeholder(&theme, &templates, None, inner);
+        let (lines, hits) = playbook_empty_placeholder(&theme, &templates, None, None, inner);
 
         // All five rows rendered and clickable, one per line.
         assert_eq!(hits.len(), 5);
@@ -26045,7 +26161,7 @@ mod tests {
         ];
         // height 10 leaves room for only a few list rows plus an overflow row.
         let inner = Rect::new(0, 0, 20, 10);
-        let (lines, hits) = playbook_empty_placeholder(&theme, &templates, None, inner);
+        let (lines, hits) = playbook_empty_placeholder(&theme, &templates, None, None, inner);
 
         assert!(hits.len() < 6, "some rows should be hidden");
         assert!(!hits.is_empty(), "at least one row should render");
@@ -26076,14 +26192,15 @@ mod tests {
         let templates = vec![placeholder_template("tasks", "Tasks")];
         // Too narrow to fit even the indent + bullet: plain description + syntax only.
         let (_, hits) =
-            playbook_empty_placeholder(&theme, &templates, None, Rect::new(0, 0, 4, 20));
+            playbook_empty_placeholder(&theme, &templates, None, None, Rect::new(0, 0, 4, 20));
         assert!(hits.is_empty());
     }
 
     #[test]
     fn playbook_empty_placeholder_has_no_rows_without_templates() {
         let theme = crate::theme::Theme::default();
-        let (lines, hits) = playbook_empty_placeholder(&theme, &[], None, Rect::new(0, 0, 80, 20));
+        let (lines, hits) =
+            playbook_empty_placeholder(&theme, &[], None, None, Rect::new(0, 0, 80, 20));
         assert!(hits.is_empty());
         // Still shows the description and syntax prose.
         assert!(!lines.is_empty());

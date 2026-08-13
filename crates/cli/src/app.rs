@@ -1367,10 +1367,10 @@ impl PlaybookActionLinkHit {
     }
 }
 
-/// A clickable template button drawn in the empty-playbook placeholder. The box
-/// spans `row_start..=row_end` (top border, label, bottom border) over the
-/// columns `col_start..col_end`; clicking anywhere inside fills the playbook with
-/// that template's Markdown. Republished every frame the active playbook is empty.
+/// A clickable template row drawn in the empty-playbook placeholder. The row
+/// spans `row_start..=row_end` (name and optional description) over the columns
+/// `col_start..col_end`; clicking anywhere inside fills the playbook with that
+/// template's Markdown. Republished every frame the active playbook is empty.
 #[derive(Debug, Clone)]
 pub struct PlaybookTemplateHit {
     pub col_start: u16,
@@ -1792,7 +1792,7 @@ pub struct App {
     /// Plugin-contributed palette/slash actions (spec 0152 phase 2),
     /// fetched once at startup/reconnect; empty when no plugins loaded.
     pub plugin_actions: Vec<construct_protocol::PluginActionInfo>,
-    /// Playbook templates offered as clickable buttons in the empty-playbook
+    /// Playbook templates offered as interactive rows in the empty-playbook
     /// placeholder. Fetched at startup and on reconnect, and refreshed in the
     /// background every time the playbook pane opens so edits to template files
     /// (or newly dropped files) appear on the next open without a daemon restart.
@@ -3009,6 +3009,10 @@ pub struct PlaybookPopup {
     pub selection: Option<PlaybookSelection>,
     pub selection_menu: Option<PlaybookSelectionMenu>,
     pub smart_clip: Option<PlaybookSmartClipSearch>,
+    /// Template id focused by keyboard in the empty-state onboarding list.
+    /// `None` keeps ordinary empty-buffer editing active until Up/Down enters
+    /// the list. Client-local and meaningful only while `buffer` is empty.
+    pub template_selection: Option<String>,
     /// Image links currently expanded inline, keyed by link instance
     /// (line-content hash ⊕ dup ordinal, index within line) → (target path,
     /// block height in body rows). The path lets edits re-attach state to
@@ -4256,7 +4260,7 @@ pub struct LayoutSnapshot {
     /// links use. No keyboard shortcuts on this surface — the playbook is a
     /// typing surface, so keys must keep typing.
     pub playbook_action_link_hits: Vec<PlaybookActionLinkHit>,
-    /// Template-button hitboxes drawn in the empty-playbook placeholder. Clicking
+    /// Template-row hitboxes drawn in the empty-playbook placeholder. Clicking
     /// one fills the playbook with that template's Markdown. Empty unless the
     /// active playbook is showing the empty-state placeholder.
     pub playbook_template_hits: Vec<PlaybookTemplateHit>,
@@ -16569,6 +16573,7 @@ fn playbook_popup_from_document(
         selection: None,
         selection_menu: None,
         smart_clip: None,
+        template_selection: None,
         expanded_attachments: HashMap::new(),
         expanded_reconcile_hash: 0,
         search: None,
@@ -18334,6 +18339,7 @@ mod tests {
             selection: None,
             selection_menu: None,
             smart_clip: None,
+            template_selection: None,
             expanded_attachments: HashMap::new(),
             expanded_reconcile_hash: 0,
             search: None,
@@ -20422,6 +20428,91 @@ mod tests {
 
         app.undo_playbook_edit();
         assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, "");
+    }
+
+    #[tokio::test]
+    async fn playbook_empty_template_rows_are_keyboard_navigable() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
+        app.layout.playbook_template_hits = vec![
+            PlaybookTemplateHit {
+                col_start: 2,
+                col_end: 70,
+                row_start: 5,
+                row_end: 6,
+                template_id: "investigation".into(),
+                markdown: "# Investigation\n".into(),
+            },
+            PlaybookTemplateHit {
+                col_start: 2,
+                col_end: 70,
+                row_start: 7,
+                row_end: 8,
+                template_id: "tasks".into(),
+                markdown: "# Tasks\n".into(),
+            },
+        ];
+
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.playbook_popup
+                .as_ref()
+                .unwrap()
+                .template_selection
+                .as_deref(),
+            Some("investigation")
+        );
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.playbook_popup
+                .as_ref()
+                .unwrap()
+                .template_selection
+                .as_deref(),
+            Some("tasks")
+        );
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "# Tasks\n");
+        assert_eq!(popup.playbook.template_id.as_deref(), Some("tasks"));
+        assert_eq!(popup.template_selection, None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn playbook_empty_template_description_is_mouse_activatable() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = empty_app().await;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "", 0));
+        app.layout.modal_area = Some(ratatui::layout::Rect::new(0, 0, 80, 20));
+        app.layout.playbook_template_hits = vec![PlaybookTemplateHit {
+            col_start: 2,
+            col_end: 70,
+            row_start: 5,
+            row_end: 6,
+            template_id: "tasks".into(),
+            markdown: "# Tasks\n".into(),
+        }];
+
+        let consumed = app
+            .handle_playbook_mouse(&MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 10,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            })
+            .await;
+
+        assert!(consumed);
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "# Tasks\n");
+        assert_eq!(popup.playbook.template_id.as_deref(), Some("tasks"));
+        server.abort();
     }
 
     /// Clicking a clip that points at a session with no navigable list row —

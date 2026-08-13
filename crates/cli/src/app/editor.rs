@@ -369,7 +369,7 @@ impl App {
             }
             return true;
         }
-        // Clicking a template button in the empty-playbook placeholder fills the
+        // Clicking a template row in the empty-playbook placeholder fills the
         // buffer with that template's Markdown — a starting point the user then
         // edits. Checked before the generic cursor-placement handler so the
         // click doesn't just move the caret.
@@ -383,7 +383,7 @@ impl App {
             {
                 // Publishes like every other mutation (spec 0171). This is
                 // the same defect paste had: filling an empty Playbook from
-                // a template button replaced the buffer and returned, so a
+                // a template row replaced the buffer and returned, so a
                 // brand-new Playbook — the very first thing a user does with
                 // one — existed only in this client until something else
                 // happened to save it.
@@ -671,6 +671,9 @@ impl App {
         let super_mod = key.modifiers.contains(KeyModifiers::SUPER);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         if self.handle_playbook_selection_menu_key(key).await {
+            return;
+        }
+        if self.handle_playbook_template_key(key).await {
             return;
         }
         if shift
@@ -1091,6 +1094,74 @@ impl App {
             self.queue_pty_input(pinned_session_id, bytes, "pinned_clip_pty_input");
         }
         true
+    }
+
+    /// Keyboard counterpart to the empty-state template hitboxes (spec 0049).
+    /// Up/Down enters and moves list focus; Enter applies the focused template.
+    /// Other keys retain their normal editor meanings, so typing into an empty
+    /// Playbook still starts a document directly.
+    async fn handle_playbook_template_key(&mut self, key: KeyEvent) -> bool {
+        let empty = self
+            .playbook_popup
+            .as_ref()
+            .is_some_and(|popup| popup.buffer.is_empty());
+        if !empty {
+            if let Some(popup) = self.playbook_popup.as_mut() {
+                popup.template_selection = None;
+            }
+            return false;
+        }
+
+        let hits = &self.layout.playbook_template_hits;
+        if hits.is_empty() {
+            return false;
+        }
+        let current = self
+            .playbook_popup
+            .as_ref()
+            .and_then(|popup| popup.template_selection.as_deref())
+            .and_then(|id| hits.iter().position(|hit| hit.template_id == id));
+
+        match key.code {
+            KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
+                let next = match (key.code, current) {
+                    (KeyCode::Up, Some(index)) => index.saturating_sub(1),
+                    (KeyCode::Up, None) => hits.len() - 1,
+                    (KeyCode::Down, Some(index)) => (index + 1).min(hits.len() - 1),
+                    (KeyCode::Down, None) => 0,
+                    _ => unreachable!(),
+                };
+                let template_id = hits[next].template_id.clone();
+                if let Some(popup) = self.playbook_popup.as_mut() {
+                    popup.template_selection = Some(template_id);
+                }
+                true
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                let Some(index) = current else {
+                    return false;
+                };
+                let hit = hits[index].clone();
+                let before = self.playbook_buffer_snapshot();
+                self.apply_playbook_template(hit.template_id, hit.markdown);
+                self.publish_playbook_mutation(before).await;
+                true
+            }
+            KeyCode::Esc if current.is_some() => {
+                if let Some(popup) = self.playbook_popup.as_mut() {
+                    popup.template_selection = None;
+                }
+                true
+            }
+            _ => {
+                if current.is_some() {
+                    if let Some(popup) = self.playbook_popup.as_mut() {
+                        popup.template_selection = None;
+                    }
+                }
+                false
+            }
+        }
     }
 
     async fn handle_playbook_selection_menu_key(&mut self, key: KeyEvent) -> bool {
@@ -2027,6 +2098,7 @@ impl App {
         popup.preferred_col = None;
         popup.selection = None;
         popup.smart_clip = None;
+        popup.template_selection = None;
     }
 
     pub(super) fn update_playbook_smart_clip_after_cursor_move(popup: &mut PlaybookPopup) {
@@ -2514,7 +2586,7 @@ impl App {
         }
     }
 
-    /// Fill an empty playbook from a placeholder template button. Replaces the
+    /// Fill an empty playbook from a placeholder template row. Replaces the
     /// whole buffer (the placeholder only shows when the playbook is empty), records
     /// an undo state so the user can back out, and stamps the document's
     /// `template_id`. Persists on the normal save path (close / Run), exactly like
@@ -2532,6 +2604,7 @@ impl App {
         popup.preferred_col = None;
         popup.selection = None;
         popup.smart_clip = None;
+        popup.template_selection = None;
         if !template_id.is_empty() {
             popup.playbook.template_id = Some(template_id);
         }
