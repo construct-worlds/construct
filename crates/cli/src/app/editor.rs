@@ -1097,9 +1097,9 @@ impl App {
     }
 
     /// Keyboard counterpart to the empty-state template hitboxes (spec 0049).
-    /// Up/Down enters and moves list focus; Enter applies the focused template.
-    /// Other keys retain their normal editor meanings, so typing into an empty
-    /// Playbook still starts a document directly.
+    /// Up/Down (or C-p/C-n) enters and moves list focus; Enter applies the
+    /// focused template. Other keys retain their normal editor meanings, so
+    /// typing into an empty Playbook still starts a document directly.
     async fn handle_playbook_template_key(&mut self, key: KeyEvent) -> bool {
         let empty = self
             .playbook_popup
@@ -1121,22 +1121,31 @@ impl App {
             .as_ref()
             .and_then(|popup| popup.template_selection.as_deref())
             .and_then(|id| hits.iter().position(|hit| hit.template_id == id));
+        let ctrl_char = Self::normalized_ctrl_char(key);
+        let direction = match key.code {
+            KeyCode::Up if key.modifiers.is_empty() => Some(-1),
+            KeyCode::Down if key.modifiers.is_empty() => Some(1),
+            _ if ctrl_char == Some('p') => Some(-1),
+            _ if ctrl_char == Some('n') => Some(1),
+            _ => None,
+        };
+
+        if let Some(direction) = direction {
+            let next = match (direction, current) {
+                (-1, Some(index)) => index.saturating_sub(1),
+                (-1, None) => hits.len() - 1,
+                (1, Some(index)) => (index + 1).min(hits.len() - 1),
+                (1, None) => 0,
+                _ => unreachable!(),
+            };
+            let template_id = hits[next].template_id.clone();
+            if let Some(popup) = self.playbook_popup.as_mut() {
+                popup.template_selection = Some(template_id);
+            }
+            return true;
+        }
 
         match key.code {
-            KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
-                let next = match (key.code, current) {
-                    (KeyCode::Up, Some(index)) => index.saturating_sub(1),
-                    (KeyCode::Up, None) => hits.len() - 1,
-                    (KeyCode::Down, Some(index)) => (index + 1).min(hits.len() - 1),
-                    (KeyCode::Down, None) => 0,
-                    _ => unreachable!(),
-                };
-                let template_id = hits[next].template_id.clone();
-                if let Some(popup) = self.playbook_popup.as_mut() {
-                    popup.template_selection = Some(template_id);
-                }
-                true
-            }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let Some(index) = current else {
                     return false;

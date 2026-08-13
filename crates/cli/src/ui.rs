@@ -16913,7 +16913,7 @@ fn playbook_empty_placeholder(
             ),
             Span::styled(
                 truncate_to_width(
-                    "  ↑/↓ select · Enter apply",
+                    "  ↑/↓ or C-p/C-n select · Enter apply",
                     width.saturating_sub(UnicodeWidthStr::width(HEADER)),
                 ),
                 dim,
@@ -26043,7 +26043,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("↑/↓ select · Enter apply"));
+        assert!(rendered.contains("↑/↓ or C-p/C-n select · Enter apply"));
         assert!(rendered.contains("Question, context, plan, findings"));
         assert!(rendered.contains("Todo / Progress / Done board"));
         assert_eq!(hits[0].row_end, hits[0].row_start + 1);

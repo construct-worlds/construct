@@ -20463,7 +20463,7 @@ mod tests {
                 .as_deref(),
             Some("investigation")
         );
-        app.handle_playbook_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
             app.playbook_popup
@@ -20473,6 +20473,18 @@ mod tests {
                 .as_deref(),
             Some("tasks")
         );
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(
+            app.playbook_popup
+                .as_ref()
+                .unwrap()
+                .template_selection
+                .as_deref(),
+            Some("investigation")
+        );
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
         app.handle_playbook_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
 
