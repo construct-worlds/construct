@@ -4190,6 +4190,8 @@ pub struct LayoutSnapshot {
     pub service_channel_row_hits: Vec<ServiceChannelRowHit>,
     /// Visible Publish/Withdraw/Open/Copy buttons for the selected channel.
     pub service_channel_action_hits: Vec<ServiceChannelActionHit>,
+    /// The top-left `< back` affordance in the channel configuration editor.
+    pub service_channel_back_hit: Option<ratatui::layout::Rect>,
     /// `(service name, graph rect)` for every service-scoped token meter
     /// painted in the last frame. Split panes can show more than one service,
     /// so this is a collection rather than a single active hit zone.
@@ -4522,6 +4524,7 @@ impl LayoutSnapshot {
             service_session_hits,
             service_channel_row_hits,
             service_channel_action_hits,
+            service_channel_back_hit,
             service_token_graphs,
             lineage_subagent_toggle_hits,
             playbook_title_run_hit,
@@ -4669,6 +4672,7 @@ impl LayoutSnapshot {
         shift.retain_rects(service_session_hits, |hit| &mut hit.area);
         shift.retain_rects(service_channel_row_hits, |hit| &mut hit.area);
         shift.retain_rects(service_channel_action_hits, |hit| &mut hit.area);
+        shift.opt_rect(service_channel_back_hit);
         shift.retain_rects(service_token_graphs, |hit| &mut hit.1);
         shift.retain_rects(lineage_subagent_toggle_hits, |hit| &mut hit.area);
 
@@ -12108,6 +12112,16 @@ impl App {
                         return;
                     }
                 }
+                if self
+                    .layout
+                    .service_channel_back_hit
+                    .is_some_and(|area| Self::rect_contains(area, col, row))
+                {
+                    if let Some(dialog) = self.service_dialog.as_mut() {
+                        dialog.channel_editor = None;
+                    }
+                    return;
+                }
                 if let Some(hit) = self
                     .layout
                     .service_channel_action_hits
@@ -17139,6 +17153,7 @@ mod tests {
             service_session_hits: Vec::new(),
             service_channel_row_hits: Vec::new(),
             service_channel_action_hits: Vec::new(),
+            service_channel_back_hit: None,
             service_token_graphs: Vec::new(),
             lineage_subagent_toggle_hits: Vec::new(),
             lineage_segment_tooltip: None,
@@ -43654,6 +43669,50 @@ mod tests {
         assert_eq!(editor.channel.id, "http-2");
         assert_eq!(editor.channel.port, Some(8788));
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_channel_editor_shows_clickable_back_affordance() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.services.push(service_summary_for_test("assistant"));
+        app.service_channel_catalog = app.services[0].channels.clone();
+        app.open_edit_service_view("assistant");
+        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let text = rendered_text(term.backend().buffer());
+        assert!(text.contains("< back"), "{text}");
+        let hit = app
+            .layout
+            .service_channel_back_hit
+            .expect("back label should be clickable");
+
+        let click = |kind| MouseEvent {
+            kind,
+            column: hit.x + 1,
+            row: hit.y,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.on_mouse(click(MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(click(MouseEventKind::Up(MouseButton::Left)))
+            .await;
+
+        assert!(
+            app.service_dialog
+                .as_ref()
+                .unwrap()
+                .channel_editor
+                .is_none(),
+            "clicking back should return to the service overview"
+        );
         server.abort();
     }
 

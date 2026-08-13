@@ -55,7 +55,9 @@ The editor lists every catalog channel under `Channels`: an attached channel use
 the filled-square `▣` glyph, an available channel uses the empty-square `▢`
 glyph, and a channel owned by another service is dimmed with its owner shown.
 Space attaches or detaches the selected available/owned channel; Enter edits
-an attached channel. The routed-session list is a separate `Sessions` section
+an attached channel. The dedicated channel editor shows a `< back` affordance
+at its top-left; clicking it or pressing Esc returns to the service overview.
+The routed-session list is a separate `Sessions` section
 below the channel catalog. Global `C-x` chords remain available while the service view is
 focused; session-only commands such as `C-x .` explain their scope instead of
 being silently swallowed. When a remote-control dialog, session picker, or

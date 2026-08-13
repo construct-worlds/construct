@@ -327,6 +327,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.service_session_hits.clear();
     app.layout.service_channel_row_hits.clear();
     app.layout.service_channel_action_hits.clear();
+    app.layout.service_channel_back_hit = None;
     app.layout.service_token_graphs.clear();
     app.layout.lineage_subagent_toggle_hits.clear();
     app.layout.lineage_segment_tooltip = None;
@@ -8412,11 +8413,42 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
     // screen differs from the one the daemon has (spec 0175).
     let unsaved = if editing && dialog.is_dirty() { "*" } else { "" };
     let border_style = pane_border_style(&app.theme, focused);
+    let title = if dialog.channel_editor.is_some() {
+        const BACK_LABEL: &str = "< back";
+        let back_area = Rect::new(area.x.saturating_add(1), area.y, BACK_LABEL.len() as u16, 1);
+        let back_hovered = app.mouse_pos.is_some_and(|(x, y)| {
+            x >= back_area.x && x < back_area.right() && y == back_area.y
+        });
+        app.layout.service_channel_back_hit = Some(back_area);
+        Line::from(vec![
+            Span::styled(
+                BACK_LABEL,
+                Style::default()
+                    .fg(if back_hovered {
+                        app.theme.highlight_fg
+                    } else {
+                        app.theme.accent
+                    })
+                    .bg(if back_hovered {
+                        app.theme.highlight_bg
+                    } else {
+                        Color::Reset
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ⛓︎ service: {}{unsaved} ", summary.name),
+                border_style,
+            ),
+        ])
+    } else {
+        Line::from(format!(" ⛓︎ service: {}{unsaved} ", summary.name))
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
         .padding(ratatui::widgets::Padding::new(2, 2, 1, 1))
-        .title(format!(" ⛓︎ service: {}{unsaved} ", summary.name));
+        .title(title);
     let block = apply_pane_title_right_cluster(
         app,
         area,
