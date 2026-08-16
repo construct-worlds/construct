@@ -904,17 +904,25 @@ fn pane_ordinal_style(theme: &Theme, in_active_pane: bool) -> Style {
 
 /// Badge style when painted onto a list row. Ratatui's `highlight_style`
 /// overwrites every cell of the selected item, so a selected row's badge
-/// would vanish into the selection bar. Invert the chip when its resting
-/// background is the same color the row highlight just applied — the
-/// digit stays a locator, the row stays the selection.
+/// would vanish into the selection bar.
+///
+/// On a focused-list selection the chip uses the inactive highlight — a
+/// quieter fill of the same family as the bar, so the digit still sits on
+/// a pad without matching the row. Against any other colliding highlight
+/// the pair is inverted.
 fn pane_ordinal_style_on_list_row(
     theme: &Theme,
     in_active_pane: bool,
     row_highlight_bg: Option<Color>,
 ) -> Style {
     let (mut fg, mut bg) = pane_ordinal_colors(theme, in_active_pane);
-    if row_highlight_bg == Some(bg) {
-        std::mem::swap(&mut fg, &mut bg);
+    if let Some(row_bg) = row_highlight_bg {
+        if row_bg == theme.highlight_bg {
+            fg = theme.highlight_fg;
+            bg = theme.inactive_highlight_bg;
+        } else if row_bg == bg {
+            std::mem::swap(&mut fg, &mut bg);
+        }
     }
     Style::default()
         .fg(fg)
@@ -3693,9 +3701,9 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(block, area);
     let list = List::new(items).highlight_style(highlight_style);
     f.render_stateful_widget(list, list_items_area, &mut state);
-    // The list highlight paints over the badge cell. Restore a distinct
-    // chip on the selected row so the ordinal and the selection bar are
-    // never the same color (spec 0199).
+    // The list highlight paints over the badge cell. Restore a muted
+    // chip on the selected row so the ordinal sits on a pad without
+    // matching the selection bar (spec 0199).
     paint_list_row_ordinal_badges(
         f,
         list_items_area,
@@ -25593,18 +25601,19 @@ mod tests {
         assert_eq!(idle[0].style.bg, Some(theme.inactive_highlight_bg));
     }
 
-    /// A selected list row wears the same pair the active-pane badge would.
-    /// Invert the chip in that case so the digit stays a locator (spec 0199).
+    /// A focused-list selection uses the inactive highlight as a quieter
+    /// chip so the digit still sits on a pad (spec 0199). Other collisions
+    /// invert.
     #[test]
-    fn pane_ordinal_badge_inverts_when_it_would_match_the_row_highlight() {
+    fn pane_ordinal_badge_uses_a_muted_chip_on_the_selection_bar() {
         let theme = Theme::default();
         let on_selected_active = pane_ordinal_style_on_list_row(
             &theme,
             true,
             Some(theme.highlight_bg),
         );
-        assert_eq!(on_selected_active.bg, Some(theme.highlight_fg));
-        assert_eq!(on_selected_active.fg, Some(theme.highlight_bg));
+        assert_eq!(on_selected_active.bg, Some(theme.inactive_highlight_bg));
+        assert_eq!(on_selected_active.fg, Some(theme.highlight_fg));
 
         let on_selected_idle = pane_ordinal_style_on_list_row(
             &theme,
@@ -25612,7 +25621,7 @@ mod tests {
             Some(theme.highlight_bg),
         );
         assert_eq!(on_selected_idle.bg, Some(theme.inactive_highlight_bg));
-        assert_eq!(on_selected_idle.fg, Some(theme.text));
+        assert_eq!(on_selected_idle.fg, Some(theme.highlight_fg));
 
         let on_unfocused_idle = pane_ordinal_style_on_list_row(
             &theme,

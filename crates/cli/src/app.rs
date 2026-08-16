@@ -20329,8 +20329,13 @@ mod tests {
         );
         assert_eq!(
             badge.style().bg,
+            Some(app.theme.inactive_highlight_bg),
+            "selected-row badge wears a muted highlight chip, not an empty cell"
+        );
+        assert_eq!(
+            badge.style().fg,
             Some(app.theme.highlight_fg),
-            "colliding badge inverts against the focused-list highlight"
+            "the digit uses the same ink as the selected row"
         );
         // A cell further along the same row still wears the selection bar.
         let title_cell = buffer
