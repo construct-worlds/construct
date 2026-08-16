@@ -61,10 +61,35 @@ collisions.
 - Ordinals past 9 are not rendered (the row falls back to its plain
   lead-in) so the badge can never widen beyond one cell.
 
+## Selecting a pane by its badge
+
+The badge is also an address. One rule everywhere: **digit N goes to the
+pane wearing badge N; digit 0 goes to the session list.**
+
+- `Alt+digit` is the accelerator in both keymap profiles — it matches the
+  emacs window-numbering convention and, unlike `Ctrl+digit`, arrives in
+  every terminal (legacy encodings deliver it ESC-prefixed).
+- `Ctrl+digit` is the same jump for terminals with keyboard-enhancement
+  disambiguation (see the terminal-keyboard-disambiguation spec). This
+  REPLACES the earlier scheme where `Ctrl+1` meant the session list and
+  `Ctrl+2` the first pane: once badges were painted, that off-by-one read
+  as a bug. The list jump moved to digit 0.
+- The vim profile additionally binds the digits behind its window-command
+  prefix chord, same numbering.
+- Clicking a badge — on a pane's corner or in a list row's first cell —
+  focuses that pane. In the list this outranks the disclosure toggle the
+  badge may be covering.
+
+Pane digits 1..9 act only while badges are on screen (two or more panes);
+with a single pane they fall through, so a focused child terminal
+application keeps its own Alt/Ctrl+digit bindings (emacs prefix arguments
+chief among them). Digit 0 is the always-available list jump.
+
 ## Non-Goals
 
 - Service and project rows in the session list are unbadged (their panes
   are, via the corner badge). The numbering already reserves their slots,
   so badging their rows later is additive.
-- This does not renumber or alter the existing pane-cycling / focus-by-index
-  keybindings; the badge is a visual locator only.
+- The web UI does not mirror the digit accelerators (browsers reserve
+  modifier-digit combinations for tab switching); its pane-focus story is
+  its own.

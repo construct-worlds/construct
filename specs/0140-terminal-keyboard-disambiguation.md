@@ -15,13 +15,14 @@ enhancement flags (event types, alternate keys, associated text) are
 requested.
 
 This exists so bindings on keys that legacy terminal encodings fold onto
-control characters — `Ctrl+digit` pane focus (`C-1` = the session list,
-`C-2`..`C-5` = split windows) chief among them — actually arrive as
-distinct key events in terminals that can express them. Terminals without
-support keep the legacy encoding and those bindings remain silently
-unreachable there; every such binding must have the behavior reachable
-another way (`C-x l` toggles list ⇄ split pane and `C-x o` cycles panes in
-any terminal).
+control characters — `Ctrl+digit` pane focus (digit N = the pane wearing
+ordinal badge N, digit 0 = the session list; see the split-pane
+ordinal-badges spec) chief among them — actually arrive as distinct key
+events in terminals that can express them. Terminals without support keep
+the legacy encoding and those bindings remain silently unreachable there;
+every such binding must have the behavior reachable another way
+(`Alt+digit` makes the same jumps in every terminal, `C-x Tab` toggles
+list ⇄ split pane, and `C-x o` cycles panes).
 
 ## Reason
 

@@ -71,7 +71,7 @@ Keyboard focus:
   session moves focus to the view pane.
 - The sidebar REMEMBERS its sub-focus: leaving it (jumping into a session,
   cycling or clicking to a pane, a `C-x` chord) keeps the rows-vs-lineage
-  choice as dormant memory, and returning (`C-x l`, `C-1`, `C-x o`
+  choice as dormant memory, and returning (`C-x l`, `C-0` / `M-0`, `C-x o`
   cycling) lands back in the region that was focused last. While dormant,
   the section owns no keys and shows no focus highlight. Only an explicit
   hand-off inside the sidebar — `Esc`, a bare unhandled key, `Tab`,

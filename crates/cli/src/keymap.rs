@@ -81,9 +81,9 @@ pub enum KeyAction {
     /// pane it came from (whose session the list selection may have just
     /// re-pointed), so `C-x Tab` … pick … `C-x Tab` is the switch-and-return
     /// loop. Bound to `C-x Tab` in both profiles: a chord, so
-    /// it works in every terminal — unlike the `C-1` accelerator, which
+    /// it works in every terminal — unlike the `C-0` accelerator, which
     /// needs the kitty keyboard protocol (spec 0140) that e.g. macOS
-    /// Terminal.app lacks.
+    /// Terminal.app lacks. `M-0` is the same jump everywhere.
     FocusList,
     /// Move keyboard focus to the spatially adjacent split window in a
     /// direction (emacs `windmove`). Reachable via the `C-x` prefix
@@ -95,6 +95,14 @@ pub enum KeyAction {
     FocusWindowDown,
     FocusWindowLeft,
     FocusWindowRight,
+    /// Focus the split pane wearing ordinal badge N (1..=9); 0 focuses the
+    /// session list (spec 0199). The digit matches the badge painted on the
+    /// pane corner and in the session list, so the number you see is the
+    /// number you press. Bound to `C-w 0`..`C-w 9` in the vim profile; both
+    /// profiles also reach the same jumps through the `M-digit` / `C-digit`
+    /// accelerators, which are handled outside the keymap so they can
+    /// escape a focused child PTY.
+    FocusPaneOrdinal(u8),
     /// Move keyboard focus into the selected session's view pane (from
     /// the list). Acts on Enter from the list — a one-way "drill in"
     /// counterpart to `SwitchFocus`'s toggle.
@@ -503,6 +511,20 @@ fn vim() -> Keymap {
         (Chord(vec![ctrl('w'), ch('<')]), ShrinkWindowHorizontally),
         (Chord(vec![ctrl('w'), shift('<')]), ShrinkWindowHorizontally),
         (Chord(vec![ctrl('w'), ch('z')]), ToggleZoom),
+        // `C-w 1`..`C-w 9` focus the pane wearing that ordinal badge;
+        // `C-w 0` jumps to the session list (spec 0199). Chords, so they
+        // work in every terminal — the `M-digit` / `C-digit` accelerators
+        // are the direct forms.
+        (Chord(vec![ctrl('w'), ch('0')]), FocusPaneOrdinal(0)),
+        (Chord(vec![ctrl('w'), ch('1')]), FocusPaneOrdinal(1)),
+        (Chord(vec![ctrl('w'), ch('2')]), FocusPaneOrdinal(2)),
+        (Chord(vec![ctrl('w'), ch('3')]), FocusPaneOrdinal(3)),
+        (Chord(vec![ctrl('w'), ch('4')]), FocusPaneOrdinal(4)),
+        (Chord(vec![ctrl('w'), ch('5')]), FocusPaneOrdinal(5)),
+        (Chord(vec![ctrl('w'), ch('6')]), FocusPaneOrdinal(6)),
+        (Chord(vec![ctrl('w'), ch('7')]), FocusPaneOrdinal(7)),
+        (Chord(vec![ctrl('w'), ch('8')]), FocusPaneOrdinal(8)),
+        (Chord(vec![ctrl('w'), ch('9')]), FocusPaneOrdinal(9)),
         (Chord(vec![ctrl('x'), ctrl('c')]), Quit),
         (Chord(vec![ctrl('x'), ch('t')]), ToggleView),
         (Chord(vec![ctrl('x'), ch('[')]), ScrollPageUp),
@@ -941,5 +963,10 @@ mod tests {
             KeyAction::ShrinkWindowHorizontally,
         );
         assert_action(&km, vec![ctrl('w'), ch('z')], KeyAction::ToggleZoom);
+        // `C-w 1`..`C-w 9` match the ordinal badge; `C-w 0` is the list.
+        assert_action(&km, vec![ctrl('w'), ch('0')], KeyAction::FocusPaneOrdinal(0));
+        assert_action(&km, vec![ctrl('w'), ch('1')], KeyAction::FocusPaneOrdinal(1));
+        assert_action(&km, vec![ctrl('w'), ch('5')], KeyAction::FocusPaneOrdinal(5));
+        assert_action(&km, vec![ctrl('w'), ch('9')], KeyAction::FocusPaneOrdinal(9));
     }
 }
