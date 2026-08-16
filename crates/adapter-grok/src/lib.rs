@@ -285,6 +285,45 @@ fn sibling_native_ids(own_cwd: &Path) -> HashSet<String> {
     ids
 }
 
+/// Find the newest eligible native session, re-reading sibling ownership
+/// before returning any id other than the one this watcher already owns.
+///
+/// The regular sibling snapshot is intentionally cached: scanning every
+/// construct session's metadata on every 500ms watcher tick is needless I/O.
+/// A newly-started same-cwd Grok session is the one moment that cache can be
+/// stale in a correctness-sensitive way, though. Its adapter writes the
+/// pre-minted native id before spawning Grok, so once the new Grok directory
+/// is visible a synchronous ownership refresh can authoritatively reject it.
+///
+/// `find_candidate` is a closure so the ownership rule stays independently
+/// testable without mutating process-global GROK_HOME state.
+fn find_revalidated_session_id(
+    current_id: Option<&str>,
+    base_excluded: &HashSet<String>,
+    cached_sibling_ids: &HashSet<String>,
+    find_candidate: impl Fn(&HashSet<String>) -> Option<String>,
+    refresh_sibling_ids: impl FnOnce() -> HashSet<String>,
+) -> (Option<String>, Option<HashSet<String>>) {
+    let mut excluded = base_excluded.clone();
+    excluded.extend(cached_sibling_ids.iter().cloned());
+    let candidate = find_candidate(&excluded);
+
+    // The common idle case needs no filesystem-wide sibling refresh.
+    if candidate.as_deref() == current_id || candidate.is_none() {
+        return (candidate, None);
+    }
+
+    // A different id may have appeared since `cached_sibling_ids` was read.
+    // Refresh before adopting it, then rescan rather than merely rejecting
+    // the first candidate: several siblings may have started in one cache
+    // interval, and every one of their pre-minted ids must be excluded.
+    let fresh_sibling_ids = refresh_sibling_ids();
+    let mut excluded = base_excluded.clone();
+    excluded.extend(fresh_sibling_ids.iter().cloned());
+    let candidate = find_candidate(&excluded);
+    (candidate, Some(fresh_sibling_ids))
+}
+
 /// Locate a known native session id anywhere under `sessions_root/*/`.
 ///
 /// Grok keys directories by process cwd. Construct's recorded cwd can lag
@@ -1033,8 +1072,9 @@ fn spawn_interactive_transcript_watcher(
         // Re-scanning every sibling's meta.json on every 500ms tick is
         // needless I/O churn — sibling composition and cwd are static for a
         // session's lifetime, only their native ids rotate occasionally.
-        // Refreshing every 5s (10 ticks) still closes the false-rebind
-        // window far faster than that window can recur in practice.
+        // Refreshing every 5s (10 ticks) keeps the steady-state cache current;
+        // a different discovery candidate forces an immediate authoritative
+        // refresh below before any rebind is allowed.
         // Sibling filter always uses construct's recorded cwd (spec 0088 /
         // 0192): it matches construct metadata, not Grok's process cwd.
         let mut ticks_since_sibling_refresh: u32 = 0;
@@ -1170,12 +1210,25 @@ fn spawn_interactive_transcript_watcher(
             }
 
             // Prefer the newest non-child, non-sibling session dir under the
-            // watch cwd (Grok's effective storage cwd). First spawn discovers
-            // the id; after /clear a fresher root dir appears and we rebind.
-            let mut excluded: HashSet<String> = children.keys().cloned().collect();
-            excluded.extend(never_rebind_onto.iter().cloned());
-            excluded.extend(sibling_ids.iter().cloned());
-            if let Some(id) = find_session_id_excluding(&watch_cwd, &excluded) {
+            // watch cwd (Grok's effective storage cwd). Before adopting a
+            // different id, synchronously refresh sibling ownership: a fresh
+            // same-cwd session (including a usage probe) prewrites its UUID,
+            // and must never steal every existing watcher's binding during
+            // the five-second cached-sibling interval (spec 0088).
+            let mut base_excluded: HashSet<String> = children.keys().cloned().collect();
+            base_excluded.extend(never_rebind_onto.iter().cloned());
+            let (discovered_id, refreshed_siblings) = find_revalidated_session_id(
+                current_id.as_deref(),
+                &base_excluded,
+                &sibling_ids,
+                |excluded| find_session_id_excluding(&watch_cwd, excluded),
+                || sibling_native_ids(&construct_cwd),
+            );
+            if let Some(fresh) = refreshed_siblings {
+                sibling_ids = fresh;
+                ticks_since_sibling_refresh = 0;
+            }
+            if let Some(id) = discovered_id {
                 if current_id.as_ref() != Some(&id) {
                     if let Some(dir) = resolve_grok_session_dir(&watch_cwd, &id) {
                         if let Some(prior) = current_id.as_ref() {
@@ -2180,6 +2233,89 @@ mod tests {
         std::env::remove_var("CONSTRUCT_SESSION_DATA_DIR");
 
         assert_eq!(ids, HashSet::from(["sibling-native-id".to_string()]));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A fresh same-cwd construct session writes its pre-minted Grok id
+    /// before Grok creates the directory. Existing watchers may still hold a
+    /// cached sibling set from before that session existed; the final check
+    /// before rebinding must refresh ownership and leave them on their own
+    /// native session instead of projecting the newcomer's usage N times.
+    #[test]
+    fn rebind_rechecks_fresh_sibling_ownership_after_stale_cached_scan() {
+        let home = std::env::temp_dir().join(format!(
+            "agentd-grok-rebind-owner-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let sessions = home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        let own_id = "aaaaaaaa-bbbb-cccc-dddd-000000000001";
+        let newcomer_id = "aaaaaaaa-bbbb-cccc-dddd-000000000002";
+        std::fs::create_dir_all(sessions.join(own_id)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::create_dir_all(sessions.join(newcomer_id)).unwrap();
+
+        let cached_siblings = HashSet::new();
+        let base_excluded = HashSet::new();
+        assert_eq!(
+            find_session_id_excluding_in(&sessions, &cached_siblings).as_deref(),
+            Some(newcomer_id),
+            "the stale fast-path sees the new sibling as a reset candidate"
+        );
+
+        let (found, refreshed) = find_revalidated_session_id(
+            Some(own_id),
+            &base_excluded,
+            &cached_siblings,
+            |excluded| find_session_id_excluding_in(&sessions, excluded),
+            || HashSet::from([newcomer_id.to_string()]),
+        );
+        assert_eq!(found.as_deref(), Some(own_id));
+        assert_eq!(
+            refreshed,
+            Some(HashSet::from([newcomer_id.to_string()]))
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The ownership recheck must not suppress this watcher's own `/clear`:
+    /// when no sibling reports the new id, the fresher native directory is
+    /// still the legitimate rebind target.
+    #[test]
+    fn rebind_keeps_an_unclaimed_native_reset_after_ownership_recheck() {
+        let home = std::env::temp_dir().join(format!(
+            "agentd-grok-rebind-reset-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let sessions = home.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        let own_id = "aaaaaaaa-bbbb-cccc-dddd-000000000001";
+        let reset_id = "aaaaaaaa-bbbb-cccc-dddd-000000000002";
+        std::fs::create_dir_all(sessions.join(own_id)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::create_dir_all(sessions.join(reset_id)).unwrap();
+
+        let (found, refreshed) = find_revalidated_session_id(
+            Some(own_id),
+            &HashSet::new(),
+            &HashSet::new(),
+            |excluded| find_session_id_excluding_in(&sessions, excluded),
+            HashSet::new,
+        );
+        assert_eq!(found.as_deref(), Some(reset_id));
+        assert_eq!(refreshed, Some(HashSet::new()));
 
         let _ = std::fs::remove_dir_all(&home);
     }
