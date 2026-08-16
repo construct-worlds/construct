@@ -1,11 +1,11 @@
-//! Transport-neutral service ingress.
+//! Transport-neutral operator ingress.
 //!
 //! Channel adapters turn their native deliveries into [`IngressRequest`]s and
-//! hand them to [`ServiceIngress`]. Session routing, ownership, request
+//! hand them to [`OperatorIngress`]. Session routing, ownership, request
 //! deduplication, result reconstruction, and approval handling live here so a
-//! channel does not need to reimplement service semantics.
+//! channel does not need to reimplement operator semantics.
 
-use super::{ServiceConfig, ServiceRouting, ServiceSessionMode};
+use super::{OperatorConfig, OperatorRouting, OperatorSessionMode};
 use crate::session::SessionManager;
 use anyhow::{anyhow, Result};
 use construct_protocol::{
@@ -42,7 +42,7 @@ struct PendingDelivery {
     created_at: tokio::time::Instant,
 }
 
-/// A delivery this service accepted and has not answered yet.
+/// A delivery this operator accepted and has not answered yet.
 ///
 /// The task waiting on a turn lives exactly as long as the daemon process. A
 /// restart mid-turn therefore takes the waiter with it, and everything the
@@ -51,7 +51,7 @@ struct PendingDelivery {
 /// delivery is what lets the next daemon pick the wait back up.
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct OutstandingDelivery {
-    /// Which channel of this service accepted it. A service may run several.
+    /// Which channel of this operator accepted it. A operator may run several.
     pub(super) channel_id: String,
     pub(super) session: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,7 +72,7 @@ pub(super) struct OutstandingDelivery {
 pub(super) struct PersistedState {
     #[serde(default)]
     pub(super) sessions: HashMap<String, String>,
-    /// Every session this service is allowed to expose through a channel.
+    /// Every session this operator is allowed to expose through a channel.
     /// This is broader than `sessions`: per-event sessions have no routing key
     /// but still need to remain queryable by the channel that created them.
     #[serde(default)]
@@ -90,14 +90,14 @@ impl PersistedState {
     }
 }
 
-/// Per-service state that outlives any one definition.
+/// Per-operator state that outlives any one definition.
 ///
-/// Exactly one instance exists per service name for the life of the daemon.
+/// Exactly one instance exists per operator name for the life of the daemon.
 /// Reloads replace `config` in place so routed sessions and delivery history
 /// survive definition edits.
-pub(crate) struct ServiceIngressShared {
+pub(crate) struct OperatorIngressShared {
     name: String,
-    config: std::sync::RwLock<Arc<ServiceConfig>>,
+    config: std::sync::RwLock<Arc<OperatorConfig>>,
     manager: Arc<SessionManager>,
     state_path: PathBuf,
     pub(super) state: Mutex<PersistedState>,
@@ -105,14 +105,14 @@ pub(crate) struct ServiceIngressShared {
     pending_deliveries: Mutex<HashMap<String, PendingDelivery>>,
 }
 
-impl ServiceIngressShared {
+impl OperatorIngressShared {
     pub(crate) fn load(
         name: String,
-        config: ServiceConfig,
+        config: OperatorConfig,
         manager: Arc<SessionManager>,
         data_dir: PathBuf,
     ) -> Arc<Self> {
-        let state_path = data_dir.join("services").join(format!("{name}.json"));
+        let state_path = data_dir.join("operators").join(format!("{name}.json"));
         let mut state: PersistedState = std::fs::read(&state_path)
             .ok()
             .and_then(|raw| serde_json::from_slice(&raw).ok())
@@ -130,14 +130,14 @@ impl ServiceIngressShared {
     }
 
     /// The definition in force now, cloned out of the lock before any await.
-    pub(crate) fn config(&self) -> Arc<ServiceConfig> {
+    pub(crate) fn config(&self) -> Arc<OperatorConfig> {
         self.config
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 
-    pub(crate) fn set_config(&self, config: ServiceConfig) {
+    pub(crate) fn set_config(&self, config: OperatorConfig) {
         let mut slot = self
             .config
             .write()
@@ -187,18 +187,18 @@ impl ServiceIngressShared {
     }
 }
 
-/// One service channel's transport-neutral route into Construct sessions.
-pub(crate) struct ServiceIngress {
+/// One operator channel's transport-neutral route into Construct sessions.
+pub(crate) struct OperatorIngress {
     channel_id: String,
-    shared: Arc<ServiceIngressShared>,
+    shared: Arc<OperatorIngressShared>,
 }
 
-impl ServiceIngress {
-    pub(crate) fn new(channel_id: String, shared: Arc<ServiceIngressShared>) -> Self {
+impl OperatorIngress {
+    pub(crate) fn new(channel_id: String, shared: Arc<OperatorIngressShared>) -> Self {
         Self { channel_id, shared }
     }
 
-    pub(super) fn service_name(&self) -> &str {
+    pub(super) fn operator_name(&self) -> &str {
         &self.shared.name
     }
 
@@ -206,7 +206,7 @@ impl ServiceIngress {
         &self.channel_id
     }
 
-    pub(super) fn current_config(&self) -> Arc<ServiceConfig> {
+    pub(super) fn current_config(&self) -> Arc<OperatorConfig> {
         self.shared.config()
     }
 
@@ -261,7 +261,7 @@ impl ServiceIngress {
         state.outstanding.insert(self.outstanding_key(key), record);
         if let Err(error) = self.persist_state(&state).await {
             tracing::warn!(
-                service = %self.shared.name,
+                operator = %self.shared.name,
                 %error,
                 "could not record an outstanding delivery; a restart would abandon it"
             );
@@ -280,7 +280,7 @@ impl ServiceIngress {
         };
         record.context = context;
         if let Err(error) = self.persist_state(&state).await {
-            tracing::warn!(service = %self.shared.name, %error, "could not amend an outstanding delivery");
+            tracing::warn!(operator = %self.shared.name, %error, "could not amend an outstanding delivery");
         }
     }
 
@@ -291,7 +291,7 @@ impl ServiceIngress {
             return;
         }
         if let Err(error) = self.persist_state(&state).await {
-            tracing::warn!(service = %self.shared.name, %error, "could not clear a resolved delivery");
+            tracing::warn!(operator = %self.shared.name, %error, "could not clear a resolved delivery");
         }
     }
 
@@ -368,12 +368,12 @@ impl ServiceIngress {
             }
         }
         let config = self.shared.config();
-        let new_delivery_id = (config.session_mode == ServiceSessionMode::Interactive)
+        let new_delivery_id = (config.session_mode == OperatorSessionMode::Interactive)
             .then(|| Uuid::new_v4().simple().to_string());
         let key = match config.routing {
-            ServiceRouting::PerEvent => None,
-            ServiceRouting::Single => Some("__single__".to_string()),
-            ServiceRouting::SessionKey => Some(
+            OperatorRouting::PerEvent => None,
+            OperatorRouting::Single => Some("__single__".to_string()),
+            OperatorRouting::SessionKey => Some(
                 request
                     .session_key
                     .filter(|key| !key.is_empty())
@@ -382,7 +382,7 @@ impl ServiceIngress {
         };
         if let Some(key) = key {
             let lookup_key = format!("{}:{key}", self.channel_id);
-            // Keep lookup + creation atomic for this service. Without this,
+            // Keep lookup + creation atomic for this operator. Without this,
             // two concurrent first deliveries for the same key would each
             // create a conversation and one would become orphaned.
             let mut state = self.shared.state.lock().await;
@@ -402,7 +402,7 @@ impl ServiceIngress {
                         .register_delivery(delivery_id.clone(), id.clone())
                         .await;
                 }
-                // Not `send_input`: an interactive service session is a live
+                // Not `send_input`: an interactive operator session is a live
                 // agent TUI, and LF-terminated input lands in its composer
                 // without submitting. `deliver_user_text` picks the framing
                 // the session's harness actually submits on.
@@ -422,7 +422,7 @@ impl ServiceIngress {
                 .create(
                     request.message,
                     Some(format!(
-                        "service:{}:{}:{key}",
+                        "operator:{}:{}:{key}",
                         self.shared.name, self.channel_id
                     )),
                     new_delivery_id.as_deref(),
@@ -440,7 +440,7 @@ impl ServiceIngress {
             let id = self
                 .create(
                     request.message,
-                    Some(format!("service:{}:{}", self.shared.name, self.channel_id)),
+                    Some(format!("operator:{}:{}", self.shared.name, self.channel_id)),
                     new_delivery_id.as_deref(),
                 )
                 .await?;
@@ -484,7 +484,7 @@ impl ServiceIngress {
             return Some(existing);
         }
         tracing::info!(
-            service = %self.shared.name,
+            operator = %self.shared.name,
             channel = %self.channel_id,
             session = %existing,
             "routed session no longer exists; the routing key will open a new session"
@@ -527,7 +527,7 @@ impl ServiceIngress {
             }
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                return Err(anyhow!("service turn timed out"));
+                return Err(anyhow!("operator turn timed out"));
             }
             let Ok(detail) = self.shared.manager.detail(&receipt.session).await else {
                 continue;
@@ -586,7 +586,7 @@ impl ServiceIngress {
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 self.shared.cancel_delivery(delivery_id).await;
-                return Err(anyhow!("service turn timed out"));
+                return Err(anyhow!("operator turn timed out"));
             }
             let Ok(detail) = self.shared.manager.detail(&receipt.session).await else {
                 continue;
@@ -594,7 +594,7 @@ impl ServiceIngress {
             publish_progress(progress, &detail.events);
             let events = detail.events.get(receipt.event_cursor..).unwrap_or(&[]);
             if let Some(reply) =
-                explicit_service_reply(events.iter().map(|event| &event.event), delivery_id)
+                explicit_operator_reply(events.iter().map(|event| &event.event), delivery_id)
             {
                 return Ok(reply);
             }
@@ -662,11 +662,11 @@ impl ServiceIngress {
                     .tool_decision(session_id, pending.call_id, "deny".to_string())
                     .await;
                 tracing::info!(
-                    service = %self.shared.name,
+                    operator = %self.shared.name,
                     session = %session_id,
                     tool = %pending.tool,
                     waited,
-                    "service approval timed out; denied"
+                    "operator approval timed out; denied"
                 );
                 approval = Some(IngressApproval {
                     tool: pending.tool,
@@ -685,7 +685,7 @@ impl ServiceIngress {
         }
 
         Ok(Some(IngressResult {
-            service: self.shared.name.clone(),
+            operator: self.shared.name.clone(),
             channel: self.channel_id.clone(),
             session: session_id.to_string(),
             status: detail.summary.state,
@@ -702,12 +702,12 @@ impl ServiceIngress {
         delivery_id: Option<&str>,
     ) -> Result<String> {
         // Use one definition snapshot for the whole creation so a reload
-        // cannot combine fields from two versions of a service.
+        // cannot combine fields from two versions of a operator.
         let config = self.shared.config();
-        let prompt = service_seed_prompt(&config.instruction, message, delivery_id);
-        let model = service_session_model(&config.harness, config.model.as_deref())?;
-        let interactive = config.session_mode == ServiceSessionMode::Interactive;
-        let env = service_session_env(&config);
+        let prompt = operator_seed_prompt(&config.instruction, message, delivery_id);
+        let model = operator_session_model(&config.harness, config.model.as_deref())?;
+        let interactive = config.session_mode == OperatorSessionMode::Interactive;
+        let env = operator_session_env(&config);
         let id = self
             .shared
             .manager
@@ -745,17 +745,17 @@ impl ServiceIngress {
     }
 }
 
-fn service_session_env(config: &ServiceConfig) -> HashMap<String, String> {
+fn operator_session_env(config: &OperatorConfig) -> HashMap<String, String> {
     let mut env = config.sandbox.session_env();
-    if config.session_mode == ServiceSessionMode::Interactive {
+    if config.session_mode == OperatorSessionMode::Interactive {
         env.insert("CONSTRUCT_INJECT_MCP".to_string(), "1".to_string());
         env.insert(
-            construct_protocol::adapter::SERVICE_REPLY_TOOL_ENV.to_string(),
+            construct_protocol::adapter::OPERATOR_REPLY_TOOL_ENV.to_string(),
             "1".to_string(),
         );
         if !config.sandbox.mcp {
             env.insert(
-                construct_protocol::adapter::SERVICE_REPLY_ONLY_MCP_ENV.to_string(),
+                construct_protocol::adapter::OPERATOR_REPLY_ONLY_MCP_ENV.to_string(),
                 "1".to_string(),
             );
         }
@@ -763,7 +763,7 @@ fn service_session_env(config: &ServiceConfig) -> HashMap<String, String> {
     env
 }
 
-/// Compose the seed prompt a service session is created with: the service's
+/// Compose the seed prompt a operator session is created with: the operator's
 /// standing instruction, this delivery's message, and — for an interactive
 /// session — the binding that tells the agent which delivery id its reply
 /// belongs to.
@@ -774,7 +774,7 @@ fn service_session_env(config: &ServiceConfig) -> HashMap<String, String> {
 /// before the harness switches it into raw mode, so a post-spawn write of the
 /// first message is silently lost. As the seed prompt it reaches the adapter
 /// as structured data and starts the first turn natively (spec 0046).
-fn service_seed_prompt(instruction: &str, message: String, delivery_id: Option<&str>) -> String {
+fn operator_seed_prompt(instruction: &str, message: String, delivery_id: Option<&str>) -> String {
     let prompt = if instruction.trim().is_empty() {
         message
     } else {
@@ -788,18 +788,18 @@ fn service_seed_prompt(instruction: &str, message: String, delivery_id: Option<&
 
 fn interactive_delivery_prompt(message: &str, delivery_id: &str) -> String {
     format!(
-        "{message}\n\n[Construct service delivery {delivery_id}]\n\
-         Send the caller-facing final response with the `construct_service_reply` tool using \
+        "{message}\n\n[Construct operator delivery {delivery_id}]\n\
+         Send the caller-facing final response with the `construct_operator_reply` tool using \
          delivery_id `{delivery_id}`. The tool is the only delivery path; do not choose a \
          workspace, channel, recipient, or thread yourself."
     )
 }
 
-/// Turn a durable service model selection into the id accepted by the
+/// Turn a durable operator model selection into the id accepted by the
 /// session's native model surface. Plain harness-native models pass through;
 /// Construct route/model ids retain both halves and receive Claude's special
 /// gateway prefix only when a Claude session is actually spawned.
-fn service_session_model(harness: &str, model: Option<&str>) -> Result<Option<String>> {
+fn operator_session_model(harness: &str, model: Option<&str>) -> Result<Option<String>> {
     let Some(model) = model else {
         return Ok(None);
     };
@@ -826,7 +826,7 @@ pub(super) struct IngressRequest {
 
 #[derive(Serialize)]
 pub(super) struct IngressResult {
-    pub(super) service: String,
+    pub(super) operator: String,
     pub(super) channel: String,
     pub(super) session: String,
     pub(super) status: SessionState,
@@ -887,7 +887,7 @@ pub(super) fn latest_assistant_reply<'a>(
     Some(parts.concat())
 }
 
-fn explicit_service_reply<'a>(
+fn explicit_operator_reply<'a>(
     events: impl Iterator<Item = &'a SessionEvent>,
     delivery_id: &str,
 ) -> Option<String> {
@@ -895,7 +895,7 @@ fn explicit_service_reply<'a>(
     for event in events {
         match event {
             SessionEvent::ToolUse { tool, args, .. }
-                if tool == "construct_service_reply"
+                if tool == "construct_operator_reply"
                     && args.get("delivery_id").and_then(serde_json::Value::as_str)
                         == Some(delivery_id) =>
             {
@@ -1080,7 +1080,7 @@ pub(super) fn pending_approval(
 pub(super) mod tests {
     use super::*;
 
-    pub(in crate::service) async fn shared_for_delivery_tests() -> Arc<ServiceIngressShared> {
+    pub(in crate::operator) async fn shared_for_delivery_tests() -> Arc<OperatorIngressShared> {
         let tmp = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
         let storage =
             Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
@@ -1091,20 +1091,20 @@ pub(super) mod tests {
         )
         .await
         .expect("session manager");
-        ServiceIngressShared::load(
+        OperatorIngressShared::load(
             "svc".to_string(),
-            ServiceConfig {
+            OperatorConfig {
                 position: 0,
                 placement: None,
                 instruction: String::new(),
                 harness: "codex".into(),
                 model: None,
-                session_mode: ServiceSessionMode::Interactive,
+                session_mode: OperatorSessionMode::Interactive,
                 cwd: ".".into(),
-                routing: ServiceRouting::SessionKey,
+                routing: OperatorRouting::SessionKey,
                 paused: false,
                 approval_timeout_secs: 0,
-                sandbox: super::super::ServiceSandboxConfig::default(),
+                sandbox: super::super::OperatorSandboxConfig::default(),
                 channels: Default::default(),
             },
             Arc::new(manager),
@@ -1115,7 +1115,7 @@ pub(super) mod tests {
     #[test]
     fn result_serialization_preserves_the_http_v1_shape() {
         let result = IngressResult {
-            service: "alerts".into(),
+            operator: "alerts".into(),
             channel: "http".into(),
             session: "s123".into(),
             status: SessionState::Running,
@@ -1132,7 +1132,7 @@ pub(super) mod tests {
         assert_eq!(
             serde_json::to_value(result).unwrap(),
             serde_json::json!({
-                "service": "alerts",
+                "operator": "alerts",
                 "channel": "http",
                 "session": "s123",
                 "status": "running",
@@ -1168,25 +1168,25 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn service_gateway_model_keeps_its_route_when_spawning_codex() {
+    fn operator_gateway_model_keeps_its_route_when_spawning_codex() {
         assert_eq!(
-            service_session_model("codex", Some("construct-claude-oauth/sonnet")).unwrap(),
+            operator_session_model("codex", Some("construct-claude-oauth/sonnet")).unwrap(),
             Some("construct-claude-oauth/sonnet".into())
         );
     }
 
     #[test]
-    fn service_gateway_model_uses_claudes_native_gateway_prefix() {
+    fn operator_gateway_model_uses_claudes_native_gateway_prefix() {
         assert_eq!(
-            service_session_model("claude", Some("construct-codex-oauth/gpt-5.6-sol")).unwrap(),
+            operator_session_model("claude", Some("construct-codex-oauth/gpt-5.6-sol")).unwrap(),
             Some("claude-construct-codex-oauth/gpt-5.6-sol".into())
         );
     }
 
     #[test]
-    fn service_native_model_passes_through_unchanged() {
+    fn operator_native_model_passes_through_unchanged() {
         assert_eq!(
-            service_session_model("codex", Some("gpt-5.6-sol")).unwrap(),
+            operator_session_model("codex", Some("gpt-5.6-sol")).unwrap(),
             Some("gpt-5.6-sol".into())
         );
     }
@@ -1195,7 +1195,7 @@ pub(super) mod tests {
     fn interactive_prompt_binds_the_reply_tool_to_the_delivery() {
         let prompt = interactive_delivery_prompt("hello", "delivery-123");
         assert!(prompt.starts_with("hello\n\n"));
-        assert!(prompt.contains("construct_service_reply"));
+        assert!(prompt.contains("construct_operator_reply"));
         assert_eq!(prompt.matches("delivery-123").count(), 2);
         assert!(prompt.contains("do not choose a workspace, channel, recipient, or thread"));
     }
@@ -1207,21 +1207,21 @@ pub(super) mod tests {
         // message here would mean the daemon had to write it into the PTY
         // after spawn, which is exactly the race that silently swallowed the
         // first Slack message of a thread.
-        let prompt = service_seed_prompt("Be brief.", "ship it".to_string(), Some("d-1"));
+        let prompt = operator_seed_prompt("Be brief.", "ship it".to_string(), Some("d-1"));
 
         assert!(prompt.starts_with("Be brief.\n\nship it\n\n"));
-        assert!(prompt.contains("construct_service_reply"));
+        assert!(prompt.contains("construct_operator_reply"));
         assert_eq!(prompt.matches("d-1").count(), 2);
     }
 
     #[test]
     fn headless_seed_prompt_carries_no_delivery_binding() {
         assert_eq!(
-            service_seed_prompt("  ", "ship it".to_string(), None),
+            operator_seed_prompt("  ", "ship it".to_string(), None),
             "ship it"
         );
         assert_eq!(
-            service_seed_prompt("Be brief.", "ship it".to_string(), None),
+            operator_seed_prompt("Be brief.", "ship it".to_string(), None),
             "Be brief.\n\nship it"
         );
     }
@@ -1229,7 +1229,7 @@ pub(super) mod tests {
     #[tokio::test]
     async fn engagement_is_having_a_session_for_the_thread_or_the_channel() {
         let shared = shared_for_delivery_tests().await;
-        let ingress = ServiceIngress::new("bot".to_string(), shared.clone());
+        let ingress = OperatorIngress::new("bot".to_string(), shared.clone());
         shared
             .state
             .lock()
@@ -1245,9 +1245,9 @@ pub(super) mod tests {
         assert!(ingress.has_session_under("T1:C1:").await);
         assert!(!ingress.has_session_under("T1:C2:").await);
 
-        // A key belonging to another channel of the same service must not
+        // A key belonging to another channel of the same operator must not
         // read as engagement here — channels own their own conversations.
-        let other = ServiceIngress::new("other-bot".to_string(), shared);
+        let other = OperatorIngress::new("other-bot".to_string(), shared);
         assert!(!other.has_session("T1:C1:111.11").await);
         assert!(!other.has_session_under("T1:C1:").await);
     }
@@ -1259,7 +1259,7 @@ pub(super) mod tests {
         // delivery is accepted to the moment something is finally said about
         // it — because that window is exactly when a waiter can be lost.
         let shared = shared_for_delivery_tests().await;
-        let ingress = ServiceIngress::new("C1".to_string(), shared);
+        let ingress = OperatorIngress::new("C1".to_string(), shared);
         let receipt = IngressReceipt {
             session: "s1".to_string(),
             event_cursor: 7,
@@ -1297,7 +1297,7 @@ pub(super) mod tests {
         // The record is only worth keeping if it reaches disk: an in-memory
         // one is lost by exactly the event it exists to survive.
         let shared = shared_for_delivery_tests().await;
-        let ingress = ServiceIngress::new("C1".to_string(), shared.clone());
+        let ingress = OperatorIngress::new("C1".to_string(), shared.clone());
         ingress
             .record_outstanding(
                 "C1:1.1",
@@ -1327,7 +1327,7 @@ pub(super) mod tests {
         // The one thing a resumed wait cannot recover from: there is nothing
         // left to wait on, so the channel has to report it instead.
         let shared = shared_for_delivery_tests().await;
-        let ingress = ServiceIngress::new("C1".to_string(), shared);
+        let ingress = OperatorIngress::new("C1".to_string(), shared);
         let record = OutstandingDelivery {
             channel_id: "C1".into(),
             session: "s-does-not-exist".into(),
@@ -1341,12 +1341,12 @@ pub(super) mod tests {
 
     #[tokio::test]
     async fn one_channels_outstanding_deliveries_are_not_anothers() {
-        // A service runs several channels against one state file. A channel
+        // A operator runs several channels against one state file. A channel
         // that reconciled another's deliveries would answer into a
         // conversation it does not own.
         let shared = shared_for_delivery_tests().await;
-        let first = ServiceIngress::new("C1".to_string(), shared.clone());
-        let second = ServiceIngress::new("C2".to_string(), shared);
+        let first = OperatorIngress::new("C1".to_string(), shared.clone());
+        let second = OperatorIngress::new("C2".to_string(), shared);
         first
             .record_outstanding(
                 "1.1",
@@ -1448,7 +1448,7 @@ pub(super) mod tests {
     fn explicit_reply_requires_the_matching_delivery_tool_call() {
         let events = [
             SessionEvent::ToolUse {
-                tool: "construct_service_reply".into(),
+                tool: "construct_operator_reply".into(),
                 args: serde_json::json!({ "delivery_id": "other" }),
                 call_id: Some("other".into()),
             },
@@ -1457,7 +1457,7 @@ pub(super) mod tests {
                 text: "wrong".into(),
             },
             SessionEvent::ToolUse {
-                tool: "construct_service_reply".into(),
+                tool: "construct_operator_reply".into(),
                 args: serde_json::json!({ "delivery_id": "wanted" }),
                 call_id: Some("wanted".into()),
             },
@@ -1468,23 +1468,23 @@ pub(super) mod tests {
         ];
 
         assert_eq!(
-            explicit_service_reply(events.iter(), "wanted").as_deref(),
+            explicit_operator_reply(events.iter(), "wanted").as_deref(),
             Some("right")
         );
-        assert_eq!(explicit_service_reply(events.iter(), "missing"), None);
+        assert_eq!(explicit_operator_reply(events.iter(), "missing"), None);
     }
 
     /// Deleting a routed session must not brick its routing key.
     ///
     /// Nothing prunes the routing map when a session is deleted — the user
-    /// can do that from any client, and the service never hears about it — so
+    /// can do that from any client, and the operator never hears about it — so
     /// the delivery path has to tolerate an entry pointing at a session that is
     /// gone. Left unhandled, every later delivery on that key failed on the
     /// missing session instead of starting a new conversation.
     #[tokio::test]
     async fn a_deleted_routed_session_frees_its_routing_key() {
         let shared = shared_for_delivery_tests().await;
-        let ingress = ServiceIngress::new("http".to_string(), shared);
+        let ingress = OperatorIngress::new("http".to_string(), shared);
         let mut state = PersistedState::default();
         state
             .sessions
@@ -1521,7 +1521,7 @@ pub(super) mod tests {
     #[tokio::test]
     async fn a_deleted_single_routing_session_frees_the_shared_key() {
         let shared = shared_for_delivery_tests().await;
-        let ingress = ServiceIngress::new("slack1".to_string(), shared);
+        let ingress = OperatorIngress::new("slack1".to_string(), shared);
         let mut state = PersistedState::default();
         state
             .sessions
@@ -1542,7 +1542,7 @@ pub(super) mod tests {
     #[tokio::test]
     async fn a_deleted_legacy_http_session_frees_its_bare_routing_key() {
         let shared = shared_for_delivery_tests().await;
-        let ingress = ServiceIngress::new("http".to_string(), shared);
+        let ingress = OperatorIngress::new("http".to_string(), shared);
         let mut state = PersistedState::default();
         state
             .sessions
@@ -1565,7 +1565,7 @@ pub(super) mod tests {
     #[tokio::test]
     async fn an_unknown_routing_key_resolves_to_no_session() {
         let shared = shared_for_delivery_tests().await;
-        let ingress = ServiceIngress::new("http".to_string(), shared);
+        let ingress = OperatorIngress::new("http".to_string(), shared);
         let mut state = PersistedState::default();
         state
             .sessions
@@ -1595,48 +1595,48 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn interactive_service_mcp_profile_is_least_privilege_unless_granted() {
-        let mut config = ServiceConfig {
+    fn interactive_operator_mcp_profile_is_least_privilege_unless_granted() {
+        let mut config = OperatorConfig {
             position: 0,
             placement: None,
             instruction: String::new(),
             harness: "codex".into(),
             model: None,
-            session_mode: ServiceSessionMode::Interactive,
+            session_mode: OperatorSessionMode::Interactive,
             cwd: ".".into(),
-            routing: ServiceRouting::SessionKey,
+            routing: OperatorRouting::SessionKey,
             paused: false,
             approval_timeout_secs: 0,
-            sandbox: super::super::ServiceSandboxConfig::default(),
+            sandbox: super::super::OperatorSandboxConfig::default(),
             channels: Default::default(),
         };
 
-        let confined = service_session_env(&config);
+        let confined = operator_session_env(&config);
         assert_eq!(confined.get("CONSTRUCT_INJECT_MCP").map(String::as_str), Some("1"));
         assert_eq!(
             confined
-                .get(construct_protocol::adapter::SERVICE_REPLY_TOOL_ENV)
+                .get(construct_protocol::adapter::OPERATOR_REPLY_TOOL_ENV)
                 .map(String::as_str),
             Some("1")
         );
         assert_eq!(
             confined
-                .get(construct_protocol::adapter::SERVICE_REPLY_ONLY_MCP_ENV)
+                .get(construct_protocol::adapter::OPERATOR_REPLY_ONLY_MCP_ENV)
                 .map(String::as_str),
             Some("1")
         );
 
         config.sandbox.mcp = true;
-        let granted = service_session_env(&config);
+        let granted = operator_session_env(&config);
         assert_eq!(granted.get("CONSTRUCT_INJECT_MCP").map(String::as_str), Some("1"));
         assert_eq!(
             granted
-                .get(construct_protocol::adapter::SERVICE_REPLY_TOOL_ENV)
+                .get(construct_protocol::adapter::OPERATOR_REPLY_TOOL_ENV)
                 .map(String::as_str),
             Some("1")
         );
         assert_eq!(
-            granted.get(construct_protocol::adapter::SERVICE_REPLY_ONLY_MCP_ENV),
+            granted.get(construct_protocol::adapter::OPERATOR_REPLY_ONLY_MCP_ENV),
             None,
             "general MCP grants keep plugin tools, including an installed Slack MCP, available"
         );

@@ -124,11 +124,11 @@ pub async fn run(
             return;
         }
     };
-    // Keep a successful OAuth grant in memory across transport and service
+    // Keep a successful OAuth grant in memory across transport and operator
     // retries. A failure after login must not repeatedly open browser windows.
     let mut construct_owner_token = None;
     // The scoped credential a registration hands back for re-registering this
-    // reservation. It outlives the owner grant, so a route lost to a service
+    // reservation. It outlives the owner grant, so a route lost to a operator
     // deploy can be recovered without anyone at this machine. Memory only, and
     // dropped with this task when the tunnel stops.
     let mut construct_reregistration_token = None;

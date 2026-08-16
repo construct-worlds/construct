@@ -1,11 +1,11 @@
-//! Slack Socket Mode adapter for service ingress.
+//! Slack Socket Mode adapter for operator ingress.
 //!
 //! Socket Mode is outbound-only: the daemon exchanges the configured app
 //! token for a short-lived WebSocket URL, acknowledges each envelope before
 //! doing work, then posts the completed answer with the bot token.
 
 use super::ingress::{
-    IngressProgress, IngressReceipt, IngressRequest, ServiceIngress, PENDING_DELIVERY_TTL,
+    IngressProgress, IngressReceipt, IngressRequest, OperatorIngress, PENDING_DELIVERY_TTL,
 };
 use super::{SlackFollowUp, SlackProgress};
 use anyhow::{anyhow, Context, Result};
@@ -205,7 +205,7 @@ impl SlackApi {
 }
 
 pub(super) async fn serve(
-    ingress: Arc<ServiceIngress>,
+    ingress: Arc<OperatorIngress>,
     config: SlackConfig,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -213,7 +213,7 @@ pub(super) async fn serve(
 }
 
 async fn serve_with_api(
-    ingress: Arc<ServiceIngress>,
+    ingress: Arc<OperatorIngress>,
     config: SlackConfig,
     cancel: CancellationToken,
     api: SlackApi,
@@ -233,7 +233,7 @@ async fn serve_with_api(
         }
         if let Err(error) = result {
             tracing::warn!(
-                service = %ingress.service_name(),
+                operator = %ingress.operator_name(),
                 channel = %ingress.channel_id(),
                 %error,
                 retry_seconds = backoff.as_secs(),
@@ -249,7 +249,7 @@ async fn serve_with_api(
 }
 
 async fn run_connection(
-    ingress: &Arc<ServiceIngress>,
+    ingress: &Arc<OperatorIngress>,
     config: &SlackConfig,
     cancel: &CancellationToken,
     api: &SlackApi,
@@ -266,9 +266,9 @@ async fn run_connection(
     };
     let (mut sink, mut stream) = socket.split();
     tracing::info!(
-        service = %ingress.service_name(),
+        operator = %ingress.operator_name(),
         channel = %ingress.channel_id(),
-        "Slack service channel connected"
+        "Slack operator channel connected"
     );
     loop {
         let message = tokio::select! {
@@ -315,7 +315,7 @@ async fn run_connection(
             }
             if let Err(error) = process_delivery(&ingress, &config, &cancel, &api, delivery).await {
                 tracing::warn!(
-                    service = %ingress.service_name(),
+                    operator = %ingress.operator_name(),
                     channel = %ingress.channel_id(),
                     %error,
                     "Slack delivery failed"
@@ -409,7 +409,7 @@ struct DeliveryTrace {
 async fn run_affordance(
     api: SlackApi,
     config: SlackConfig,
-    ingress: Arc<ServiceIngress>,
+    ingress: Arc<OperatorIngress>,
     key: String,
     mut state: DeliveryTrace,
     after: std::time::Duration,
@@ -517,7 +517,7 @@ async fn run_affordance(
 /// rather than declared lost, on what remains of the delivery's original
 /// allowance. Only a delivery that cannot be resumed is reported as over.
 async fn reconcile_outstanding(
-    ingress: &Arc<ServiceIngress>,
+    ingress: &Arc<OperatorIngress>,
     config: &SlackConfig,
     cancel: &CancellationToken,
     api: &SlackApi,
@@ -546,11 +546,11 @@ async fn reconcile_outstanding(
         };
         if let Some(text) = unfinished {
             tracing::info!(
-                service = %ingress.service_name(),
+                operator = %ingress.operator_name(),
                 channel = %ingress.channel_id(),
                 session = %record.session,
                 waited_seconds = waited.as_secs(),
-                "outstanding service delivery cannot be resumed; reporting it"
+                "outstanding operator delivery cannot be resumed; reporting it"
             );
             settle(api, config, &trace, text, false).await;
             ingress.clear_outstanding(&key).await;
@@ -560,11 +560,11 @@ async fn reconcile_outstanding(
         let (ingress, config, cancel, api) =
             (ingress.clone(), config.clone(), cancel.clone(), api.clone());
         tracing::info!(
-            service = %ingress.service_name(),
+            operator = %ingress.operator_name(),
             channel = %ingress.channel_id(),
             session = %record.session,
             waited_seconds = waited.as_secs(),
-            "resuming a service delivery left outstanding by a restart"
+            "resuming a operator delivery left outstanding by a restart"
         );
         tokio::spawn(async move {
             if let Err(error) =
@@ -586,7 +586,7 @@ async fn reconcile_outstanding(
 /// history needs a scope an existing app install will not have, and a missing
 /// scope must cost context, never the answer.
 async fn first_engagement_context(
-    ingress: &ServiceIngress,
+    ingress: &OperatorIngress,
     config: &SlackConfig,
     api: &SlackApi,
     delivery: &SlackDelivery,
@@ -620,7 +620,7 @@ async fn first_engagement_context(
 }
 
 async fn process_delivery(
-    ingress: &Arc<ServiceIngress>,
+    ingress: &Arc<OperatorIngress>,
     config: &SlackConfig,
     cancel: &CancellationToken,
     api: &SlackApi,
@@ -680,7 +680,7 @@ async fn process_delivery(
 /// something has been said about it.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_delivery(
-    ingress: &Arc<ServiceIngress>,
+    ingress: &Arc<OperatorIngress>,
     config: &SlackConfig,
     cancel: &CancellationToken,
     api: &SlackApi,
@@ -957,7 +957,7 @@ fn engagement_required(addressed: Addressed, follow_up: SlackFollowUp) -> Engage
 /// Decide whether an untagged channel message is for us, given where the
 /// minibuffer lets this channel keep listening.
 async fn resolve_addressed(
-    ingress: &ServiceIngress,
+    ingress: &OperatorIngress,
     follow_up: SlackFollowUp,
     delivery: &SlackDelivery,
 ) -> bool {
@@ -1371,9 +1371,9 @@ mod tests {
         assert!(!state.reacted);
     }
 
-    async fn test_ingress() -> Arc<ServiceIngress> {
+    async fn test_ingress() -> Arc<OperatorIngress> {
         let shared = super::super::ingress::tests::shared_for_delivery_tests().await;
-        Arc::new(ServiceIngress::new("C1".to_string(), shared))
+        Arc::new(OperatorIngress::new("C1".to_string(), shared))
     }
 
     fn trace() -> DeliveryTrace {

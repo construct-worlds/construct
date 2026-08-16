@@ -629,7 +629,7 @@ fn should_record_pty_user_message(harness: &str) -> bool {
 
 /// How "say this to the session as if the user typed it" has to be framed for
 /// a given harness. Shared by every daemon-originated delivery — Playbook Run,
-/// verb-drift escalation, and service channel deliveries — because the framing
+/// verb-drift escalation, and operator channel deliveries — because the framing
 /// is a property of the harness, not of the feature doing the talking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionInputDelivery {
@@ -1364,10 +1364,10 @@ pub struct SessionManager {
     /// newly installed or disabled plugin takes effect without a restart;
     /// empty when no plugins are loaded.
     plugins: std::sync::RwLock<Option<Arc<crate::plugins::PluginRuntime>>>,
-    /// Handle to the service supervisor, so any caller can ask for a
+    /// Handle to the operator supervisor, so any caller can ask for a
     /// definition reload without depending on its internals. Set once from
     /// daemon startup; absent in tests, which never spawn one.
-    services: std::sync::OnceLock<crate::service_supervisor::ServiceHandle>,
+    operators: std::sync::OnceLock<crate::operator_supervisor::OperatorHandle>,
     /// Handle to the config supervisor (spec 0190). Set once from daemon
     /// startup; absent in tests, which never spawn one.
     config_reloads: std::sync::OnceLock<crate::config_supervisor::ConfigHandle>,
@@ -1377,8 +1377,8 @@ pub struct SessionManager {
     /// process and persists until the restart it names.
     config_restart_required: std::sync::RwLock<Vec<String>>,
     /// Provider-neutral public exposure for channel-owned ingress endpoints.
-    /// Separate from `services`: future channel implementations can register
-    /// endpoints without depending on service definition internals.
+    /// Separate from `operators`: future channel implementations can register
+    /// endpoints without depending on operator definition internals.
     channel_publications:
         std::sync::OnceLock<crate::channel_publication::PublicationHandle>,
     adapter_runtime_dir: PathBuf,
@@ -1978,7 +1978,7 @@ impl SessionManager {
                 storage,
                 config: std::sync::RwLock::new(config),
                 plugins: std::sync::RwLock::new(None),
-                services: std::sync::OnceLock::new(),
+                operators: std::sync::OnceLock::new(),
                 config_reloads: std::sync::OnceLock::new(),
                 config_restart_required: std::sync::RwLock::new(Vec::new()),
                 channel_publications: std::sync::OnceLock::new(),
@@ -2075,30 +2075,30 @@ impl SessionManager {
             .clone()
     }
 
-    /// Install the service supervisor handle. Called once from daemon startup.
-    pub fn set_service_supervisor(&self, handle: crate::service_supervisor::ServiceHandle) {
-        let _ = self.services.set(handle);
+    /// Install the operator supervisor handle. Called once from daemon startup.
+    pub fn set_operator_supervisor(&self, handle: crate::operator_supervisor::OperatorHandle) {
+        let _ = self.operators.set(handle);
     }
 
-    /// Apply the definitions currently on disk to the running services.
+    /// Apply the definitions currently on disk to the running operators.
     ///
     /// Errors when no supervisor is installed, which is the case in tests —
     /// callers should treat that as "nothing to reload", not as a failure of
     /// the edit they just persisted.
-    pub async fn reload_services(
+    pub async fn reload_operators(
         &self,
-        reason: crate::service_supervisor::ReloadReason,
-    ) -> anyhow::Result<crate::service_supervisor::ReloadReport> {
-        let Some(handle) = self.services.get() else {
-            anyhow::bail!("service supervisor is not running");
+        reason: crate::operator_supervisor::ReloadReason,
+    ) -> anyhow::Result<crate::operator_supervisor::ReloadReport> {
+        let Some(handle) = self.operators.get() else {
+            anyhow::bail!("operator supervisor is not running");
         };
         handle.reload(reason).await
     }
 
-    pub(crate) fn service_supervisor(
+    pub(crate) fn operator_supervisor(
         &self,
-    ) -> Option<&crate::service_supervisor::ServiceHandle> {
-        self.services.get()
+    ) -> Option<&crate::operator_supervisor::OperatorHandle> {
+        self.operators.get()
     }
 
     pub(crate) fn storage(&self) -> &Arc<Storage> {
@@ -3299,7 +3299,7 @@ impl SessionManager {
     /// for an external agent TUI, CR-terminated PTY submit for a PTY-backed
     /// line editor, or a structured adapter input for a headless harness).
     /// Shared by Playbook Run's prompt delivery, verb-drift escalation
-    /// (spec 0089), and service channel deliveries (spec 0176) — all are "say
+    /// (spec 0089), and operator channel deliveries (spec 0176) — all are "say
     /// this to the session as if the user typed it," differing only in the
     /// message. Callers that need the text to appear in the transcript should
     /// go through [`Self::deliver_user_text`] instead.
@@ -3335,7 +3335,7 @@ impl SessionManager {
     /// harness needs (see [`Self::deliver_text_to_session`]).
     ///
     /// This is the entry point for text that arrives from outside the session
-    /// — a service channel delivery, say — where the session is live and its
+    /// — a operator channel delivery, say — where the session is live and its
     /// harness must actually *start a turn* from the message. Plain
     /// [`Self::send_input`] is not equivalent for a PTY-backed agent TUI: it
     /// writes `text` + LF, and an LF is not the byte a terminal's Enter key
@@ -8006,7 +8006,7 @@ mod tests {
 
     #[test]
     fn interactive_codex_takes_the_typed_submit_framing() {
-        // The harness behind interactive service sessions (spec 0176). Codex
+        // The harness behind interactive operator sessions (spec 0176). Codex
         // is a crossterm TUI in raw mode, where LF is Ctrl+J ("insert a
         // newline"), not Enter — classifying it as anything but a typed
         // submit regresses to a delivery that types the message into the
@@ -12206,7 +12206,7 @@ mod tests {
         construct_protocol::LayoutNode::Leaf {
             id,
             session_id: session.map(str::to_string),
-            service_name: None,
+            operator_name: None,
         }
     }
 

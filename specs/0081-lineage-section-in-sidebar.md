@@ -8,7 +8,7 @@ Scope: Fork/subagent lineage renders as a collapsible section of the left sideba
 ## Decision
 
 The sidebar stacks four regions top to bottom: the session rows, the lineage
-section, services, and the minibuffer panel. The lineage section renders the
+section, operators, and the minibuffer panel. The lineage section renders the
 SELECTED session's fork/subagent tree — the same tree data, diagram modes
 (boxed-lane and compact rails, toggled from the section header; the full
 boxed-lane diagram is the default), turn-info stats, and row
@@ -52,12 +52,12 @@ height, and the view mode persist across launches (all global, not per session).
 Keyboard focus:
 
 - Bare `Tab`, while the list pane holds focus, advances keyboard focus through
-  the visible sidebar regions in visual order: session rows, lineage, services,
+  the visible sidebar regions in visual order: session rows, lineage, operators,
   then session rows again. Missing regions are skipped.
   It is an intercept scoped to list-pane focus, NOT a global keymap
   binding — view-focused PTY sessions keep receiving Tab (terminal
   completion is untouched). If lineage is absent, Tab advances directly
-  between session rows and services.
+  between session rows and operators.
 - `C-x Tab` toggles the section's focus from anywhere, expanding a
   collapsed section on entry.
 - While focused, the section owns the row vocabulary carried over from the

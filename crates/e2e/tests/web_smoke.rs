@@ -3051,11 +3051,11 @@ async fn web_client_loads_and_websocket_connects() {
                 currentId: state.currentId,
                 sessions: state.sessions,
                 groups: state.groups,
-                services: state.services,
+                operators: state.operators,
               };
               try {
                 state.currentId = 's-child';
-                state.services = [{ name: 'proxy', harness: 'shell', position: 0 }];
+                state.operators = [{ name: 'proxy', harness: 'shell', position: 0 }];
                 state.groups = [
                   { id: 'g-open', name: 'Open', collapsed: false, position: 0 },
                   { id: 'g-shut', name: 'Shut', collapsed: true, position: 1 },
@@ -3080,7 +3080,7 @@ async fn web_client_loads_and_websocket_connects() {
                 return {
                   listRole: list.getAttribute('role'),
                   listLabel: list.getAttribute('aria-label'),
-                  service: attrsOf(list.querySelector('[data-service-name="proxy"]')),
+                  operator: attrsOf(list.querySelector('[data-operator-name="proxy"]')),
                   parent: attrsOf(list.querySelector('[data-id="s-parent"]')),
                   child: attrsOf(list.querySelector('[data-id="s-child"]')),
                   solo: attrsOf(list.querySelector('[data-id="s-solo"]')),
@@ -3094,7 +3094,7 @@ async fn web_client_loads_and_websocket_connects() {
                 state.currentId = saved.currentId;
                 state.sessions = saved.sessions;
                 state.groups = saved.groups;
-                state.services = saved.services;
+                state.operators = saved.operators;
                 renderSessions();
               }
             })()
@@ -3106,14 +3106,14 @@ async fn web_client_loads_and_websocket_connects() {
         .expect("json object");
     assert_eq!(list_aria["listRole"], "tree");
     assert_eq!(list_aria["listLabel"], "sessions");
-    // Top level (level 1) is service + two top sessions + two group headers.
+    // Top level (level 1) is operator + two top sessions + two group headers.
     assert_eq!(
-        list_aria["service"],
+        list_aria["operator"],
         serde_json::json!({
             "role": "treeitem", "selected": "false", "expanded": null,
             "level": "1", "pos": "1", "size": "5", "tab": "-1"
         }),
-        "service row aria: {list_aria:?}"
+        "operator row aria: {list_aria:?}"
     );
     assert_eq!(
         list_aria["parent"],

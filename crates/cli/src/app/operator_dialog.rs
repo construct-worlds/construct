@@ -1,26 +1,26 @@
-//! Inline service-view editor and service definition lifecycle.
+//! Inline operator-view editor and operator definition lifecycle.
 
 use super::*;
 
-/// Definition rows in the service view: Name, Instruction, Harness, Model,
+/// Definition rows in the operator view: Name, Instruction, Harness, Model,
 /// Session mode, Working dir, Routing, State. Channels and routed sessions are not fields —
 /// they are their own navigable sections below the definition (spec 0175).
 pub const FIELD_COUNT: usize = 8;
 /// Re-exported name for consumers outside this module (renderers, hit tests).
-pub const SERVICE_FIELD_COUNT: usize = FIELD_COUNT;
-pub const SERVICE_PICKER_VISIBLE_ROWS: usize = 5;
+pub const OPERATOR_FIELD_COUNT: usize = FIELD_COUNT;
+pub const OPERATOR_PICKER_VISIBLE_ROWS: usize = 5;
 
-/// Where the service editor's cursor sits. The view is one continuous list —
+/// Where the operator editor's cursor sits. The view is one continuous list —
 /// definition fields, then the channel catalog, then the routed sessions — so
 /// the selection is modelled explicitly instead of overloading a field index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceDialogFocus {
+pub enum OperatorDialogFocus {
     Field(usize),
     Channel(usize),
     Session(usize),
 }
 
-impl ServiceDialogFocus {
+impl OperatorDialogFocus {
     pub fn field(self) -> Option<usize> {
         match self {
             Self::Field(index) => Some(index),
@@ -125,26 +125,26 @@ impl ServiceDialogFocus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceDialogMode {
+pub enum OperatorDialogMode {
     Create,
     Edit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceDialogPickerKind {
+pub enum OperatorDialogPickerKind {
     Harness,
     Model,
     SessionMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceChannelDialogMode {
+pub enum OperatorChannelDialogMode {
     Create,
     Edit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceDialogPickerOption {
+pub struct OperatorDialogPickerOption {
     pub value: String,
     pub label: String,
     pub detail: String,
@@ -152,26 +152,26 @@ pub struct ServiceDialogPickerOption {
 }
 
 #[derive(Debug, Clone)]
-pub struct ServiceDialog {
-    pub mode: ServiceDialogMode,
-    pub service: ServiceSummary,
+pub struct OperatorDialog {
+    pub mode: OperatorDialogMode,
+    pub operator: OperatorSummary,
     /// The definition as the daemon last confirmed it. Compared against
-    /// `service` to decide whether the pane title carries the unsaved marker
+    /// `operator` to decide whether the pane title carries the unsaved marker
     /// and whether Esc has edits to revert.
-    pub saved: ServiceSummary,
-    pub focus: ServiceDialogFocus,
+    pub saved: OperatorSummary,
+    pub focus: OperatorDialogFocus,
     pub note: Option<String>,
-    pub picker: Option<ServiceDialogPickerKind>,
+    pub picker: Option<OperatorDialogPickerKind>,
     pub picker_selected: usize,
     pub picker_scroll: usize,
-    pub channel_editor: Option<ServiceChannelDialog>,
+    pub channel_editor: Option<OperatorChannelDialog>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ServiceChannelDialog {
-    pub mode: ServiceChannelDialogMode,
-    pub service_name: String,
-    pub channel: ServiceChannelSummary,
+pub struct OperatorChannelDialog {
+    pub mode: OperatorChannelDialogMode,
+    pub operator_name: String,
+    pub channel: OperatorChannelSummary,
     pub selected_field: usize,
     pub note: Option<String>,
     pub new_secret: Option<String>,
@@ -185,13 +185,13 @@ pub struct ServiceChannelDialog {
 /// browser URL: URLs can be opened and copied, while socket endpoints can only
 /// be copied.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ServiceChannelActionAddress {
+pub enum OperatorChannelActionAddress {
     AuthorizationUrl(String),
     PublicUrl(String),
     PublicSocket(String),
 }
 
-impl ServiceChannelActionAddress {
+impl OperatorChannelActionAddress {
     pub fn value(&self) -> &str {
         match self {
             Self::AuthorizationUrl(value) | Self::PublicUrl(value) | Self::PublicSocket(value) => {
@@ -217,16 +217,16 @@ impl ServiceChannelActionAddress {
 /// consume this model instead of branching on channel kinds or publication
 /// protocol details.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceChannelActions {
-    pub service_name: String,
+pub struct OperatorChannelActions {
+    pub operator_name: String,
     pub channel_index: usize,
     pub channel_id: String,
     pub published: bool,
-    pub address: Option<ServiceChannelActionAddress>,
+    pub address: Option<OperatorChannelActionAddress>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ServiceChannelAction {
+pub enum OperatorChannelAction {
     TogglePublication,
     OpenAddress,
     CopyAddress,
@@ -240,7 +240,7 @@ pub(crate) const SLACK_FIELD_THREAD_CONTEXT: usize = 8;
 pub(crate) const SLACK_FIELD_STATE: usize = 9;
 const HTTP_FIELD_STATE: usize = 3;
 
-fn channel_field_count(editor: &ServiceChannelDialog) -> usize {
+fn channel_field_count(editor: &OperatorChannelDialog) -> usize {
     if editor.channel.kind == "slack" {
         SLACK_FIELD_STATE + 1
     } else {
@@ -263,7 +263,7 @@ fn cycle_option(values: &[&str], current: Option<&str>, forward: bool) -> String
     values[next].to_string()
 }
 
-fn canonical_service_model(model: &str) -> String {
+fn canonical_operator_model(model: &str) -> String {
     construct_protocol::published_model::decode_published_model_id(model)
         .ok()
         .flatten()
@@ -276,7 +276,7 @@ fn canonical_service_model(model: &str) -> String {
 /// Compare the user-editable half of two definitions. Channels are
 /// attached and detached straight against the daemon, so they are deliberately
 /// excluded: toggling one must never leave the editor looking dirty.
-fn same_editable_definition(left: &ServiceSummary, right: &ServiceSummary) -> bool {
+fn same_editable_definition(left: &OperatorSummary, right: &OperatorSummary) -> bool {
     left.name == right.name
         && left.instruction == right.instruction
         && left.harness == right.harness
@@ -287,14 +287,14 @@ fn same_editable_definition(left: &ServiceSummary, right: &ServiceSummary) -> bo
         && left.paused == right.paused
 }
 
-impl ServiceDialog {
+impl OperatorDialog {
     /// Open the editor for a definition the daemon already knows about.
-    pub fn editing(service: ServiceSummary) -> Self {
+    pub fn editing(operator: OperatorSummary) -> Self {
         Self {
-            mode: ServiceDialogMode::Edit,
-            saved: service.clone(),
-            service,
-            focus: ServiceDialogFocus::Field(1),
+            mode: OperatorDialogMode::Edit,
+            saved: operator.clone(),
+            operator,
+            focus: OperatorDialogFocus::Field(1),
             note: Some("Saved edits apply live — see each field for when.".to_string()),
             picker: None,
             picker_selected: 0,
@@ -303,27 +303,27 @@ impl ServiceDialog {
         }
     }
 
-    /// A service the user has changed since it was last saved. A service
+    /// A operator the user has changed since it was last saved. A operator
     /// being created has never been saved, so it is unsaved by definition.
     pub fn is_dirty(&self) -> bool {
-        self.mode == ServiceDialogMode::Create
-            || !same_editable_definition(&self.service, &self.saved)
+        self.mode == OperatorDialogMode::Create
+            || !same_editable_definition(&self.operator, &self.saved)
     }
 
     /// Adopt a definition the daemon just confirmed: it is now both what the
     /// editor shows and the baseline that "unsaved" is measured against.
-    pub fn adopt_saved(&mut self, service: ServiceSummary) {
-        self.saved = service.clone();
-        self.service = service;
+    pub fn adopt_saved(&mut self, operator: OperatorSummary) {
+        self.saved = operator.clone();
+        self.operator = operator;
     }
 
     pub fn field_value(&self, field: usize) -> String {
         match field {
-            0 => self.service.name.clone(),
-            1 => self.service.instruction.replace('\n', " ↵ "),
-            2 => self.service.harness.clone(),
+            0 => self.operator.name.clone(),
+            1 => self.operator.instruction.replace('\n', " ↵ "),
+            2 => self.operator.harness.clone(),
             3 => self
-                .service
+                .operator
                 .model
                 .as_deref()
                 .and_then(|model| {
@@ -332,13 +332,13 @@ impl ServiceDialog {
                         .flatten()
                 })
                 .map(|(route, model)| format!("{model} · {route}"))
-                .or_else(|| self.service.model.clone())
+                .or_else(|| self.operator.model.clone())
                 .unwrap_or_default(),
-            4 => self.service.session_mode.clone(),
-            5 => self.service.cwd.clone(),
-            6 => self.service.routing.clone(),
+            4 => self.operator.session_mode.clone(),
+            5 => self.operator.cwd.clone(),
+            6 => self.operator.routing.clone(),
             7 => {
-                if self.service.paused {
+                if self.operator.paused {
                     "paused".to_string()
                 } else {
                     "serving".to_string()
@@ -348,13 +348,13 @@ impl ServiceDialog {
         }
     }
 
-    pub fn picker_options(&self, app: &App) -> Vec<ServiceDialogPickerOption> {
+    pub fn picker_options(&self, app: &App) -> Vec<OperatorDialogPickerOption> {
         match self.picker {
-            Some(ServiceDialogPickerKind::Harness) => {
+            Some(OperatorDialogPickerKind::Harness) => {
                 let mut options: Vec<_> = app
                     .harnesses
                     .iter()
-                    .map(|harness| ServiceDialogPickerOption {
+                    .map(|harness| OperatorDialogPickerOption {
                         value: harness.name.clone(),
                         label: harness.name.clone(),
                         detail: harness
@@ -367,13 +367,13 @@ impl ServiceDialog {
                     .collect();
                 if !options
                     .iter()
-                    .any(|option| option.value == self.service.harness)
+                    .any(|option| option.value == self.operator.harness)
                 {
                     options.insert(
                         0,
-                        ServiceDialogPickerOption {
-                            value: self.service.harness.clone(),
-                            label: self.service.harness.clone(),
+                        OperatorDialogPickerOption {
+                            value: self.operator.harness.clone(),
+                            label: self.operator.harness.clone(),
                             detail: "current value; no daemon probe available".to_string(),
                             available: false,
                         },
@@ -381,17 +381,17 @@ impl ServiceDialog {
                 }
                 options
             }
-            Some(ServiceDialogPickerKind::Model) => {
-                let mut options = vec![ServiceDialogPickerOption {
+            Some(OperatorDialogPickerKind::Model) => {
+                let mut options = vec![OperatorDialogPickerOption {
                     value: String::new(),
                     label: "Default".to_string(),
                     detail: "let the selected harness choose its default model".to_string(),
                     available: true,
                 }];
-                if matches!(self.service.harness.as_str(), "codex" | "claude")
-                    && !app.service_route_catalog.is_empty()
+                if matches!(self.operator.harness.as_str(), "codex" | "claude")
+                    && !app.operator_route_catalog.is_empty()
                 {
-                    for route in &app.service_route_catalog {
+                    for route in &app.operator_route_catalog {
                         let models = if route.models.is_empty() {
                             vec![route.model.clone()]
                         } else {
@@ -406,7 +406,7 @@ impl ServiceDialog {
                             } else {
                                 format!("route: {}", route.name)
                             };
-                            options.push(ServiceDialogPickerOption {
+                            options.push(OperatorDialogPickerOption {
                                 value: construct_protocol::published_model::published_model_id(
                                     &route.name,
                                     &model,
@@ -420,10 +420,10 @@ impl ServiceDialog {
                 } else if let Some(harness) = app
                     .harnesses
                     .iter()
-                    .find(|harness| harness.name == self.service.harness)
+                    .find(|harness| harness.name == self.operator.harness)
                 {
                     options.extend(harness.capabilities.models.iter().map(|model| {
-                        ServiceDialogPickerOption {
+                        OperatorDialogPickerOption {
                             value: model.clone(),
                             label: model.clone(),
                             detail: "advertised by this harness".to_string(),
@@ -431,10 +431,10 @@ impl ServiceDialog {
                         }
                     }));
                 }
-                if let Some(current) = self.service.model.as_deref() {
-                    let current = canonical_service_model(current);
+                if let Some(current) = self.operator.model.as_deref() {
+                    let current = canonical_operator_model(current);
                     if !options.iter().any(|option| option.value == current) {
-                        options.push(ServiceDialogPickerOption {
+                        options.push(OperatorDialogPickerOption {
                             value: current.clone(),
                             label: current,
                             detail: "current value; not advertised by this harness".to_string(),
@@ -444,22 +444,22 @@ impl ServiceDialog {
                 }
                 options
             }
-            Some(ServiceDialogPickerKind::SessionMode) => vec![
-                ServiceDialogPickerOption {
+            Some(OperatorDialogPickerKind::SessionMode) => vec![
+                OperatorDialogPickerOption {
                     value: "headless".to_string(),
                     label: "Headless / structured".to_string(),
                     detail: "structured events; automatic reply extraction".to_string(),
                     available: true,
                 },
-                ServiceDialogPickerOption {
+                OperatorDialogPickerOption {
                     value: "interactive".to_string(),
                     label: "Interactive / native PTY".to_string(),
-                    detail: if matches!(self.service.harness.as_str(), "codex" | "claude") {
-                        "native UI; replies through the bound service tool".to_string()
+                    detail: if matches!(self.operator.harness.as_str(), "codex" | "claude") {
+                        "native UI; replies through the bound operator tool".to_string()
                     } else {
                         "currently requires codex or claude".to_string()
                     },
-                    available: matches!(self.service.harness.as_str(), "codex" | "claude"),
+                    available: matches!(self.operator.harness.as_str(), "codex" | "claude"),
                 },
             ],
             None => Vec::new(),
@@ -467,14 +467,14 @@ impl ServiceDialog {
     }
 }
 
-fn default_service(app: &App, suggested: String) -> ServiceSummary {
+fn default_operator(app: &App, suggested: String) -> OperatorSummary {
     let selected = app.selected_session();
-    ServiceSummary {
+    OperatorSummary {
         name: suggested,
         position: app
-            .services
+            .operators
             .iter()
-            .map(|service| service.position)
+            .map(|operator| operator.position)
             .max()
             .map(|position| position.saturating_add(1))
             .unwrap_or_default(),
@@ -494,7 +494,7 @@ fn default_service(app: &App, suggested: String) -> ServiceSummary {
     }
 }
 
-fn valid_service_name(name: &str) -> bool {
+fn valid_operator_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 32
         && name
@@ -505,33 +505,33 @@ fn valid_service_name(name: &str) -> bool {
 }
 
 impl App {
-    pub async fn refresh_services(&mut self) {
-        match self.client.list_services().await {
-            Ok(mut services) => {
-                services.sort_by(|a, b| {
+    pub async fn refresh_operators(&mut self) {
+        match self.client.list_operators().await {
+            Ok(mut operators) => {
+                operators.sort_by(|a, b| {
                     a.position
                         .cmp(&b.position)
                         .then_with(|| a.name.cmp(&b.name))
                 });
-                self.service_token_meters
-                    .retain(|name, _| services.iter().any(|service| service.name == *name));
-                self.services = services;
+                self.operator_token_meters
+                    .retain(|name, _| operators.iter().any(|operator| operator.name == *name));
+                self.operators = operators;
             }
-            Err(error) => self.set_status(format!("services refresh failed: {error}")),
+            Err(error) => self.set_status(format!("operators refresh failed: {error}")),
         }
-        match self.client.list_service_channel_catalog().await {
+        match self.client.list_operator_channel_catalog().await {
             Ok(mut channels) => {
                 channels.sort_by(|a, b| a.id.cmp(&b.id));
-                self.service_channel_catalog = channels;
-                self.clamp_service_dialog_focus();
+                self.operator_channel_catalog = channels;
+                self.clamp_operator_dialog_focus();
             }
             Err(error) => self.set_status(format!("channel catalog refresh failed: {error}")),
         }
     }
 
-    /// Sessions this service has routed a request into, in list order.
-    pub fn routed_service_sessions(&self, name: &str) -> Vec<&SessionSummary> {
-        let prefix = format!("service:{name}");
+    /// Sessions this operator has routed a request into, in list order.
+    pub fn routed_operator_sessions(&self, name: &str) -> Vec<&SessionSummary> {
+        let prefix = format!("operator:{name}");
         let nested = format!("{prefix}:");
         self.sessions
             .iter()
@@ -544,26 +544,26 @@ impl App {
             .collect()
     }
 
-    /// Service whose routing namespace owns this session or one of its
-    /// ancestors. Native subagents and forks contribute to the service that
-    /// owns their routed root even when their own title has no service prefix.
-    pub fn routed_service_name<'a>(&'a self, session: &SessionSummary) -> Option<&'a str> {
+    /// Operator whose routing namespace owns this session or one of its
+    /// ancestors. Native subagents and forks contribute to the operator that
+    /// owns their routed root even when their own title has no operator prefix.
+    pub fn routed_operator_name<'a>(&'a self, session: &SessionSummary) -> Option<&'a str> {
         let mut current = session;
         // Session ancestry is acyclic by contract. The bound is a defensive
         // stop for malformed summaries so meter attribution can never loop.
         for _ in 0..=self.sessions.len() {
-            if let Some(service_name) = current
+            if let Some(operator_name) = current
                 .title
                 .as_deref()
-                .and_then(|title| title.strip_prefix("service:"))
+                .and_then(|title| title.strip_prefix("operator:"))
                 .and_then(|suffix| suffix.split(':').next())
             {
-                if let Some(service) = self
-                    .services
+                if let Some(operator) = self
+                    .operators
                     .iter()
-                    .find(|service| service.name == service_name)
+                    .find(|operator| operator.name == operator_name)
                 {
-                    return Some(service.name.as_str());
+                    return Some(operator.name.as_str());
                 }
             }
             let parent_id = current
@@ -580,26 +580,26 @@ impl App {
     /// Navigable row counts below the definition fields. The channel section
     /// always offers one row: with an empty catalog it is the "create one"
     /// affordance, which is the only way to reach channel creation by keyboard.
-    fn service_dialog_row_counts(&self) -> (usize, usize) {
-        let channels = self.service_channel_catalog.len().max(1);
+    fn operator_dialog_row_counts(&self) -> (usize, usize) {
+        let channels = self.operator_channel_catalog.len().max(1);
         let sessions = self
-            .service_dialog
+            .operator_dialog
             .as_ref()
-            .map(|dialog| self.routed_service_sessions(&dialog.service.name).len())
+            .map(|dialog| self.routed_operator_sessions(&dialog.operator.name).len())
             .unwrap_or(0);
         (channels, sessions)
     }
 
-    fn clamp_service_dialog_focus(&mut self) {
-        let (channels, sessions) = self.service_dialog_row_counts();
-        if let Some(dialog) = self.service_dialog.as_mut() {
+    fn clamp_operator_dialog_focus(&mut self) {
+        let (channels, sessions) = self.operator_dialog_row_counts();
+        if let Some(dialog) = self.operator_dialog.as_mut() {
             dialog.focus = dialog.focus.clamp(channels, sessions);
         }
     }
 
-    fn move_service_dialog_focus(&mut self, forward: bool) {
-        let (channels, sessions) = self.service_dialog_row_counts();
-        if let Some(dialog) = self.service_dialog.as_mut() {
+    fn move_operator_dialog_focus(&mut self, forward: bool) {
+        let (channels, sessions) = self.operator_dialog_row_counts();
+        if let Some(dialog) = self.operator_dialog.as_mut() {
             dialog.focus = if forward {
                 dialog.focus.next(channels, sessions)
             } else {
@@ -612,17 +612,17 @@ impl App {
         self.show_terminal_scrollbar();
     }
 
-    pub fn open_new_service_view(&mut self, suggested: impl Into<String>) {
+    pub fn open_new_operator_view(&mut self, suggested: impl Into<String>) {
         let suggested = suggested.into();
-        self.dismiss_surfaces_over_service_view();
-        self.select_service(suggested.clone());
-        let service = default_service(self, suggested);
-        self.service_dialog = Some(ServiceDialog {
-            mode: ServiceDialogMode::Create,
-            saved: service.clone(),
-            service,
-            focus: ServiceDialogFocus::Field(0),
-            note: Some("Enter saves this service as its own TOML file.".to_string()),
+        self.dismiss_surfaces_over_operator_view();
+        self.select_operator(suggested.clone());
+        let operator = default_operator(self, suggested);
+        self.operator_dialog = Some(OperatorDialog {
+            mode: OperatorDialogMode::Create,
+            saved: operator.clone(),
+            operator,
+            focus: OperatorDialogFocus::Field(0),
+            note: Some("Enter saves this operator as its own TOML file.".to_string()),
             picker: None,
             picker_selected: 0,
             picker_scroll: 0,
@@ -630,63 +630,63 @@ impl App {
         });
     }
 
-    pub fn open_edit_service_view(&mut self, name: &str) -> bool {
-        if !self.services.iter().any(|service| service.name == name) {
-            self.set_status(format!("service {name} not found"));
+    pub fn open_edit_operator_view(&mut self, name: &str) -> bool {
+        if !self.operators.iter().any(|operator| operator.name == name) {
+            self.set_status(format!("operator {name} not found"));
             return false;
         }
-        self.dismiss_surfaces_over_service_view();
-        // Selecting the service is what opens its editor — focusing a service
+        self.dismiss_surfaces_over_operator_view();
+        // Selecting the operator is what opens its editor — focusing a operator
         // view is edit mode (spec 0175).
-        self.select_service(name.to_string());
+        self.select_operator(name.to_string());
         true
     }
 
     /// Transient surfaces that would otherwise keep swallowing keystrokes
-    /// after a command hands the user a freshly focused service view. The
+    /// after a command hands the user a freshly focused operator view. The
     /// minibuffer matters most: `/serve` is typically typed into the
     /// minibuffer panel, which stays open unless it is dismissed here.
-    fn dismiss_surfaces_over_service_view(&mut self) {
+    fn dismiss_surfaces_over_operator_view(&mut self) {
         self.configure_popup = None;
         self.session_picker = None;
         self.prompt = None;
     }
 
     /// Keep the inline editor attached to whatever the active pane shows:
-    /// every path that focuses a service leaves its editor open, and moving
-    /// off a service closes it. Called from selection and pane-focus changes.
-    pub(super) fn sync_service_editor_with_selection(&mut self) {
-        let Some(name) = self.selection.service_name().map(str::to_owned) else {
-            self.service_dialog = None;
+    /// every path that focuses a operator leaves its editor open, and moving
+    /// off a operator closes it. Called from selection and pane-focus changes.
+    pub(super) fn sync_operator_editor_with_selection(&mut self) {
+        let Some(name) = self.selection.operator_name().map(str::to_owned) else {
+            self.operator_dialog = None;
             return;
         };
         if self
-            .service_dialog
+            .operator_dialog
             .as_ref()
-            .is_some_and(|dialog| dialog.service.name == name)
+            .is_some_and(|dialog| dialog.operator.name == name)
         {
             return;
         }
-        // A different service brings its own channels and sessions, so the
+        // A different operator brings its own channels and sessions, so the
         // section starts at the top again.
-        self.service_view_scroll = 0;
+        self.operator_view_scroll = 0;
         match self
-            .services
+            .operators
             .iter()
-            .find(|service| service.name == name)
+            .find(|operator| operator.name == name)
             .cloned()
         {
-            // A service still being created has no daemon-side definition to
-            // reopen; `open_new_service_view` installs that editor itself, and
+            // A operator still being created has no daemon-side definition to
+            // reopen; `open_new_operator_view` installs that editor itself, and
             // the selection follows the name field so this stays in step.
-            None => self.service_dialog = None,
-            Some(service) => self.service_dialog = Some(ServiceDialog::editing(service)),
+            None => self.operator_dialog = None,
+            Some(operator) => self.operator_dialog = Some(OperatorDialog::editing(operator)),
         }
     }
 
-    fn suggested_channel_id(&self, _service: &ServiceSummary) -> String {
+    fn suggested_channel_id(&self, _operator: &OperatorSummary) -> String {
         if !self
-            .service_channel_catalog
+            .operator_channel_catalog
             .iter()
             .any(|channel| channel.id == "http")
         {
@@ -696,21 +696,21 @@ impl App {
             .map(|index| format!("http-{index}"))
             .find(|id| {
                 !self
-                    .service_channel_catalog
+                    .operator_channel_catalog
                     .iter()
                     .any(|channel| channel.id == *id)
             })
-            .unwrap_or_else(|| format!("http-{}", self.service_channel_catalog.len() + 1))
+            .unwrap_or_else(|| format!("http-{}", self.operator_channel_catalog.len() + 1))
     }
 
-    fn suggested_channel_port(&self, service: &ServiceSummary) -> u16 {
-        let mut used: std::collections::HashSet<u16> = service
+    fn suggested_channel_port(&self, operator: &OperatorSummary) -> u16 {
+        let mut used: std::collections::HashSet<u16> = operator
             .channels
             .iter()
             .filter_map(|channel| channel.port)
             .collect();
         used.extend(
-            self.service_channel_catalog
+            self.operator_channel_catalog
                 .iter()
                 .filter_map(|channel| channel.port),
         );
@@ -719,24 +719,24 @@ impl App {
             .unwrap_or(8787)
     }
 
-    pub fn open_new_service_channel(&mut self) -> bool {
-        let Some(service) = self
-            .service_dialog
+    pub fn open_new_operator_channel(&mut self) -> bool {
+        let Some(operator) = self
+            .operator_dialog
             .as_ref()
-            .map(|dialog| dialog.service.clone())
+            .map(|dialog| dialog.operator.clone())
         else {
             return false;
         };
-        let id = self.suggested_channel_id(&service);
-        let port = self.suggested_channel_port(&service);
-        let Some(dialog) = self.service_dialog.as_mut() else {
+        let id = self.suggested_channel_id(&operator);
+        let port = self.suggested_channel_port(&operator);
+        let Some(dialog) = self.operator_dialog.as_mut() else {
             return false;
         };
-        dialog.focus = ServiceDialogFocus::Channel(dialog.focus.channel().unwrap_or(0));
-        dialog.channel_editor = Some(ServiceChannelDialog {
-            mode: ServiceChannelDialogMode::Create,
-            service_name: dialog.service.name.clone(),
-            channel: ServiceChannelSummary {
+        dialog.focus = OperatorDialogFocus::Channel(dialog.focus.channel().unwrap_or(0));
+        dialog.channel_editor = Some(OperatorChannelDialog {
+            mode: OperatorChannelDialogMode::Create,
+            operator_name: dialog.operator.name.clone(),
+            channel: OperatorChannelSummary {
                 id,
                 kind: "http".to_string(),
                 enabled: true,
@@ -753,7 +753,7 @@ impl App {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                attached_to: Some(dialog.service.name.clone()),
+                attached_to: Some(dialog.operator.name.clone()),
                 publication: None,
             },
             selected_field: 0,
@@ -766,34 +766,34 @@ impl App {
         true
     }
 
-    pub fn open_edit_service_channel(&mut self, index: usize) -> bool {
-        self.open_service_channel_editor(index, false)
+    pub fn open_edit_operator_channel(&mut self, index: usize) -> bool {
+        self.open_operator_channel_editor(index, false)
     }
 
     /// Open the channel editor on catalog row `index`. Editing is limited to
-    /// channels attached to this service; `for_delete` also admits unattached
-    /// catalog rows, since dropping one takes nothing away from any service.
-    fn open_service_channel_editor(&mut self, index: usize, for_delete: bool) -> bool {
-        let Some(dialog) = self.service_dialog.as_mut() else {
+    /// channels attached to this operator; `for_delete` also admits unattached
+    /// catalog rows, since dropping one takes nothing away from any operator.
+    fn open_operator_channel_editor(&mut self, index: usize, for_delete: bool) -> bool {
+        let Some(dialog) = self.operator_dialog.as_mut() else {
             return false;
         };
-        let Some(channel) = self.service_channel_catalog.get(index).cloned() else {
+        let Some(channel) = self.operator_channel_catalog.get(index).cloned() else {
             return false;
         };
-        let attached_here = channel.attached_to.as_deref() == Some(dialog.service.name.as_str());
+        let attached_here = channel.attached_to.as_deref() == Some(dialog.operator.name.as_str());
         if !attached_here && !(for_delete && channel.attached_to.is_none()) {
             return false;
         }
-        dialog.focus = ServiceDialogFocus::Channel(index);
-        dialog.channel_editor = Some(ServiceChannelDialog {
-            mode: ServiceChannelDialogMode::Edit,
-            service_name: dialog.service.name.clone(),
+        dialog.focus = OperatorDialogFocus::Channel(index);
+        dialog.channel_editor = Some(OperatorChannelDialog {
+            mode: OperatorChannelDialogMode::Edit,
+            operator_name: dialog.operator.name.clone(),
             channel,
             selected_field: 2,
             note: Some(if attached_here {
                 "Channel changes bind or unbind the listener immediately.".to_string()
             } else {
-                "This channel is not attached to any service.".to_string()
+                "This channel is not attached to any operator.".to_string()
             }),
             new_secret: None,
             confirm_delete: false,
@@ -804,21 +804,21 @@ impl App {
     }
 
     /// Arm the delete-confirm prompt for the selected catalog row. A channel
-    /// owned by another service is refused: deleting it here would pull the
-    /// endpoint out from under that service.
-    fn confirm_delete_service_channel(&mut self, index: usize) {
-        let Some(dialog) = self.service_dialog.as_ref() else {
+    /// owned by another operator is refused: deleting it here would pull the
+    /// endpoint out from under that operator.
+    fn confirm_delete_operator_channel(&mut self, index: usize) {
+        let Some(dialog) = self.operator_dialog.as_ref() else {
             return;
         };
-        let service_name = dialog.service.name.clone();
-        let Some(channel) = self.service_channel_catalog.get(index).cloned() else {
+        let operator_name = dialog.operator.name.clone();
+        let Some(channel) = self.operator_channel_catalog.get(index).cloned() else {
             return;
         };
         if let Some(owner) = channel.attached_to.as_deref() {
-            if owner != service_name {
-                if let Some(dialog) = self.service_dialog.as_mut() {
+            if owner != operator_name {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
                     dialog.note = Some(format!(
-                        "Channel `{}` is already attached to service `{owner}`.",
+                        "Channel `{}` is already attached to operator `{owner}`.",
                         channel.id
                     ));
                 }
@@ -826,11 +826,11 @@ impl App {
             }
         }
         let attached_here = channel.attached_to.is_some();
-        if !self.open_service_channel_editor(index, true) {
+        if !self.open_operator_channel_editor(index, true) {
             return;
         }
         if let Some(editor) = self
-            .service_dialog
+            .operator_dialog
             .as_mut()
             .and_then(|dialog| dialog.channel_editor.as_mut())
         {
@@ -846,21 +846,21 @@ impl App {
         }
     }
 
-    async fn toggle_service_channel(&mut self, index: usize) {
-        let Some(dialog) = self.service_dialog.as_ref() else {
+    async fn toggle_operator_channel(&mut self, index: usize) {
+        let Some(dialog) = self.operator_dialog.as_ref() else {
             return;
         };
-        let service_name = dialog.service.name.clone();
-        let Some(channel) = self.service_channel_catalog.get(index).cloned() else {
+        let operator_name = dialog.operator.name.clone();
+        let Some(channel) = self.operator_channel_catalog.get(index).cloned() else {
             return;
         };
         let operation = match channel.attached_to.as_deref() {
             None => Some((true, channel.id.clone())),
-            Some(owner) if owner == service_name => Some((false, channel.id.clone())),
+            Some(owner) if owner == operator_name => Some((false, channel.id.clone())),
             Some(owner) => {
-                if let Some(dialog) = self.service_dialog.as_mut() {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
                     dialog.note = Some(format!(
-                        "Channel `{}` is already attached to service `{owner}`.",
+                        "Channel `{}` is already attached to operator `{owner}`.",
                         channel.id
                     ));
                 }
@@ -872,24 +872,24 @@ impl App {
         };
         let result = if attach {
             self.client
-                .attach_service_channel(&service_name, &channel_id)
+                .attach_operator_channel(&operator_name, &channel_id)
                 .await
         } else {
             self.client
-                .detach_service_channel(&service_name, &channel_id)
+                .detach_operator_channel(&operator_name, &channel_id)
                 .await
         };
         match result {
             Ok(result) => {
-                self.refresh_services().await;
-                if let Some(dialog) = self.service_dialog.as_mut() {
-                    if let Some(service) = self
-                        .services
+                self.refresh_operators().await;
+                if let Some(dialog) = self.operator_dialog.as_mut() {
+                    if let Some(operator) = self
+                        .operators
                         .iter()
-                        .find(|service| service.name == service_name)
+                        .find(|operator| operator.name == operator_name)
                         .cloned()
                     {
-                        dialog.adopt_saved(service);
+                        dialog.adopt_saved(operator);
                     }
                     dialog.note = Some(format!(
                         "Channel `{channel_id}` {}: {}.",
@@ -899,7 +899,7 @@ impl App {
                 }
             }
             Err(error) => {
-                if let Some(dialog) = self.service_dialog.as_mut() {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
                     dialog.note = Some(format!(
                         "Channel `{channel_id}` {} failed: {error}",
                         if attach { "attach" } else { "detach" }
@@ -913,26 +913,26 @@ impl App {
         &mut self,
         payload: construct_protocol::ChannelPublicationNotificationPayload,
     ) {
-        for channel in &mut self.service_channel_catalog {
+        for channel in &mut self.operator_channel_catalog {
             if channel.id == payload.channel_id
-                && channel.attached_to.as_deref() == Some(payload.service_name.as_str())
+                && channel.attached_to.as_deref() == Some(payload.operator_name.as_str())
             {
                 channel.publication = payload.publication.clone();
             }
         }
-        for service in &mut self.services {
-            if service.name != payload.service_name {
+        for operator in &mut self.operators {
+            if operator.name != payload.operator_name {
                 continue;
             }
-            for channel in &mut service.channels {
+            for channel in &mut operator.channels {
                 if channel.id == payload.channel_id {
                     channel.publication = payload.publication.clone();
                 }
             }
         }
-        if let Some(dialog) = self.service_dialog.as_mut() {
-            if dialog.service.name == payload.service_name {
-                for channel in &mut dialog.service.channels {
+        if let Some(dialog) = self.operator_dialog.as_mut() {
+            if dialog.operator.name == payload.operator_name {
+                for channel in &mut dialog.operator.channels {
                     if channel.id == payload.channel_id {
                         channel.publication = payload.publication.clone();
                     }
@@ -946,13 +946,13 @@ impl App {
         }
     }
 
-    async fn toggle_channel_publication(&mut self, service_name: &str, index: usize) {
-        let service_name = service_name.to_string();
-        let Some(channel) = self.service_channel_catalog.get(index).cloned() else {
+    async fn toggle_channel_publication(&mut self, operator_name: &str, index: usize) {
+        let operator_name = operator_name.to_string();
+        let Some(channel) = self.operator_channel_catalog.get(index).cloned() else {
             return;
         };
-        if channel.attached_to.as_deref() != Some(service_name.as_str()) {
-            if let Some(dialog) = self.service_dialog.as_mut() {
+        if channel.attached_to.as_deref() != Some(operator_name.as_str()) {
+            if let Some(dialog) = self.operator_dialog.as_mut() {
                 dialog.note = Some("Attach the channel before publishing it.".to_string());
             }
             return;
@@ -961,18 +961,18 @@ impl App {
         if channel.publication.is_some() {
             match self
                 .client
-                .unpublish_service_channel(&service_name, &channel.id)
+                .unpublish_operator_channel(&operator_name, &channel.id)
                 .await
             {
                 Ok(_) => self.apply_channel_publication(
                     construct_protocol::ChannelPublicationNotificationPayload {
-                        service_name,
+                        operator_name,
                         channel_id: channel.id,
                         publication: None,
                     },
                 ),
                 Err(error) => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(dialog) = self.operator_dialog.as_mut() {
                         dialog.note = Some(format!("Unpublish failed: {error}"));
                     }
                 }
@@ -980,18 +980,18 @@ impl App {
         } else {
             match self
                 .client
-                .publish_service_channel(&service_name, &channel.id, "construct")
+                .publish_operator_channel(&operator_name, &channel.id, "construct")
                 .await
             {
                 Ok(publication) => self.apply_channel_publication(
                     construct_protocol::ChannelPublicationNotificationPayload {
-                        service_name,
+                        operator_name,
                         channel_id: channel.id,
                         publication: Some(publication),
                     },
                 ),
                 Err(error) => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(dialog) = self.operator_dialog.as_mut() {
                         dialog.note = Some(format!("Publish failed: {error}"));
                     }
                 }
@@ -1003,13 +1003,13 @@ impl App {
     /// channel. A local port is the client-visible ingress capability today;
     /// an existing publication remains withdrawable even if its listener has
     /// disappeared while the notification is in flight.
-    pub fn service_channel_actions(
+    pub fn operator_channel_actions(
         &self,
-        service_name: &str,
+        operator_name: &str,
         index: usize,
-    ) -> Option<ServiceChannelActions> {
-        let channel = self.service_channel_catalog.get(index)?;
-        if channel.attached_to.as_deref() != Some(service_name)
+    ) -> Option<OperatorChannelActions> {
+        let channel = self.operator_channel_catalog.get(index)?;
+        if channel.attached_to.as_deref() != Some(operator_name)
             || (channel.port.is_none() && channel.publication.is_none())
         {
             return None;
@@ -1022,15 +1022,15 @@ impl App {
                 .public_endpoint
                 .as_ref()
                 .map(|endpoint| match endpoint {
-                    Endpoint::Url { url } => ServiceChannelActionAddress::PublicUrl(url.clone()),
+                    Endpoint::Url { url } => OperatorChannelActionAddress::PublicUrl(url.clone()),
                     Endpoint::Socket { .. } => {
-                        ServiceChannelActionAddress::PublicSocket(endpoint.to_string())
+                        OperatorChannelActionAddress::PublicSocket(endpoint.to_string())
                     }
                 });
             let authorization = publication
                 .auth_url
                 .as_ref()
-                .map(|url| ServiceChannelActionAddress::AuthorizationUrl(url.clone()));
+                .map(|url| OperatorChannelActionAddress::AuthorizationUrl(url.clone()));
             match publication.phase {
                 ChannelPublicationPhase::Authorizing => authorization.or(public),
                 ChannelPublicationPhase::Ready => public.or(authorization),
@@ -1040,8 +1040,8 @@ impl App {
             }
         });
 
-        Some(ServiceChannelActions {
-            service_name: service_name.to_string(),
+        Some(OperatorChannelActions {
+            operator_name: operator_name.to_string(),
             channel_index: index,
             channel_id: channel.id.clone(),
             published: channel.publication.is_some(),
@@ -1049,32 +1049,32 @@ impl App {
         })
     }
 
-    pub fn selected_service_channel_actions(
+    pub fn selected_operator_channel_actions(
         &self,
-        service_name: &str,
-    ) -> Option<ServiceChannelActions> {
+        operator_name: &str,
+    ) -> Option<OperatorChannelActions> {
         let index = self
-            .service_dialog
+            .operator_dialog
             .as_ref()
-            .filter(|dialog| dialog.service.name == service_name)
+            .filter(|dialog| dialog.operator.name == operator_name)
             .and_then(|dialog| dialog.focus.channel())?;
-        self.service_channel_actions(service_name, index)
+        self.operator_channel_actions(operator_name, index)
     }
 
-    pub(super) async fn run_service_channel_action(
+    pub(super) async fn run_operator_channel_action(
         &mut self,
-        service_name: &str,
+        operator_name: &str,
         index: usize,
-        action: ServiceChannelAction,
+        action: OperatorChannelAction,
     ) {
-        let Some(actions) = self.service_channel_actions(service_name, index) else {
+        let Some(actions) = self.operator_channel_actions(operator_name, index) else {
             return;
         };
         match action {
-            ServiceChannelAction::TogglePublication => {
-                self.toggle_channel_publication(service_name, index).await;
+            OperatorChannelAction::TogglePublication => {
+                self.toggle_channel_publication(operator_name, index).await;
             }
-            ServiceChannelAction::OpenAddress => {
+            OperatorChannelAction::OpenAddress => {
                 let Some(address) = actions.address.filter(|address| address.can_open()) else {
                     return;
                 };
@@ -1085,7 +1085,7 @@ impl App {
                     }
                 }
             }
-            ServiceChannelAction::CopyAddress => {
+            OperatorChannelAction::CopyAddress => {
                 let Some(address) = actions.address else {
                     return;
                 };
@@ -1103,15 +1103,15 @@ impl App {
         }
     }
 
-    fn edit_service_channel_text(&mut self, mut edit: impl FnMut(&mut String)) {
-        let Some(dialog) = self.service_dialog.as_mut() else {
+    fn edit_operator_channel_text(&mut self, mut edit: impl FnMut(&mut String)) {
+        let Some(dialog) = self.operator_dialog.as_mut() else {
             return;
         };
         let Some(channel) = dialog.channel_editor.as_mut() else {
             return;
         };
         match channel.selected_field {
-            0 if channel.mode == ServiceChannelDialogMode::Create => edit(&mut channel.channel.id),
+            0 if channel.mode == OperatorChannelDialogMode::Create => edit(&mut channel.channel.id),
             2 if channel.channel.kind == "http" => {
                 let mut value = channel
                     .channel
@@ -1161,8 +1161,8 @@ impl App {
         channel.confirm_delete = false;
     }
 
-    async fn save_service_channel(&mut self, rotate_secret: bool) {
-        let Some(parent) = self.service_dialog.as_ref() else {
+    async fn save_operator_channel(&mut self, rotate_secret: bool) {
+        let Some(parent) = self.operator_dialog.as_ref() else {
             return;
         };
         let Some(editor) = parent.channel_editor.as_ref() else {
@@ -1170,18 +1170,18 @@ impl App {
         };
         let editor_snapshot = editor.clone();
         let slack = editor_snapshot.channel.kind == "slack";
-        let valid_id = valid_service_name(&editor_snapshot.channel.id);
+        let valid_id = valid_operator_name(&editor_snapshot.channel.id);
         let validation_error = if !valid_id {
             Some("Channel ID must be 1–32 lowercase letters, digits, or interior hyphens.")
         } else if editor_snapshot.channel.kind == "http" && editor_snapshot.channel.port.is_none() {
             Some("HTTP port must be between 1 and 65535.")
         } else if editor_snapshot.channel.kind == "slack"
-            && editor_snapshot.mode == ServiceChannelDialogMode::Create
+            && editor_snapshot.mode == OperatorChannelDialogMode::Create
             && !editor_snapshot.app_token.starts_with("xapp-")
         {
             Some("Slack app token must start with xapp-.")
         } else if editor_snapshot.channel.kind == "slack"
-            && editor_snapshot.mode == ServiceChannelDialogMode::Create
+            && editor_snapshot.mode == OperatorChannelDialogMode::Create
             && !editor_snapshot.bot_token.starts_with("xoxb-")
         {
             Some("Slack bot token must start with xoxb-.")
@@ -1189,7 +1189,7 @@ impl App {
             None
         };
         if let Some(message) = validation_error {
-            if let Some(parent) = self.service_dialog.as_mut() {
+            if let Some(parent) = self.operator_dialog.as_mut() {
                 if let Some(editor) = parent.channel_editor.as_mut() {
                     editor.note = Some(message.to_string());
                 }
@@ -1198,9 +1198,9 @@ impl App {
         }
         match self
             .client
-            .put_service_channel(construct_protocol::ServiceChannelPutParams {
-                service_name: editor_snapshot.service_name.clone(),
-                channel: construct_protocol::ServiceChannelPut {
+            .put_operator_channel(construct_protocol::OperatorChannelPutParams {
+                operator_name: editor_snapshot.operator_name.clone(),
+                channel: construct_protocol::OperatorChannelPut {
                     id: editor_snapshot.channel.id,
                     kind: editor_snapshot.channel.kind,
                     enabled: editor_snapshot.channel.enabled,
@@ -1224,20 +1224,20 @@ impl App {
             .await
         {
             Ok(result) => {
-                self.refresh_services().await;
-                let refreshed_service = self
-                    .services
+                self.refresh_operators().await;
+                let refreshed_operator = self
+                    .operators
                     .iter()
-                    .find(|service| service.name == editor_snapshot.service_name)
+                    .find(|operator| operator.name == editor_snapshot.operator_name)
                     .cloned();
                 let applied = result.applied.summary();
                 let new_secret = result.new_secret;
-                if let Some(parent) = self.service_dialog.as_mut() {
-                    if let Some(service) = refreshed_service {
-                        parent.adopt_saved(service);
+                if let Some(parent) = self.operator_dialog.as_mut() {
+                    if let Some(operator) = refreshed_operator {
+                        parent.adopt_saved(operator);
                     }
                     if let Some(editor) = parent.channel_editor.as_mut() {
-                        editor.mode = ServiceChannelDialogMode::Edit;
+                        editor.mode = OperatorChannelDialogMode::Edit;
                         editor.channel = result.channel;
                         editor.app_token.clear();
                         editor.bot_token.clear();
@@ -1253,7 +1253,7 @@ impl App {
                 }
             }
             Err(error) => {
-                if let Some(parent) = self.service_dialog.as_mut() {
+                if let Some(parent) = self.operator_dialog.as_mut() {
                     if let Some(editor) = parent.channel_editor.as_mut() {
                         editor.note = Some(format!("Channel save failed: {error}"));
                     }
@@ -1262,33 +1262,33 @@ impl App {
         }
     }
 
-    async fn delete_service_channel(&mut self) {
-        let Some(parent) = self.service_dialog.as_ref() else {
+    async fn delete_operator_channel(&mut self) {
+        let Some(parent) = self.operator_dialog.as_ref() else {
             return;
         };
         let Some(editor) = parent.channel_editor.as_ref() else {
             return;
         };
-        let service_name = editor.service_name.clone();
+        let operator_name = editor.operator_name.clone();
         let channel_id = editor.channel.id.clone();
         // An unattached channel has no live endpoint to withdraw; say so
         // instead of claiming a withdrawal that never happened.
         let was_attached = editor.channel.attached_to.is_some();
         match self
             .client
-            .delete_service_channel(&service_name, &channel_id)
+            .delete_operator_channel(&operator_name, &channel_id)
             .await
         {
             Ok(()) => {
-                self.refresh_services().await;
-                if let Some(parent) = self.service_dialog.as_mut() {
-                    if let Some(service) = self
-                        .services
+                self.refresh_operators().await;
+                if let Some(parent) = self.operator_dialog.as_mut() {
+                    if let Some(operator) = self
+                        .operators
                         .iter()
-                        .find(|service| service.name == service_name)
+                        .find(|operator| operator.name == operator_name)
                         .cloned()
                     {
-                        parent.adopt_saved(service);
+                        parent.adopt_saved(operator);
                     }
                     parent.channel_editor = None;
                     parent.note = Some(if was_attached {
@@ -1299,7 +1299,7 @@ impl App {
                 }
             }
             Err(error) => {
-                if let Some(parent) = self.service_dialog.as_mut() {
+                if let Some(parent) = self.operator_dialog.as_mut() {
                     if let Some(editor) = parent.channel_editor.as_mut() {
                         editor.note = Some(format!("Channel delete failed: {error}"));
                         editor.confirm_delete = false;
@@ -1309,31 +1309,31 @@ impl App {
         }
     }
 
-    async fn rotate_service_channel_secret(&mut self) {
-        let Some(parent) = self.service_dialog.as_ref() else {
+    async fn rotate_operator_channel_secret(&mut self) {
+        let Some(parent) = self.operator_dialog.as_ref() else {
             return;
         };
         let Some(editor) = parent.channel_editor.as_ref() else {
             return;
         };
-        let service_name = editor.service_name.clone();
+        let operator_name = editor.operator_name.clone();
         let channel_id = editor.channel.id.clone();
         match self
             .client
-            .rotate_service_channel_secret(&service_name, &channel_id)
+            .rotate_operator_channel_secret(&operator_name, &channel_id)
             .await
         {
             Ok(result) => {
-                self.refresh_services().await;
+                self.refresh_operators().await;
                 let applied = result.applied.summary();
-                if let Some(parent) = self.service_dialog.as_mut() {
-                    if let Some(service) = self
-                        .services
+                if let Some(parent) = self.operator_dialog.as_mut() {
+                    if let Some(operator) = self
+                        .operators
                         .iter()
-                        .find(|service| service.name == service_name)
+                        .find(|operator| operator.name == operator_name)
                         .cloned()
                     {
-                        parent.adopt_saved(service);
+                        parent.adopt_saved(operator);
                     }
                     if let Some(editor) = parent.channel_editor.as_mut() {
                         editor.channel = result.channel;
@@ -1346,7 +1346,7 @@ impl App {
                 }
             }
             Err(error) => {
-                if let Some(parent) = self.service_dialog.as_mut() {
+                if let Some(parent) = self.operator_dialog.as_mut() {
                     if let Some(editor) = parent.channel_editor.as_mut() {
                         editor.note = Some(format!("Credential rotation failed: {error}"));
                     }
@@ -1355,46 +1355,46 @@ impl App {
         }
     }
 
-    fn open_service_picker(&mut self, kind: ServiceDialogPickerKind) {
-        let Some(mut dialog) = self.service_dialog.clone() else {
+    fn open_operator_picker(&mut self, kind: OperatorDialogPickerKind) {
+        let Some(mut dialog) = self.operator_dialog.clone() else {
             return;
         };
         dialog.picker = Some(kind);
         dialog.picker_scroll = 0;
         let options = dialog.picker_options(self);
         let current = match kind {
-            ServiceDialogPickerKind::Harness => dialog.service.harness.clone(),
-            ServiceDialogPickerKind::Model => dialog
-                .service
+            OperatorDialogPickerKind::Harness => dialog.operator.harness.clone(),
+            OperatorDialogPickerKind::Model => dialog
+                .operator
                 .model
                 .as_deref()
-                .map(canonical_service_model)
+                .map(canonical_operator_model)
                 .unwrap_or_default(),
-            ServiceDialogPickerKind::SessionMode => dialog.service.session_mode.clone(),
+            OperatorDialogPickerKind::SessionMode => dialog.operator.session_mode.clone(),
         };
         dialog.picker_selected = options
             .iter()
             .position(|option| option.value == current)
             .unwrap_or(0);
-        self.service_dialog = Some(dialog);
-        self.ensure_service_picker_visible();
+        self.operator_dialog = Some(dialog);
+        self.ensure_operator_picker_visible();
     }
 
-    fn ensure_service_picker_visible(&mut self) {
-        let Some(dialog) = self.service_dialog.as_mut() else {
+    fn ensure_operator_picker_visible(&mut self) {
+        let Some(dialog) = self.operator_dialog.as_mut() else {
             return;
         };
         if dialog.picker_selected < dialog.picker_scroll {
             dialog.picker_scroll = dialog.picker_selected;
-        } else if dialog.picker_selected >= dialog.picker_scroll + SERVICE_PICKER_VISIBLE_ROWS {
+        } else if dialog.picker_selected >= dialog.picker_scroll + OPERATOR_PICKER_VISIBLE_ROWS {
             dialog.picker_scroll = dialog
                 .picker_selected
-                .saturating_sub(SERVICE_PICKER_VISIBLE_ROWS - 1);
+                .saturating_sub(OPERATOR_PICKER_VISIBLE_ROWS - 1);
         }
     }
 
-    fn move_service_picker(&mut self, delta: isize) {
-        let Some(snapshot) = self.service_dialog.clone() else {
+    fn move_operator_picker(&mut self, delta: isize) {
+        let Some(snapshot) = self.operator_dialog.clone() else {
             return;
         };
         if snapshot.picker.is_none() {
@@ -1404,15 +1404,15 @@ impl App {
         if options.is_empty() {
             return;
         }
-        if let Some(dialog) = self.service_dialog.as_mut() {
+        if let Some(dialog) = self.operator_dialog.as_mut() {
             dialog.picker_selected = (dialog.picker_selected as isize + delta)
                 .rem_euclid(options.len() as isize) as usize;
         }
-        self.ensure_service_picker_visible();
+        self.ensure_operator_picker_visible();
     }
 
-    fn choose_service_picker(&mut self) {
-        let Some(snapshot) = self.service_dialog.clone() else {
+    fn choose_operator_picker(&mut self) {
+        let Some(snapshot) = self.operator_dialog.clone() else {
             return;
         };
         let Some(kind) = snapshot.picker else {
@@ -1423,19 +1423,19 @@ impl App {
             return;
         };
         if !option.available {
-            if let Some(dialog) = self.service_dialog.as_mut() {
+            if let Some(dialog) = self.operator_dialog.as_mut() {
                 dialog.note = Some(option.detail.clone());
             }
             return;
         }
         let value = option.value.clone();
-        if let Some(dialog) = self.service_dialog.as_mut() {
+        if let Some(dialog) = self.operator_dialog.as_mut() {
             match kind {
-                ServiceDialogPickerKind::Harness => dialog.service.harness = value,
-                ServiceDialogPickerKind::Model => {
-                    dialog.service.model = (!value.is_empty()).then_some(value)
+                OperatorDialogPickerKind::Harness => dialog.operator.harness = value,
+                OperatorDialogPickerKind::Model => {
+                    dialog.operator.model = (!value.is_empty()).then_some(value)
                 }
-                ServiceDialogPickerKind::SessionMode => dialog.service.session_mode = value,
+                OperatorDialogPickerKind::SessionMode => dialog.operator.session_mode = value,
             }
             dialog.picker = None;
             dialog.picker_selected = 0;
@@ -1444,8 +1444,8 @@ impl App {
         }
     }
 
-    fn edit_service_dialog_text(&mut self, mut edit: impl FnMut(&mut String)) {
-        let Some(dialog) = self.service_dialog.as_mut() else {
+    fn edit_operator_dialog_text(&mut self, mut edit: impl FnMut(&mut String)) {
+        let Some(dialog) = self.operator_dialog.as_mut() else {
             return;
         };
         // Channel and session rows are not text: they act on daemon-side
@@ -1453,52 +1453,52 @@ impl App {
         let Some(field) = dialog.focus.field() else {
             return;
         };
-        if dialog.mode == ServiceDialogMode::Edit && field == 0 {
-            dialog.note = Some("Service names cannot be changed after creation.".to_string());
+        if dialog.mode == OperatorDialogMode::Edit && field == 0 {
+            dialog.note = Some("Operator names cannot be changed after creation.".to_string());
             return;
         }
         match field {
-            0 => edit(&mut dialog.service.name),
-            1 => edit(&mut dialog.service.instruction),
+            0 => edit(&mut dialog.operator.name),
+            1 => edit(&mut dialog.operator.instruction),
             // Harness, model, and session mode are catalog-backed fields. They deliberately
             // do not accept typed or pasted text: Enter opens the picker and
             // the picker is the only way to change either value.
             2 | 3 | 4 => return,
-            5 => edit(&mut dialog.service.cwd),
+            5 => edit(&mut dialog.operator.cwd),
             _ => {}
         }
         dialog.note = None;
-        // A service being named doesn't exist yet, so the pane is bound to it
+        // A operator being named doesn't exist yet, so the pane is bound to it
         // by the name in the editor. Keep the selection following the field or
-        // the next selection sync finds no such service and drops the draft.
+        // the next selection sync finds no such operator and drops the draft.
         if field == 0 {
-            let name = dialog.service.name.clone();
-            if self.selection.service_name() != Some(name.as_str()) {
-                self.selection = Selection::Service(name);
+            let name = dialog.operator.name.clone();
+            if self.selection.operator_name() != Some(name.as_str()) {
+                self.selection = Selection::Operator(name);
                 self.sync_active_window_selection();
             }
         }
     }
 
-    pub(super) fn insert_service_dialog_text(&mut self, text: &str) -> bool {
-        if self.service_dialog.is_none() {
+    pub(super) fn insert_operator_dialog_text(&mut self, text: &str) -> bool {
+        if self.operator_dialog.is_none() {
             return false;
         }
         let sanitized = text.replace(['\r', '\n'], " ");
         if self
-            .service_dialog
+            .operator_dialog
             .as_ref()
             .is_some_and(|dialog| dialog.channel_editor.is_some())
         {
-            self.edit_service_channel_text(|value| value.push_str(&sanitized));
+            self.edit_operator_channel_text(|value| value.push_str(&sanitized));
         } else {
-            self.edit_service_dialog_text(|value| value.push_str(&sanitized));
+            self.edit_operator_dialog_text(|value| value.push_str(&sanitized));
         }
         true
     }
 
-    fn cycle_service_dialog_value(&mut self, reverse: bool) {
-        let Some(dialog) = self.service_dialog.as_mut() else {
+    fn cycle_operator_dialog_value(&mut self, reverse: bool) {
+        let Some(dialog) = self.operator_dialog.as_mut() else {
             return;
         };
         match dialog.focus.field() {
@@ -1506,40 +1506,40 @@ impl App {
                 const ROUTING: [&str; 3] = ["session-key", "per-event", "single"];
                 let current = ROUTING
                     .iter()
-                    .position(|value| *value == dialog.service.routing)
+                    .position(|value| *value == dialog.operator.routing)
                     .unwrap_or(0);
                 let next = if reverse {
                     current.checked_sub(1).unwrap_or(ROUTING.len() - 1)
                 } else {
                     (current + 1) % ROUTING.len()
                 };
-                dialog.service.routing = ROUTING[next].to_string();
+                dialog.operator.routing = ROUTING[next].to_string();
             }
-            Some(7) => dialog.service.paused = !dialog.service.paused,
+            Some(7) => dialog.operator.paused = !dialog.operator.paused,
             _ => {}
         }
         dialog.note = None;
     }
 
-    async fn save_service_dialog(&mut self) {
-        let Some(dialog) = self.service_dialog.clone() else {
+    async fn save_operator_dialog(&mut self) {
+        let Some(dialog) = self.operator_dialog.clone() else {
             return;
         };
-        let service = dialog.service;
-        let validation_error = if !valid_service_name(&service.name) {
+        let operator = dialog.operator;
+        let validation_error = if !valid_operator_name(&operator.name) {
             Some("Name must be 1–32 lowercase letters, digits, or interior hyphens.")
-        } else if service.harness.trim().is_empty() {
+        } else if operator.harness.trim().is_empty() {
             Some("Harness cannot be empty.")
-        } else if service.cwd.trim().is_empty() {
+        } else if operator.cwd.trim().is_empty() {
             Some("Working directory cannot be empty.")
-        } else if service.session_mode == "interactive"
-            && !matches!(service.harness.as_str(), "codex" | "claude")
+        } else if operator.session_mode == "interactive"
+            && !matches!(operator.harness.as_str(), "codex" | "claude")
         {
             Some("Interactive sessions currently require the codex or claude harness.")
-        } else if !matches!(service.session_mode.as_str(), "headless" | "interactive") {
+        } else if !matches!(operator.session_mode.as_str(), "headless" | "interactive") {
             Some("Session mode must be headless or interactive.")
         } else if !matches!(
-            service.routing.as_str(),
+            operator.routing.as_str(),
             "session-key" | "per-event" | "single"
         ) {
             Some("Routing must be session-key, per-event, or single.")
@@ -1547,7 +1547,7 @@ impl App {
             None
         };
         if let Some(message) = validation_error {
-            if let Some(dialog) = self.service_dialog.as_mut() {
+            if let Some(dialog) = self.operator_dialog.as_mut() {
                 dialog.note = Some(message.to_string());
             }
             return;
@@ -1555,42 +1555,42 @@ impl App {
 
         match self
             .client
-            .put_service(construct_protocol::ServicePutParams { service })
+            .put_operator(construct_protocol::OperatorPutParams { operator })
             .await
         {
             Ok(result) => {
-                self.refresh_services().await;
+                self.refresh_operators().await;
                 let applied = result.applied.summary();
-                if let Some(dialog) = self.service_dialog.as_mut() {
-                    dialog.mode = ServiceDialogMode::Edit;
-                    dialog.adopt_saved(result.service);
+                if let Some(dialog) = self.operator_dialog.as_mut() {
+                    dialog.mode = OperatorDialogMode::Edit;
+                    dialog.adopt_saved(result.operator);
                     dialog.note = Some(applied);
                 }
             }
             Err(error) => {
-                if let Some(dialog) = self.service_dialog.as_mut() {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
                     dialog.note = Some(format!("Save failed: {error}"));
                 }
             }
         }
     }
 
-    /// Delete a saved service definition (C-x k / title-menu delete / palette).
-    pub(super) async fn delete_service_by_name(&mut self, name: String) {
-        match self.client.delete_service(name.clone()).await {
+    /// Delete a saved operator definition (C-x k / title-menu delete / palette).
+    pub(super) async fn delete_operator_by_name(&mut self, name: String) {
+        match self.client.delete_operator(name.clone()).await {
             Ok(()) => {
-                let was_selected = self.selection.service_name() == Some(name.as_str());
-                if self.main_windows.clear_service(&name) {
+                let was_selected = self.selection.operator_name() == Some(name.as_str());
+                if self.main_windows.clear_operator(&name) {
                     self.push_layout();
                 }
                 if self
-                    .service_dialog
+                    .operator_dialog
                     .as_ref()
-                    .is_some_and(|dialog| dialog.service.name == name)
+                    .is_some_and(|dialog| dialog.operator.name == name)
                 {
-                    self.service_dialog = None;
+                    self.operator_dialog = None;
                 }
-                self.refresh_services().await;
+                self.refresh_operators().await;
                 if was_selected {
                     self.selection = Selection::None;
                     self.ensure_selection_valid();
@@ -1598,25 +1598,25 @@ impl App {
                 }
                 self.set_status(format!("{name} deleted; its endpoint is withdrawn"));
             }
-            Err(error) => self.set_status(format!("service delete failed: {error}")),
+            Err(error) => self.set_status(format!("operator delete failed: {error}")),
         }
     }
 
-    /// Esc in a service view. The editor is the view, so there is no
+    /// Esc in a operator view. The editor is the view, so there is no
     /// view-only state to fall back to: Esc first throws away unsaved edits,
     /// and once there is nothing to discard it hands keyboard focus back to
     /// the session list (spec 0175).
-    pub(super) fn escape_service_dialog(&mut self) {
-        let Some(dialog) = self.service_dialog.as_mut() else {
+    pub(super) fn escape_operator_dialog(&mut self) {
+        let Some(dialog) = self.operator_dialog.as_mut() else {
             return;
         };
-        if dialog.mode == ServiceDialogMode::Create {
+        if dialog.mode == OperatorDialogMode::Create {
             // Nothing has been written to disk yet, so the draft is all there
-            // is — dropping it leaves no service to keep showing.
-            let name = dialog.service.name.clone();
-            self.service_dialog = None;
-            if self.selection.service_name() == Some(name.as_str())
-                && !self.services.iter().any(|service| service.name == name)
+            // is — dropping it leaves no operator to keep showing.
+            let name = dialog.operator.name.clone();
+            self.operator_dialog = None;
+            if self.selection.operator_name() == Some(name.as_str())
+                && !self.operators.iter().any(|operator| operator.name == name)
             {
                 self.selection = Selection::None;
                 self.ensure_selection_valid();
@@ -1630,8 +1630,8 @@ impl App {
             let saved = dialog.saved.clone();
             // Channels move independently of the definition, so keep the live
             // attachment list and revert only what the user typed.
-            dialog.service = ServiceSummary {
-                channels: dialog.service.channels.clone(),
+            dialog.operator = OperatorSummary {
+                channels: dialog.operator.channels.clone(),
                 ..saved
             };
             dialog.picker = None;
@@ -1643,37 +1643,37 @@ impl App {
         self.focus = PaneFocus::List;
     }
 
-    pub(super) async fn handle_service_dialog_key(&mut self, key: KeyEvent) -> bool {
+    pub(super) async fn handle_operator_dialog_key(&mut self, key: KeyEvent) -> bool {
         // A `C-x` chord already in flight belongs to the global keymap. The
         // editor no longer closes itself to make room for one, so it has to
         // stand aside for the continuation key explicitly.
         if !self.chord_state.is_empty() {
             return false;
         }
-        self.clamp_service_dialog_focus();
-        let Some(snapshot) = self.service_dialog.clone() else {
+        self.clamp_operator_dialog_focus();
+        let Some(snapshot) = self.operator_dialog.clone() else {
             return false;
         };
         if snapshot.channel_editor.is_some() {
-            return self.handle_service_channel_dialog_key(key).await;
+            return self.handle_operator_channel_dialog_key(key).await;
         }
         if snapshot.picker.is_some() {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Esc => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(dialog) = self.operator_dialog.as_mut() {
                         dialog.picker = None;
                         dialog.picker_selected = 0;
                         dialog.picker_scroll = 0;
                     }
                 }
-                KeyCode::Enter => self.choose_service_picker(),
-                KeyCode::Up => self.move_service_picker(-1),
-                KeyCode::Down => self.move_service_picker(1),
-                KeyCode::Char('p') if ctrl => self.move_service_picker(-1),
-                KeyCode::Char('n') if ctrl => self.move_service_picker(1),
+                KeyCode::Enter => self.choose_operator_picker(),
+                KeyCode::Up => self.move_operator_picker(-1),
+                KeyCode::Down => self.move_operator_picker(1),
+                KeyCode::Char('p') if ctrl => self.move_operator_picker(-1),
+                KeyCode::Char('n') if ctrl => self.move_operator_picker(1),
                 KeyCode::Char('x') if ctrl => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(dialog) = self.operator_dialog.as_mut() {
                         dialog.picker = None;
                         dialog.picker_selected = 0;
                         dialog.picker_scroll = 0;
@@ -1687,7 +1687,7 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('s') => {
-                    self.save_service_dialog().await;
+                    self.save_operator_dialog().await;
                     return true;
                 }
                 KeyCode::Char('x') => {
@@ -1697,11 +1697,11 @@ impl App {
                     return false;
                 }
                 KeyCode::Char('p') => {
-                    self.move_service_dialog_focus(false);
+                    self.move_operator_dialog_focus(false);
                     return true;
                 }
                 KeyCode::Char('n') => {
-                    self.move_service_dialog_focus(true);
+                    self.move_operator_dialog_focus(true);
                     return true;
                 }
                 _ => {}
@@ -1709,30 +1709,30 @@ impl App {
         }
         let channel_row = snapshot.focus.channel();
         match key.code {
-            KeyCode::Esc => self.escape_service_dialog(),
+            KeyCode::Esc => self.escape_operator_dialog(),
             KeyCode::Enter => match snapshot.focus {
-                ServiceDialogFocus::Field(2) => {
-                    self.open_service_picker(ServiceDialogPickerKind::Harness)
+                OperatorDialogFocus::Field(2) => {
+                    self.open_operator_picker(OperatorDialogPickerKind::Harness)
                 }
-                ServiceDialogFocus::Field(3) => {
-                    self.open_service_picker(ServiceDialogPickerKind::Model)
+                OperatorDialogFocus::Field(3) => {
+                    self.open_operator_picker(OperatorDialogPickerKind::Model)
                 }
-                ServiceDialogFocus::Field(4) => {
-                    self.open_service_picker(ServiceDialogPickerKind::SessionMode)
+                OperatorDialogFocus::Field(4) => {
+                    self.open_operator_picker(OperatorDialogPickerKind::SessionMode)
                 }
-                ServiceDialogFocus::Field(_) => self.save_service_dialog().await,
-                ServiceDialogFocus::Channel(index) => {
-                    if self.service_channel_catalog.is_empty() {
-                        self.open_new_service_channel();
+                OperatorDialogFocus::Field(_) => self.save_operator_dialog().await,
+                OperatorDialogFocus::Channel(index) => {
+                    if self.operator_channel_catalog.is_empty() {
+                        self.open_new_operator_channel();
                     } else if self
-                        .service_channel_catalog
+                        .operator_channel_catalog
                         .get(index)
                         .is_some_and(|channel| {
-                            channel.attached_to.as_deref() == Some(snapshot.service.name.as_str())
+                            channel.attached_to.as_deref() == Some(snapshot.operator.name.as_str())
                         })
                     {
-                        self.open_edit_service_channel(index);
-                    } else if let Some(channel) = self.service_channel_catalog.get(index) {
+                        self.open_edit_operator_channel(index);
+                    } else if let Some(channel) = self.operator_channel_catalog.get(index) {
                         let message = match channel.attached_to.as_deref() {
                             Some(owner) => format!(
                                 "Channel `{}` is attached to `{owner}`; press Space on an available channel.",
@@ -1743,16 +1743,16 @@ impl App {
                                 channel.id
                             ),
                         };
-                        if let Some(dialog) = self.service_dialog.as_mut() {
+                        if let Some(dialog) = self.operator_dialog.as_mut() {
                             dialog.note = Some(message);
                         }
                     }
                 }
                 // A routed session row is a jump target, exactly like clicking
-                // it: Enter leaves the service view for that session.
-                ServiceDialogFocus::Session(index) => {
+                // it: Enter leaves the operator view for that session.
+                OperatorDialogFocus::Session(index) => {
                     if let Some(id) = self
-                        .routed_service_sessions(&snapshot.service.name)
+                        .routed_operator_sessions(&snapshot.operator.name)
                         .get(index)
                         .map(|session| session.id.clone())
                     {
@@ -1761,71 +1761,71 @@ impl App {
                 }
             },
             KeyCode::Char(' ') if channel_row.is_some() => {
-                self.toggle_service_channel(channel_row.unwrap_or_default())
+                self.toggle_operator_channel(channel_row.unwrap_or_default())
                     .await;
             }
             KeyCode::Char('a') if channel_row.is_some() => {
-                self.open_new_service_channel();
+                self.open_new_operator_channel();
             }
             KeyCode::Char('e') if channel_row.is_some() => {
-                self.open_edit_service_channel(channel_row.unwrap_or_default());
+                self.open_edit_operator_channel(channel_row.unwrap_or_default());
             }
             KeyCode::Char('d') if channel_row.is_some() => {
-                self.confirm_delete_service_channel(channel_row.unwrap_or_default());
+                self.confirm_delete_operator_channel(channel_row.unwrap_or_default());
             }
             KeyCode::Char('r') if channel_row.is_some() => {
-                if self.open_edit_service_channel(channel_row.unwrap_or_default()) {
-                    self.rotate_service_channel_secret().await;
+                if self.open_edit_operator_channel(channel_row.unwrap_or_default()) {
+                    self.rotate_operator_channel_secret().await;
                 }
             }
             KeyCode::Char('p') if channel_row.is_some() => {
-                self.run_service_channel_action(
-                    &snapshot.service.name,
+                self.run_operator_channel_action(
+                    &snapshot.operator.name,
                     channel_row.unwrap_or_default(),
-                    ServiceChannelAction::TogglePublication,
+                    OperatorChannelAction::TogglePublication,
                 )
                 .await;
             }
             KeyCode::Char('o') if channel_row.is_some() => {
-                self.run_service_channel_action(
-                    &snapshot.service.name,
+                self.run_operator_channel_action(
+                    &snapshot.operator.name,
                     channel_row.unwrap_or_default(),
-                    ServiceChannelAction::OpenAddress,
+                    OperatorChannelAction::OpenAddress,
                 )
                 .await;
             }
             KeyCode::Char('y') if channel_row.is_some() => {
-                self.run_service_channel_action(
-                    &snapshot.service.name,
+                self.run_operator_channel_action(
+                    &snapshot.operator.name,
                     channel_row.unwrap_or_default(),
-                    ServiceChannelAction::CopyAddress,
+                    OperatorChannelAction::CopyAddress,
                 )
                 .await;
             }
-            KeyCode::Tab | KeyCode::Down => self.move_service_dialog_focus(true),
-            KeyCode::BackTab | KeyCode::Up => self.move_service_dialog_focus(false),
-            KeyCode::Left => self.cycle_service_dialog_value(true),
+            KeyCode::Tab | KeyCode::Down => self.move_operator_dialog_focus(true),
+            KeyCode::BackTab | KeyCode::Up => self.move_operator_dialog_focus(false),
+            KeyCode::Left => self.cycle_operator_dialog_value(true),
             KeyCode::Right | KeyCode::Char(' ')
-                if matches!(snapshot.focus, ServiceDialogFocus::Field(6 | 7)) =>
+                if matches!(snapshot.focus, OperatorDialogFocus::Field(6 | 7)) =>
             {
-                self.cycle_service_dialog_value(false)
+                self.cycle_operator_dialog_value(false)
             }
-            KeyCode::Backspace => self.edit_service_dialog_text(|value| {
+            KeyCode::Backspace => self.edit_operator_dialog_text(|value| {
                 value.pop();
             }),
             KeyCode::Char(ch)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
-                self.edit_service_dialog_text(|value| value.push(ch));
+                self.edit_operator_dialog_text(|value| value.push(ch));
             }
             _ => {}
         }
         true
     }
 
-    async fn handle_service_channel_dialog_key(&mut self, key: KeyEvent) -> bool {
+    async fn handle_operator_channel_dialog_key(&mut self, key: KeyEvent) -> bool {
         let Some(snapshot) = self
-            .service_dialog
+            .operator_dialog
             .as_ref()
             .and_then(|dialog| dialog.channel_editor.clone())
         else {
@@ -1833,9 +1833,9 @@ impl App {
         };
         if snapshot.confirm_delete {
             match key.code {
-                KeyCode::Enter | KeyCode::Char('y') => self.delete_service_channel().await,
+                KeyCode::Enter | KeyCode::Char('y') => self.delete_operator_channel().await,
                 KeyCode::Esc | KeyCode::Char('n') => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(dialog) = self.operator_dialog.as_mut() {
                         if let Some(editor) = dialog.channel_editor.as_mut() {
                             editor.confirm_delete = false;
                             editor.note = Some("Delete cancelled.".to_string());
@@ -1849,18 +1849,18 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('s') => {
-                    self.save_service_channel(false).await;
+                    self.save_operator_channel(false).await;
                     return true;
                 }
                 KeyCode::Char('r')
-                    if snapshot.mode == ServiceChannelDialogMode::Edit
+                    if snapshot.mode == OperatorChannelDialogMode::Edit
                         && snapshot.channel.kind == "http" =>
                 {
-                    self.rotate_service_channel_secret().await;
+                    self.rotate_operator_channel_secret().await;
                     return true;
                 }
-                KeyCode::Char('d') if snapshot.mode == ServiceChannelDialogMode::Edit => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
+                KeyCode::Char('d') if snapshot.mode == OperatorChannelDialogMode::Edit => {
+                    if let Some(dialog) = self.operator_dialog.as_mut() {
                         if let Some(editor) = dialog.channel_editor.as_mut() {
                             editor.confirm_delete = true;
                             editor.note = Some(
@@ -1871,13 +1871,13 @@ impl App {
                     return true;
                 }
                 KeyCode::Char('x') => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(dialog) = self.operator_dialog.as_mut() {
                         dialog.channel_editor = None;
                     }
                     return false;
                 }
                 KeyCode::Char('p') => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(dialog) = self.operator_dialog.as_mut() {
                         if let Some(editor) = dialog.channel_editor.as_mut() {
                             editor.selected_field = editor
                                 .selected_field
@@ -1888,7 +1888,7 @@ impl App {
                     return true;
                 }
                 KeyCode::Char('n') => {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(dialog) = self.operator_dialog.as_mut() {
                         if let Some(editor) = dialog.channel_editor.as_mut() {
                             editor.selected_field =
                                 (editor.selected_field + 1) % channel_field_count(editor);
@@ -1901,13 +1901,13 @@ impl App {
         }
         match key.code {
             KeyCode::Esc => {
-                if let Some(dialog) = self.service_dialog.as_mut() {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
                     dialog.channel_editor = None;
                 }
             }
-            KeyCode::Enter => self.save_service_channel(false).await,
+            KeyCode::Enter => self.save_operator_channel(false).await,
             KeyCode::Tab | KeyCode::Down => {
-                if let Some(dialog) = self.service_dialog.as_mut() {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
                         editor.selected_field =
                             (editor.selected_field + 1) % channel_field_count(editor);
@@ -1915,7 +1915,7 @@ impl App {
                 }
             }
             KeyCode::BackTab | KeyCode::Up => {
-                if let Some(dialog) = self.service_dialog.as_mut() {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
                         editor.selected_field = editor
                             .selected_field
@@ -1926,9 +1926,9 @@ impl App {
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
                 if snapshot.selected_field == 1
-                    && snapshot.mode == ServiceChannelDialogMode::Create =>
+                    && snapshot.mode == OperatorChannelDialogMode::Create =>
             {
-                if let Some(dialog) = self.service_dialog.as_mut() {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
                         editor.channel.kind = if editor.channel.kind == "http" {
                             "slack"
@@ -1957,7 +1957,7 @@ impl App {
                     || (snapshot.channel.kind == "slack"
                         && snapshot.selected_field == SLACK_FIELD_STATE) =>
             {
-                if let Some(dialog) = self.service_dialog.as_mut() {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
                         editor.channel.enabled = !editor.channel.enabled;
                     }
@@ -1972,7 +1972,7 @@ impl App {
             {
                 // More than two values, so Left has to mean the other way.
                 let forward = key.code != KeyCode::Left;
-                if let Some(dialog) = self.service_dialog.as_mut() {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
                         if editor.selected_field == SLACK_FIELD_PROGRESS {
                             editor.channel.progress = Some(cycle_option(
@@ -1991,13 +1991,13 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => self.edit_service_channel_text(|value| {
+            KeyCode::Backspace => self.edit_operator_channel_text(|value| {
                 value.pop();
             }),
             KeyCode::Char(ch)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
-                self.edit_service_channel_text(|value| value.push(ch));
+                self.edit_operator_channel_text(|value| value.push(ch));
             }
             _ => {}
         }

@@ -110,8 +110,8 @@ impl Paths {
         self.config_dir.join("config.toml.template")
     }
 
-    pub fn services_dir(&self) -> PathBuf {
-        self.config_dir.join("services")
+    pub fn operators_dir(&self) -> PathBuf {
+        self.config_dir.join("operators")
     }
 
     pub fn keymap_file(&self) -> PathBuf {

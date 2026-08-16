@@ -1,14 +1,14 @@
-# 0177-service-deliveries-reach-sessions-as-native-input
+# 0177-operator-deliveries-reach-sessions-as-native-input
 
 Status: accepted
 Date: 2026-08-02
 Area: harness
-Scope: How an inbound service channel delivery reaches the session that must act on it.
+Scope: How an inbound operator channel delivery reaches the session that must act on it.
 
 ## Decision
 
 A channel delivery must actually start a turn in the session it is routed to.
-Construct is responsible for the framing that makes that true; a service
+Construct is responsible for the framing that makes that true; a operator
 channel never reasons about terminals, keystrokes, or harness startup.
 
 Two rules follow from that, and they are different because the session is in a
@@ -78,4 +78,4 @@ A Slack thread's first message creates an interactive Codex session; Codex
 boots with the message already as its prompt and begins work without any
 follow-up nudge. The next message in that thread is pasted into the running
 Codex composer and submitted, and appears in the session transcript as a user
-turn. A headless service session receives both as ordinary structured input.
+turn. A headless operator session receives both as ordinary structured input.

@@ -54,7 +54,7 @@ Rules both modes must preserve:
   wrapping, least important first: tokens, then activity, then identity,
   keeping the context gauge longest — and identically on every row. Full
   mode never forces the sidebar wider and never horizontally scrolls.
-- A row that heads a subtree — a project header, a service — carries no
+- A row that heads a subtree — a project header, a operator — carries no
   detail line, but in full mode it gains the same closing rail/breathing row
   a session card ends with, drawing the stem down into its first member. Its
   members hang off rails; without that row those rails begin in mid-air, and
@@ -72,7 +72,7 @@ Rules both modes must preserve:
   difference, so every project in the list opens on the same amount of air
   regardless of its neighbor. A project at the top of the list has nothing to
   be set apart from and carries no margin. Compact mode packs its rows with
-  nothing between them and gains no margin, and services — which head a
+  nothing between them and gains no margin, and operators — which head a
   subtree but not a section — do not take one.
 - That margin belongs to the project it sets apart: it counts toward the
   header's measured height, so clicking the gap selects the project and

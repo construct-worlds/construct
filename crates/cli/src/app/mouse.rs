@@ -225,10 +225,10 @@ impl App {
             .saturating_sub(hit.area.y)
             .min(hit.area.height.saturating_sub(hit.thumb.height)) as usize;
         let from_top = (thumb_top * max_scrollback + max_thumb_top / 2) / max_thumb_top;
-        // The service view shares this bar (and its drag plumbing) but counts
+        // The operator view shares this bar (and its drag plumbing) but counts
         // rows from the top, so the thumb position is its offset directly.
-        if self.selection.service_name().is_some() {
-            self.service_view_scroll = from_top;
+        if self.selection.operator_name().is_some() {
+            self.operator_view_scroll = from_top;
         } else {
             let active_window = Some(self.active_window_id);
             self.set_scrollback_for_window(active_window, max_scrollback.saturating_sub(from_top));
@@ -418,36 +418,36 @@ impl App {
         true
     }
 
-    /// Wheel over an open service view scrolls its lower section. Rows count
+    /// Wheel over an open operator view scrolls its lower section. Rows count
     /// from the top, so a wheel-up (positive scrollback delta) moves the
     /// offset back toward zero. Returns false when the pointer is somewhere
     /// else, leaving the wheel to the surface underneath it.
-    pub(super) fn scroll_service_view_at(&mut self, col: u16, row: u16, delta: i32) -> bool {
-        const SERVICE_VIEW_WHEEL_STEP: usize = 3;
+    pub(super) fn scroll_operator_view_at(&mut self, col: u16, row: u16, delta: i32) -> bool {
+        const OPERATOR_VIEW_WHEEL_STEP: usize = 3;
         let Some(name) = self
-            .service_dialog
+            .operator_dialog
             .as_ref()
-            .map(|dialog| dialog.service.name.clone())
+            .map(|dialog| dialog.operator.name.clone())
         else {
             return false;
         };
-        let over_service_pane = self.layout.main_window_areas.iter().any(|hit| {
+        let over_operator_pane = self.layout.main_window_areas.iter().any(|hit| {
             Self::rect_contains(hit.inner_area, col, row)
                 && self
                     .selection_for_window(hit.id)
-                    .is_some_and(|selection| selection.service_name() == Some(name.as_str()))
+                    .is_some_and(|selection| selection.operator_name() == Some(name.as_str()))
         });
-        if !over_service_pane {
+        if !over_operator_pane {
             return false;
         }
-        self.service_view_scroll = if delta > 0 {
-            self.service_view_scroll
-                .saturating_sub(SERVICE_VIEW_WHEEL_STEP)
+        self.operator_view_scroll = if delta > 0 {
+            self.operator_view_scroll
+                .saturating_sub(OPERATOR_VIEW_WHEEL_STEP)
         } else {
             // Clamped to the section's extent at render time, where the
             // wrapped height is known.
-            self.service_view_scroll
-                .saturating_add(SERVICE_VIEW_WHEEL_STEP)
+            self.operator_view_scroll
+                .saturating_add(OPERATOR_VIEW_WHEEL_STEP)
         };
         self.show_terminal_scrollbar();
         true

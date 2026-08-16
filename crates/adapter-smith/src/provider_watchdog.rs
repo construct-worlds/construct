@@ -225,7 +225,7 @@ fn is_retryable_provider_error(err: &anyhow::Error) -> bool {
         || msg.contains("502")
         || msg.contains("503")
         || msg.contains("504")
-        || msg.contains("service unavailable")
+        || msg.contains("operator unavailable")
         || msg.contains("temporarily unavailable")
         || msg.contains("overloaded")
         || msg.contains("overload")
@@ -530,7 +530,7 @@ mod tests {
     async fn retries_transient_error_before_visible_output() {
         let provider = FlakyProvider {
             failures_left: std::sync::atomic::AtomicUsize::new(2),
-            message: "codex-oauth: 503 Service Unavailable from chatgpt.com",
+            message: "codex-oauth: 503 Operator Unavailable from chatgpt.com",
             emission: FailureEmission::None,
         };
         let mut sink = NullSink::default();

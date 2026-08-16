@@ -1,6 +1,6 @@
-//! Loopback HTTP adapter for service ingress.
+//! Loopback HTTP adapter for operator ingress.
 
-use super::ingress::{IngressRequest, ServiceIngress};
+use super::ingress::{IngressRequest, OperatorIngress};
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use std::sync::Arc;
@@ -11,11 +11,11 @@ use tokio_util::sync::CancellationToken;
 const MAX_HTTP_BYTES: usize = 1024 * 1024;
 
 struct HttpChannel {
-    ingress: Arc<ServiceIngress>,
+    ingress: Arc<OperatorIngress>,
 }
 
 pub(super) async fn serve(
-    ingress: Arc<ServiceIngress>,
+    ingress: Arc<OperatorIngress>,
     listener: TcpListener,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -25,20 +25,20 @@ pub(super) async fn serve(
         .map(|address| address.port())
         .unwrap_or(0);
     tracing::info!(
-        service = %runtime.ingress.service_name(),
+        operator = %runtime.ingress.operator_name(),
         channel = %runtime.ingress.channel_id(),
         port,
-        "service http endpoint ready (loopback only)"
+        "operator http endpoint ready (loopback only)"
     );
     loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 tracing::info!(
-                    service = %runtime.ingress.service_name(),
+                    operator = %runtime.ingress.operator_name(),
                     channel = %runtime.ingress.channel_id(),
                     port,
-                    "service http endpoint released"
+                    "operator http endpoint released"
                 );
                 return Ok(());
             }
@@ -47,7 +47,7 @@ pub(super) async fn serve(
                 let runtime = runtime.clone();
                 tokio::spawn(async move {
                     if let Err(error) = handle(stream, runtime).await {
-                        tracing::debug!(%error, "service request failed");
+                        tracing::debug!(%error, "operator request failed");
                     }
                 });
             }
@@ -57,7 +57,7 @@ pub(super) async fn serve(
 
 /// The credential this HTTP channel currently accepts. Read per request so a
 /// rotation takes effect without rebinding its listener.
-pub(super) fn token(ingress: &ServiceIngress) -> Option<String> {
+pub(super) fn token(ingress: &OperatorIngress) -> Option<String> {
     ingress
         .current_config()
         .channels
@@ -68,7 +68,7 @@ pub(super) fn token(ingress: &ServiceIngress) -> Option<String> {
 
 /// Recheck pause/enable state per request to cover the interval before the
 /// supervisor releases a listener after a definition reload.
-pub(super) fn serving(ingress: &ServiceIngress) -> bool {
+pub(super) fn serving(ingress: &OperatorIngress) -> bool {
     let config = ingress.current_config();
     !config.paused
         && config
@@ -105,7 +105,7 @@ async fn handle(mut stream: TcpStream, runtime: Arc<HttpChannel>) -> Result<()> 
     let headers = std::str::from_utf8(&bytes[..end]).map_err(|_| anyhow!("invalid headers"))?;
     let mut lines = headers.split("\r\n");
     let request_line = lines.next().unwrap_or("");
-    let route = match parse_http_route(runtime.ingress.service_name(), request_line) {
+    let route = match parse_http_route(runtime.ingress.operator_name(), request_line) {
         Ok(route) => route,
         Err((status, message)) => return respond(&mut stream, status, message).await,
     };
@@ -122,9 +122,9 @@ async fn handle(mut stream: TcpStream, runtime: Arc<HttpChannel>) -> Result<()> 
         return respond(&mut stream, 401, "unauthorized").await;
     }
     // Check this after authentication so callers cannot use 401 versus 503 to
-    // discover which services exist.
+    // discover which operators exist.
     if !serving(&runtime.ingress) {
-        return respond(&mut stream, 503, "service paused").await;
+        return respond(&mut stream, 503, "operator paused").await;
     }
     match route {
         HttpRoute::Submit => {
@@ -139,7 +139,7 @@ async fn handle(mut stream: TcpStream, runtime: Arc<HttpChannel>) -> Result<()> 
                         202,
                         &serde_json::json!({
                             "accepted": true,
-                            "service": runtime.ingress.service_name(),
+                            "operator": runtime.ingress.operator_name(),
                             "channel": runtime.ingress.channel_id(),
                             "session": session,
                         }),
@@ -165,7 +165,7 @@ pub(super) enum HttpRoute {
 }
 
 pub(super) fn parse_http_route(
-    service_name: &str,
+    operator_name: &str,
     request_line: &str,
 ) -> std::result::Result<HttpRoute, (u16, &'static str)> {
     let mut parts = request_line.split_whitespace();
@@ -175,7 +175,7 @@ pub(super) fn parse_http_route(
     if parts.next().is_some() || !version.starts_with("HTTP/") {
         return Err((400, "invalid request line"));
     }
-    let submit = format!("/svc/{service_name}");
+    let submit = format!("/svc/{operator_name}");
     if target == submit {
         return if method == "POST" {
             Ok(HttpRoute::Submit)

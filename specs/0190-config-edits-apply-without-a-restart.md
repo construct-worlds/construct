@@ -8,7 +8,7 @@ Scope: When an edit to the daemon's configuration file reaches the running daemo
 ## Decision
 
 A configuration edit is applied to the running daemon when it is saved, on the
-same terms a service definition is. No restart is involved, and no command is
+same terms a operator definition is. No restart is involved, and no command is
 run.
 
 Each part of the configuration has one propagation class, and the class is a
@@ -27,7 +27,7 @@ to the configuration means giving it a class.
 
 **Nothing is re-applied to a running conversation.** A session keeps the harness
 binary, arguments, and environment it was created with, for its whole life, for
-the same reason a service-backed conversation keeps its instruction: a harness
+the same reason a operator-backed conversation keeps its instruction: a harness
 assembles its world when it starts, and there is no point at which a changed
 binary path could be delivered to a process already running from the old one.
 A session created while an edit is being applied is created from one
@@ -61,7 +61,7 @@ add a harness but cannot know to take one away.
 
 ## Reason
 
-The configuration file sits in the same directory as the service definitions
+The configuration file sits in the same directory as the operator definitions
 beside it, and those already apply when saved. That a file needs a process
 restart while its neighbour does not is not a distinction a user can be
 expected to hold, and nothing announced it: an edit simply had no effect, which

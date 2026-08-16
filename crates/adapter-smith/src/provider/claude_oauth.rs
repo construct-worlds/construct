@@ -42,7 +42,7 @@ const OAUTH_BETA: &str = "oauth-2025-04-20";
 /// The OAuth credential is scoped to Claude Code; the system prompt must lead
 /// with this identity block or the API rejects the request.
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-/// macOS keychain generic-password service name Claude Code writes its creds to.
+/// macOS keychain generic-password operator name Claude Code writes its creds to.
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 /// Refresh when the access token is within this much of expiry.
 const REFRESH_LEEWAY_MS: u64 = 5 * 60 * 1000;
@@ -187,7 +187,7 @@ impl CredStore {
         if let Some(account) = keychain_account() {
             return Ok(CredStore::Keychain { account });
         }
-        // Account unknown but the item may still be readable by service name.
+        // Account unknown but the item may still be readable by operator name.
         if keychain_read().is_ok() {
             return Ok(CredStore::Keychain {
                 account: std::env::var("USER").unwrap_or_default(),

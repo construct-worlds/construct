@@ -14,7 +14,7 @@
 //!   the list selection like a detail panel (master–detail), and a click on its
 //!   header collapses it to just that header row.
 //! - `Tab`, while the list pane holds focus, moves keyboard focus through
-//!   session rows, the lineage section, and services in visual order.
+//!   session rows, the lineage section, and operators in visual order.
 
 use super::*;
 use crate::lineage::LineageRow;
@@ -96,7 +96,7 @@ impl App {
         true
     }
 
-    /// Whether the unified session/service rows should read as the
+    /// Whether the unified session/operator rows should read as the
     /// keyboard-focused sidebar region.
     pub(crate) fn session_rows_focused(&self) -> bool {
         self.focus == PaneFocus::List && !self.lineage_focused
@@ -289,7 +289,7 @@ impl App {
     /// `C-x C-c` still quits while the section is focused.
     ///
     /// Esc hands focus back to the session rows. Bare Tab advances back to
-    /// the unified rows because services no longer have a separate focus
+    /// the unified rows because operators no longer have a separate focus
     /// region.
     pub(super) async fn handle_lineage_focus_key(&mut self, key: KeyEvent) -> bool {
         if self.lineage_section_session().is_none() {
@@ -330,7 +330,7 @@ impl App {
             // before its second key arrives would prevent global focus and
             // session commands such as `C-x o` from completing.
             KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => false,
-            // Bare Tab advances back to the unified session/service rows.
+            // Bare Tab advances back to the unified session/operator rows.
             KeyCode::Tab => {
                 self.lineage_focused = false;
                 self.focus = PaneFocus::List;

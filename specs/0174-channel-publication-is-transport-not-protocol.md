@@ -25,7 +25,7 @@ edges return host-and-port sockets. Clients call all of these public endpoints
 rather than assuming every future channel has a URL.
 
 Publishing is an explicit runtime action on one attached, enabled channel.
-Enabling or attaching a channel never publishes it. Pausing its service,
+Enabling or attaching a channel never publishes it. Pausing its operator,
 detaching it, disabling it, losing its local listener, or replacing its local
 endpoint withdraws the route. A later resume or reattachment does not silently
 republish it. Daemon restart also withdraws publication and requires another
@@ -66,9 +66,9 @@ without teaching it the other's implementation details.
 ## Consequences
 
 - Remote control and channel publications have independent routes and
-  lifetimes even when they use the same first-party account and relay service.
+  lifetimes even when they use the same first-party account and relay operator.
 - Channel ids identify publication reservations because they are globally
-  exclusive transport resources; mutable service names do not define public
+  exclusive transport resources; mutable operator names do not define public
   identity.
 - The first-party gateway must implement the channel-publication registration
   contract and must not replace a channel's Authorization header with remote
@@ -104,6 +104,6 @@ without teaching it the other's implementation details.
   a public host and port. The UI offers Copy, but not Open, for that endpoint.
   The tunnel carries opaque bytes; the database channel performs its own
   handshake and authentication.
-- A service is paused while its channel is public. The publication route is
+- A operator is paused while its channel is public. The publication route is
   withdrawn. Resuming restores only the loopback listener until the user
   explicitly publishes again.

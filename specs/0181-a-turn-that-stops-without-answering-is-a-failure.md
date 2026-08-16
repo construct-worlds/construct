@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-08-02
 Area: architecture
-Scope: How a service delivery learns that the turn behind it has ended without producing an answer, and what it reports when that happens.
+Scope: How a operator delivery learns that the turn behind it has ended without producing an answer, and what it reports when that happens.
 
 ## Decision
 

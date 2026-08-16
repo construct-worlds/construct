@@ -9,7 +9,7 @@ Scope: The web UI sidebar and persistent header expose the fleet token meter alo
 
 The web client's left sidebar stacks the same durable regions the TUI
 does: session rows, then a collapsible **lineage** section, then a
-collapsible **minibuffer** ambient panel. Services remain ordinary list
+collapsible **minibuffer** ambient panel. Operators remain ordinary list
 rows (as they already are on the web).
 
 ### Lineage section

@@ -247,13 +247,13 @@ pub fn missing_bin_hint(bin: &str, source: &std::io::Error) -> String {
 /// resolved to absolute paths. Adapters inject these alongside the
 /// construct MCP server; `CONSTRUCT_INJECT_MCP=0` disables both.
 pub const PLUGIN_MCP_SERVERS_ENV: &str = "CONSTRUCT_PLUGIN_MCP_SERVERS";
-/// Advertise the session-bound service reply tool from construct-mcp.
-pub const SERVICE_REPLY_TOOL_ENV: &str = "CONSTRUCT_SERVICE_REPLY_TOOL";
-/// Restrict construct-mcp to the service reply tool and suppress plugin MCP
-/// servers. Used by least-privilege interactive service sessions.
-pub const SERVICE_REPLY_ONLY_MCP_ENV: &str = "CONSTRUCT_SERVICE_REPLY_ONLY_MCP";
+/// Advertise the session-bound operator reply tool from construct-mcp.
+pub const OPERATOR_REPLY_TOOL_ENV: &str = "CONSTRUCT_OPERATOR_REPLY_TOOL";
+/// Restrict construct-mcp to the operator reply tool and suppress plugin MCP
+/// servers. Used by least-privilege interactive operator sessions.
+pub const OPERATOR_REPLY_ONLY_MCP_ENV: &str = "CONSTRUCT_OPERATOR_REPLY_ONLY_MCP";
 
-const CONSTRUCT_MCP_ENV_VARS: &[&str] = &[SERVICE_REPLY_TOOL_ENV, SERVICE_REPLY_ONLY_MCP_ENV];
+const CONSTRUCT_MCP_ENV_VARS: &[&str] = &[OPERATOR_REPLY_TOOL_ENV, OPERATOR_REPLY_ONLY_MCP_ENV];
 
 /// One plugin-contributed MCP server, as decoded from
 /// [`PLUGIN_MCP_SERVERS_ENV`].
@@ -318,7 +318,7 @@ pub fn maybe_inject_codex_mcp_args(session_id: &str) -> Vec<String> {
     let env_lit = mcp_env_toml(session_id);
     let inline = format!("{{ command = {bin_lit}, args = [\"__mcp\"], env = {env_lit} }}");
     let mut out = vec!["-c".to_string(), format!("mcp_servers.construct={inline}")];
-    if service_reply_only_mcp() {
+    if operator_reply_only_mcp() {
         return out;
     }
     for server in plugin_mcp_servers() {
@@ -383,8 +383,8 @@ fn mcp_env_toml_from(session_id: &str, lookup: impl Fn(&str) -> Option<String>) 
     format!("{{ {} }}", pairs.join(", "))
 }
 
-fn service_reply_only_mcp() -> bool {
-    std::env::var(SERVICE_REPLY_ONLY_MCP_ENV).as_deref() == Ok("1")
+fn operator_reply_only_mcp() -> bool {
+    std::env::var(OPERATOR_REPLY_ONLY_MCP_ENV).as_deref() == Ok("1")
 }
 
 /// If `CONSTRUCT_INJECT_MCP` is not set to `"0"`, attempt to write a per-session
@@ -430,7 +430,7 @@ pub fn maybe_inject_mcp_config(session_id: &str) -> Option<PathBuf> {
             "env": env,
         }),
     );
-    if !service_reply_only_mcp() {
+    if !operator_reply_only_mcp() {
         for server in plugin_mcp_servers() {
             servers.insert(
                 server.name.clone(),
@@ -1353,14 +1353,14 @@ mod tests {
     }
 
     #[test]
-    fn mcp_env_toml_propagates_service_reply_profile() {
+    fn mcp_env_toml_propagates_operator_reply_profile() {
         let got = mcp_env_toml_from("s123", |name| match name {
-            SERVICE_REPLY_TOOL_ENV | SERVICE_REPLY_ONLY_MCP_ENV => Some("1".to_string()),
+            OPERATOR_REPLY_TOOL_ENV | OPERATOR_REPLY_ONLY_MCP_ENV => Some("1".to_string()),
             _ => None,
         });
 
-        assert!(got.contains("CONSTRUCT_SERVICE_REPLY_TOOL = \"1\""));
-        assert!(got.contains("CONSTRUCT_SERVICE_REPLY_ONLY_MCP = \"1\""));
+        assert!(got.contains("CONSTRUCT_OPERATOR_REPLY_TOOL = \"1\""));
+        assert!(got.contains("CONSTRUCT_OPERATOR_REPLY_ONLY_MCP = \"1\""));
     }
 
     /// Symptom-level repro for the stuck-smith-prompt bug. The user

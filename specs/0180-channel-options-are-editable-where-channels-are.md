@@ -47,7 +47,7 @@ what leaves a client unable to render a field even once someone wants to.
   validation, and every client that edits channels — in one change. That is
   more work per option than a configuration-only field, and it is the point.
 - The option's propagation class must be declared, per
-  [0173](0173-service-definitions-apply-without-restart.md). For an outbound
+  [0173](0173-operator-definitions-apply-without-restart.md). For an outbound
   channel that holds its configuration in a live connection, saving an option
   replaces that connection.
 - A client written against an older protocol keeps working: it sends no option,
@@ -59,7 +59,7 @@ what leaves a client unable to render a field even once someone wants to.
 
 ## Non-Goals
 
-- This does not say every service definition field must be editable from every
+- This does not say every operator definition field must be editable from every
   client. It is about channel options specifically, and about the client that
   already edits that channel.
 - It does not require a CLI subcommand for each option. "The clients that edit

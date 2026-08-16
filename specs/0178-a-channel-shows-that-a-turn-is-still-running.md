@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-08-02
 Area: ux
-Scope: What a service channel tells the person waiting while a turn it accepted has not answered yet.
+Scope: What a operator channel tells the person waiting while a turn it accepted has not answered yet.
 
 ## Decision
 

@@ -1,6 +1,6 @@
-//! Single long-running task that owns every service listener.
+//! Single long-running task that owns every operator listener.
 //!
-//! Service definitions are edited while the daemon runs — through IPC, or by
+//! Operator definitions are edited while the daemon runs — through IPC, or by
 //! hand in the config directory — and each edit must reach the running system
 //! on its declared schedule. This task is what makes that safe.
 //!
@@ -31,10 +31,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::service::{self, ServiceConfig, ServiceShared};
+use crate::operator::{self, OperatorConfig, OperatorShared};
 use crate::session::SessionManager;
 
-/// One bound channel: which service, which channel within it.
+/// One bound channel: which operator, which channel within it.
 pub type ListenerKey = (String, String);
 
 /// Why a reload is happening. Purely for logs and for the text a caller sees.
@@ -66,7 +66,7 @@ pub struct ReloadReport {
     pub failures: Vec<(ListenerKey, u16, String)>,
 }
 
-pub enum ServiceMsg {
+pub enum OperatorMsg {
     Reload {
         reason: ReloadReason,
         respond: Option<oneshot::Sender<Result<ReloadReport>>>,
@@ -85,25 +85,25 @@ pub enum ServiceMsg {
 /// Handle held by `SessionManager` so any caller can request a reload without
 /// depending on this module's internals.
 #[derive(Clone)]
-pub struct ServiceHandle(mpsc::UnboundedSender<ServiceMsg>);
+pub struct OperatorHandle(mpsc::UnboundedSender<OperatorMsg>);
 
-impl ServiceHandle {
+impl OperatorHandle {
     pub async fn reload(&self, reason: ReloadReason) -> Result<ReloadReport> {
         let (tx, rx) = oneshot::channel();
         self.0
-            .send(ServiceMsg::Reload {
+            .send(OperatorMsg::Reload {
                 reason,
                 respond: Some(tx),
             })
-            .map_err(|_| anyhow::anyhow!("service supervisor is not running"))?;
+            .map_err(|_| anyhow::anyhow!("operator supervisor is not running"))?;
         rx.await
-            .map_err(|_| anyhow::anyhow!("service supervisor dropped the request"))?
+            .map_err(|_| anyhow::anyhow!("operator supervisor dropped the request"))?
     }
 
     /// Fire-and-forget reload, for the file watcher, which has nobody to
     /// report to.
     pub fn reload_detached(&self, reason: ReloadReason) {
-        let _ = self.0.send(ServiceMsg::Reload {
+        let _ = self.0.send(OperatorMsg::Reload {
             reason,
             respond: None,
         });
@@ -111,22 +111,22 @@ impl ServiceHandle {
 
     pub async fn reply(&self, session_id: String, delivery_id: String, text: String) -> Result<()> {
         if text.trim().is_empty() {
-            anyhow::bail!("service reply must not be empty");
+            anyhow::bail!("operator reply must not be empty");
         }
         if text.chars().count() > 40_000 {
-            anyhow::bail!("service reply exceeds 40000 characters");
+            anyhow::bail!("operator reply exceeds 40000 characters");
         }
         let (tx, rx) = oneshot::channel();
         self.0
-            .send(ServiceMsg::Reply {
+            .send(OperatorMsg::Reply {
                 session_id,
                 delivery_id,
                 text,
                 respond: tx,
             })
-            .map_err(|_| anyhow::anyhow!("service supervisor is not running"))?;
+            .map_err(|_| anyhow::anyhow!("operator supervisor is not running"))?;
         rx.await
-            .map_err(|_| anyhow::anyhow!("service supervisor dropped the reply"))?
+            .map_err(|_| anyhow::anyhow!("operator supervisor dropped the reply"))?
     }
 }
 
@@ -138,7 +138,7 @@ struct ListenerHandle {
 }
 
 struct SlackHandle {
-    config: service::SlackConfig,
+    config: operator::SlackConfig,
     cancel: CancellationToken,
     task: JoinHandle<()>,
 }
@@ -147,10 +147,10 @@ struct SlackHandle {
 /// is no lock and no way for another task to observe it half-updated.
 #[derive(Default)]
 struct Registry {
-    /// One entry per service name, reused across reloads. See the invariant on
-    /// [`ServiceShared`]: rebuilding one of these would drop the routed
+    /// One entry per operator name, reused across reloads. See the invariant on
+    /// [`OperatorShared`]: rebuilding one of these would drop the routed
     /// session map and the dedup ring.
-    shared: BTreeMap<String, Arc<ServiceShared>>,
+    shared: BTreeMap<String, Arc<OperatorShared>>,
     listeners: HashMap<ListenerKey, ListenerHandle>,
     slack: HashMap<ListenerKey, SlackHandle>,
 }
@@ -174,12 +174,12 @@ pub struct PortConflict {
 
 /// The channels that should be bound, given these definitions.
 ///
-/// Paused services and disabled channels contribute nothing, which is what
+/// Paused operators and disabled channels contribute nothing, which is what
 /// lets a user free a port by pausing. When two channels ask for the same
 /// port the earlier key wins deterministically, so a hand-edited duplicate
-/// cannot take a port away from a service that is already serving.
+/// cannot take a port away from a operator that is already serving.
 pub fn desired_listeners(
-    defs: &BTreeMap<String, ServiceConfig>,
+    defs: &BTreeMap<String, OperatorConfig>,
 ) -> (BTreeMap<ListenerKey, u16>, Vec<PortConflict>) {
     let mut desired: BTreeMap<ListenerKey, u16> = BTreeMap::new();
     let mut claimed: BTreeMap<u16, ListenerKey> = BTreeMap::new();
@@ -189,7 +189,7 @@ pub fn desired_listeners(
             continue;
         }
         for (channel_id, channel) in &config.channels {
-            let Some(port) = service::bindable_port(name, channel_id, channel) else {
+            let Some(port) = operator::bindable_port(name, channel_id, channel) else {
                 continue;
             };
             let key = (name.clone(), channel_id.clone());
@@ -210,15 +210,15 @@ pub fn desired_listeners(
 }
 
 fn desired_slack(
-    defs: &BTreeMap<String, ServiceConfig>,
-) -> BTreeMap<ListenerKey, service::SlackConfig> {
+    defs: &BTreeMap<String, OperatorConfig>,
+) -> BTreeMap<ListenerKey, operator::SlackConfig> {
     let mut desired = BTreeMap::new();
     for (name, config) in defs {
         if config.paused {
             continue;
         }
         for (channel_id, channel) in &config.channels {
-            if let Some(config) = service::slack_config(name, channel_id, channel) {
+            if let Some(config) = operator::slack_config(name, channel_id, channel) {
                 desired.insert((name.clone(), channel_id.clone()), config);
             }
         }
@@ -257,13 +257,13 @@ pub fn plan(
 pub async fn run(
     manager: Arc<SessionManager>,
     paths: Paths,
-    handle: ServiceHandle,
-    mut rx: mpsc::UnboundedReceiver<ServiceMsg>,
+    handle: OperatorHandle,
+    mut rx: mpsc::UnboundedReceiver<OperatorMsg>,
 ) {
     let mut registry = Registry::default();
     while let Some(msg) = rx.recv().await {
         match msg {
-            ServiceMsg::Reload {
+            OperatorMsg::Reload {
                 reason,
                 mut respond,
             } => {
@@ -273,7 +273,7 @@ pub async fn run(
                 let mut reason = reason;
                 while let Ok(next) = rx.try_recv() {
                     match next {
-                        ServiceMsg::Reload {
+                        OperatorMsg::Reload {
                             reason: next_reason,
                             respond: next_respond,
                         } => {
@@ -283,12 +283,12 @@ pub async fn run(
                             reason = next_reason;
                             respond = next_respond;
                         }
-                        ServiceMsg::ListenerDied(key) => {
+                        OperatorMsg::ListenerDied(key) => {
                             registry.listeners.remove(&key);
                             registry.slack.remove(&key);
                             reconcile_publications(&manager, &registry);
                         }
-                        ServiceMsg::Reply {
+                        OperatorMsg::Reply {
                             session_id,
                             delivery_id,
                             text,
@@ -306,12 +306,12 @@ pub async fn run(
                     let _ = respond.send(outcome);
                 }
             }
-            ServiceMsg::ListenerDied(key) => {
+            OperatorMsg::ListenerDied(key) => {
                 registry.listeners.remove(&key);
                 registry.slack.remove(&key);
                 reconcile_publications(&manager, &registry);
             }
-            ServiceMsg::Reply {
+            OperatorMsg::Reply {
                 session_id,
                 delivery_id,
                 text,
@@ -322,7 +322,7 @@ pub async fn run(
             }
         }
     }
-    tracing::debug!("service supervisor channel closed; exiting");
+    tracing::debug!("operator supervisor channel closed; exiting");
 }
 
 async fn record_reply(
@@ -340,7 +340,7 @@ async fn record_reply(
         }
     }
     let Some(claimed_by) = claimed_by else {
-        anyhow::bail!("delivery is not pending for this service session");
+        anyhow::bail!("delivery is not pending for this operator session");
     };
 
     let recorded = async {
@@ -348,7 +348,7 @@ async fn record_reply(
             .emit_session_event(construct_protocol::SessionEmitEventParams {
                 session_id: session_id.clone(),
                 event: construct_protocol::SessionEvent::ToolUse {
-                    tool: "construct_service_reply".to_string(),
+                    tool: "construct_operator_reply".to_string(),
                     args: serde_json::json!({ "delivery_id": &delivery_id }),
                     call_id: Some(delivery_id.clone()),
                 },
@@ -374,24 +374,24 @@ async fn record_reply(
 async fn reload(
     manager: &Arc<SessionManager>,
     paths: &Paths,
-    handle: &ServiceHandle,
+    handle: &OperatorHandle,
     registry: &mut Registry,
     reason: ReloadReason,
 ) -> Result<ReloadReport> {
     // All or nothing: a definition that does not parse leaves the running
     // configuration untouched rather than half-applied.
     let defs =
-        service::load_definitions(&paths.services_dir()).context("reload service definitions")?;
+        operator::load_definitions(&paths.operators_dir()).context("reload operator definitions")?;
 
     let (desired, conflicts) = desired_listeners(&defs);
     let desired_slack = desired_slack(&defs);
     for conflict in &conflicts {
         tracing::warn!(
-            service = %conflict.key.0,
+            operator = %conflict.key.0,
             channel = %conflict.key.1,
             port = conflict.port,
             held_by = %format!("{}:{}", conflict.held_by.0, conflict.held_by.1),
-            "service channel wants a port another channel already claims; not binding"
+            "operator channel wants a port another channel already claims; not binding"
         );
     }
 
@@ -403,7 +403,7 @@ async fn reload(
             None => {
                 registry.shared.insert(
                     name.clone(),
-                    ServiceShared::load(
+                    OperatorShared::load(
                         name.clone(),
                         config.clone(),
                         manager.clone(),
@@ -466,8 +466,8 @@ async fn reload(
         };
         let Some(endpoint) = defs
             .get(&key.0)
-            .and_then(|service| service.channels.get(&key.1))
-            .and_then(|channel| service::ingress_endpoint(&key.0, &key.1, channel))
+            .and_then(|operator| operator.channels.get(&key.1))
+            .and_then(|channel| operator::ingress_endpoint(&key.0, &key.1, channel))
         else {
             report.failures.push((
                 key,
@@ -488,7 +488,7 @@ async fn reload(
             Err(error) => {
                 // One held port must not abort the rest of the reload, nor
                 // leave the registry believing a listener exists.
-                tracing::error!(service = %key.0, channel = %key.1, port, %error, "service channel failed to bind");
+                tracing::error!(operator = %key.0, channel = %key.1, port, %error, "operator channel failed to bind");
                 report.failures.push((key, port, error.to_string()));
             }
         }
@@ -537,7 +537,7 @@ async fn reload(
         }
     }
 
-    // Services that disappeared keep their state file; only the live entry is
+    // Operators that disappeared keep their state file; only the live entry is
     // dropped, and only after its listeners are down.
     registry.shared.retain(|name, _| defs.contains_key(name));
 
@@ -552,14 +552,14 @@ async fn reload(
         stopped = report.stopped.len(),
         rebound = report.rebound.len(),
         failed = report.failures.len(),
-        "service definitions reloaded"
+        "operator definitions reloaded"
     );
     Ok(report)
 }
 
 async fn start_listener(
-    handle: &ServiceHandle,
-    shared: Arc<ServiceShared>,
+    handle: &OperatorHandle,
+    shared: Arc<OperatorShared>,
     key: ListenerKey,
     port: u16,
     endpoint: crate::channel_publication::ChannelIngressEndpoint,
@@ -568,20 +568,20 @@ async fn start_listener(
     // to whoever asked for the reload instead of becoming a stray log line.
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
         .await
-        .context("bind loopback service endpoint")?;
-    let runtime = service::channel_runtime(shared, key.1.clone());
+        .context("bind loopback operator endpoint")?;
+    let runtime = operator::channel_runtime(shared, key.1.clone());
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
     let task_handle = handle.clone();
     let task_key = key.clone();
     let task = tokio::spawn(async move {
-        if let Err(error) = service::serve(runtime, listener, task_cancel.clone()).await {
-            tracing::error!(service = %task_key.0, channel = %task_key.1, %error, "service endpoint stopped");
+        if let Err(error) = operator::serve(runtime, listener, task_cancel.clone()).await {
+            tracing::error!(operator = %task_key.0, channel = %task_key.1, %error, "operator endpoint stopped");
         }
         // Only report an unexpected death. A cancelled listener was removed
         // from the registry by whoever cancelled it.
         if !task_cancel.is_cancelled() {
-            let _ = task_handle.0.send(ServiceMsg::ListenerDied(task_key));
+            let _ = task_handle.0.send(OperatorMsg::ListenerDied(task_key));
         }
     });
     Ok(ListenerHandle {
@@ -605,23 +605,23 @@ fn reconcile_publications(manager: &SessionManager, registry: &Registry) {
 }
 
 fn start_slack(
-    handle: &ServiceHandle,
-    shared: Arc<ServiceShared>,
+    handle: &OperatorHandle,
+    shared: Arc<OperatorShared>,
     key: ListenerKey,
-    config: service::SlackConfig,
+    config: operator::SlackConfig,
 ) -> SlackHandle {
-    let runtime = service::channel_runtime(shared, key.1.clone());
+    let runtime = operator::channel_runtime(shared, key.1.clone());
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
     let task_handle = handle.clone();
     let task_key = key.clone();
     let running_config = config.clone();
     let task = tokio::spawn(async move {
-        if let Err(error) = service::serve_slack(runtime, config, task_cancel.clone()).await {
-            tracing::error!(service = %task_key.0, channel = %task_key.1, %error, "Slack service channel stopped");
+        if let Err(error) = operator::serve_slack(runtime, config, task_cancel.clone()).await {
+            tracing::error!(operator = %task_key.0, channel = %task_key.1, %error, "Slack operator channel stopped");
         }
         if !task_cancel.is_cancelled() {
-            let _ = task_handle.0.send(ServiceMsg::ListenerDied(task_key));
+            let _ = task_handle.0.send(OperatorMsg::ListenerDied(task_key));
         }
     });
     SlackHandle {
@@ -632,9 +632,9 @@ fn start_slack(
 }
 
 /// Create the supervisor's channel and handle. The caller spawns [`run`].
-pub fn channel() -> (ServiceHandle, mpsc::UnboundedReceiver<ServiceMsg>) {
+pub fn channel() -> (OperatorHandle, mpsc::UnboundedReceiver<OperatorMsg>) {
     let (tx, rx) = mpsc::unbounded_channel();
-    (ServiceHandle(tx), rx)
+    (OperatorHandle(tx), rx)
 }
 
 /// How often hand-edited definitions are noticed. Definitions change on human
@@ -652,7 +652,7 @@ const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 ///
 /// A torn read is harmless because reload is all-or-nothing — the parse fails,
 /// nothing changes, and the next tick picks up the finished file.
-pub fn spawn_watcher(paths: Paths, handle: ServiceHandle) {
+pub fn spawn_watcher(paths: Paths, handle: OperatorHandle) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(WATCH_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -671,7 +671,7 @@ pub fn spawn_watcher(paths: Paths, handle: ServiceHandle) {
 /// Size-and-mtime fingerprint over every definition plus the channel catalog.
 fn definitions_fingerprint(paths: &Paths) -> Vec<(String, u64, u128)> {
     let mut parts = Vec::new();
-    let dir = paths.services_dir();
+    let dir = paths.operators_dir();
     let entries = std::fs::read_dir(&dir).into_iter().flatten().flatten();
     for entry in entries {
         let path = entry.path();
@@ -702,8 +702,8 @@ fn file_stamp(path: &std::path::Path) -> (String, u64, u128) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::{
-        ServiceChannelConfig, ServiceRouting, ServiceSandboxConfig, ServiceSessionMode,
+    use crate::operator::{
+        OperatorChannelConfig, OperatorRouting, OperatorSandboxConfig, OperatorSessionMode,
     };
 
     struct FakePublicationBackend;
@@ -738,25 +738,25 @@ mod tests {
         }
     }
 
-    fn service(channels: &[(&str, u16, bool)], paused: bool) -> ServiceConfig {
-        ServiceConfig {
+    fn operator(channels: &[(&str, u16, bool)], paused: bool) -> OperatorConfig {
+        OperatorConfig {
             position: 0,
             placement: None,
             instruction: String::new(),
             harness: "smith".into(),
             model: None,
-            session_mode: ServiceSessionMode::Headless,
+            session_mode: OperatorSessionMode::Headless,
             cwd: ".".into(),
-            routing: ServiceRouting::SessionKey,
+            routing: OperatorRouting::SessionKey,
             paused,
             approval_timeout_secs: 0,
-            sandbox: ServiceSandboxConfig::default(),
+            sandbox: OperatorSandboxConfig::default(),
             channels: channels
                 .iter()
                 .map(|(id, port, enabled)| {
                     (
                         (*id).to_string(),
-                        ServiceChannelConfig {
+                        OperatorChannelConfig {
                             kind: Some("http".into()),
                             enabled: *enabled,
                             port: Some(*port),
@@ -775,11 +775,11 @@ mod tests {
         }
     }
 
-    fn key(service: &str, channel: &str) -> ListenerKey {
-        (service.to_string(), channel.to_string())
+    fn key(operator: &str, channel: &str) -> ListenerKey {
+        (operator.to_string(), channel.to_string())
     }
 
-    fn defs(entries: &[(&str, ServiceConfig)]) -> BTreeMap<String, ServiceConfig> {
+    fn defs(entries: &[(&str, OperatorConfig)]) -> BTreeMap<String, OperatorConfig> {
         entries
             .iter()
             .map(|(name, config)| ((*name).to_string(), config.clone()))
@@ -788,31 +788,31 @@ mod tests {
 
     #[test]
     fn paused_and_disabled_channels_are_not_wanted() {
-        let (desired, _) = desired_listeners(&defs(&[("a", service(&[("http", 1, true)], true))]));
-        assert!(desired.is_empty(), "a paused service frees its port");
+        let (desired, _) = desired_listeners(&defs(&[("a", operator(&[("http", 1, true)], true))]));
+        assert!(desired.is_empty(), "a paused operator frees its port");
 
         let (desired, _) =
-            desired_listeners(&defs(&[("a", service(&[("http", 1, false)], false))]));
+            desired_listeners(&defs(&[("a", operator(&[("http", 1, false)], false))]));
         assert!(desired.is_empty(), "a disabled channel does not bind");
     }
 
     #[test]
     fn slack_channels_are_outbound_tasks_and_credential_edits_change_revision() {
-        let slack_service = |app_token: &str, paused: bool| ServiceConfig {
+        let slack_operator = |app_token: &str, paused: bool| OperatorConfig {
             position: 0,
             placement: None,
             instruction: String::new(),
             harness: "smith".into(),
             model: None,
-            session_mode: ServiceSessionMode::Headless,
+            session_mode: OperatorSessionMode::Headless,
             cwd: ".".into(),
-            routing: ServiceRouting::SessionKey,
+            routing: OperatorRouting::SessionKey,
             paused,
             approval_timeout_secs: 0,
-            sandbox: ServiceSandboxConfig::default(),
+            sandbox: OperatorSandboxConfig::default(),
             channels: BTreeMap::from([(
                 "slack".into(),
-                ServiceChannelConfig {
+                OperatorChannelConfig {
                     kind: Some("slack".into()),
                     enabled: true,
                     port: None,
@@ -827,20 +827,20 @@ mod tests {
                 },
             )]),
         };
-        let first_defs = defs(&[("chat", slack_service("xapp-first", false))]);
+        let first_defs = defs(&[("chat", slack_operator("xapp-first", false))]);
         assert!(desired_listeners(&first_defs).0.is_empty());
         let first = desired_slack(&first_defs);
         assert!(first.contains_key(&key("chat", "slack")));
-        let changed = desired_slack(&defs(&[("chat", slack_service("xapp-second", false))]));
+        let changed = desired_slack(&defs(&[("chat", slack_operator("xapp-second", false))]));
         assert!(first != changed);
-        assert!(desired_slack(&defs(&[("chat", slack_service("xapp-first", true),)])).is_empty());
+        assert!(desired_slack(&defs(&[("chat", slack_operator("xapp-first", true),)])).is_empty());
     }
 
     #[test]
     fn a_duplicate_port_loses_deterministically() {
         let (desired, conflicts) = desired_listeners(&defs(&[
-            ("a", service(&[("http", 9000, true)], false)),
-            ("b", service(&[("http", 9000, true)], false)),
+            ("a", operator(&[("http", 9000, true)], false)),
+            ("b", operator(&[("http", 9000, true)], false)),
         ]));
         // The already-serving claim wins; the loser is reported rather than
         // silently stealing the port.
@@ -881,7 +881,7 @@ mod tests {
         _tmp: tempfile::TempDir,
         paths: Paths,
         manager: Arc<SessionManager>,
-        handle: ServiceHandle,
+        handle: OperatorHandle,
         publications: crate::channel_publication::PublicationHandle,
         registry: Registry,
     }
@@ -895,7 +895,7 @@ mod tests {
                 data_dir: tmp.path().join("data"),
                 runtime_dir: tmp.path().join("run"),
             };
-            std::fs::create_dir_all(paths.services_dir()).expect("services dir");
+            std::fs::create_dir_all(paths.operators_dir()).expect("operators dir");
             let storage =
                 Arc::new(crate::storage::Storage::new(paths.data_dir.clone()).expect("storage"));
             let config = Arc::new(crate::config::Config::default());
@@ -924,12 +924,12 @@ mod tests {
         }
 
         fn write(&self, name: &str, body: &str) {
-            std::fs::write(self.paths.services_dir().join(format!("{name}.toml")), body)
+            std::fs::write(self.paths.operators_dir().join(format!("{name}.toml")), body)
                 .expect("write definition");
         }
 
         fn remove(&self, name: &str) {
-            std::fs::remove_file(self.paths.services_dir().join(format!("{name}.toml")))
+            std::fs::remove_file(self.paths.operators_dir().join(format!("{name}.toml")))
                 .expect("remove definition");
         }
 
@@ -953,8 +953,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_reload_reuses_the_state_of_a_service_it_already_knows() {
-        // The invariant that matters most: rebuilding a service's shared state
+    async fn a_reload_reuses_the_state_of_a_operator_it_already_knows() {
+        // The invariant that matters most: rebuilding a operator's shared state
         // would drop its routed-session map and reset its dedup ring, so a
         // retried delivery would open a second conversation.
         let mut fx = Fixture::new().await;
@@ -973,11 +973,11 @@ mod tests {
 
         assert!(
             Arc::ptr_eq(&first, &second),
-            "the same service must keep its identity across a reload"
+            "the same operator must keep its identity across a reload"
         );
         assert_eq!(
             second.config().routing,
-            crate::service::ServiceRouting::PerEvent,
+            crate::operator::OperatorRouting::PerEvent,
             "the edited definition is what readers now see"
         );
     }
@@ -993,16 +993,16 @@ mod tests {
         assert!(outcome.is_err(), "a parse failure must fail the reload");
 
         // Still registered, still running the definition it had before.
-        let shared = fx.registry.shared.get("svc").expect("service survives");
+        let shared = fx.registry.shared.get("svc").expect("operator survives");
         assert_eq!(
             shared.config().routing,
-            crate::service::ServiceRouting::SessionKey,
+            crate::operator::OperatorRouting::SessionKey,
             "a file that does not parse must not disturb what is running"
         );
     }
 
     #[tokio::test]
-    async fn services_appear_and_disappear_with_their_definitions() {
+    async fn operators_appear_and_disappear_with_their_definitions() {
         let mut fx = Fixture::new().await;
         fx.write("first", &definition("session-key", false));
         fx.reload().await.expect("reload");
@@ -1063,12 +1063,12 @@ mod tests {
         assert_eq!(report.stopped.len(), 1, "pausing stops the listener");
         assert!(
             !port_in_use(second_port).await,
-            "a paused service frees its port"
+            "a paused operator frees its port"
         );
     }
 
     #[tokio::test]
-    async fn one_service_can_hand_a_port_to_another_in_one_reload() {
+    async fn one_operator_can_hand_a_port_to_another_in_one_reload() {
         // The case the two-pass executor exists for: if the bind ran before
         // the release, this would fail with EADDRINUSE and the port would end
         // up serving nobody.
@@ -1127,24 +1127,24 @@ mod tests {
 
     #[test]
     fn every_editable_field_declares_when_it_applies() {
-        use construct_protocol::{PropagationClass, ServiceField};
+        use construct_protocol::{PropagationClass, OperatorField};
         // The classes are what the UI promises a user, so each one has to
         // match what this module actually does with the field.
-        for field in ServiceField::ALL {
+        for field in OperatorField::ALL {
             let _ = field.propagation().label();
         }
         assert_eq!(
-            ServiceField::ChannelPort.propagation(),
+            OperatorField::ChannelPort.propagation(),
             PropagationClass::Immediate,
             "a port change rebinds the socket during the reload"
         );
         assert_eq!(
-            ServiceField::Routing.propagation(),
+            OperatorField::Routing.propagation(),
             PropagationClass::NextRequest,
             "routing is read while handling a request"
         );
         assert_eq!(
-            ServiceField::Instruction.propagation(),
+            OperatorField::Instruction.propagation(),
             PropagationClass::NextSession,
             "no harness can be re-instructed in place"
         );
@@ -1155,7 +1155,7 @@ mod tests {
         let _serialized = port_lock().lock().await;
         // The port frees when the listener drops inside its task, not when the
         // token is cancelled — so a rebind must await the handle. This is the
-        // real failure behind two services swapping ports.
+        // real failure behind two operators swapping ports.
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("bind ephemeral");
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn a_port_handover_releases_before_it_binds() {
-        // One service gives up a port and another takes it in the same reload.
+        // One operator gives up a port and another takes it in the same reload.
         // A swap of two ports would not test this: both sides are rebinds, so
         // there is no Start to order against and the assertion would hold
         // vacuously.

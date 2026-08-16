@@ -1,14 +1,14 @@
 use super::*;
 
 impl App {
-    pub fn open_service_title_menu(&mut self, name: String, view: ratatui::layout::Rect) {
-        let menu_h = ServiceTitleMenuAction::ALL.len() as u16 + 2;
+    pub fn open_operator_title_menu(&mut self, name: String, view: ratatui::layout::Rect) {
+        let menu_h = OperatorTitleMenuAction::ALL.len() as u16 + 2;
         let width = fleet_title_menu_width(&name, view.width);
         let x = view
             .x
             .saturating_add(view.width)
             .saturating_sub(width.saturating_add(1));
-        self.service_title_menu = Some(ServiceTitleMenu {
+        self.operator_title_menu = Some(OperatorTitleMenu {
             name,
             area: ratatui::layout::Rect {
                 x,
@@ -19,30 +19,30 @@ impl App {
         });
     }
 
-    pub(super) async fn run_service_title_menu_action(
+    pub(super) async fn run_operator_title_menu_action(
         &mut self,
         name: String,
-        action: ServiceTitleMenuAction,
+        action: OperatorTitleMenuAction,
     ) {
-        self.service_title_menu = None;
-        if self.selection.service_name() != Some(name.as_str()) {
-            self.select_service(name.clone());
+        self.operator_title_menu = None;
+        if self.selection.operator_name() != Some(name.as_str()) {
+            self.select_operator(name.clone());
         }
 
         match action {
-            ServiceTitleMenuAction::CopyId => {
+            OperatorTitleMenuAction::CopyId => {
                 self.run_action(crate::keymap::KeyAction::CopySelectedId)
                     .await
             }
-            ServiceTitleMenuAction::SplitHorizontal => {
+            OperatorTitleMenuAction::SplitHorizontal => {
                 self.split_active_window(WindowSplitDirection::Right)
             }
-            ServiceTitleMenuAction::SplitVertical => {
+            OperatorTitleMenuAction::SplitVertical => {
                 self.split_active_window(WindowSplitDirection::Below)
             }
-            ServiceTitleMenuAction::CloseSplit => self.delete_active_window(),
-            ServiceTitleMenuAction::Delete => {
-                // Same path as C-x k / dd on a selected service.
+            OperatorTitleMenuAction::CloseSplit => self.delete_active_window(),
+            OperatorTitleMenuAction::Delete => {
+                // Same path as C-x k / dd on a selected operator.
                 self.run_action(crate::keymap::KeyAction::OpenDeleteConfirm)
                     .await
             }

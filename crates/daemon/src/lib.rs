@@ -31,8 +31,8 @@ mod remote;
 mod remote_supervisor;
 mod router;
 mod server;
-mod service;
-mod service_supervisor;
+mod operator;
+mod operator_supervisor;
 mod session;
 mod storage;
 mod tunnel;
@@ -103,6 +103,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     std::fs::create_dir_all(&paths.data_dir).ok();
     std::fs::create_dir_all(&paths.runtime_dir).ok();
     std::fs::create_dir_all(&paths.config_dir).ok();
+    migrate_legacy_service_dirs(&paths);
     config::write_template(&paths);
 
     // Resolve the socket path early so the single-instance lock can key off
@@ -258,9 +259,9 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             Some(manager.clone()),
         ));
     }
-    // Service endpoints are deliberately a separate, loopback-only ingress
-    // surface.  They do not reuse the remote-control listener: a service's
-    // bearer credential is scoped to that service, while remote control
+    // Operator endpoints are deliberately a separate, loopback-only ingress
+    // surface.  They do not reuse the remote-control listener: a operator's
+    // bearer credential is scoped to that operator, while remote control
     // remains protected by its owner-login boundary.
     //
     // The supervisor owns every listener and is the only thing that binds one,
@@ -269,19 +270,19 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     // rather than rediscovering them, so it and the IPC handlers can never
     // disagree about which directory holds the definitions.
     {
-        let (service_handle, service_rx) = service_supervisor::channel();
-        manager.set_service_supervisor(service_handle.clone());
-        tokio::spawn(service_supervisor::run(
+        let (operator_handle, operator_rx) = operator_supervisor::channel();
+        manager.set_operator_supervisor(operator_handle.clone());
+        tokio::spawn(operator_supervisor::run(
             manager.clone(),
             paths.clone(),
-            service_handle.clone(),
-            service_rx,
+            operator_handle.clone(),
+            operator_rx,
         ));
-        service_handle.reload_detached(service_supervisor::ReloadReason::Boot);
-        service_supervisor::spawn_watcher(paths.clone(), service_handle);
+        operator_handle.reload_detached(operator_supervisor::ReloadReason::Boot);
+        operator_supervisor::spawn_watcher(paths.clone(), operator_handle);
     }
     // Config reloads (spec 0190). `config.toml` is hand-edited in the same
-    // directory as the service definitions above, so it applies on the same
+    // directory as the operator definitions above, so it applies on the same
     // terms: the supervisor re-derives the running configuration from disk
     // and swaps it in, and the watcher notices an edit made in an editor.
     //
@@ -667,6 +668,25 @@ async fn bind_local_webui(paths: &Paths) -> anyhow::Result<(tokio::net::TcpListe
         }
     }
     Ok((listener, bound, persisted))
+}
+
+/// One-shot, idempotent migration for the service→operator rename:
+/// definitions move from `<config>/services/` to `<config>/operators/` and
+/// per-operator routing state from `<data>/services/` to `<data>/operators/`.
+/// Only runs when the old directory exists and the new one does not, so a
+/// half-migrated or already-migrated layout is never touched.
+fn migrate_legacy_service_dirs(paths: &Paths) {
+    for (old, new) in [
+        (paths.config_dir.join("services"), paths.operators_dir()),
+        (paths.data_dir.join("services"), paths.data_dir.join("operators")),
+    ] {
+        if old.is_dir() && !new.exists() {
+            match std::fs::rename(&old, &new) {
+                Ok(()) => tracing::info!(from = %old.display(), to = %new.display(), "migrated legacy services directory"),
+                Err(error) => tracing::warn!(%error, from = %old.display(), "failed to migrate legacy services directory"),
+            }
+        }
+    }
 }
 
 fn warn_legacy_paths(current: &Paths) {

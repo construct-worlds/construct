@@ -3,7 +3,7 @@
 //! The control plane authenticates the tunnel owner, allocates an
 //! ephemeral reverse port, and returns a short-lived capability that
 //! permits exactly that reverse binding. `wstunnel` carries the bytes;
-//! the service's browser gateway supplies social login and maps the
+//! the operator's browser gateway supplies social login and maps the
 //! stable hostname to the runtime-only port.
 
 use std::time::Duration;
@@ -21,7 +21,7 @@ const DEFAULT_API_URL: &str = "https://tunnel.zarvis.ai/api/v1/tunnels";
 
 /// Cadence of the post-readiness `ready_url` health poll, and how many
 /// consecutive failures prove the gateway no longer routes this tunnel.
-/// The gateway holds routes in memory only, so a service deploy restarts
+/// The gateway holds routes in memory only, so a operator deploy restarts
 /// it with an empty table while the in-process wstunnel client keeps
 /// retrying its transport forever — without this poll the daemon would
 /// advertise a dead tunnel until the ~24h capability refresh.
@@ -46,14 +46,14 @@ struct Registration {
     ready_url: String,
     expires_in_seconds: u64,
     /// Credential authorizing the next unattended re-registration of this
-    /// reservation. Absent when talking to a service that predates it, in
+    /// reservation. Absent when talking to a operator that predates it, in
     /// which case recovery falls back to the owner credential as before.
     #[serde(default)]
     reregistration_token: Option<String>,
 }
 
 /// Which credential a registration attempt presented. The distinction only
-/// matters when the service refuses it: a refused re-registration credential
+/// matters when the operator refuses it: a refused re-registration credential
 /// should fall back to the owner credential, while a refused owner credential
 /// is what forces a fresh browser handoff.
 enum Credential {
@@ -86,7 +86,7 @@ fn select_credential(
     owner.clone().map(Credential::Owner)
 }
 
-/// Forget exactly the credential the service just refused.
+/// Forget exactly the credential the operator just refused.
 ///
 /// A refused re-registration credential says nothing about the owner
 /// credential, which may still be current — dropping both would open a browser
@@ -150,7 +150,7 @@ pub async fn run_once(
         })
         .send()
         .await
-        .context("contact Construct tunnel service")?;
+        .context("contact Construct tunnel operator")?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         if matches!(credential, Credential::Reregistration(_)) {
             tracing::info!(
@@ -296,9 +296,9 @@ impl AuthorizationDisplay for RemoteState {
 }
 
 fn normalize_public_url(value: &str) -> Result<String> {
-    let url = reqwest::Url::parse(value).context("service returned an invalid public URL")?;
+    let url = reqwest::Url::parse(value).context("operator returned an invalid public URL")?;
     if url.scheme() != "https" || url.host_str().is_none() {
-        anyhow::bail!("service returned a non-HTTPS public URL");
+        anyhow::bail!("operator returned a non-HTTPS public URL");
     }
     Ok(format!("{}/", value.trim_end_matches('/')))
 }
@@ -381,7 +381,7 @@ mod tests {
         assert!(select_credential(&reregistration, &owner).is_none());
     }
 
-    /// A service that predates the credential simply omits the field, and the
+    /// A operator that predates the credential simply omits the field, and the
     /// daemon has to keep working against it.
     #[test]
     fn registration_without_a_scoped_credential_still_decodes() {
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_carries_the_scoped_credential_when_the_service_issues_one() {
+    fn registration_carries_the_scoped_credential_when_the_operator_issues_one() {
         let body = serde_json::json!({
             "public_url": "https://demo.tunnel.zarvis.ai",
             "relay_url": "wss://relay.tunnel.zarvis.ai",

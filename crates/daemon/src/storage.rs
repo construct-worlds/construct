@@ -1159,8 +1159,15 @@ impl Storage {
     pub fn load_summary(&self, id: &str) -> Result<SessionSummary> {
         let path = self.meta_path(id);
         let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        let s: SessionSummary =
+        let mut s: SessionSummary =
             serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+        // Lazy migration for the service→operator rename: routed sessions
+        // carry their owner in the title (`operator:<name>:…`), and every
+        // client parses that prefix. Rewriting here keeps pre-rename
+        // sessions attached to their operator without touching disk.
+        if let Some(rest) = s.title.as_deref().and_then(|t| t.strip_prefix("service:")) {
+            s.title = Some(format!("operator:{rest}"));
+        }
         Ok(s)
     }
 

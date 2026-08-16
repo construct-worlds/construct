@@ -43,7 +43,7 @@ the one long-lived process that needs it cannot.
 Config is the surface that does not have this problem: it is re-read on every
 start. Letting it carry environment closes the gap without changing process
 lifecycle semantics, and it works identically for a daemon started by hand, by
-a client, or by a service manager — where "the shell that launched it" is not
+a client, or by a operator manager — where "the shell that launched it" is not
 a meaningful thing to point at.
 
 Keeping the real environment on top preserves every existing deployment: a

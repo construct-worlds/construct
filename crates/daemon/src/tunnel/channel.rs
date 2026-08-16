@@ -170,7 +170,7 @@ impl PublicationBackend for ConstructChannelBackend {
                     }
                     if let Err(error) = outcome {
                         events.send(BackendEvent::Error(error.to_string()));
-                        tracing::warn!(service = %key.0, channel = %key.1, %error, "channel publication route lost; re-registering");
+                        tracing::warn!(operator = %key.0, channel = %key.1, %error, "channel publication route lost; re-registering");
                     }
                 }
                 Err(error) => {
@@ -178,7 +178,7 @@ impl PublicationBackend for ConstructChannelBackend {
                         return Ok(());
                     }
                     events.send(BackendEvent::Error(error.to_string()));
-                    tracing::warn!(service = %key.0, channel = %key.1, %error, "channel publication registration failed; retrying");
+                    tracing::warn!(operator = %key.0, channel = %key.1, %error, "channel publication registration failed; retrying");
                 }
             }
 
@@ -226,7 +226,7 @@ async fn register(
         })
         .send()
         .await
-        .context("contact Construct channel publication service")?;
+        .context("contact Construct channel publication operator")?;
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         match credential {
@@ -550,7 +550,7 @@ mod tests {
         assert_eq!(value["protocol"]["path"], "/svc/alerts");
         assert!(value.get("token").is_none());
         assert!(value.get("upstream_password").is_none());
-        assert!(value.get("service_name").is_none());
+        assert!(value.get("operator_name").is_none());
 
         let websocket = serde_json::to_value(ProtocolProfile::WebSocket {
             path: "/events".into(),

@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-08-02
 Area: persistence
-Scope: What happens to a service delivery whose turn is still running when the daemon restarts.
+Scope: What happens to a operator delivery whose turn is still running when the daemon restarts.
 
 ## Decision
 
@@ -45,7 +45,7 @@ will never be settled. No timeout fires, because the thing that would have
 timed out is gone.
 
 This is not a rare edge. Restarts happen on upgrade, on configuration change,
-and on minibuffer command, and a service channel accepts deliveries the whole
+and on minibuffer command, and a operator channel accepts deliveries the whole
 time. Every restart that lands mid-turn strands one.
 
 Resuming rather than reporting is what makes the recovery worth having. The
@@ -68,9 +68,9 @@ strands it forever. The asymmetry decides it.
   race a resumed turn for the same conversation.
 - A resumed delivery inherits its original deadline. Restart loops cannot
   extend a turn indefinitely.
-- Shared service state is now written on delivery acceptance, not only on
+- Shared operator state is now written on delivery acceptance, not only on
   routing changes.
-- Records are keyed per channel. Two channels of one service using the same
+- Records are keyed per channel. Two channels of one operator using the same
   request id must not collide, and neither may reconcile the other's.
 - Recovery is best-effort at the edges: a record whose channel context cannot
   be understood is dropped rather than acted on blindly.

@@ -139,9 +139,9 @@ fn open_browser(url: &str) -> Result<()> {
 }
 
 fn validate_https_url(value: &str) -> Result<String> {
-    let url = reqwest::Url::parse(value).context("service returned an invalid HTTPS URL")?;
+    let url = reqwest::Url::parse(value).context("operator returned an invalid HTTPS URL")?;
     if url.scheme() != "https" || url.host_str().is_none() {
-        anyhow::bail!("service returned a non-HTTPS URL");
+        anyhow::bail!("operator returned a non-HTTPS URL");
     }
     Ok(value.to_string())
 }

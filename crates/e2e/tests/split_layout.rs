@@ -66,12 +66,12 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         first: Box::new(LayoutNode::Leaf {
             id: 1,
             session_id: Some(a.clone()),
-            service_name: None,
+            operator_name: None,
         }),
         second: Box::new(LayoutNode::Leaf {
             id: 2,
             session_id: Some(b.clone()),
-            service_name: None,
+            operator_name: None,
         }),
     };
     let doc = d
@@ -668,12 +668,12 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         first: Box::new(LayoutNode::Leaf {
             id: 1,
             session_id: Some(duplicate_terminal.clone()),
-            service_name: None,
+            operator_name: None,
         }),
         second: Box::new(LayoutNode::Leaf {
             id: 2,
             session_id: Some(duplicate_terminal.clone()),
-            service_name: None,
+            operator_name: None,
         }),
     };
     d.client
@@ -816,7 +816,7 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
     let collapsed = LayoutNode::Leaf {
         id: 1,
         session_id: Some(a.clone()),
-        service_name: None,
+        operator_name: None,
     };
     d.client
         .set_layout(collapsed, Some(current.version))

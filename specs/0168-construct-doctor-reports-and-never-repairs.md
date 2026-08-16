@@ -123,7 +123,7 @@ The rules exist because each protects against a specific failure:
 - Repairing anything, now or later, under any flag.
 - Checking the health of *sessions* or *harness conversations*. Doctor
   diagnoses the installation, not the work.
-- Reachability of remote services, model endpoints, or tunnels. Those are
+- Reachability of remote operators, model endpoints, or tunnels. Those are
   network-dependent and belong to whatever surface owns them.
 - Being a supported machine-readable API beyond finding ids and severities.
 

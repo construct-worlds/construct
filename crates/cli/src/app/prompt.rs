@@ -474,7 +474,7 @@ impl App {
                     Selection::ArchivedRow(
                         ArchiveSection::Ungrouped | ArchiveSection::Children(_),
                     )
-                    | Selection::Service(_)
+                    | Selection::Operator(_)
                     | Selection::None => None,
                 };
                 let params = construct_protocol::CreateSessionParams {
@@ -795,12 +795,12 @@ impl App {
                 let cmd = input.trim();
                 self.run_palette_command(cmd).await;
             }
-            PromptIntent::ServiceDeleteConfirm { name } => {
+            PromptIntent::OperatorDeleteConfirm { name } => {
                 if !matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-                    self.set_status("service delete cancelled".to_string());
+                    self.set_status("operator delete cancelled".to_string());
                     return;
                 }
-                self.delete_service_by_name(name).await;
+                self.delete_operator_by_name(name).await;
             }
             PromptIntent::Minibuffer => {
                 // Unreachable in PTY-minibuffer mode — the

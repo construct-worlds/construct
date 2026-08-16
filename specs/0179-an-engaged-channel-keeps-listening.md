@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-08-02
 Area: ux
-Scope: When a service channel treats a message as addressed to it, and what surrounding conversation it may read.
+Scope: When a operator channel treats a message as addressed to it, and what surrounding conversation it may read.
 
 ## Decision
 

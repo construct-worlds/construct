@@ -29,7 +29,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const STREAM_URL: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent";
 
-/// Keychain service/account the agy binary (and its Go keyring) writes to.
+/// Keychain operator/account the agy binary (and its Go keyring) writes to.
 const KEYCHAIN_SERVICE: &str = "gemini";
 const KEYCHAIN_ACCOUNT: &str = "antigravity";
 
@@ -68,7 +68,7 @@ impl AntigravityOauth {
 
         Err(anyhow!(
             "could not find antigravity/agy OAuth credentials.\n\
-             Expected macOS keychain item service=\"{}\" account=\"{}\".\n\
+             Expected macOS keychain item operator=\"{}\" account=\"{}\".\n\
              Run `agy` once and log in with your Google account, then retry.",
             KEYCHAIN_SERVICE,
             KEYCHAIN_ACCOUNT

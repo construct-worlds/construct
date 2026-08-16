@@ -258,7 +258,7 @@ pub const COMMANDS: &[SlashCommand] = &[
         visibility: ModelVisibility::Hidden,
         transcript: TranscriptPolicy::Omit,
         render: Render::Hidden,
-        help: "Copy the selected session, project, or service id",
+        help: "Copy the selected session, project, or operator id",
         in_popup: true,
     },
     SlashCommand {

@@ -443,23 +443,23 @@ impl App {
             }
         }
         match &items[idx] {
-            ListItem::Service {
+            ListItem::Operator {
                 summary,
                 session_count,
                 ..
             } => {
                 if first_line && *session_count > 0 && col == list.x + 1 {
-                    let key = crate::app::service_children_key(&summary.name);
+                    let key = crate::app::operator_children_key(&summary.name);
                     if !self.children_collapsed.insert(key.clone()) {
                         self.children_collapsed.remove(&key);
                     }
                     return;
                 }
                 // From-list variant: like a session-row click, selecting a
-                // service with the mouse must leave keyboard focus (and the
+                // operator with the mouse must leave keyboard focus (and the
                 // focused selection highlight) on the list rows rather than
-                // handing focus to the service view.
-                self.select_service_from_list(summary.name.clone());
+                // handing focus to the operator view.
+                self.select_operator_from_list(summary.name.clone());
                 self.sync_active_window_selection();
             }
             ListItem::Session { summary, .. } => {

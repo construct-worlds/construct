@@ -1,20 +1,20 @@
-# 0171-service-approvals-are-visible-and-bounded
+# 0171-operator-approvals-are-visible-and-bounded
 
 Status: accepted
 Date: 2026-08-01
 Area: architecture
-Scope: What a service caller is told when a turn stops at a tool approval, and how long that turn may stay stopped.
+Scope: What a operator caller is told when a turn stops at a tool approval, and how long that turn may stay stopped.
 
 ## Decision
 
-When a service session's turn stops at a tool approval, the service result says
+When a operator session's turn stops at a tool approval, the operator result says
 so: that the turn is waiting on the user, which tool it is waiting on, a
 summary of what that tool would do, and how long it has been waiting.
 
-A service may bound that wait. When the bound elapses, the pending call is
+A operator may bound that wait. When the bound elapses, the pending call is
 denied on the caller's behalf, the turn resumes, and the result reports that
 the action was refused rather than continuing to look unfinished. The bound is
-per service and defaults to waiting indefinitely, so a user who has not
+per operator and defaults to waiting indefinitely, so a user who has not
 asked for a deadline remains the only one who can decide.
 
 Approval state is derived from the session's own transcript rather than
@@ -28,7 +28,7 @@ viewed from outside: both report only that no reply is ready. The caller has
 no way to learn that progress now depends on a person, and no way to reach
 that person. It polls a session that will not move.
 
-The approval itself is right — a service session is prompted by a third party,
+The approval itself is right — a operator session is prompted by a third party,
 so a human deciding on consequential actions is the point. What was wrong was
 telling the caller nothing about it, and letting an unanswered prompt hold a
 turn open forever.
@@ -62,15 +62,15 @@ for free, because the transcript does.
 
 - Letting the caller approve, deny, or influence the decision.
 - Notifying the user through the channel the request arrived on.
-- Per-tool or per-risk timeouts; the bound is per service.
+- Per-tool or per-risk timeouts; the bound is per operator.
 
 ## Examples
 
 - A request triggers a file write. The caller polls and sees that the turn is
   waiting on the user, which tool it is, and that it has been waiting nine
   seconds. The user approves; the next poll returns the finished reply.
-- The same service is configured with a bound. Nobody answers within it, so
+- The same operator is configured with a bound. Nobody answers within it, so
   the call is denied, the turn resumes, and the caller receives a reply
   explaining that the action was refused. The action did not happen.
-- A service with no bound configured waits as long as it takes, and reports
+- A operator with no bound configured waits as long as it takes, and reports
   the wait accurately the whole time.

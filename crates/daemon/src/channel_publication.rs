@@ -141,14 +141,14 @@ impl PublicationHandle {
 
     pub async fn publish(
         &self,
-        service_name: String,
+        operator_name: String,
         channel_id: String,
         provider: String,
     ) -> Result<ChannelPublicationSummary> {
         let (tx, rx) = oneshot::channel();
         self.0
             .send(Msg::Publish {
-                key: (service_name, channel_id),
+                key: (operator_name, channel_id),
                 provider,
                 respond: tx,
             })
@@ -157,11 +157,11 @@ impl PublicationHandle {
             .map_err(|_| anyhow!("channel publication supervisor dropped the request"))?
     }
 
-    pub async fn unpublish(&self, service_name: String, channel_id: String) -> Result<bool> {
+    pub async fn unpublish(&self, operator_name: String, channel_id: String) -> Result<bool> {
         let (tx, rx) = oneshot::channel();
         self.0
             .send(Msg::Unpublish {
-                key: (service_name, channel_id),
+                key: (operator_name, channel_id),
                 respond: tx,
             })
             .map_err(|_| anyhow!("channel publication supervisor is not running"))?;
@@ -217,7 +217,7 @@ pub async fn run(
                     if let Some(publication) = active.remove(&key) {
                         publication.cancel.cancel();
                         notify(&manager, &key, None);
-                        tracing::info!(service = %key.0, channel = %key.1, "channel publication withdrawn because its local endpoint changed");
+                        tracing::info!(operator = %key.0, channel = %key.1, "channel publication withdrawn because its local endpoint changed");
                     }
                 }
                 available = next;
@@ -255,7 +255,7 @@ pub async fn run(
                             Err(error) => Err(error),
                             Ok(()) => {
                                 let summary = ChannelPublicationSummary {
-                                    service_name: key.0.clone(),
+                                    operator_name: key.0.clone(),
                                     channel_id: key.1.clone(),
                                     provider: backend.id().to_string(),
                                     phase: ChannelPublicationPhase::Authorizing,
@@ -315,7 +315,7 @@ pub async fn run(
                 let mut summaries: Vec<_> =
                     active.values().map(|item| item.summary.clone()).collect();
                 summaries.sort_by(|a, b| {
-                    (&a.service_name, &a.channel_id).cmp(&(&b.service_name, &b.channel_id))
+                    (&a.operator_name, &a.channel_id).cmp(&(&b.operator_name, &b.channel_id))
                 });
                 let _ = respond.send(summaries);
             }
@@ -388,7 +388,7 @@ fn notify(
     if let Some(manager) = manager {
         manager.broadcast_channel_publication(
             construct_protocol::ChannelPublicationNotificationPayload {
-                service_name: key.0.clone(),
+                operator_name: key.0.clone(),
                 channel_id: key.1.clone(),
                 publication: publication.cloned(),
             },

@@ -2,11 +2,11 @@
 //!
 //! `config.toml` is a documented, hand-editable surface, so an edit made in a
 //! text editor has to reach the running daemon on the same terms an edit to a
-//! service definition beside it already does. This task is what makes that
+//! operator definition beside it already does. This task is what makes that
 //! safe.
 //!
 //! It sits behind an mpsc channel for the same two reasons
-//! `service_supervisor` does, in the same order:
+//! `operator_supervisor` does, in the same order:
 //!
 //! 1. **Reloads must be serialized.** Two concurrent reloads would each read
 //!    the file, then race to install their derivation — and because a reload
@@ -294,14 +294,14 @@ fn describe_applied(previous: &Config, next: &Config) -> Vec<String> {
 
 /// How often a hand edit is noticed. Configuration changes on human
 /// timescales, so this trades a little latency for far fewer wakeups. Matches
-/// the service watcher deliberately: the two files sit in the same directory
+/// the operator watcher deliberately: the two files sit in the same directory
 /// and a user editing both should not see them apply on visibly
 /// different schedules.
 const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Notice `config.toml` edited outside the daemon.
 ///
-/// Polling an mtime fingerprint is deliberate, for the reasons the service
+/// Polling an mtime fingerprint is deliberate, for the reasons the operator
 /// watcher gives: a filesystem-notification dependency would have to cope with
 /// editors that write in place versus write-and-rename, and with event
 /// coalescing, to learn the same thing this learns by looking.

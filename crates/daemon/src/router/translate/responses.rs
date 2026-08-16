@@ -644,7 +644,7 @@ impl StreamEncoder {
             "metadata": {},
             "user": Value::Null,
             "background": false,
-            "service_tier": "default",
+            "operator_tier": "default",
             "top_logprobs": 0,
             "presence_penalty": 0.0,
             "frequency_penalty": 0.0,
@@ -1627,7 +1627,7 @@ mod tests {
             "object", "output", "parallel_tool_calls", "previous_response_id",
             "reasoning", "temperature", "text", "tool_choice", "tools",
             "usage", "user", "incomplete_details", "status", "store",
-            "metadata", "background", "service_tier", "truncation",
+            "metadata", "background", "operator_tier", "truncation",
             "top_logprobs", "presence_penalty", "frequency_penalty",
             "prompt_cache_key",
         ];
