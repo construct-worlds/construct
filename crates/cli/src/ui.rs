@@ -881,20 +881,91 @@ fn session_row_marker(
     }
 }
 
-/// Style of the pane-ordinal badge (spec 0199): a digit over a highlight
-/// background so it reads as a marker, not as row text. The pane that last
-/// held focus wears the selection colors; every other pane wears the
-/// inactive highlight, so badge brightness also says where `C-x o` returns.
-fn pane_ordinal_style(theme: &Theme, in_active_pane: bool) -> Style {
+/// Resting colors of the pane-ordinal badge (spec 0199): a digit over a
+/// highlight background so it reads as a marker, not as row text. The pane
+/// that last held focus wears the selection pair; every other pane wears
+/// the inactive highlight, so badge brightness also says where `C-x o`
+/// returns.
+fn pane_ordinal_colors(theme: &Theme, in_active_pane: bool) -> (Color, Color) {
     if in_active_pane {
-        Style::default()
-            .bg(theme.highlight_bg)
-            .fg(theme.highlight_fg)
-            .add_modifier(Modifier::BOLD)
+        (theme.highlight_fg, theme.highlight_bg)
     } else {
-        Style::default()
-            .bg(theme.inactive_highlight_bg)
-            .fg(theme.text)
+        (theme.text, theme.inactive_highlight_bg)
+    }
+}
+
+fn pane_ordinal_style(theme: &Theme, in_active_pane: bool) -> Style {
+    let (fg, bg) = pane_ordinal_colors(theme, in_active_pane);
+    Style::default()
+        .fg(fg)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Badge style when painted onto a list row. Ratatui's `highlight_style`
+/// overwrites every cell of the selected item, so a selected row's badge
+/// would vanish into the selection bar. Invert the chip when its resting
+/// background is the same color the row highlight just applied — the
+/// digit stays a locator, the row stays the selection.
+fn pane_ordinal_style_on_list_row(
+    theme: &Theme,
+    in_active_pane: bool,
+    row_highlight_bg: Option<Color>,
+) -> Style {
+    let (mut fg, mut bg) = pane_ordinal_colors(theme, in_active_pane);
+    if row_highlight_bg == Some(bg) {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    Style::default()
+        .fg(fg)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Repaint the pane-ordinal badge on the selected list row after the list
+/// widget has applied `highlight_style`. Unselected rows keep the badge
+/// the lead-in already painted; only the highlighted item is overwritten.
+fn paint_list_row_ordinal_badges(
+    f: &mut Frame,
+    list_items_area: Rect,
+    theme: &Theme,
+    list_focused: bool,
+    selected_idx: Option<usize>,
+    items: &[AppListItem],
+    visible_rows: &[crate::app::ListRowHit],
+    pane_ordinals: &HashMap<String, (usize, bool)>,
+) {
+    let Some(selected_idx) = selected_idx else {
+        return;
+    };
+    let row_highlight_bg = if list_focused {
+        theme.highlight_bg
+    } else {
+        theme.inactive_highlight_bg
+    };
+    for (offset, hit) in visible_rows.iter().enumerate() {
+        if !hit.first_line || hit.item_index != selected_idx {
+            continue;
+        }
+        let Some(AppListItem::Session { summary, .. }) = items.get(hit.item_index) else {
+            continue;
+        };
+        let Some((n, in_active)) = pane_ordinals.get(summary.id.as_str()).copied() else {
+            continue;
+        };
+        if n > 9 {
+            continue;
+        }
+        let y = list_items_area.y.saturating_add(offset as u16);
+        if y >= list_items_area.bottom() || list_items_area.width == 0 {
+            continue;
+        }
+        f.buffer_mut().set_string(
+            list_items_area.x,
+            y,
+            n.to_string(),
+            pane_ordinal_style_on_list_row(theme, in_active, Some(row_highlight_bg)),
+        );
     }
 }
 
@@ -3622,6 +3693,19 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(block, area);
     let list = List::new(items).highlight_style(highlight_style);
     f.render_stateful_widget(list, list_items_area, &mut state);
+    // The list highlight paints over the badge cell. Restore a distinct
+    // chip on the selected row so the ordinal and the selection bar are
+    // never the same color (spec 0199).
+    paint_list_row_ordinal_badges(
+        f,
+        list_items_area,
+        &app.theme,
+        focused,
+        selected_idx,
+        &app_items,
+        &app.layout.list_visible_rows,
+        &pane_ordinals,
+    );
     app.layout.list_items_area = Some(list_items_area);
     app.layout.list_scroll_offset = visible_start + state.offset();
     app.list_scroll_offset = app.layout.list_scroll_offset;
@@ -25507,6 +25591,36 @@ mod tests {
             session_row_lead_spans(&theme, String::new(), " ", Style::default(), Some((1, false)));
         assert_eq!(active[0].style.bg, Some(theme.highlight_bg));
         assert_eq!(idle[0].style.bg, Some(theme.inactive_highlight_bg));
+    }
+
+    /// A selected list row wears the same pair the active-pane badge would.
+    /// Invert the chip in that case so the digit stays a locator (spec 0199).
+    #[test]
+    fn pane_ordinal_badge_inverts_when_it_would_match_the_row_highlight() {
+        let theme = Theme::default();
+        let on_selected_active = pane_ordinal_style_on_list_row(
+            &theme,
+            true,
+            Some(theme.highlight_bg),
+        );
+        assert_eq!(on_selected_active.bg, Some(theme.highlight_fg));
+        assert_eq!(on_selected_active.fg, Some(theme.highlight_bg));
+
+        let on_selected_idle = pane_ordinal_style_on_list_row(
+            &theme,
+            false,
+            Some(theme.highlight_bg),
+        );
+        assert_eq!(on_selected_idle.bg, Some(theme.inactive_highlight_bg));
+        assert_eq!(on_selected_idle.fg, Some(theme.text));
+
+        let on_unfocused_idle = pane_ordinal_style_on_list_row(
+            &theme,
+            false,
+            Some(theme.inactive_highlight_bg),
+        );
+        assert_eq!(on_unfocused_idle.bg, Some(theme.text));
+        assert_eq!(on_unfocused_idle.fg, Some(theme.inactive_highlight_bg));
     }
 
     /// A fork's mark and an archived row's disclosure sit in the same column,
