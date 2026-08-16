@@ -23,16 +23,17 @@ Before this decision, a sibling simply taking a turn could make an idle session'
 
 - Grok's discovery excludes, in addition to native-subagent ids and (for forks) the fork's own parent, the current native id of every other live construct session that shares this session's cwd and harness.
 - A resumed Grok adapter snapshots the cwd's native session ids before spawning Grok and permanently excludes every preexisting id except its own. Native directories created afterward remain eligible for `/clear` rebinding.
-- That exclusion set is read from each sibling's own on-disk native-id record, refreshed periodically rather than on every poll tick, since sibling composition and cwd are static for a session's lifetime and only the ids themselves rotate.
-- A sibling's own legitimate native reset is picked up by this session's exclusion set on the next refresh, not instantly — a bounded, short delay, not a correctness gap.
+- That exclusion set is read from each sibling's own on-disk native-id record and cached between poll ticks, since a full metadata scan every 500ms is needless I/O. The cache is only a fast path: before adopting any different native id, the watcher synchronously refreshes sibling ownership and rescans. A fresh construct session prewrites its native id before spawning Grok, so its directory cannot be mistaken for another session's reset even when it appears between periodic refreshes.
+- A sibling's already-reported native reset is rejected by the same pre-adoption refresh. Grok does not expose an originator tag for the instant between creating a reset directory and its owning watcher recording that id, so that narrower in-process reset race remains best-effort.
 
 ## Non-Goals
 
-- Guaranteeing zero false positives. A construct session that is mid-creation — spawned but before its own native id has been recorded to disk — is not yet excludable by its siblings' watchers. This narrows the window from "every routine turn, indefinitely" to "the brief startup race for a brand-new sibling," not zero.
+- Identifying arbitrary Grok CLI processes launched outside construct. They have no construct metadata or originator tag, so a post-start external native directory remains indistinguishable from this session's own reset.
+- Guaranteeing ownership during the sub-second interval after a same-cwd Grok process creates an in-process reset directory but before its construct watcher records the new id. Fresh construct sessions are protected because they prewrite their id before spawn; Grok-native `/clear` does not provide the same signal.
 - Changing discovery for harnesses that already match on an originator tag (Claude, Codex, Antigravity) — those are not exposed to this failure mode.
 - Retroactively cleaning up archived forks created before this decision; that is an operational cleanup, not a behavior this decision governs.
 
 ## Examples
 
 1. Two construct sessions, both running Grok, both cwd `/repo`. Session A is idle (awaiting input); session B takes a turn, which rewrites B's own native session's metadata file and bumps its directory's mtime. A's watcher polls, sees B's directory is now newest, but finds it in A's exclusion set (B reported that id as its own) and does not rebind — A's conversation is untouched.
-2. Same setup, but the exclusion set predates B's existence (B was spawned after A's last refresh). A's watcher may misattribute B's directory to itself once, until its next periodic refresh picks up B's reported native id and excludes it going forward.
+2. Same setup, but the exclusion cache predates B's existence. A's fast scan sees B's new directory, synchronously rereads sibling ownership before rebinding, finds the id B wrote before spawn, and remains attached to A. B's cost events appear once in the fleet token meter rather than once per same-cwd watcher.

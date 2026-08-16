@@ -31,7 +31,8 @@ These harnesses mint a new native session id when the user clears context or bra
 - Changing construct's own session ids (`s…` fleet ids).
 - Mapping one construct session onto multiple simultaneous native conversations (e.g. keeping both pre- and post-clear ids live). Only the active native id is tracked.
 - Implementing a user-facing "resume the pre-clear conversation" UI; the old native transcripts remain on disk under the harness's own storage.
-- Perfect isolation when multiple Grok sessions share one cwd (Grok has no originator tag; newest-mtime is best-effort) — sibling exclusion ([0088](0088-grok-native-discovery-excludes-sibling-sessions.md)) closes the common case but a brand-new sibling can still be mistaken for a reset in the brief window before it's excludable.
+- Identifying native sessions created by Grok processes launched outside construct. Grok has no originator tag; construct-owned siblings are isolated through their prewritten native-id records ([0088](0088-grok-native-discovery-excludes-sibling-sessions.md)), while an external post-start directory remains indistinguishable from the current session's own reset.
+- Perfect isolation during simultaneous Grok-native `/clear` discovery. Unlike a fresh construct session, Grok does not preannounce the new id before creating its reset directory, leaving a brief best-effort ownership interval documented in [0088](0088-grok-native-discovery-excludes-sibling-sessions.md).
 
 ## Examples
 
