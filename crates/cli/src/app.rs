@@ -973,6 +973,27 @@ impl MainWindowTree {
             }
         }
     }
+
+    /// Leaf panes in layout order as `(window_id, session_id)` pairs. Layout
+    /// order is the order the eye reads the splits in, so a pane's 1-based
+    /// index here is its ordinal badge wherever one is shown (spec 0199).
+    /// Non-session panes (services, empty panes) still occupy a slot: badges
+    /// must agree with the pane's on-screen position, not with how many
+    /// session panes precede it.
+    pub fn leaf_panes(&self) -> Vec<(u64, Option<&str>)> {
+        fn walk<'a>(node: &'a MainWindowTree, out: &mut Vec<(u64, Option<&'a str>)>) {
+            match node {
+                MainWindowTree::Leaf { id, selection } => out.push((*id, selection.session_id())),
+                MainWindowTree::Split { first, second, .. } => {
+                    walk(first, out);
+                    walk(second, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &mut out);
+        out
+    }
 }
 
 /// What the right pane is currently showing for the selected session.
@@ -9266,6 +9287,45 @@ impl App {
         }
         let mut out = Vec::new();
         collect(&self.main_windows, &mut out);
+        out
+    }
+
+    /// The 1-based pane-ordinal badge for a split window, or `None` when the
+    /// layout is a single pane — a lone pane needs no locating aid, so no
+    /// badge is worn anywhere (spec 0199).
+    pub fn window_pane_ordinal(&self, window_id: u64) -> Option<usize> {
+        let leaves = self.main_windows.leaf_panes();
+        if leaves.len() < 2 {
+            return None;
+        }
+        leaves
+            .iter()
+            .position(|(id, _)| *id == window_id)
+            .map(|i| i + 1)
+    }
+
+    /// `session_id -> (ordinal, in_active_pane)` for every session visible
+    /// in a multi-pane layout; empty for a single pane. A session shown in
+    /// more than one pane wears the active pane's number when it's one of
+    /// them — the badge then matches the pane whose title is lit — else the
+    /// first pane in layout order.
+    pub fn session_pane_ordinals(&self) -> HashMap<String, (usize, bool)> {
+        let leaves = self.main_windows.leaf_panes();
+        let mut out = HashMap::new();
+        if leaves.len() < 2 {
+            return out;
+        }
+        for (i, (window_id, session_id)) in leaves.iter().enumerate() {
+            let Some(session_id) = session_id else { continue };
+            let in_active = *window_id == self.active_window_id;
+            out.entry(session_id.to_string())
+                .and_modify(|slot: &mut (usize, bool)| {
+                    if in_active {
+                        *slot = (i + 1, true);
+                    }
+                })
+                .or_insert((i + 1, in_active));
+        }
         out
     }
 
@@ -36090,6 +36150,55 @@ mod tests {
         s2.id = "s2".into();
         let app = test_app(client, vec![s1, s2]);
         (app, dir, server)
+    }
+
+    /// Pane-ordinal badges (spec 0199): numbers follow layout order, exist
+    /// only when the layout actually has multiple panes, and a session shown
+    /// in several panes wears the active pane's number.
+    #[tokio::test]
+    async fn pane_ordinals_follow_layout_order_and_prefer_the_active_pane() {
+        let (mut app, _dir, _server) = two_session_app().await;
+        // Single pane: no badges anywhere — nothing needs locating.
+        app.main_windows = MainWindowTree::single(1, Selection::Session("s1".into()));
+        app.active_window_id = 1;
+        assert!(app.session_pane_ordinals().is_empty());
+        assert_eq!(app.window_pane_ordinal(1), None);
+
+        // Two panes: layout order numbers them 1 and 2.
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 2;
+        assert_eq!(app.window_pane_ordinal(1), Some(1));
+        assert_eq!(app.window_pane_ordinal(2), Some(2));
+        let ordinals = app.session_pane_ordinals();
+        assert_eq!(ordinals.get("s1"), Some(&(1, false)));
+        assert_eq!(ordinals.get("s2"), Some(&(2, true)));
+
+        // The same session in both panes wears the active pane's number so
+        // the badge matches the pane whose title is lit.
+        app.main_windows
+            .set_selection(1, Selection::Session("s2".into()));
+        assert_eq!(
+            app.session_pane_ordinals().get("s2"),
+            Some(&(2, true)),
+            "active pane wins when a session is shown twice"
+        );
+
+        // A non-session pane still owns its slot: emptying the first pane
+        // must not renumber the second — badges match on-screen position.
+        app.main_windows.set_selection(1, Selection::None);
+        assert_eq!(app.window_pane_ordinal(2), Some(2));
+        assert_eq!(app.session_pane_ordinals().get("s2"), Some(&(2, true)));
     }
 
     fn deck_hand() -> construct_protocol::SuggestionHand {
