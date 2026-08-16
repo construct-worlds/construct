@@ -3,7 +3,7 @@
 use crate::app::{
     feature_guidance, harness_guidance, harness_picker_entries, smith_method_guidance, App,
     ConfigureTab, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Prompt,
-    PromptChoiceAction, PromptChoiceHit, PromptIntent, PaneFocus, RemoteControlHit,
+    PaneTransition, PromptChoiceAction, PromptChoiceHit, PromptIntent, PaneFocus, RemoteControlHit,
     RemoteControlHitAction, ScreenPoint, Selection, OperatorTitleMenuAction, SessionTitleMenuAction,
     TextSelectionRange, TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit,
     WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS,
@@ -458,6 +458,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // over the footer strip in screen coordinates.
     apply_main_block_slide(f, app, &slide);
     app.mouse_pos = screen_mouse;
+
+    // Split topology changes are committed before their animation starts.
+    // Paint the brief visual residue in screen coordinates after the main
+    // block slide, while leaving the new layout's hit targets/input live.
+    render_pane_transitions(f, app);
 
     render_modeline(f, modeline_area, app);
     render_prompt(f, prompt_area, app);
@@ -6310,6 +6315,130 @@ fn render_main_transitions(f: &mut Frame, app: &App) {
             Some(Selection::None) | None => 0x5e5510,
         };
         render_glitch_overlay(f, pane.inner_area, &app.theme, seed, amount);
+    }
+}
+
+fn pane_transition_progress(started_at: Instant) -> Option<f32> {
+    let elapsed = started_at.elapsed().as_millis();
+    if elapsed >= crate::app::PANE_TRANSITION_MS {
+        return None;
+    }
+    Some(elapsed as f32 / crate::app::PANE_TRANSITION_MS as f32)
+}
+
+/// Paint an opaque code veil directly into selected cells, leaving all other
+/// cells untouched so the already-live pane below resolves into view. New
+/// panes sweep downward from a bright central seam; deleted panes collapse
+/// inward into a noisy residue over their former bounds.
+fn render_construct_pane_veil(
+    f: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    seed: u64,
+    progress: f32,
+    materializing: bool,
+) {
+    let area = area.intersection(f.area());
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let frame = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64 / crate::app::SPINNER_FRAME_MS as u64)
+        .unwrap_or(0);
+    let glyphs = ["0", "1", ":", ";", "+", "*", "|", "/", "\\"];
+    let background = theme.background.unwrap_or(Color::Reset);
+
+    for row in 0..area.height {
+        let ny = (row as f32 + 0.5) / area.height as f32;
+        for col in 0..area.width {
+            let nx = (col as f32 + 0.5) / area.width as f32;
+            let cell_seed = hash64(
+                seed ^ (u64::from(row) << 32)
+                    ^ u64::from(col).wrapping_mul(0x9e37)
+                    ^ frame.wrapping_mul(0x51),
+            );
+            let noise = unit_f32(cell_seed);
+
+            let (covered, frontier) = if materializing {
+                // A mostly top-to-bottom reveal, bowed around the middle and
+                // broken up per-cell so it reads as construction rather than
+                // a plain wipe.
+                let bow = (nx - 0.5).abs() * 0.24;
+                let jitter = (noise - 0.5) * 0.22;
+                let reveal_at = (0.05 + (ny * 0.72 + bow + jitter) * 0.9).clamp(0.03, 0.97);
+                (progress < reveal_at, (progress - reveal_at).abs() < 0.055)
+            } else {
+                // Pull the old pane toward its center while random cells drop
+                // out ahead of the edge. The surviving pane is already below
+                // this veil and becomes visible immediately through the gaps.
+                let radius = ((nx - 0.5).abs() * 2.0).max((ny - 0.5).abs() * 2.0);
+                let limit = (1.0 - progress).powf(0.72);
+                let jitter = (noise - 0.5) * 0.18;
+                (
+                    radius < limit + jitter && noise > progress * 0.24,
+                    (radius - limit).abs() < 0.065,
+                )
+            };
+            if !covered {
+                continue;
+            }
+
+            let animated_seed = hash64(cell_seed ^ frame.rotate_left(17));
+            let glyph = if frontier || unit_f32(animated_seed) < 0.58 {
+                glyphs[(animated_seed as usize) % glyphs.len()]
+            } else {
+                " "
+            };
+            let fg = if frontier {
+                theme.matrix_flash_work
+            } else if unit_f32(hash64(animated_seed ^ 0xa11ce)) < 0.22 {
+                theme.matrix_close
+            } else {
+                theme.matrix_line
+            };
+            if let Some(cell) = f.buffer_mut().cell_mut(Position {
+                x: area.x + col,
+                y: area.y + row,
+            }) {
+                cell.set_symbol(glyph)
+                    .set_style(Style::default().fg(fg).bg(background));
+            }
+        }
+    }
+}
+
+fn render_pane_transitions(f: &mut Frame, app: &App) {
+    for transition in &app.pane_transitions {
+        let Some(progress) = pane_transition_progress(transition.started_at()) else {
+            continue;
+        };
+        let (window_id, area, materializing) = match transition {
+            PaneTransition::Materialize { window_id, .. } => {
+                let Some(pane) = app
+                    .layout
+                    .main_window_areas
+                    .iter()
+                    .find(|pane| pane.id == *window_id)
+                else {
+                    continue;
+                };
+                (*window_id, pane.area, true)
+            }
+            PaneTransition::Dematerialize {
+                window_id, area, ..
+            } => (*window_id, *area, false),
+        };
+        app.request_tick_redraw();
+        render_construct_pane_veil(
+            f,
+            area,
+            &app.theme,
+            hash64(window_id ^ 0x636f_6e73_7472_7563),
+            progress,
+            materializing,
+        );
     }
 }
 
@@ -29111,5 +29240,42 @@ mod tests {
         let (table, _) = parse_markdown_table(&lines, 0).unwrap();
         let rendered = render_markdown_table(&table, &Theme::default(), Rect::new(0, 0, 40, 10));
         assert_eq!(rendered.len(), 3, "header + rule + one body row");
+    }
+
+    #[test]
+    fn pane_materialization_veil_starts_opaque_and_finishes_clear() {
+        fn painted_cells(progress: f32) -> usize {
+            let backend = ratatui::backend::TestBackend::new(12, 6);
+            let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    for y in 0..6 {
+                        for x in 0..12 {
+                            frame
+                                .buffer_mut()
+                                .cell_mut((x, y))
+                                .expect("background cell")
+                                .set_symbol(".");
+                        }
+                    }
+                    render_construct_pane_veil(
+                        frame,
+                        Rect::new(2, 1, 8, 4),
+                        &Theme::default(),
+                        42,
+                        progress,
+                        true,
+                    );
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            (1..5)
+                .flat_map(|y| (2..10).map(move |x| (x, y)))
+                .filter(|&(x, y)| buffer.cell((x, y)).expect("cell").symbol() != ".")
+                .count()
+        }
+
+        assert_eq!(painted_cells(0.0), 32);
+        assert_eq!(painted_cells(1.0), 0);
     }
 }

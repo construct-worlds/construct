@@ -2381,6 +2381,11 @@ pub struct App {
     /// different session. Keyed per main-window id so split panes don't
     /// glitch together.
     pub session_transitions: HashMap<u64, SessionTransition>,
+    /// Brief, non-blocking materialization/de-materialization effects for
+    /// split-pane topology changes. These are visual residue only: the
+    /// shared layout changes immediately, so focus, input, and PTY sizing
+    /// never wait for an animation to finish.
+    pub pane_transitions: Vec<PaneTransition>,
     /// OP-XY feedback link state for the modeline indicator: `None` until
     /// the feedback loop reports (or when no OP-XY profile is enabled — the
     /// indicator only renders once a report arrives), then `Some(connected)`.
@@ -2568,6 +2573,28 @@ struct PtyInputJob {
 #[derive(Debug, Clone)]
 pub struct SessionTransition {
     pub started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub enum PaneTransition {
+    Materialize {
+        window_id: u64,
+        started_at: Instant,
+    },
+    Dematerialize {
+        window_id: u64,
+        area: ratatui::layout::Rect,
+        started_at: Instant,
+    },
+}
+
+impl PaneTransition {
+    pub fn started_at(&self) -> Instant {
+        match self {
+            Self::Materialize { started_at, .. }
+            | Self::Dematerialize { started_at, .. } => *started_at,
+        }
+    }
 }
 
 /// Adapter-owned input editor state, mirrored from
@@ -5136,6 +5163,10 @@ pub const SPINNER_FRAME_MS: u128 = 120;
 pub const SPINNER_FRAMES: [&str; 8] = ["✦", "✧", "✶", "✷", "✸", "✷", "✶", "✧"];
 /// Duration of the session-switch visual transition.
 pub const SESSION_TRANSITION_MS: u128 = 200;
+/// Duration of the Construct-inspired split-pane materialization effect.
+/// Long enough to read as an intentional transition, but short enough that
+/// repeated window commands still feel immediate.
+pub const PANE_TRANSITION_MS: u128 = 360;
 /// Maximum number of queued daemon notifications to fold into one event-loop
 /// pass. Keeps terminal redraw fragments from repainting one chunk at a time.
 const MAX_NOTIFICATION_DRAIN: usize = 256;
@@ -5575,6 +5606,7 @@ async fn run_with_socket_initial_selection(
         dynamic_ui_scroll_offsets: HashMap::new(),
         image_resize_cache: Vec::new(),
         session_transitions: HashMap::new(),
+        pane_transitions: Vec::new(),
         op_xy_link_connected: None,
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
         matrix_rain_intensity: 0.0,
@@ -7458,6 +7490,27 @@ impl App {
         );
     }
 
+    fn start_pane_materialization(&mut self, window_id: u64) {
+        self.pane_transitions.retain(|transition| {
+            !matches!(transition, PaneTransition::Materialize { window_id: id, .. } if *id == window_id)
+        });
+        self.pane_transitions.push(PaneTransition::Materialize {
+            window_id,
+            started_at: Instant::now(),
+        });
+    }
+
+    fn start_pane_dematerialization(&mut self, window_id: u64, area: ratatui::layout::Rect) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        self.pane_transitions.push(PaneTransition::Dematerialize {
+            window_id,
+            area,
+            started_at: Instant::now(),
+        });
+    }
+
     pub fn select_session(&mut self, id: String) {
         self.select_session_inner(id, true, true);
     }
@@ -7666,7 +7719,22 @@ impl App {
         if merged == self.main_windows {
             return;
         }
+        let old_ids: HashSet<u64> = self.main_windows.leaf_ids().into_iter().collect();
+        let new_ids: HashSet<u64> = merged.leaf_ids().into_iter().collect();
+        let removed_panes: Vec<(u64, ratatui::layout::Rect)> = self
+            .layout
+            .main_window_areas
+            .iter()
+            .filter(|pane| old_ids.contains(&pane.id) && !new_ids.contains(&pane.id))
+            .map(|pane| (pane.id, pane.area))
+            .collect();
         self.main_windows = merged;
+        for id in new_ids.difference(&old_ids).copied() {
+            self.start_pane_materialization(id);
+        }
+        for (id, area) in removed_panes {
+            self.start_pane_dematerialization(id, area);
+        }
         self.next_window_id = self.main_windows.max_id().saturating_add(1);
         if self.selection_for_window(self.active_window_id).is_none() {
             self.active_window_id = self.main_windows.first_leaf_id().unwrap_or(1);
@@ -7838,9 +7906,13 @@ impl App {
     }
 
     pub fn prune_finished_transitions(&mut self) {
-        let done = |started: Instant| started.elapsed().as_millis() >= SESSION_TRANSITION_MS;
+        let session_done =
+            |started: Instant| started.elapsed().as_millis() >= SESSION_TRANSITION_MS;
         self.session_transitions
-            .retain(|_, transition| !done(transition.started_at));
+            .retain(|_, transition| !session_done(transition.started_at));
+        self.pane_transitions.retain(|transition| {
+            transition.started_at().elapsed().as_millis() < PANE_TRANSITION_MS
+        });
     }
 
     pub fn selected_session(&self) -> Option<&SessionSummary> {
@@ -9569,6 +9641,7 @@ impl App {
             direction,
         ) {
             self.focus_main_window(new_id);
+            self.start_pane_materialization(new_id);
             self.set_status(
                 match direction {
                     WindowSplitDirection::Below => "split below — C-x o cycles windows",
@@ -9606,7 +9679,16 @@ impl App {
             return;
         }
         let target = self.active_window_id;
+        let closing_area = self
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|pane| pane.id == target)
+            .map(|pane| pane.area);
         if remove(&mut self.main_windows, target) {
+            if let Some(area) = closing_area {
+                self.start_pane_dematerialization(target, area);
+            }
             if let Some(id) = self.leaf_window_ids().first().copied() {
                 self.focus_main_window(id);
             }
@@ -9618,8 +9700,18 @@ impl App {
 
     fn delete_other_windows(&mut self) {
         self.sync_active_window_selection();
+        let closing_panes: Vec<(u64, ratatui::layout::Rect)> = self
+            .layout
+            .main_window_areas
+            .iter()
+            .filter(|pane| pane.id != self.active_window_id)
+            .map(|pane| (pane.id, pane.area))
+            .collect();
         let selection = self.selection.clone();
         self.main_windows = MainWindowTree::single(self.active_window_id, selection);
+        for (id, area) in closing_panes {
+            self.start_pane_dematerialization(id, area);
+        }
         self.set_status("only current window".into());
         self.report_focused_sessions();
         self.prune_window_state();
@@ -16784,7 +16876,7 @@ fn playbook_line_end(s: &str, cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Margin, Rect};
 
     #[test]
     fn generated_tunnel_name_is_human_friendly_and_dns_safe() {
@@ -17589,6 +17681,7 @@ mod tests {
             dynamic_ui_scroll_offsets: HashMap::new(),
             image_resize_cache: Vec::new(),
             session_transitions: HashMap::new(),
+            pane_transitions: Vec::new(),
             op_xy_link_connected: None,
             matrix_rain: crate::matrix_rain::MatrixRain::default(),
             matrix_rain_intensity: 0.0,
@@ -32242,6 +32335,65 @@ mod tests {
         assert!(app
             .playbook_referenced_sessions_needing_hydration()
             .is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn split_active_window_materializes_only_the_new_pane() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.main_windows = MainWindowTree::single(1, Selection::Session("s1".into()));
+        app.active_window_id = 1;
+        app.next_window_id = 2;
+        app.pane_transitions.clear();
+
+        app.split_active_window(WindowSplitDirection::Right);
+
+        assert_eq!(app.leaf_window_ids(), vec![1, 2]);
+        assert!(matches!(
+            app.pane_transitions.as_slice(),
+            [PaneTransition::Materialize { window_id: 2, .. }]
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn delete_active_window_leaves_visual_residue_at_old_bounds() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s1".into()),
+            }),
+        };
+        app.active_window_id = 2;
+        let old_area = Rect::new(60, 0, 60, 28);
+        app.layout.main_window_areas = vec![WindowPaneHit {
+            id: 2,
+            area: old_area,
+            inner_area: old_area.inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            }),
+        }];
+        app.pane_transitions.clear();
+
+        app.delete_active_window();
+
+        assert_eq!(app.leaf_window_ids(), vec![1]);
+        assert!(matches!(
+            app.pane_transitions.as_slice(),
+            [PaneTransition::Dematerialize {
+                window_id: 2,
+                area,
+                ..
+            }] if *area == old_area
+        ));
         server.abort();
     }
 
