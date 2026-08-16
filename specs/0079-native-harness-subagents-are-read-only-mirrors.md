@@ -30,6 +30,24 @@ that concise title with completion prose. Construct does not synthesize a child
 from the earlier tool request alone because its tool-use identifier is not the
 stable task identifier reported by later lifecycle notifications.
 
+A background command's mirror carries a live transcript, not just lifecycle
+state: when the harness announces where the command's output is being written,
+Construct follows that output and projects it into the mirror as it grows —
+opening with the launching command itself, then streaming output in
+line-bounded chunks whose ordinals are deterministic at line granularity. A
+trailing partial line is held until it completes so no line is ever split
+across events; a terminal notification flushes whatever remains. Because the
+output stream is discovered from the launch announcement in the parent's own
+transcript, a mirror adopted after a restart (where launch history is not
+re-read) may retain only the output projected before the restart — accepted,
+since the command process does not itself survive the parent harness's
+restart.
+
+Live background commands count as retained native children in the harness's
+retained-child snapshot. A snapshot derived only from on-disk subagent
+transcript files would otherwise archive a still-running background command's
+mirror the moment any other child appears or disappears.
+
 A native child's FULL transcript history is projected, not just lines that
 arrive while a watcher happens to be attached: adapters re-scan child
 transcript files from the top on every (re)start, and each file-derived
@@ -110,6 +128,9 @@ child that is already owned by its parent.
 - A Claude Code session starts a long-running background Bash command. Its
   agent-provided description appears immediately as a running `(native) claude`
   child title and remains the title after the command's exit status arrives.
+  Focusing the child shows the launching command followed by the command's
+  output streaming live, and the final output lines arrive with the terminal
+  status.
 - A Codex rollout declares a parent thread. A `(native) codex` child row appears
   under the Construct session associated with that parent rollout.
 - A native Codex child launches another child. The grandchild appears beneath
