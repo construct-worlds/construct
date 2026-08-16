@@ -2911,7 +2911,7 @@
     background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
 
-  /* Minibuffer ambient panel (spec 0019 / 0167): fleet token meter by default. */
+  /* Monitor ambient panel (spec 0019 / 0167): fleet token meter by default. */
   .minibuffer-panel {
     flex: 0 0 auto;
     display: flex;
@@ -3880,19 +3880,21 @@
         <div class="lineage-body" id="lineageBody" role="tree" aria-label="session lineage"></div>
       </section>
       <!--
-        Minibuffer ambient panel (specs 0019 / 0167): fleet token meter by
+        Monitor ambient panel (specs 0019 / 0167): fleet token meter by
         default, with a rain mode toggle. Anchored at the bottom of the
-        sidebar like the TUI matrix-rain region.
+        sidebar like the TUI matrix-rain region. Titled "monitor" — the
+        pane observes the fleet; "minibuffer" names the dispatcher session
+        (spec 0199), not this pane.
       -->
       <section class="minibuffer-panel" id="minibufferPanel">
         <!-- Resize handle on the TOP border of the title bar (TUI parity). -->
         <div class="minibuffer-resize" id="minibufferResize" role="separator"
-             aria-orientation="horizontal" aria-label="resize minibuffer panel"></div>
+             aria-orientation="horizontal" aria-label="resize monitor panel"></div>
         <div class="minibuffer-header" id="minibufferHeader">
-          <span class="section-title" id="minibufferTitle">minibuffer</span>
-          <button type="button" id="minibufferModeBtn" aria-label="toggle minibuffer panel mode"
+          <span class="section-title" id="minibufferTitle">monitor</span>
+          <button type="button" id="minibufferModeBtn" aria-label="toggle monitor panel mode"
                   title="Toggle rain / tokens">tokens ⇄</button>
-          <button type="button" id="minibufferCollapseBtn" aria-label="collapse minibuffer panel"
+          <button type="button" id="minibufferCollapseBtn" aria-label="collapse monitor panel"
                   title="Collapse">−</button>
         </div>
         <div class="minibuffer-body" id="minibufferBody">
@@ -6263,7 +6265,7 @@ function applyMinibufferPanelMode() {
     minibufferCollapseBtn.textContent = state.minibufferCollapsed ? "+" : "−";
     minibufferCollapseBtn.setAttribute(
       "aria-label",
-      state.minibufferCollapsed ? "expand minibuffer panel" : "collapse minibuffer panel",
+      state.minibufferCollapsed ? "expand monitor panel" : "collapse monitor panel",
     );
   }
   const tokens = state.minibufferPanelMode !== "rain";

@@ -1,7 +1,7 @@
 # 0019-minibuffer-widgets-use-matrix-rain-viewport
 
 Status: accepted
-Date: 2026-06-05 (amended 2026-08-01)
+Date: 2026-06-05 (amended 2026-08-16)
 Area: tui
 Scope: Defines the ambient panel's selectable body modes and how the collapsed Minibuffer communicates through it.
 
@@ -20,7 +20,7 @@ of the body, not a mode of its own.
 
 When the Minibuffer session is collapsed, the panel may act as a transient viewport over the Minibuffer session's normal sticky widgets. Minibuffer widgets keep the same lifecycle as all session widgets: sessions create, update, and delete them, and the viewport only controls temporary visibility.
 
-Updating a Minibuffer widget briefly reveals it in the panel. The title bar shows the lowercase `minibuffer` label followed by one square indicator per visible Minibuffer widget, and a mode switch naming the mode currently showing, carrying the same swap glyph as the session list's view-mode toggle so the two controls read as one convention. Hovering the Minibuffer label may reveal the current Minibuffer status in a tooltip. Hovering a widget indicator may reveal that widget's title. Clicking an empty square selects and shows the widget; clicking the filled square hides the widget viewport. The existing close button continues to hide the Minibuffer/ambient panel itself, and is distinct from the mode switch — switching modes never collapses the panel. When the widget viewport hides or no Minibuffer widgets exist, the panel returns to its selected mode.
+Updating a Minibuffer widget briefly reveals it in the panel. The title bar names the pane with the lowercase `monitor` title — the pane observes the fleet; `minibuffer` names the dispatcher session (spec 0199) and must never double as this pane's name. The title may also carry the Minibuffer affordances (loop toggle, status tooltip, approval alert, click-to-open) when the bar has no room for a second chip; the hover tooltip still names the Minibuffer so the control is not confused with the pane itself. Then come one square indicator per visible Minibuffer widget, and a mode switch naming the mode currently showing, carrying the same swap glyph as the session list's view-mode toggle so the two controls read as one convention. Hovering the title may reveal the current Minibuffer status in a tooltip. Hovering a widget indicator may reveal that widget's title. Clicking an empty square selects and shows the widget; clicking the filled square hides the widget viewport. The existing close button continues to hide the monitor/ambient panel itself, and is distinct from the mode switch — switching modes never collapses the panel. When the widget viewport hides or no Minibuffer widgets exist, the panel returns to its selected mode.
 
 ## Reason
 

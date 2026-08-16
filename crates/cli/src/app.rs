@@ -41896,7 +41896,7 @@ mod tests {
             .expect("minibuffer widget render should not panic");
         assert_eq!(app.layout.matrix_widget_hits.len(), 3);
         let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("minibuffer ─"));
+        assert!(text.contains("monitor ─"));
         assert!(
             text.contains("■"),
             "selected widget indicator should be filled"
@@ -42077,7 +42077,7 @@ mod tests {
             .expect("collapsed rain title bar should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
-            text.contains("minibuffer"),
+            text.contains("monitor"),
             "collapsed panel should keep its title bar: {text:?}"
         );
 
@@ -42141,7 +42141,7 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("minibuffer approval title should render");
         let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("minibuffer !"));
+        assert!(text.contains("monitor !"));
         let (x_start, _x_end, y) = app
             .layout
             .matrix_minibuffer_title_hit

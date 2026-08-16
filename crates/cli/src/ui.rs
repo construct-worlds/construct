@@ -1184,9 +1184,9 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
         if let Some((xs, xe, y)) = matrix_rain_close_button_range(rain) {
             if my == y && mx >= xs && mx < xe {
                 let (label, anchor_y) = if app.matrix_rain_hidden {
-                    (" Expand Minibuffer ", y)
+                    (" Expand monitor ", y)
                 } else {
-                    (" Collapse Minibuffer ", y.saturating_add(2))
+                    (" Collapse monitor ", y.saturating_add(2))
                 };
                 render_button_tooltip(f, &app.theme, label, xs, anchor_y);
             }
@@ -3777,7 +3777,7 @@ fn split_lineage_section(
 
 /// Render the sidebar's lineage section: a header bar (a `─` rule carrying
 /// the `⑂ lineage` label, the view-mode toggle, and a `−`/`+` collapse
-/// button — the same furniture as the minibuffer panel's title bar lower in
+/// button — the same furniture as the monitor panel's title bar lower in
 /// the sidebar)
 /// above the selected session's lineage diagram. Reuses
 /// `App::lineage_section_rows` (`crate::lineage::build_tree`/`flatten`
@@ -3807,7 +3807,7 @@ fn render_lineage_section(
     app.layout.lineage_area = Some(rect);
     let focused = app.lineage_focused && app.focus == PaneFocus::List;
 
-    // Header bar: a full-width `─` rule (the minibuffer panel's visual
+    // Header bar: a full-width `─` rule (the monitor panel's visual
     // language), label at the left, mode toggle + collapse button at the
     // right. The bare bar doubles as the height drag handle.
     let line_style = if focused {
@@ -3843,7 +3843,7 @@ fn render_lineage_section(
         } else {
             " − "
         };
-        // Flush right, matching the minibuffer panel's toggle below.
+        // Flush right, matching the monitor panel's toggle below.
         let bx = rect.x + rect.width.saturating_sub(3);
         let button = Rect {
             x: bx,
@@ -5583,10 +5583,17 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
     // so the squares below reflect the live shown/pinned widget.
     app.matrix_widget_visible(now);
     let approval_pending = app.minibuffer_has_pending_approval();
+
+    // Pane title: this pane is the fleet's ambient *monitor* (rain / token
+    // meter / widget strip), so it must not be titled after the minibuffer
+    // — that names the dispatcher session in the bottom strip (spec 0199).
+    // The label still carries the minibuffer affordances (status tooltip,
+    // approval alert, click-to-open) because the default sidebar width has
+    // no room for a separate chip; the tooltip names the minibuffer.
     let minibuffer_text = if approval_pending {
-        "minibuffer !"
+        "monitor !"
     } else {
-        "minibuffer"
+        "monitor"
     };
 
     // Play/pause toggle for the minibuffer ambient loop.
@@ -5612,7 +5619,7 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
         .set_string(loop_icon_x, area.y, loop_icon, loop_icon_style);
     app.layout.matrix_minibuffer_loop_hit = Some((loop_icon_x, loop_icon_end, area.y));
 
-    // Prompt label renders after the icon; the leading space in " minibuffer "
+    // Prompt label renders after the icon; the leading space in " monitor "
     // provides the visual gap between icon and text.
     let label = format!(" {minibuffer_text} ");
     let label_x = loop_icon_end;
