@@ -36,7 +36,7 @@ unchanged.
 Spec 0152 made the daemon re-register on its own when the gateway forgets a
 route, but that recovery only works while the credential it already holds is
 still valid. Owner credentials are deliberately short-lived, and the gateway
-loses routes on every routine service deploy. The two windows are independent,
+loses routes on every routine operator deploy. The two windows are independent,
 so a deploy that lands after the owner credential lapses leaves a *running*
 daemon with a dead tunnel, no way to re-register, and no path forward except
 opening a browser on the host machine.
@@ -62,22 +62,22 @@ changes that.
 
 ## Consequences
 
-- Re-registration credentials are a distinct credential purpose. The service
+- Re-registration credentials are a distinct credential purpose. The operator
   must not accept one where an owner credential is required, nor the reverse.
 - Rotation on use is mandatory, so a captured credential stops working as soon
   as the legitimate holder next recovers. Both sides must tolerate a
-  re-registration whose response is lost: the daemon may retry, so the service
+  re-registration whose response is lost: the daemon may retry, so the operator
   cannot invalidate the old credential until the new one has been issued.
 - The credential's lifetime sets the ceiling on unattended recovery. Beyond it,
   the tunnel needs a human. That ceiling should be generous enough to cover a
   realistic trip away from the machine.
 - Stopping a tunnel, or logging the owner identity out, must invalidate any
   outstanding re-registration credential for that reservation. Recovery
-  survives service restarts; it must not survive the user revoking access.
+  survives operator restarts; it must not survive the user revoking access.
 - Restarting the daemon still requires interactive authorization. 0146's
   memory-only rule is unchanged, and this spec must not be read as a step
   toward persisting credentials.
-- The service gains an authorization path that no browser drives, so its
+- The operator gains an authorization path that no browser drives, so its
   refusals must be legible to an unattended client: a rejected credential has
   to be distinguishable from a transport failure, or the daemon cannot tell
   "re-authorize" from "retry".
@@ -93,7 +93,7 @@ changes that.
 
 ## Examples
 
-- A service deploy drops all routes a day after the user last signed in. The
+- A operator deploy drops all routes a day after the user last signed in. The
   daemon has been running throughout. Its health check notices the route is
   gone, re-registers with the credential it holds, and the same public URL
   comes back. No browser opens, and a phone connected to that URL reconnects

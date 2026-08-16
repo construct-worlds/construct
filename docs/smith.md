@@ -222,7 +222,7 @@ the daemon tells you how (spec 0151):
   default hash names.
 - **Next-prompt suggestions** — smith and shell sessions generate
   suggestions via smith; other harnesses always use their own model.
-- **The operator session** — the bottom input strip is a smith session by
+- **The minibuffer session** — the bottom input strip is a smith session by
   default. Without a credential it still handles slash commands but cannot
   act as an agent (spec 0071).
 

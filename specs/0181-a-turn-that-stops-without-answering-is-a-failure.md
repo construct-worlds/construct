@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-08-02
 Area: architecture
-Scope: How a service delivery learns that the turn behind it has ended without producing an answer, and what it reports when that happens.
+Scope: How a operator delivery learns that the turn behind it has ended without producing an answer, and what it reports when that happens.
 
 ## Decision
 
@@ -86,4 +86,4 @@ None of those pauses ends the wait, because each one is interrupted by
 something new appearing in the transcript.
 
 A turn stops at an approval and stays there for an hour. It is never reported
-as failed; the channel keeps saying an operator has to act.
+as failed; the channel keeps saying a user has to act.

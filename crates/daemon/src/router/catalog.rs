@@ -405,7 +405,7 @@ pub fn build_codex_catalog(
         entry["multi_agent_version"] = Value::String("v1".to_string());
         if let Some(object) = entry.as_object_mut() {
             object.remove("web_search_tool_type");
-            object.remove("service_tiers");
+            object.remove("operator_tiers");
             object.remove("additional_speed_tiers");
             object.remove("supports_websockets");
             object.remove("prefer_websockets");
@@ -437,7 +437,7 @@ mod tests {
                 },
                 "supported_reasoning_levels": [{"effort":"high"}],
                 "context_window": 200000,
-                "service_tiers": [{"id":"priority"}],
+                "operator_tiers": [{"id":"priority"}],
                 "web_search_tool_type": "text_and_image"
             }]
         })
@@ -503,7 +503,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("based on GPT-5"));
-        assert!(models[1].get("service_tiers").is_none());
+        assert!(models[1].get("operator_tiers").is_none());
         // An effort choice cannot reach an Anthropic-dialect target yet, so
         // the picker must not offer one.
         assert_eq!(

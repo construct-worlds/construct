@@ -12,7 +12,7 @@ strip, the lineage section, any playbook popups — is always laid out at the si
 it has when the footer occupies a single row. That size does not depend on how
 tall the footer actually is.
 
-When the footer grows beyond one row (the operator panel, the multi-row harness
+When the footer grows beyond one row (the minibuffer panel, the multi-row harness
 picker), the block keeps that size and **slides up** by the footer's extra rows.
 Rows that leave the top edge are cropped away; the bottom of the block stays
 flush with the modeline, so the newest terminal output remains on screen. The
@@ -41,7 +41,7 @@ Consequences for the rest of the client:
 
 ## Reason
 
-Opening the operator panel used to shrink the main block, which resized every
+Opening the minibuffer panel used to shrink the main block, which resized every
 visible pane and asked every child PTY to reflow — for a panel the user opens
 and closes constantly. Harnesses that repaint on resize flickered, alt-screen
 harnesses re-laid-out their whole frame, and the daemon took a burst of resize
@@ -71,11 +71,11 @@ reveals read as the same gesture.
 - The footer itself does not slide or animate its height; it appears at its full
   height and the block moves to meet it.
 - This says nothing about how tall any particular footer is, or about the
-  operator panel's own resize/persistence behavior.
+  minibuffer panel's own resize/persistence behavior.
 
 ## Examples
 
-- The operator panel opens: the session list and split views glide up, their top
+- The minibuffer panel opens: the session list and split views glide up, their top
   rows leaving the viewport, the last line of each terminal still sitting just
   above the modeline. No session reports a resize.
 - The panel is dragged taller: the block follows the pointer immediately, still

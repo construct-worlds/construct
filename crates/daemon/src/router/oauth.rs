@@ -89,7 +89,7 @@ impl OauthProvider {
         }
     }
 
-    /// Model used when the operator has not chosen one.
+    /// Model used when the user has not chosen one.
     ///
     /// A default that lags a vendor release produces a clean API error
     /// naming the model, which is recoverable; requiring configuration for

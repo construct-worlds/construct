@@ -31,7 +31,7 @@ This is system-specific in appearance: machines where the TUI is started from th
 
 ## Non-Goals
 
-- Changing how construct chooses the spawn cwd for new sessions (TUI still uses its process cwd; operators can pass `--cwd`).
+- Changing how construct chooses the spawn cwd for new sessions (TUI still uses its process cwd; minibuffers can pass `--cwd`).
 - Moving Grok's own on-disk layout or preventing Grok from chdiring.
 - Retroactively repairing construct transcripts that already missed events while the watcher was on the wrong path.
 

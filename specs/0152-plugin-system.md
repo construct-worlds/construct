@@ -95,7 +95,7 @@ registration.
   order-independent and must be preserved; anything that lets a plugin
   claim an unnamespaced name reopens the override-a-built-in hole.
 - User config wins field-by-field over plugin adapter declarations, the
-  same layering built-in adapters use — operators can pin or patch a plugin
+  same layering built-in adapters use — minibuffers can pin or patch a plugin
   adapter without forking it.
 - Registry changes require a daemon restart to apply. Acceptable because
   restart preserves sessions; if that ever stops being true, plugins need a

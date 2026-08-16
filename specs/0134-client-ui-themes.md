@@ -24,7 +24,7 @@ Basic use their dark variant as the safe SSH fallback; users can select the
 painted Light theme when they need a fixed light palette remotely.
 
 The TUI must support theme switching from a local slash command and from a
-mouse-clickable affordance in the Operator/minibuffer area. The web UI must
+mouse-clickable affordance in the User/minibuffer area. The web UI must
 support theme switching from a visible picker. Theme switching applies
 immediately to the client surface and to embedded terminal views. Each client
 persists its own selected theme in its local configuration or browser storage.
@@ -44,7 +44,7 @@ theme registry as the rest of their client so switching themes does not leave a
 mixed palette behind. The Playbook pane's frame is a deliberate, narrow
 exception to this rule — see [[0083-playbook-border-fixed-across-themes]].
 
-Matrix-specific visual mechanics, such as the operator rain viewport, may keep
+Matrix-specific visual mechanics, such as the user rain viewport, may keep
 their behavior across themes, but their colors must adapt to the active palette.
 TUI renderers must not assume the terminal's default background is visible under
 neutral themes; neutral themes own the frame background.

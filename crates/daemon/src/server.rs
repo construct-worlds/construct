@@ -1130,21 +1130,21 @@ fn parse_params<T: serde::de::DeserializeOwned>(
     serde_json::from_value(v).map_err(|e| ErrorObject::invalid_params(e.to_string()))
 }
 
-/// Apply a just-persisted service edit to the running daemon and describe what
+/// Apply a just-persisted operator edit to the running daemon and describe what
 /// happened.
 ///
 /// The write already succeeded by the time this runs, so a reload failure is
-/// reported rather than raised: the operator's edit is saved either way, and
+/// reported rather than raised: the user's edit is saved either way, and
 /// what they need to know is which part of it is not yet live.
-async fn apply_service_edit(
+async fn apply_operator_edit(
     manager: &Arc<SessionManager>,
     method: &'static str,
-) -> construct_protocol::ServiceApplyResult {
+) -> construct_protocol::OperatorApplyResult {
     match manager
-        .reload_services(crate::service_supervisor::ReloadReason::Ipc(method))
+        .reload_operators(crate::operator_supervisor::ReloadReason::Ipc(method))
         .await
     {
-        Ok(report) => construct_protocol::ServiceApplyResult {
+        Ok(report) => construct_protocol::OperatorApplyResult {
             reloaded: true,
             started: report.started.len(),
             stopped: report.stopped.len(),
@@ -1152,14 +1152,14 @@ async fn apply_service_edit(
             failures: report
                 .failures
                 .into_iter()
-                .map(|((service, channel), port, error)| {
-                    format!("{service}/{channel} on port {port}: {error}")
+                .map(|((operator, channel), port, error)| {
+                    format!("{operator}/{channel} on port {port}: {error}")
                 })
                 .collect(),
         },
         Err(error) => {
-            tracing::debug!(%error, "service edit persisted without a live reload");
-            construct_protocol::ServiceApplyResult::default()
+            tracing::debug!(%error, "operator edit persisted without a live reload");
+            construct_protocol::OperatorApplyResult::default()
         }
     }
 }
@@ -1178,7 +1178,7 @@ async fn channel_publication_map(
         .map(|publication| {
             (
                 (
-                    publication.service_name.clone(),
+                    publication.operator_name.clone(),
                     publication.channel_id.clone(),
                 ),
                 publication,
@@ -1188,7 +1188,7 @@ async fn channel_publication_map(
 }
 
 fn enrich_channel_publications(
-    channels: &mut [construct_protocol::ServiceChannelSummary],
+    channels: &mut [construct_protocol::OperatorChannelSummary],
     publications: &std::collections::HashMap<
         (String, String),
         construct_protocol::ChannelPublicationSummary,
@@ -1198,22 +1198,22 @@ fn enrich_channel_publications(
         channel.publication = channel
             .attached_to
             .as_ref()
-            .and_then(|service| publications.get(&(service.clone(), channel.id.clone())))
+            .and_then(|operator| publications.get(&(operator.clone(), channel.id.clone())))
             .cloned();
     }
 }
 
-fn enrich_service_publications(
-    services: &mut [construct_protocol::ServiceSummary],
+fn enrich_operator_publications(
+    operators: &mut [construct_protocol::OperatorSummary],
     publications: &std::collections::HashMap<
         (String, String),
         construct_protocol::ChannelPublicationSummary,
     >,
 ) {
-    for service in services {
-        for channel in &mut service.channels {
+    for operator in operators {
+        for channel in &mut operator.channels {
             channel.publication = publications
-                .get(&(service.name.clone(), channel.id.clone()))
+                .get(&(operator.name.clone(), channel.id.clone()))
                 .cloned();
         }
     }
@@ -1405,12 +1405,12 @@ pub(crate) async fn dispatch(
     dispatch_entry!(ipc_method::SESSION_LIST, {
         ok!(req, &manager.list().await)
     });
-    dispatch_entry!(ipc_method::SERVICE_REPLY, {
-        let p = params!(req, construct_protocol::ServiceReplyParams);
-        let Some(supervisor) = manager.service_supervisor() else {
+    dispatch_entry!(ipc_method::OPERATOR_REPLY, {
+        let p = params!(req, construct_protocol::OperatorReplyParams);
+        let Some(supervisor) = manager.operator_supervisor() else {
             return Response::err(
                 req.id.clone(),
-                ErrorObject::internal("service supervisor is not running"),
+                ErrorObject::internal("operator supervisor is not running"),
             );
         };
         match supervisor.reply(p.session_id, p.delivery_id, p.text).await {
@@ -1421,54 +1421,54 @@ pub(crate) async fn dispatch(
             ),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_LIST, {
-        match crate::service::list_summaries(&construct_protocol::paths::Paths::discover().services_dir()) {
-            Ok(mut services) => {
+    dispatch_entry!(ipc_method::OPERATOR_LIST, {
+        match crate::operator::list_summaries(&construct_protocol::paths::Paths::discover().operators_dir()) {
+            Ok(mut operators) => {
                 let publications = channel_publication_map(manager).await;
-                enrich_service_publications(&mut services, &publications);
-                ok!(req, &services)
+                enrich_operator_publications(&mut operators, &publications);
+                ok!(req, &operators)
             },
             Err(e) => Response::err(req.id.clone(), ErrorObject::internal(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_PUT, {
-        let p = params!(req, construct_protocol::ServicePutParams);
-        match crate::service::put_definition(
-            &construct_protocol::paths::Paths::discover().services_dir(),
+    dispatch_entry!(ipc_method::OPERATOR_PUT, {
+        let p = params!(req, construct_protocol::OperatorPutParams);
+        match crate::operator::put_definition(
+            &construct_protocol::paths::Paths::discover().operators_dir(),
             p,
         ) {
             Ok(mut result) => {
                 result.applied =
-                    apply_service_edit(manager, ipc_method::SERVICE_PUT).await;
+                    apply_operator_edit(manager, ipc_method::OPERATOR_PUT).await;
                 ok!(req, &result)
             }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_DELETE, {
-        let p = params!(req, construct_protocol::ServiceNameParams);
-        match crate::service::delete_definition(
-            &construct_protocol::paths::Paths::discover().services_dir(),
+    dispatch_entry!(ipc_method::OPERATOR_DELETE, {
+        let p = params!(req, construct_protocol::OperatorNameParams);
+        match crate::operator::delete_definition(
+            &construct_protocol::paths::Paths::discover().operators_dir(),
             &p.name,
         ) {
             Ok(()) => {
                 // Deletion must still withdraw the endpoint, but the response
                 // stays null: clients deserialize it as unit.
-                let _ = apply_service_edit(manager, ipc_method::SERVICE_DELETE).await;
+                let _ = apply_operator_edit(manager, ipc_method::OPERATOR_DELETE).await;
                 Response::ok(req.id.clone(), serde_json::Value::Null)
             }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_MOVE, {
-        let p = params!(req, construct_protocol::ServiceMoveParams);
+    dispatch_entry!(ipc_method::OPERATOR_MOVE, {
+        let p = params!(req, construct_protocol::OperatorMoveParams);
         // The step is computed against the same top-level flow the list
         // clients render, so the move needs the fleet's sessions and
-        // projects, not just the service definitions.
+        // projects, not just the operator definitions.
         let sessions = manager.list().await;
         let groups = manager.list_groups().await;
-        match crate::service::move_definition(
-            &construct_protocol::paths::Paths::discover().services_dir(),
+        match crate::operator::move_definition(
+            &construct_protocol::paths::Paths::discover().operators_dir(),
             &p.name,
             p.direction,
             &sessions,
@@ -1478,10 +1478,10 @@ pub(crate) async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_CHANNEL_LIST, {
-        let p = params!(req, construct_protocol::ServiceNameParams);
-        match crate::service::list_channel_summaries(
-            &construct_protocol::paths::Paths::discover().services_dir(),
+    dispatch_entry!(ipc_method::OPERATOR_CHANNEL_LIST, {
+        let p = params!(req, construct_protocol::OperatorNameParams);
+        match crate::operator::list_channel_summaries(
+            &construct_protocol::paths::Paths::discover().operators_dir(),
             &p.name,
         ) {
             Ok(mut channels) => {
@@ -1492,9 +1492,9 @@ pub(crate) async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_CHANNEL_CATALOG_LIST, {
-        match crate::service::list_channel_catalog(
-            &construct_protocol::paths::Paths::discover().services_dir(),
+    dispatch_entry!(ipc_method::OPERATOR_CHANNEL_CATALOG_LIST, {
+        match crate::operator::list_channel_catalog(
+            &construct_protocol::paths::Paths::discover().operators_dir(),
         ) {
             Ok(mut channels) => {
                 let publications = channel_publication_map(manager).await;
@@ -1504,78 +1504,78 @@ pub(crate) async fn dispatch(
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_CHANNEL_PUT, {
-        let p = params!(req, construct_protocol::ServiceChannelPutParams);
-        match crate::service::put_channel(
-            &construct_protocol::paths::Paths::discover().services_dir(),
+    dispatch_entry!(ipc_method::OPERATOR_CHANNEL_PUT, {
+        let p = params!(req, construct_protocol::OperatorChannelPutParams);
+        match crate::operator::put_channel(
+            &construct_protocol::paths::Paths::discover().operators_dir(),
             p,
         ) {
             Ok(mut result) => {
                 result.applied =
-                    apply_service_edit(manager, ipc_method::SERVICE_CHANNEL_PUT).await;
+                    apply_operator_edit(manager, ipc_method::OPERATOR_CHANNEL_PUT).await;
                 ok!(req, &result)
             }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_CHANNEL_DELETE, {
-        let p = params!(req, construct_protocol::ServiceChannelNameParams);
-        match crate::service::delete_channel(
-            &construct_protocol::paths::Paths::discover().services_dir(),
+    dispatch_entry!(ipc_method::OPERATOR_CHANNEL_DELETE, {
+        let p = params!(req, construct_protocol::OperatorChannelNameParams);
+        match crate::operator::delete_channel(
+            &construct_protocol::paths::Paths::discover().operators_dir(),
             p,
         ) {
             Ok(()) => {
                 // Deletion must still withdraw the endpoint, but the response
                 // stays null: clients deserialize it as unit.
-                let _ = apply_service_edit(manager, ipc_method::SERVICE_CHANNEL_DELETE).await;
+                let _ = apply_operator_edit(manager, ipc_method::OPERATOR_CHANNEL_DELETE).await;
                 Response::ok(req.id.clone(), serde_json::Value::Null)
             }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_CHANNEL_ATTACH, {
-        let p = params!(req, construct_protocol::ServiceChannelAttachParams);
-        match crate::service::attach_channel(
-            &construct_protocol::paths::Paths::discover().services_dir(),
+    dispatch_entry!(ipc_method::OPERATOR_CHANNEL_ATTACH, {
+        let p = params!(req, construct_protocol::OperatorChannelAttachParams);
+        match crate::operator::attach_channel(
+            &construct_protocol::paths::Paths::discover().operators_dir(),
             p,
         ) {
             Ok(mut result) => {
                 result.applied =
-                    apply_service_edit(manager, ipc_method::SERVICE_CHANNEL_ATTACH).await;
+                    apply_operator_edit(manager, ipc_method::OPERATOR_CHANNEL_ATTACH).await;
                 ok!(req, &result)
             }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_CHANNEL_DETACH, {
-        let p = params!(req, construct_protocol::ServiceChannelAttachParams);
-        match crate::service::detach_channel(
-            &construct_protocol::paths::Paths::discover().services_dir(),
+    dispatch_entry!(ipc_method::OPERATOR_CHANNEL_DETACH, {
+        let p = params!(req, construct_protocol::OperatorChannelAttachParams);
+        match crate::operator::detach_channel(
+            &construct_protocol::paths::Paths::discover().operators_dir(),
             p,
         ) {
             Ok(mut result) => {
                 result.applied =
-                    apply_service_edit(manager, ipc_method::SERVICE_CHANNEL_DETACH).await;
+                    apply_operator_edit(manager, ipc_method::OPERATOR_CHANNEL_DETACH).await;
                 ok!(req, &result)
             }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_CHANNEL_ROTATE_SECRET, {
-        let p = params!(req, construct_protocol::ServiceChannelNameParams);
-        match crate::service::rotate_channel_secret(
-            &construct_protocol::paths::Paths::discover().services_dir(),
+    dispatch_entry!(ipc_method::OPERATOR_CHANNEL_ROTATE_SECRET, {
+        let p = params!(req, construct_protocol::OperatorChannelNameParams);
+        match crate::operator::rotate_channel_secret(
+            &construct_protocol::paths::Paths::discover().operators_dir(),
             p,
         ) {
             Ok(mut result) => {
                 result.applied =
-                    apply_service_edit(manager, ipc_method::SERVICE_CHANNEL_ROTATE_SECRET).await;
+                    apply_operator_edit(manager, ipc_method::OPERATOR_CHANNEL_ROTATE_SECRET).await;
                 ok!(req, &result)
             }
             Err(e) => Response::err(req.id.clone(), ErrorObject::invalid_params(e.to_string())),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_CHANNEL_PUBLISH, {
+    dispatch_entry!(ipc_method::OPERATOR_CHANNEL_PUBLISH, {
         let p = params!(req, construct_protocol::ChannelPublicationParams);
         let Some(publications) = manager.channel_publications() else {
             return Response::err(
@@ -1584,7 +1584,7 @@ pub(crate) async fn dispatch(
             );
         };
         match publications
-            .publish(p.service_name, p.channel_id, p.provider)
+            .publish(p.operator_name, p.channel_id, p.provider)
             .await
         {
             Ok(summary) => ok!(req, &summary),
@@ -1594,15 +1594,15 @@ pub(crate) async fn dispatch(
             ),
         }
     });
-    dispatch_entry!(ipc_method::SERVICE_CHANNEL_UNPUBLISH, {
-        let p = params!(req, construct_protocol::ServiceChannelNameParams);
+    dispatch_entry!(ipc_method::OPERATOR_CHANNEL_UNPUBLISH, {
+        let p = params!(req, construct_protocol::OperatorChannelNameParams);
         let Some(publications) = manager.channel_publications() else {
             return Response::err(
                 req.id.clone(),
                 ErrorObject::internal("channel publication supervisor is not running"),
             );
         };
-        match publications.unpublish(p.service_name, p.channel_id).await {
+        match publications.unpublish(p.operator_name, p.channel_id).await {
             Ok(withdrawn) => ok!(req, &serde_json::json!({ "withdrawn": withdrawn })),
             Err(error) => Response::err(req.id.clone(), ErrorObject::internal(error.to_string())),
         }
@@ -2263,7 +2263,7 @@ mod tests {
             &Some("s1".to_string()),
             BroadcastMsg::ChannelPublicationState(
                 construct_protocol::ChannelPublicationNotificationPayload {
-                    service_name: "alerts".into(),
+                    operator_name: "alerts".into(),
                     channel_id: "http".into(),
                     publication: None,
                 },
@@ -2276,7 +2276,7 @@ mod tests {
             notification["method"],
             construct_protocol::ipc_notif::CHANNEL_PUBLICATION_STATE
         );
-        assert_eq!(notification["params"]["service_name"], "alerts");
+        assert_eq!(notification["params"]["operator_name"], "alerts");
         assert_eq!(notification["params"]["channel_id"], "http");
     }
 

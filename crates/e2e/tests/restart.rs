@@ -292,7 +292,7 @@ async fn tui_auto_reconnects_after_restart() {
 }
 
 /// The user's real `/construct restart` path: the command is typed
-/// into the smith orchestrator's REPL, not issued by an external
+/// into the smith minibuffer's REPL, not issued by an external
 /// client. Smith resolves it as a `Routing::Client` slash and emits
 /// `SessionEvent::ClientCommand { id: Agentd, args: "restart" }`; the
 /// TUI turns that into `daemon_restart()` from *inside*
@@ -302,20 +302,20 @@ async fn tui_auto_reconnects_after_restart() {
 /// trigger + reconnect. (Smith handles the slash before any model
 /// call, so no provider/API key is needed.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn tui_reconnects_after_orchestrator_typed_construct_restart() {
+async fn tui_reconnects_after_minibuffer_typed_construct_restart() {
     use construct_protocol::CreateSessionParams;
 
     let d = Daemon::spawn().await.expect("spawn daemon");
 
-    // Create the smith orchestrator directly (the e2e harness
+    // Create the smith minibuffer directly (the e2e harness
     // disables daemon auto-create). The TUI renders an
-    // Orchestrator-kind session as its focused REPL panel.
+    // Minibuffer-kind session as its focused REPL panel.
     let orch = CreateSessionParams {
         harness: "smith".to_string(),
         cwd: "/tmp".to_string(),
         prompt: None,
         model: None,
-        title: Some("orchestrator".to_string()),
+        title: Some("minibuffer".to_string()),
         mode: Some("interactive".to_string()),
         pty_size: Some(construct_protocol::PtySize {
             cols: 100,
@@ -324,7 +324,7 @@ async fn tui_reconnects_after_orchestrator_typed_construct_restart() {
         worktree: false,
         env: Default::default(),
         args: Vec::new(),
-        kind: construct_protocol::SessionKind::Orchestrator,
+        kind: construct_protocol::SessionKind::Minibuffer,
         parent_session_id: None,
         group_id: None,
         position_after_session_id: None,
@@ -333,31 +333,31 @@ async fn tui_reconnects_after_orchestrator_typed_construct_restart() {
     let orch_id = match d.client.create(orch).await {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("skipping: could not create smith orchestrator ({e})");
+            eprintln!("skipping: could not create smith minibuffer ({e})");
             return;
         }
     };
 
     let mut tui =
-        Tui::spawn_with_recording(&d.socket, "restart_orchestrator_typed").expect("spawn TUI");
+        Tui::spawn_with_recording(&d.socket, "restart_minibuffer_typed").expect("spawn TUI");
     tui.wait_for("focus:", Duration::from_secs(15))
         .await
         .expect("modeline never rendered");
     // Let smith's interactive REPL come up and start reading its PTY.
     tokio::time::sleep(Duration::from_millis(2500)).await;
 
-    // Type the command into the orchestrator PTY (carriage return =
+    // Type the command into the minibuffer PTY (carriage return =
     // Enter). Smith emits ClientCommand → TUI runs daemon_restart.
     d.client
         .pty_input(&orch_id, b"/construct restart\r".to_vec())
         .await
-        .expect("pty_input to orchestrator");
+        .expect("pty_input to minibuffer");
 
     // Must reconnect on its own — the in-loop trigger is the whole
     // point of this test.
     tui.wait_for("reconnected to daemon", Duration::from_secs(45))
         .await
-        .expect("TUI did not auto-reconnect after orchestrator-typed /construct restart");
+        .expect("TUI did not auto-reconnect after minibuffer-typed /construct restart");
 
     tui.send(b"\x18\x03").expect("send C-x C-c");
     let status = tui

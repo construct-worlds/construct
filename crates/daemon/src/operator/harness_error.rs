@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn a_codex_stream_failure_is_recovered_whole() {
-        // Captured verbatim from the PTY of a live codex service session whose
+        // Captured verbatim from the PTY of a live codex operator session whose
         // turn died against a router port that had moved. The banner and the
         // URL that identifies it arrive in two separate writes, and the
         // composer redraw follows immediately behind — the message is only

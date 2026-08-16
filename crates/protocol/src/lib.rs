@@ -671,10 +671,10 @@ pub enum SessionEvent {
     ApprovalModeChanged {
         mode: ApprovalMode,
     },
-    /// Adapter toggled the operator ambient loop (`/operator enable|disable`).
+    /// Adapter toggled the minibuffer ambient loop (`/minibuffer enable|disable`).
     /// Durable per-session state like [`ApprovalModeChanged`]: never written
     /// to the transcript; the daemon persists it so the choice survives restart.
-    OperatorLoopChanged {
+    MinibufferLoopChanged {
         enabled: bool,
     },
     /// Adapter switched the session's active model internally (e.g. the
@@ -1243,7 +1243,7 @@ pub mod ipc_method {
     /// see `SmithSetAuthMethodResult::note`.
     pub const SMITH_SET_AUTH_METHOD: &str = "smith.set_auth_method";
     /// Live status of the daemon's ambient features (auto-naming,
-    /// suggestions, operator — spec 0151): whether each is working,
+    /// suggestions, minibuffer — spec 0151): whether each is working,
     /// degraded, or off, with a human-readable reason. Lets clients
     /// connect a silently-missing convenience back to its cause instead
     /// of leaving the user guessing.
@@ -1262,20 +1262,20 @@ pub mod ipc_method {
     /// result back into the document once the subagent completes.
     pub const PLAYBOOK_VERB_EXECUTE: &str = "playbook.verb_execute";
     pub const SESSION_LIST: &str = "session.list";
-    pub const SERVICE_LIST: &str = "service.list";
-    pub const SERVICE_PUT: &str = "service.put";
-    pub const SERVICE_DELETE: &str = "service.delete";
-    pub const SERVICE_MOVE: &str = "service.move";
-    pub const SERVICE_REPLY: &str = "service.reply";
-    pub const SERVICE_CHANNEL_LIST: &str = "service.channel.list";
-    pub const SERVICE_CHANNEL_CATALOG_LIST: &str = "service.channel.catalog.list";
-    pub const SERVICE_CHANNEL_PUT: &str = "service.channel.put";
-    pub const SERVICE_CHANNEL_DELETE: &str = "service.channel.delete";
-    pub const SERVICE_CHANNEL_ATTACH: &str = "service.channel.attach";
-    pub const SERVICE_CHANNEL_DETACH: &str = "service.channel.detach";
-    pub const SERVICE_CHANNEL_ROTATE_SECRET: &str = "service.channel.rotate_secret";
-    pub const SERVICE_CHANNEL_PUBLISH: &str = "service.channel.publish";
-    pub const SERVICE_CHANNEL_UNPUBLISH: &str = "service.channel.unpublish";
+    pub const OPERATOR_LIST: &str = "operator.list";
+    pub const OPERATOR_PUT: &str = "operator.put";
+    pub const OPERATOR_DELETE: &str = "operator.delete";
+    pub const OPERATOR_MOVE: &str = "operator.move";
+    pub const OPERATOR_REPLY: &str = "operator.reply";
+    pub const OPERATOR_CHANNEL_LIST: &str = "operator.channel.list";
+    pub const OPERATOR_CHANNEL_CATALOG_LIST: &str = "operator.channel.catalog.list";
+    pub const OPERATOR_CHANNEL_PUT: &str = "operator.channel.put";
+    pub const OPERATOR_CHANNEL_DELETE: &str = "operator.channel.delete";
+    pub const OPERATOR_CHANNEL_ATTACH: &str = "operator.channel.attach";
+    pub const OPERATOR_CHANNEL_DETACH: &str = "operator.channel.detach";
+    pub const OPERATOR_CHANNEL_ROTATE_SECRET: &str = "operator.channel.rotate_secret";
+    pub const OPERATOR_CHANNEL_PUBLISH: &str = "operator.channel.publish";
+    pub const OPERATOR_CHANNEL_UNPUBLISH: &str = "operator.channel.unpublish";
     pub const SESSION_CREATE: &str = "session.create";
     pub const SESSION_GET: &str = "session.get";
     pub const SESSION_INPUT: &str = "session.input";
@@ -1428,7 +1428,7 @@ pub mod ipc_method {
     /// Re-read `config.toml` and apply it to the running daemon (spec 0190).
     /// The file watcher does this on its own when the file changes; this is
     /// the same act on demand, for a client that just wrote the file or an
-    /// operator who does not want to wait for the next tick. Returns a
+    /// user who does not want to wait for the next tick. Returns a
     /// `ConfigApplyResult` describing what applied and what needs a restart —
     /// a config that fails to parse is reported there, not raised as an error,
     /// because the running configuration is intact either way.
@@ -1493,7 +1493,7 @@ pub mod ipc_notif {
     /// because a restart residue is a property of the daemon rather than of
     /// the client that happened to be attached when it arose.
     pub const CONFIG_STATE: &str = "config/state";
-    pub const CHANNEL_PUBLICATION_STATE: &str = "service/channel-publication-state";
+    pub const CHANNEL_PUBLICATION_STATE: &str = "operator/channel-publication-state";
     /// Console PTY bytes for the connection that opened the console. Not a
     /// broadcast: consoles are per-connection, so this never reaches another
     /// client and carries no session id.
@@ -2418,11 +2418,11 @@ pub enum FeatureStatus {
 /// One ambient feature's live status, as reported by `features.status`
 /// (spec 0151). Ambient features are the daemon-driven conveniences that
 /// depend on the built-in smith harness having a usable model credential —
-/// session auto-naming, next-prompt suggestions, the operator session — and
+/// session auto-naming, next-prompt suggestions, the minibuffer session — and
 /// whose failure would otherwise be invisible to the user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureInfo {
-    /// Stable id: `"auto_title"`, `"suggestions"`, `"operator"`.
+    /// Stable id: `"auto_title"`, `"suggestions"`, `"minibuffer"`.
     pub id: String,
     /// Human label for display, e.g. "Session auto-naming".
     pub label: String,
@@ -2611,9 +2611,9 @@ pub struct UsageQueryResult {
     pub enabled: bool,
 }
 
-/// Distinguishes the implicit orchestrator session — created by the
+/// Distinguishes the implicit minibuffer session — created by the
 /// daemon at startup as the user's always-available command surface —
-/// from ordinary user-created sessions. The orchestrator session is
+/// from ordinary user-created sessions. The minibuffer session is
 /// otherwise identical to a user session; clients use this flag to
 /// render it differently (hidden from the session list, surfaced in
 /// the TUI's minibuffer).
@@ -2622,12 +2622,15 @@ pub struct UsageQueryResult {
 pub enum SessionKind {
     #[default]
     User,
-    Orchestrator,
+    /// Renamed from `orchestrator`; the alias keeps `meta.json` files
+    /// written before the rename loading.
+    #[serde(alias = "orchestrator")]
+    Minibuffer,
     Subagent,
     /// A short-lived, daemon-internal session spun up to run a harness's
     /// own usage/status slash command and capture what it renders (spec
     /// 0085). Hidden from every session list via the same `User`-only
-    /// allowlist that hides `Orchestrator`/`Subagent`; deleted (along with
+    /// allowlist that hides `Minibuffer`/`Subagent`; deleted (along with
     /// the native transcript file the harness CLI wrote for it) as soon as
     /// the probe finishes.
     UsageProbe,
@@ -2788,9 +2791,9 @@ pub struct SessionSummary {
     /// How adapters that gate tools handle Risky tool calls.
     #[serde(default)]
     pub approval_mode: ApprovalMode,
-    /// Distinguishes the orchestrator session (daemon-created, hidden
+    /// Distinguishes the minibuffer session (daemon-created, hidden
     /// from the session list) from ordinary user sessions. Persisted
-    /// in `meta.json` so the daemon recognizes the orchestrator
+    /// in `meta.json` so the daemon recognizes the minibuffer
     /// across restarts.
     #[serde(default)]
     pub kind: SessionKind,
@@ -2800,15 +2803,16 @@ pub struct SessionSummary {
     /// The daemon does not auto-resume archived sessions on startup.
     #[serde(default)]
     pub archived: bool,
-    /// Operator ambient loop is disabled (`/operator disable`). Only meaningful
-    /// for the orchestrator session; true (disabled) by default on fresh create,
-    /// false for all other session kinds.
-    #[serde(default)]
-    pub operator_loop_disabled: bool,
+    /// Minibuffer ambient loop is disabled (`/minibuffer disable`). Only meaningful
+    /// for the minibuffer session; true (disabled) by default on fresh create,
+    /// false for all other session kinds. The alias keeps `meta.json` files
+    /// from before the operator→minibuffer rename loading.
+    #[serde(default, alias = "operator_loop_disabled")]
+    pub minibuffer_loop_disabled: bool,
     /// Sticky "this session needs you" marker. The daemon raises it when the
     /// session leaves `Running` for a non-running state (awaiting input / done
     /// / errored) while it isn't the focused session, and clears it when the
-    /// operator switches to it or it returns to `Running`. Persisted so it
+    /// user switches to it or it returns to `Running`. Persisted so it
     /// survives daemon/client restart. Orthogonal to `state` — not a run state.
     #[serde(default)]
     pub needs_attention: bool,
@@ -3438,10 +3442,10 @@ pub struct CreateSessionParams {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub args: Vec<String>,
-    /// Marks an internal daemon caller as creating the orchestrator
+    /// Marks an internal daemon caller as creating the minibuffer
     /// session. Public IPC clients should leave this as
-    /// `SessionKind::User`; daemon-internal `ensure_orchestrator`
-    /// passes `Orchestrator`.
+    /// `SessionKind::User`; daemon-internal `ensure_minibuffer`
+    /// passes `Minibuffer`.
     #[serde(default)]
     pub kind: SessionKind,
     /// Parent session for internal child sessions such as Smith subagents.
@@ -3465,65 +3469,65 @@ pub struct CreateSessionParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceSummary {
+pub struct OperatorSummary {
     pub name: String,
-    /// Stable position among service rows in the unified session list.
+    /// Stable position among operator rows in the unified session list.
     /// Legacy definitions default to zero and use their name as a tie-breaker
     /// until the first reorder materializes explicit positions.
     #[serde(default)]
     pub position: u64,
-    /// Where this row sits when the operator has moved it out of the leading
-    /// service block and into the top-level session/project flow. `None`
+    /// Where this row sits when the user has moved it out of the leading
+    /// operator block and into the top-level session/project flow. `None`
     /// keeps the row in the leading block (legacy behavior).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placement: Option<ServicePlacement>,
+    pub placement: Option<OperatorPlacement>,
     pub instruction: String,
     pub harness: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Session surface used for newly routed conversations. `headless` emits
     /// structured assistant events; `interactive` runs the harness's native
-    /// PTY and requires an explicit service-reply tool call.
-    #[serde(default = "default_service_session_mode")]
+    /// PTY and requires an explicit operator-reply tool call.
+    #[serde(default = "default_operator_session_mode")]
     pub session_mode: String,
     pub cwd: String,
     pub routing: String,
     #[serde(default)]
     pub paused: bool,
     #[serde(default)]
-    pub channels: Vec<ServiceChannelSummary>,
+    pub channels: Vec<OperatorChannelSummary>,
 }
 
-/// A service row's slot in the top-level list flow. The row is pinned to the
+/// A operator row's slot in the top-level list flow. The row is pinned to the
 /// `position` value of the session or project row it renders after: at equal
-/// positions the session/project row sorts first, then services by their own
-/// service position. Pinning to a value (not an id) keeps the row in place
+/// positions the session/project row sorts first, then operators by their own
+/// operator position. Pinning to a value (not an id) keeps the row in place
 /// when the neighbor it was dropped after is archived, deleted, or moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServicePlacement {
-    pub region: ServicePlacementRegion,
+pub struct OperatorPlacement {
+    pub region: OperatorPlacementRegion,
     /// Compared within the region's own session/project position space.
     pub position: i64,
 }
 
-/// Which top-level region a placed service row is interleaved into: the
+/// Which top-level region a placed operator row is interleaved into: the
 /// ungrouped-session run or the projects run that follows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ServicePlacementRegion {
+pub enum OperatorPlacementRegion {
     Sessions,
     Projects,
 }
 
-fn default_service_session_mode() -> String {
+fn default_operator_session_mode() -> String {
     "headless".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceChannelSummary {
+pub struct OperatorChannelSummary {
     pub id: String,
     pub kind: String,
-    #[serde(default = "default_service_channel_true")]
+    #[serde(default = "default_operator_channel_true")]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
@@ -3554,13 +3558,13 @@ pub struct ServiceChannelSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_to: Option<String>,
     /// Live public exposure, when this channel has been explicitly published.
-    /// Publication is runtime state rather than service configuration: daemon
+    /// Publication is runtime state rather than operator configuration: daemon
     /// restart, pause, detach, and endpoint replacement all withdraw it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<ChannelPublicationSummary>,
 }
 
-fn default_service_channel_true() -> bool {
+fn default_operator_channel_true() -> bool {
     true
 }
 
@@ -3600,7 +3604,7 @@ pub enum ChannelPublicationPhase {
 /// Runtime status shown beside a channel in every client.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChannelPublicationSummary {
-    pub service_name: String,
+    pub operator_name: String,
     pub channel_id: String,
     /// Provider identifier rather than an enum so plugins can add providers
     /// without extending the core wire protocol.
@@ -3619,7 +3623,7 @@ pub struct ChannelPublicationSummary {
 /// route was explicitly or automatically withdrawn.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChannelPublicationNotificationPayload {
-    pub service_name: String,
+    pub operator_name: String,
     pub channel_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<ChannelPublicationSummary>,
@@ -3627,7 +3631,7 @@ pub struct ChannelPublicationNotificationPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelPublicationParams {
-    pub service_name: String,
+    pub operator_name: String,
     pub channel_id: String,
     #[serde(default = "default_channel_publication_provider")]
     pub provider: String,
@@ -3638,12 +3642,12 @@ fn default_channel_publication_provider() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServicePutParams {
-    pub service: ServiceSummary,
+pub struct OperatorPutParams {
+    pub operator: OperatorSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceReplyParams {
+pub struct OperatorReplyParams {
     /// Construct session that owns the MCP server making this request.
     pub session_id: String,
     /// Opaque delivery capability included in the routed prompt.
@@ -3654,18 +3658,18 @@ pub struct ServiceReplyParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServicePutResult {
-    pub service: ServiceSummary,
+pub struct OperatorPutResult {
+    pub operator: OperatorSummary,
     /// What the running daemon did with this edit.
     #[serde(default)]
-    pub applied: ServiceApplyResult,
+    pub applied: OperatorApplyResult,
 }
 
-/// When an edit to a service field reaches the running system.
+/// When an edit to a operator field reaches the running system.
 ///
 /// Clients render the class beside the field being edited, and the daemon
-/// obeys the same table, so the promise an operator reads is the promise the
-/// daemon keeps. Adding a field to a service definition means giving it a
+/// obeys the same table, so the promise a user reads is the promise the
+/// daemon keeps. Adding a field to a operator definition means giving it a
 /// class here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -3695,9 +3699,9 @@ impl PropagationClass {
     }
 }
 
-/// Every editable part of a service definition.
+/// Every editable part of a operator definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceField {
+pub enum OperatorField {
     Instruction,
     Harness,
     Model,
@@ -3716,24 +3720,24 @@ pub enum ServiceField {
     ChannelThreadContext,
 }
 
-impl ServiceField {
-    pub const ALL: &'static [ServiceField] = &[
-        ServiceField::Instruction,
-        ServiceField::Harness,
-        ServiceField::Model,
-        ServiceField::SessionMode,
-        ServiceField::Cwd,
-        ServiceField::Routing,
-        ServiceField::Paused,
-        ServiceField::ApprovalTimeout,
-        ServiceField::Sandbox,
-        ServiceField::ChannelAttachment,
-        ServiceField::ChannelPort,
-        ServiceField::ChannelState,
-        ServiceField::ChannelCredential,
-        ServiceField::ChannelProgress,
-        ServiceField::ChannelFollowUp,
-        ServiceField::ChannelThreadContext,
+impl OperatorField {
+    pub const ALL: &'static [OperatorField] = &[
+        OperatorField::Instruction,
+        OperatorField::Harness,
+        OperatorField::Model,
+        OperatorField::SessionMode,
+        OperatorField::Cwd,
+        OperatorField::Routing,
+        OperatorField::Paused,
+        OperatorField::ApprovalTimeout,
+        OperatorField::Sandbox,
+        OperatorField::ChannelAttachment,
+        OperatorField::ChannelPort,
+        OperatorField::ChannelState,
+        OperatorField::ChannelCredential,
+        OperatorField::ChannelProgress,
+        OperatorField::ChannelFollowUp,
+        OperatorField::ChannelThreadContext,
     ];
 
     pub fn propagation(self) -> PropagationClass {
@@ -3742,31 +3746,31 @@ impl ServiceField {
             // Slack channel has no port, but its behavior options are held by
             // the running connection, so saving one replaces that connection
             // exactly as a changed allowlist does.
-            ServiceField::ChannelAttachment
-            | ServiceField::ChannelPort
-            | ServiceField::ChannelState
-            | ServiceField::ChannelCredential
-            | ServiceField::ChannelProgress
-            | ServiceField::ChannelFollowUp
-            | ServiceField::ChannelThreadContext => PropagationClass::Immediate,
+            OperatorField::ChannelAttachment
+            | OperatorField::ChannelPort
+            | OperatorField::ChannelState
+            | OperatorField::ChannelCredential
+            | OperatorField::ChannelProgress
+            | OperatorField::ChannelFollowUp
+            | OperatorField::ChannelThreadContext => PropagationClass::Immediate,
             // Consulted while handling a request, before any session is touched.
-            ServiceField::Routing | ServiceField::Paused | ServiceField::ApprovalTimeout => {
+            OperatorField::Routing | OperatorField::Paused | OperatorField::ApprovalTimeout => {
                 PropagationClass::NextRequest
             }
             // Consulted only when a session is built.
-            ServiceField::Instruction
-            | ServiceField::Harness
-            | ServiceField::Model
-            | ServiceField::SessionMode
-            | ServiceField::Cwd
-            | ServiceField::Sandbox => PropagationClass::NextSession,
+            OperatorField::Instruction
+            | OperatorField::Harness
+            | OperatorField::Model
+            | OperatorField::SessionMode
+            | OperatorField::Cwd
+            | OperatorField::Sandbox => PropagationClass::NextSession,
         }
     }
 }
 
 /// Every part of the daemon's `config.toml` that an edit can change.
 ///
-/// The parallel of [`ServiceField`] for the configuration file, and it exists
+/// The parallel of [`OperatorField`] for the configuration file, and it exists
 /// for the same reason: the class beside a setting is the promise the daemon
 /// keeps (spec 0190). [`ConfigField::propagation`] is an exhaustive match, so
 /// adding a setting to the configuration does not compile until it has been
@@ -3782,7 +3786,7 @@ pub enum ConfigField {
     AdapterUsageProbe,
     DaemonEnv,
     DefaultsWorktree,
-    OrchestratorHarness,
+    MinibufferHarness,
     PlaybookTemplatesDir,
     SuggestEnabled,
     RouterEnabled,
@@ -3803,7 +3807,7 @@ impl ConfigField {
         ConfigField::AdapterUsageProbe,
         ConfigField::DaemonEnv,
         ConfigField::DefaultsWorktree,
-        ConfigField::OrchestratorHarness,
+        ConfigField::MinibufferHarness,
         ConfigField::PlaybookTemplatesDir,
         ConfigField::SuggestEnabled,
         ConfigField::RouterEnabled,
@@ -3836,7 +3840,7 @@ impl ConfigField {
             | ConfigField::AdapterEnv
             | ConfigField::DaemonEnv
             | ConfigField::DefaultsWorktree
-            | ConfigField::OrchestratorHarness => PropagationClass::NextSession,
+            | ConfigField::MinibufferHarness => PropagationClass::NextSession,
             // The port is transport identity: harness processes are told it
             // once, at spawn, and cannot be told it moved (spec 0183).
             ConfigField::RouterPort => PropagationClass::Restart,
@@ -3853,13 +3857,13 @@ impl ConfigField {
 
 /// The effect an accepted configuration reload had on the running daemon.
 ///
-/// Mirrors [`ServiceApplyResult`]: the daemon states what it did rather than
-/// telling the operator to restart and hope.
+/// Mirrors [`OperatorApplyResult`]: the daemon states what it did rather than
+/// telling the user to restart and hope.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigApplyResult {
     /// False when the file failed to parse — nothing changed.
     pub reloaded: bool,
-    /// What changed and is now in force, named for an operator.
+    /// What changed and is now in force, named for a user.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub applied: Vec<String>,
     /// What was read and recorded but is not in force until a restart. Sticky:
@@ -3873,7 +3877,7 @@ pub struct ConfigApplyResult {
 }
 
 impl ConfigApplyResult {
-    /// One line for an operator: what changed, or what stopped it.
+    /// One line for a user: what changed, or what stopped it.
     pub fn summary(&self) -> String {
         if let Some(error) = &self.error {
             return format!("config unchanged: {error}");
@@ -3912,12 +3916,12 @@ pub struct ConfigStateNotificationPayload {
     pub applied: Vec<String>,
 }
 
-/// The effect an accepted service edit had on the running daemon.
+/// The effect an accepted operator edit had on the running daemon.
 ///
 /// Definitions are applied live, so a client can state what happened rather
-/// than telling the operator to restart and hope.
+/// than telling the user to restart and hope.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ServiceApplyResult {
+pub struct OperatorApplyResult {
     /// False when no supervisor is running (the edit is persisted and will be
     /// picked up when one starts).
     pub reloaded: bool,
@@ -3930,8 +3934,8 @@ pub struct ServiceApplyResult {
     pub failures: Vec<String>,
 }
 
-impl ServiceApplyResult {
-    /// One line for an operator: what changed, or what stopped it.
+impl OperatorApplyResult {
+    /// One line for a user: what changed, or what stopped it.
     pub fn summary(&self) -> String {
         if !self.failures.is_empty() {
             return format!("saved; {}", self.failures.join("; "));
@@ -3958,29 +3962,29 @@ impl ServiceApplyResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceNameParams {
+pub struct OperatorNameParams {
     pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceMoveParams {
+pub struct OperatorMoveParams {
     pub name: String,
     pub direction: MoveDirection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceChannelPutParams {
-    pub service_name: String,
-    pub channel: ServiceChannelPut,
+pub struct OperatorChannelPutParams {
+    pub operator_name: String,
+    pub channel: OperatorChannelPut,
     #[serde(default)]
     pub rotate_secret: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceChannelPut {
+pub struct OperatorChannelPut {
     pub id: String,
     pub kind: String,
-    #[serde(default = "default_service_channel_true")]
+    #[serde(default = "default_operator_channel_true")]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
@@ -4023,24 +4027,24 @@ pub const SLACK_FOLLOW_UP_DEFAULT: &str = "thread";
 pub const SLACK_THREAD_CONTEXT_DEFAULT: usize = 50;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceChannelPutResult {
-    pub channel: ServiceChannelSummary,
+pub struct OperatorChannelPutResult {
+    pub channel: OperatorChannelSummary,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_secret: Option<String>,
     /// What the running daemon did with this edit.
     #[serde(default)]
-    pub applied: ServiceApplyResult,
+    pub applied: OperatorApplyResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceChannelNameParams {
-    pub service_name: String,
+pub struct OperatorChannelNameParams {
+    pub operator_name: String,
     pub channel_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceChannelAttachParams {
-    pub service_name: String,
+pub struct OperatorChannelAttachParams {
+    pub operator_name: String,
     pub channel_id: String,
 }
 
@@ -4196,7 +4200,7 @@ pub struct RemoteStateNotificationPayload {
 ///
 /// - `Cloudflare` — a `cloudflared` quick tunnel. Public internet,
 ///   ephemeral URL that nobody can guess. Needs no account.
-/// - `Construct` — Construct's authenticated first-party service,
+/// - `Construct` — Construct's authenticated first-party operator,
 ///   with a user-chosen stable name under `tunnel.zarvis.ai`.
 ///
 /// The enum keeps a `None` variant and room for more providers because
@@ -4561,12 +4565,12 @@ pub enum LayoutSplitDirection {
 
 /// The shared split layout: a recursive binary tree of panes.
 ///
-/// A leaf is a *pane*, and a pane shows at most one session or service. Ratios are
+/// A leaf is a *pane*, and a pane shows at most one session or operator. Ratios are
 /// percentages rather than absolute sizes precisely so the tree is
 /// client-agnostic — the same 60/40 split is meaningful in an 80-column
 /// terminal and in a 3440px browser window.
 ///
-/// `session_id` and `service_name` are optional because a pane can
+/// `session_id` and `operator_name` are optional because a pane can
 /// legitimately be empty: a TUI window whose selection is a group header or
 /// an archived-row disclosure has no view to show, and a freshly split pane
 /// may not have picked one yet. At most one is present. Clients must treat
@@ -4582,7 +4586,7 @@ pub enum LayoutNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        service_name: Option<String>,
+        operator_name: Option<String>,
     },
     Split {
         direction: LayoutSplitDirection,
@@ -4598,7 +4602,7 @@ impl Default for LayoutNode {
         Self::Leaf {
             id: 1,
             session_id: None,
-            service_name: None,
+            operator_name: None,
         }
     }
 }
@@ -4676,13 +4680,13 @@ impl LayoutNode {
         }
     }
 
-    pub fn service_for_leaf(&self, target: u64) -> Option<&str> {
+    pub fn operator_for_leaf(&self, target: u64) -> Option<&str> {
         match self {
-            Self::Leaf { id, service_name, .. } if *id == target => service_name.as_deref(),
+            Self::Leaf { id, operator_name, .. } if *id == target => operator_name.as_deref(),
             Self::Leaf { .. } => None,
             Self::Split { first, second, .. } => first
-                .service_for_leaf(target)
-                .or_else(|| second.service_for_leaf(target)),
+                .operator_for_leaf(target)
+                .or_else(|| second.operator_for_leaf(target)),
         }
     }
 
@@ -5224,7 +5228,7 @@ mod layout_tests {
         LayoutNode::Leaf {
             id,
             session_id: session.map(str::to_string),
-            service_name: None,
+            operator_name: None,
         }
     }
 
@@ -5250,16 +5254,16 @@ mod layout_tests {
     }
 
     #[test]
-    fn service_leaf_round_trips_and_is_not_a_session() {
+    fn operator_leaf_round_trips_and_is_not_a_session() {
         let tree = LayoutNode::Leaf {
             id: 4,
             session_id: None,
-            service_name: Some("assistant".to_string()),
+            operator_name: Some("assistant".to_string()),
         };
         let json = serde_json::to_string(&tree).unwrap();
-        assert!(json.contains("service_name"));
+        assert!(json.contains("operator_name"));
         let back: LayoutNode = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.service_for_leaf(4), Some("assistant"));
+        assert_eq!(back.operator_for_leaf(4), Some("assistant"));
         assert_eq!(back.session_for_leaf(4), None);
     }
 
@@ -5372,7 +5376,7 @@ mod session_state_glyph_tests {
 
     /// `Running` and `AwaitingInput` intentionally share a dot: both mean
     /// "alive, nothing wrong", and a session sitting at a prompt is usually
-    /// just idle rather than blocked on the operator. Pinned so a future
+    /// just idle rather than blocked on the user. Pinned so a future
     /// change has to argue with spec 0169 rather than quietly re-split them
     /// and re-introduce a per-row "waiting" signal that cries wolf.
     #[test]
@@ -5480,12 +5484,12 @@ mod cost_model_tests {
 }
 
 #[cfg(test)]
-mod service_protocol_tests {
+mod operator_protocol_tests {
     use super::*;
 
     #[test]
-    fn legacy_service_summary_defaults_to_headless() {
-        let summary: ServiceSummary = serde_json::from_value(serde_json::json!({
+    fn legacy_operator_summary_defaults_to_headless() {
+        let summary: OperatorSummary = serde_json::from_value(serde_json::json!({
             "name": "legacy",
             "instruction": "",
             "harness": "smith",
@@ -5493,7 +5497,7 @@ mod service_protocol_tests {
             "routing": "session-key",
             "channels": []
         }))
-        .expect("legacy service summary");
+        .expect("legacy operator summary");
 
         assert_eq!(summary.session_mode, "headless");
         assert_eq!(summary.position, 0);
@@ -5502,7 +5506,7 @@ mod service_protocol_tests {
     #[test]
     fn session_mode_edits_apply_to_new_sessions() {
         assert_eq!(
-            ServiceField::SessionMode.propagation(),
+            OperatorField::SessionMode.propagation(),
             PropagationClass::NextSession
         );
     }

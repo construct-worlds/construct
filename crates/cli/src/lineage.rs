@@ -2247,7 +2247,7 @@ mod tests {
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: SessionKind::User,
             archived: false,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
             merge: None,

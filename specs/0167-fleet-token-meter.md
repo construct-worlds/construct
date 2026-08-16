@@ -276,7 +276,7 @@ model.
 
 Each retained sample also identifies the reporting session. A client uses
 that identity with the currently loaded session summaries to rebuild meters
-scoped to a project, service, or other session subset from the same durable
+scoped to a project, operator, or other session subset from the same durable
 window. Restarting a client must not clear a scoped graph any more than it
 clears the fleet graph. History from an older daemon that lacks session
 identity can still seed the fleet graph and is omitted only from scoped

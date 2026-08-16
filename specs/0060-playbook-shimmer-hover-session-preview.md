@@ -3,11 +3,11 @@
 Status: accepted
 Date: 2026-06-30
 Area: tui
-Scope: Hovering a shimmering playbook block shows a cropped live preview of the dispatching (orchestrator) session's own terminal, captioned with the block's status tooltip; hovering a session clip chip continues to preview the session the clip points to.
+Scope: Hovering a shimmering playbook block shows a cropped live preview of the dispatching (minibuffer) session's own terminal, captioned with the block's status tooltip; hovering a session clip chip continues to preview the session the clip points to.
 
 ## Decision
 
-When a viewer hovers a still-running (shimmering) playbook block, the hover affordance is a small cropped live view of the **dispatching session's own terminal** — the orchestrator session running the playbook itself — captioned with the block's shimmer status tooltip (`0057`). This holds regardless of whether the block names a worker session in an `@{session:…}` clip: the shimmer-text hover always previews the dispatcher, never a session a block happens to delegate to.
+When a viewer hovers a still-running (shimmering) playbook block, the hover affordance is a small cropped live view of the **dispatching session's own terminal** — the minibuffer session running the playbook itself — captioned with the block's shimmer status tooltip (`0057`). This holds regardless of whether the block names a worker session in an `@{session:…}` clip: the shimmer-text hover always previews the dispatcher, never a session a block happens to delegate to.
 
 Hovering a `@{session:…}` smart-clip chip is a distinct affordance and keeps previewing the session the clip actually points to (e.g. a subagent/worker session) — the same session-preview card, just anchored to the chip and targeted at the referenced session instead of the dispatcher.
 
@@ -40,5 +40,5 @@ Captioning the preview with the tooltip preserves the concise agent-authored sta
 
 ## Examples
 
-- **Delegated block.** A playbook item "Building the PR @{session:worker}" shimmers while the worker runs. Hovering its prose text (not the clip chip) shows a small card with the orchestrator's own live terminal tail, captioned "Building PR". Hovering the `@{session:worker}` chip itself instead shows the worker session's live terminal tail — the clip's own target.
+- **Delegated block.** A playbook item "Building the PR @{session:worker}" shimmers while the worker runs. Hovering its prose text (not the clip chip) shows a small card with the minibuffer's own live terminal tail, captioned "Building PR". Hovering the `@{session:worker}` chip itself instead shows the worker session's live terminal tail — the clip's own target.
 - **Optimistic / no output yet.** The instant a Run starts, hovering a shimmering block shows the bare "Working…" tooltip until the dispatching session produces output, then upgrades to the live preview.

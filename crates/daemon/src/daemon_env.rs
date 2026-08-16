@@ -17,7 +17,7 @@
 //!
 //! Precedence is one-directional: a variable that is really set (to a
 //! non-empty value) always wins. Config fills gaps, it does not override an
-//! operator who exported something for this specific run.
+//! user who exported something for this specific run.
 //!
 //! This does not cover the `CONSTRUCT_*` knobs that select paths and assets
 //! — those are read while locating the config file, before there is a table
@@ -165,7 +165,7 @@ mod tests {
 
     /// Children inherit the real environment on their own, so the base map
     /// carries only what config adds — never a value that would override
-    /// what the operator exported.
+    /// what the user exported.
     #[test]
     fn child_base_carries_config_only_where_the_shell_is_silent() {
         with_env(

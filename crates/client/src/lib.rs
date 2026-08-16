@@ -468,141 +468,141 @@ impl Client {
         self.request(ipc_method::SESSION_LIST, &serde_json::Value::Null)
             .await
     }
-    pub async fn list_services(&self) -> Result<Vec<construct_protocol::ServiceSummary>> {
-        self.request(ipc_method::SERVICE_LIST, &serde_json::Value::Null)
+    pub async fn list_operators(&self) -> Result<Vec<construct_protocol::OperatorSummary>> {
+        self.request(ipc_method::OPERATOR_LIST, &serde_json::Value::Null)
             .await
     }
-    pub async fn service_reply(
+    pub async fn operator_reply(
         &self,
-        params: construct_protocol::ServiceReplyParams,
+        params: construct_protocol::OperatorReplyParams,
     ) -> Result<()> {
-        self.request(ipc_method::SERVICE_REPLY, &params).await
+        self.request(ipc_method::OPERATOR_REPLY, &params).await
     }
-    pub async fn put_service(
+    pub async fn put_operator(
         &self,
-        params: construct_protocol::ServicePutParams,
-    ) -> Result<construct_protocol::ServicePutResult> {
-        self.request(ipc_method::SERVICE_PUT, &params).await
+        params: construct_protocol::OperatorPutParams,
+    ) -> Result<construct_protocol::OperatorPutResult> {
+        self.request(ipc_method::OPERATOR_PUT, &params).await
     }
-    pub async fn delete_service(&self, name: String) -> Result<()> {
+    pub async fn delete_operator(&self, name: String) -> Result<()> {
         self.request(
-            ipc_method::SERVICE_DELETE,
-            &construct_protocol::ServiceNameParams { name },
+            ipc_method::OPERATOR_DELETE,
+            &construct_protocol::OperatorNameParams { name },
         )
         .await
     }
-    pub async fn move_service(&self, name: &str, direction: MoveDirection) -> Result<()> {
+    pub async fn move_operator(&self, name: &str, direction: MoveDirection) -> Result<()> {
         self.request(
-            ipc_method::SERVICE_MOVE,
-            &construct_protocol::ServiceMoveParams {
+            ipc_method::OPERATOR_MOVE,
+            &construct_protocol::OperatorMoveParams {
                 name: name.to_string(),
                 direction,
             },
         )
         .await
     }
-    pub async fn list_service_channels(
+    pub async fn list_operator_channels(
         &self,
-        service_name: &str,
-    ) -> Result<Vec<construct_protocol::ServiceChannelSummary>> {
+        operator_name: &str,
+    ) -> Result<Vec<construct_protocol::OperatorChannelSummary>> {
         self.request(
-            ipc_method::SERVICE_CHANNEL_LIST,
-            &construct_protocol::ServiceNameParams {
-                name: service_name.to_string(),
+            ipc_method::OPERATOR_CHANNEL_LIST,
+            &construct_protocol::OperatorNameParams {
+                name: operator_name.to_string(),
             },
         )
         .await
     }
-    pub async fn list_service_channel_catalog(
+    pub async fn list_operator_channel_catalog(
         &self,
-    ) -> Result<Vec<construct_protocol::ServiceChannelSummary>> {
+    ) -> Result<Vec<construct_protocol::OperatorChannelSummary>> {
         self.request(
-            ipc_method::SERVICE_CHANNEL_CATALOG_LIST,
+            ipc_method::OPERATOR_CHANNEL_CATALOG_LIST,
             &serde_json::Value::Null,
         )
         .await
     }
-    pub async fn put_service_channel(
+    pub async fn put_operator_channel(
         &self,
-        params: construct_protocol::ServiceChannelPutParams,
-    ) -> Result<construct_protocol::ServiceChannelPutResult> {
-        self.request(ipc_method::SERVICE_CHANNEL_PUT, &params).await
+        params: construct_protocol::OperatorChannelPutParams,
+    ) -> Result<construct_protocol::OperatorChannelPutResult> {
+        self.request(ipc_method::OPERATOR_CHANNEL_PUT, &params).await
     }
-    pub async fn delete_service_channel(
+    pub async fn delete_operator_channel(
         &self,
-        service_name: &str,
+        operator_name: &str,
         channel_id: &str,
     ) -> Result<()> {
         self.request(
-            ipc_method::SERVICE_CHANNEL_DELETE,
-            &construct_protocol::ServiceChannelNameParams {
-                service_name: service_name.to_string(),
+            ipc_method::OPERATOR_CHANNEL_DELETE,
+            &construct_protocol::OperatorChannelNameParams {
+                operator_name: operator_name.to_string(),
                 channel_id: channel_id.to_string(),
             },
         )
         .await
     }
-    pub async fn attach_service_channel(
+    pub async fn attach_operator_channel(
         &self,
-        service_name: &str,
+        operator_name: &str,
         channel_id: &str,
-    ) -> Result<construct_protocol::ServiceChannelPutResult> {
+    ) -> Result<construct_protocol::OperatorChannelPutResult> {
         self.request(
-            ipc_method::SERVICE_CHANNEL_ATTACH,
-            &construct_protocol::ServiceChannelAttachParams {
-                service_name: service_name.to_string(),
+            ipc_method::OPERATOR_CHANNEL_ATTACH,
+            &construct_protocol::OperatorChannelAttachParams {
+                operator_name: operator_name.to_string(),
                 channel_id: channel_id.to_string(),
             },
         )
         .await
     }
-    pub async fn detach_service_channel(
+    pub async fn detach_operator_channel(
         &self,
-        service_name: &str,
+        operator_name: &str,
         channel_id: &str,
-    ) -> Result<construct_protocol::ServiceChannelPutResult> {
+    ) -> Result<construct_protocol::OperatorChannelPutResult> {
         self.request(
-            ipc_method::SERVICE_CHANNEL_DETACH,
-            &construct_protocol::ServiceChannelAttachParams {
-                service_name: service_name.to_string(),
+            ipc_method::OPERATOR_CHANNEL_DETACH,
+            &construct_protocol::OperatorChannelAttachParams {
+                operator_name: operator_name.to_string(),
                 channel_id: channel_id.to_string(),
             },
         )
         .await
     }
-    pub async fn rotate_service_channel_secret(
+    pub async fn rotate_operator_channel_secret(
         &self,
-        service_name: &str,
+        operator_name: &str,
         channel_id: &str,
-    ) -> Result<construct_protocol::ServiceChannelPutResult> {
+    ) -> Result<construct_protocol::OperatorChannelPutResult> {
         self.request(
-            ipc_method::SERVICE_CHANNEL_ROTATE_SECRET,
-            &construct_protocol::ServiceChannelNameParams {
-                service_name: service_name.to_string(),
+            ipc_method::OPERATOR_CHANNEL_ROTATE_SECRET,
+            &construct_protocol::OperatorChannelNameParams {
+                operator_name: operator_name.to_string(),
                 channel_id: channel_id.to_string(),
             },
         )
         .await
     }
-    pub async fn publish_service_channel(
+    pub async fn publish_operator_channel(
         &self,
-        service_name: &str,
+        operator_name: &str,
         channel_id: &str,
         provider: &str,
     ) -> Result<construct_protocol::ChannelPublicationSummary> {
         self.request(
-            construct_protocol::ipc_method::SERVICE_CHANNEL_PUBLISH,
+            construct_protocol::ipc_method::OPERATOR_CHANNEL_PUBLISH,
             &construct_protocol::ChannelPublicationParams {
-                service_name: service_name.to_string(),
+                operator_name: operator_name.to_string(),
                 channel_id: channel_id.to_string(),
                 provider: provider.to_string(),
             },
         )
         .await
     }
-    pub async fn unpublish_service_channel(
+    pub async fn unpublish_operator_channel(
         &self,
-        service_name: &str,
+        operator_name: &str,
         channel_id: &str,
     ) -> Result<bool> {
         #[derive(serde::Deserialize)]
@@ -611,9 +611,9 @@ impl Client {
         }
         let result: ResultBody = self
             .request(
-                construct_protocol::ipc_method::SERVICE_CHANNEL_UNPUBLISH,
-                &construct_protocol::ServiceChannelNameParams {
-                    service_name: service_name.to_string(),
+                construct_protocol::ipc_method::OPERATOR_CHANNEL_UNPUBLISH,
+                &construct_protocol::OperatorChannelNameParams {
+                    operator_name: operator_name.to_string(),
                     channel_id: channel_id.to_string(),
                 },
             )
@@ -1319,7 +1319,7 @@ impl Client {
     /// Tell the adapter to act on a running tool call — `"kill"` to
     /// abort, `"background"` to detach and continue. Used by the
     /// TUI's `[bg]` / `[kill]` button click handlers; future
-    /// orchestrator slash commands will use it too.
+    /// minibuffer slash commands will use it too.
     pub async fn tool_action(
         &self,
         id: &str,

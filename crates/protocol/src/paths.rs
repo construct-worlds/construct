@@ -110,8 +110,8 @@ impl Paths {
         self.config_dir.join("config.toml.template")
     }
 
-    pub fn services_dir(&self) -> PathBuf {
-        self.config_dir.join("services")
+    pub fn operators_dir(&self) -> PathBuf {
+        self.config_dir.join("operators")
     }
 
     pub fn keymap_file(&self) -> PathBuf {
@@ -223,7 +223,7 @@ pub fn local_webui_port_for(paths: &Paths) -> u16 {
     read_persisted_port(&paths.webui_port_file()).unwrap_or(DEFAULT_WEBUI_PORT)
 }
 
-/// True when the operator pinned the web-UI port via env — the daemon
+/// True when the user pinned the web-UI port via env — the daemon
 /// must not auto-fallback or overwrite the persisted file.
 pub fn local_webui_port_explicit() -> bool {
     std::env::var(WEBUI_PORT_ENV)

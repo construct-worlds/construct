@@ -568,9 +568,9 @@ pub struct FeatureInputs {
     pub title_gen: bool,
     /// `[suggest] enabled` from config.
     pub suggest_enabled: bool,
-    /// The orchestrator's configured harness and that harness's
-    /// availability, or `None` when the operator is disabled in config.
-    pub orchestrator: Option<(String, Availability)>,
+    /// The minibuffer's configured harness and that harness's
+    /// availability, or `None` when the user is disabled in config.
+    pub minibuffer: Option<(String, Availability)>,
 }
 
 /// Map raw availability probes to per-feature status rows (spec 0151).
@@ -630,25 +630,25 @@ pub fn ambient_features(inputs: &FeatureInputs) -> Vec<construct_protocol::Featu
                 .to_string(),
         }
     };
-    let operator = match &inputs.orchestrator {
+    let minibuffer = match &inputs.minibuffer {
         None => FeatureInfo {
-            id: "operator".to_string(),
-            label: "Operator session".to_string(),
+            id: "minibuffer".to_string(),
+            label: "Minibuffer session".to_string(),
             status: FeatureStatus::Off,
-            detail: "disabled in config ([orchestrator])".to_string(),
+            detail: "disabled in config ([minibuffer])".to_string(),
         },
         Some((harness, avail)) if avail.available => FeatureInfo {
-            id: "operator".to_string(),
-            label: "Operator session".to_string(),
+            id: "minibuffer".to_string(),
+            label: "Minibuffer session".to_string(),
             status: FeatureStatus::Ok,
             detail: format!("runs on {harness} ({})", avail.detail),
         },
-        // smith's degraded operator still starts and handles slash
-        // commands (spec 0071's orchestrator exception); a missing
-        // wrapper CLI for a non-smith orchestrator can't start at all.
+        // smith's degraded minibuffer still starts and handles slash
+        // commands (spec 0071's minibuffer exception); a missing
+        // wrapper CLI for a non-smith minibuffer can't start at all.
         Some((harness, avail)) if harness == "smith" => FeatureInfo {
-            id: "operator".to_string(),
-            label: "Operator session".to_string(),
+            id: "minibuffer".to_string(),
+            label: "Minibuffer session".to_string(),
             status: FeatureStatus::Degraded,
             detail: format!(
                 "slash commands only — smith has no model credential ({})",
@@ -656,13 +656,13 @@ pub fn ambient_features(inputs: &FeatureInputs) -> Vec<construct_protocol::Featu
             ),
         },
         Some((harness, avail)) => FeatureInfo {
-            id: "operator".to_string(),
-            label: "Operator session".to_string(),
+            id: "minibuffer".to_string(),
+            label: "Minibuffer session".to_string(),
             status: FeatureStatus::Off,
             detail: format!("{harness} unavailable: {}", avail.detail),
         },
     };
-    vec![auto_title, suggestions, operator]
+    vec![auto_title, suggestions, minibuffer]
 }
 
 /// Which `smith_auth_methods` entry a pinned `CONSTRUCT_SMITH_MODEL` spec
@@ -730,7 +730,7 @@ mod tests {
             smith: Availability::ready("ready (Anthropic API key)"),
             title_gen: true,
             suggest_enabled: true,
-            orchestrator: Some((
+            minibuffer: Some((
                 "smith".to_string(),
                 Availability::ready("ready (Anthropic API key)"),
             )),
@@ -741,7 +741,7 @@ mod tests {
             smith: Availability::missing("no API key or OAuth credential found"),
             title_gen: false,
             suggest_enabled: true,
-            orchestrator: Some((
+            minibuffer: Some((
                 "smith".to_string(),
                 Availability::missing("no API key or OAuth credential found"),
             )),
@@ -760,18 +760,18 @@ mod tests {
             smith: Availability::missing("no API key or OAuth credential found"),
             title_gen: false,
             suggest_enabled: false,
-            orchestrator: None,
+            minibuffer: None,
         });
         assert_eq!(off[1].status, FeatureStatus::Off, "{off:#?}");
         assert_eq!(off[2].status, FeatureStatus::Off, "{off:#?}");
 
-        // A non-smith orchestrator harness that's missing means the operator
+        // A non-smith minibuffer harness that's missing means the user
         // can't start at all — Off, not smith-style Degraded.
         let wrapper = ambient_features(&FeatureInputs {
             smith: Availability::missing("no API key or OAuth credential found"),
             title_gen: false,
             suggest_enabled: true,
-            orchestrator: Some((
+            minibuffer: Some((
                 "claude".to_string(),
                 Availability::missing("`claude` CLI not found on daemon PATH"),
             )),
@@ -820,7 +820,7 @@ mod tests {
     }
 
     /// An OAuth-only machine runs smith sessions fine — so suggestions and
-    /// the operator stay Ok — while auto-naming falls back to the
+    /// the user stay Ok — while auto-naming falls back to the
     /// same-harness probe. Reporting it as Ok would promise a generator
     /// that never runs.
     #[test]
@@ -830,7 +830,7 @@ mod tests {
             smith: Availability::ready("ready (Codex subscription)"),
             title_gen: false,
             suggest_enabled: true,
-            orchestrator: Some((
+            minibuffer: Some((
                 "smith".to_string(),
                 Availability::ready("ready (Codex subscription)"),
             )),

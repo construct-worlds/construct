@@ -700,35 +700,35 @@
     .session-list .item { padding-top: 9px; padding-bottom: 9px; }
     .session-list .archived-row { padding-top: 6px; padding-bottom: 6px; }
   }
-  /* Operator / orchestrator row — pinned at the top, name in
+  /* Minibuffer / minibuffer row — pinned at the top, name in
      the accent color so it stands out as the special fleet
      dispatcher session. */
-  .session-list .item.is-operator .name {
+  .session-list .item.is-minibuffer .name {
     color: var(--accent);
     font-weight: 600;
   }
-  .session-list .item.is-operator {
+  .session-list .item.is-minibuffer {
     border-bottom: 1px solid var(--border-faint);
     border-bottom-left-radius: 0;
     border-bottom-right-radius: 0;
     margin-bottom: 4px;
   }
-  /* Services share the ordinary list row geometry but use a distinct type
+  /* Operators share the ordinary list row geometry but use a distinct type
      glyph so they cannot be mistaken for a session status marker. */
-  .session-list .item.is-service .service-glyph {
+  .session-list .item.is-operator .operator-glyph {
     flex: 0 0 16px;
     color: var(--accent);
     font-size: 13px;
     line-height: 1;
     text-align: center;
   }
-  .session-list .item.is-service .service-state {
+  .session-list .item.is-operator .operator-state {
     flex: none;
     margin-left: 5px;
     color: var(--warn);
     font-size: 11px;
   }
-  .session-list .item.is-service.paused {
+  .session-list .item.is-operator.paused {
     opacity: 0.7;
   }
   .session-list .empty {
@@ -804,7 +804,7 @@
     display: flex;
     flex-direction: column;
   }
-  .service-view {
+  .operator-view {
     flex: 1 1 0;
     min-width: 0;
     min-height: 0;
@@ -812,19 +812,19 @@
     padding: clamp(16px, 3vw, 36px);
     color: var(--fg);
   }
-  .service-view[hidden] { display: none; }
-  .service-view-header {
+  .operator-view[hidden] { display: none; }
+  .operator-view-header {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: 18px;
     margin-bottom: 22px;
   }
-  .service-view-kicker { color: var(--accent); font: 11px var(--mono); letter-spacing: .12em; }
-  .service-view h2 { margin: 4px 0 0; font-size: clamp(22px, 3vw, 34px); font-weight: 500; }
-  .service-view-actions { display: flex; gap: 8px; }
-  .service-view-actions button,
-  .service-view-footer button {
+  .operator-view-kicker { color: var(--accent); font: 11px var(--mono); letter-spacing: .12em; }
+  .operator-view h2 { margin: 4px 0 0; font-size: clamp(22px, 3vw, 34px); font-weight: 500; }
+  .operator-view-actions { display: flex; gap: 8px; }
+  .operator-view-actions button,
+  .operator-view-footer button {
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 7px 12px;
@@ -832,9 +832,9 @@
     color: var(--fg-dim);
     cursor: pointer;
   }
-  .service-view-actions button:hover { color: var(--fg); border-color: var(--accent); }
-  .service-view-actions .danger { color: var(--err); }
-  .service-view-grid {
+  .operator-view-actions button:hover { color: var(--fg); border-color: var(--accent); }
+  .operator-view-actions .danger { color: var(--err); }
+  .operator-view-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.15fr) minmax(220px, .85fr);
     gap: 1px;
@@ -843,66 +843,66 @@
     overflow: hidden;
     background: var(--border);
   }
-  .service-definition, .service-help { padding: 16px 18px; background: var(--bg-elev); min-height: 190px; }
-  .service-field { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border-faint); }
-  .service-field:last-child { border-bottom: 0; }
-  .service-field-label { color: var(--fg-faint); font: 11px var(--mono); }
-  .service-field-value { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
-  .service-field-value input,
-  .service-field-value textarea,
-  .service-field-value select {
+  .operator-definition, .operator-help { padding: 16px 18px; background: var(--bg-elev); min-height: 190px; }
+  .operator-field { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border-faint); }
+  .operator-field:last-child { border-bottom: 0; }
+  .operator-field-label { color: var(--fg-faint); font: 11px var(--mono); }
+  .operator-field-value { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
+  .operator-field-value input,
+  .operator-field-value textarea,
+  .operator-field-value select {
     width: 100%; box-sizing: border-box; border: 1px solid var(--border);
     border-radius: 5px; padding: 5px 7px; background: var(--bg);
     color: var(--fg); font: inherit; resize: vertical;
   }
-  .service-field-value textarea { min-height: 54px; }
-  .service-field-value input:focus,
-  .service-field-value textarea:focus,
-  .service-field-value select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
-  .service-field-value input[readonly], .service-field-value textarea[readonly] { border-color: transparent; background: transparent; padding-left: 0; }
-  .service-check { display: flex; align-items: center; gap: 7px; color: var(--fg-dim); }
-  .service-field-value.muted { color: var(--fg-dim); }
-  .service-help h3 { margin: 0 0 10px; color: var(--accent); font: 600 12px var(--mono); }
-  .service-help p { margin: 0; color: var(--fg-dim); line-height: 1.55; font-size: 13px; }
-  .service-help .hint { margin-top: 16px; color: var(--fg-faint); font: 11px var(--mono); }
-  .service-activity { margin-top: 18px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-elev); }
-  .service-activity h3 { margin: 0 0 10px; font: 600 12px var(--mono); color: var(--accent); }
-  .service-session-link { display: flex; gap: 10px; padding: 6px 0; color: var(--fg-dim); cursor: pointer; border-bottom: 1px solid var(--border-faint); }
-  .service-session-link:hover { color: var(--fg); }
-  .service-session-link .service-session-state { color: var(--ok); }
-  .service-session-link .service-session-channel { color: var(--accent); font-family: var(--mono); }
-  .service-channel-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border-faint); color: var(--fg-dim); }
-  .service-channel-row.unavailable { opacity: .48; }
-  .service-channel-row .channel-toggle { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
-  .service-channel-owner { color: var(--fg-faint); font: 11px var(--mono); }
-  .service-channel-row:last-of-type { border-bottom: 0; }
-  .service-channel-row .channel-id { min-width: 130px; color: var(--fg); font-family: var(--mono); }
-  .service-channel-row .channel-endpoint { flex: 1; min-width: 0; font-family: var(--mono); color: var(--fg-faint); }
-  .service-channel-row .channel-state { color: var(--ok); font: 11px var(--mono); }
-  .service-channel-row .channel-state.disabled { color: var(--fg-faint); }
-  .service-channel-actions { display: inline-flex; gap: 5px; }
-  .service-channel-actions button { border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; background: var(--bg); color: var(--fg-faint); cursor: pointer; font: 11px var(--mono); }
-  .service-channel-actions button:hover { color: var(--fg); border-color: var(--accent); }
-  .service-channel-actions .danger { color: var(--err); }
-  .service-channel-editor { margin: 12px 0 18px; padding: 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
-  .service-channel-editor-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-  .service-channel-editor label { display: grid; gap: 4px; color: var(--fg-faint); font: 11px var(--mono); }
-  .service-channel-editor input, .service-channel-editor select { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 4px; padding: 5px 6px; background: var(--bg-elev); color: var(--fg); font: inherit; }
-  .service-channel-editor input:focus, .service-channel-editor select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
-  .service-channel-editor .channel-editor-actions { display: flex; gap: 7px; margin-top: 10px; }
-  .service-channel-editor .channel-editor-actions button { border: 1px solid var(--border); border-radius: 5px; padding: 5px 9px; background: var(--bg-elev); color: var(--fg-dim); cursor: pointer; }
-  .service-channel-editor .channel-editor-actions button:hover { color: var(--fg); border-color: var(--accent); }
-  @media (max-width: 720px) { .service-channel-editor-grid { grid-template-columns: 1fr 1fr; } .service-channel-row { flex-wrap: wrap; } .service-channel-row .channel-endpoint { flex-basis: 100%; order: 3; } }
-  .service-view-footer { margin-top: 12px; color: var(--fg-faint); font: 11px var(--mono); white-space: pre-wrap; }
-  .service-pane-mirror { flex: 1; padding: 24px; background: var(--bg-elev); color: var(--fg-dim); }
-  .service-pane-mirror-kicker { color: var(--accent); font: 10px var(--mono); letter-spacing: .1em; }
-  .service-pane-mirror h3 { margin: 5px 0 12px; color: var(--fg); font-size: 18px; font-weight: 500; }
-  .service-pane-mirror p { margin: 6px 0; font-size: 12px; }
+  .operator-field-value textarea { min-height: 54px; }
+  .operator-field-value input:focus,
+  .operator-field-value textarea:focus,
+  .operator-field-value select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  .operator-field-value input[readonly], .operator-field-value textarea[readonly] { border-color: transparent; background: transparent; padding-left: 0; }
+  .operator-check { display: flex; align-items: center; gap: 7px; color: var(--fg-dim); }
+  .operator-field-value.muted { color: var(--fg-dim); }
+  .operator-help h3 { margin: 0 0 10px; color: var(--accent); font: 600 12px var(--mono); }
+  .operator-help p { margin: 0; color: var(--fg-dim); line-height: 1.55; font-size: 13px; }
+  .operator-help .hint { margin-top: 16px; color: var(--fg-faint); font: 11px var(--mono); }
+  .operator-activity { margin-top: 18px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-elev); }
+  .operator-activity h3 { margin: 0 0 10px; font: 600 12px var(--mono); color: var(--accent); }
+  .operator-session-link { display: flex; gap: 10px; padding: 6px 0; color: var(--fg-dim); cursor: pointer; border-bottom: 1px solid var(--border-faint); }
+  .operator-session-link:hover { color: var(--fg); }
+  .operator-session-link .operator-session-state { color: var(--ok); }
+  .operator-session-link .operator-session-channel { color: var(--accent); font-family: var(--mono); }
+  .operator-channel-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border-faint); color: var(--fg-dim); }
+  .operator-channel-row.unavailable { opacity: .48; }
+  .operator-channel-row .channel-toggle { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+  .operator-channel-owner { color: var(--fg-faint); font: 11px var(--mono); }
+  .operator-channel-row:last-of-type { border-bottom: 0; }
+  .operator-channel-row .channel-id { min-width: 130px; color: var(--fg); font-family: var(--mono); }
+  .operator-channel-row .channel-endpoint { flex: 1; min-width: 0; font-family: var(--mono); color: var(--fg-faint); }
+  .operator-channel-row .channel-state { color: var(--ok); font: 11px var(--mono); }
+  .operator-channel-row .channel-state.disabled { color: var(--fg-faint); }
+  .operator-channel-actions { display: inline-flex; gap: 5px; }
+  .operator-channel-actions button { border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; background: var(--bg); color: var(--fg-faint); cursor: pointer; font: 11px var(--mono); }
+  .operator-channel-actions button:hover { color: var(--fg); border-color: var(--accent); }
+  .operator-channel-actions .danger { color: var(--err); }
+  .operator-channel-editor { margin: 12px 0 18px; padding: 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
+  .operator-channel-editor-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .operator-channel-editor label { display: grid; gap: 4px; color: var(--fg-faint); font: 11px var(--mono); }
+  .operator-channel-editor input, .operator-channel-editor select { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 4px; padding: 5px 6px; background: var(--bg-elev); color: var(--fg); font: inherit; }
+  .operator-channel-editor input:focus, .operator-channel-editor select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  .operator-channel-editor .channel-editor-actions { display: flex; gap: 7px; margin-top: 10px; }
+  .operator-channel-editor .channel-editor-actions button { border: 1px solid var(--border); border-radius: 5px; padding: 5px 9px; background: var(--bg-elev); color: var(--fg-dim); cursor: pointer; }
+  .operator-channel-editor .channel-editor-actions button:hover { color: var(--fg); border-color: var(--accent); }
+  @media (max-width: 720px) { .operator-channel-editor-grid { grid-template-columns: 1fr 1fr; } .operator-channel-row { flex-wrap: wrap; } .operator-channel-row .channel-endpoint { flex-basis: 100%; order: 3; } }
+  .operator-view-footer { margin-top: 12px; color: var(--fg-faint); font: 11px var(--mono); white-space: pre-wrap; }
+  .operator-pane-mirror { flex: 1; padding: 24px; background: var(--bg-elev); color: var(--fg-dim); }
+  .operator-pane-mirror-kicker { color: var(--accent); font: 10px var(--mono); letter-spacing: .1em; }
+  .operator-pane-mirror h3 { margin: 5px 0 12px; color: var(--fg); font-size: 18px; font-weight: 500; }
+  .operator-pane-mirror p { margin: 6px 0; font-size: 12px; }
   @media (max-width: 720px) {
-    .service-view-grid { grid-template-columns: 1fr; }
-    .service-definition, .service-help { min-height: 0; }
-    .service-view-header { margin-bottom: 14px; }
-    .service-view { padding: 18px 14px; }
+    .operator-view-grid { grid-template-columns: 1fr; }
+    .operator-definition, .operator-help { min-height: 0; }
+    .operator-view-header { margin-bottom: 14px; }
+    .operator-view { padding: 18px 14px; }
   }
   .pane-grid {
     flex: 1 1 0;
@@ -2465,7 +2465,7 @@
   }
 
   /* Sidebar lineage section (spec 0081 / web parity): master–detail tree
-     for the selected session, between the list and the operator panel. */
+     for the selected session, between the list and the minibuffer panel. */
   .lineage-section {
     flex: 0 0 auto;
     display: flex;
@@ -2480,11 +2480,11 @@
     flex: 0 0 auto;
   }
   .lineage-section,
-  .operator-panel {
+  .minibuffer-panel {
     position: relative;
   }
   .lineage-header,
-  .operator-header {
+  .minibuffer-header {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
@@ -2499,7 +2499,7 @@
     cursor: default;
   }
   .lineage-header .section-title,
-  .operator-header .section-title {
+  .minibuffer-header .section-title {
     flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
@@ -2507,7 +2507,7 @@
     white-space: nowrap;
   }
   .lineage-header button,
-  .operator-header button {
+  .minibuffer-header button {
     appearance: none;
     flex: 0 0 auto;
     border: none;
@@ -2521,7 +2521,7 @@
     cursor: pointer;
   }
   .lineage-header button:hover,
-  .operator-header button:hover {
+  .minibuffer-header button:hover {
     color: var(--fg);
     background: color-mix(in srgb, var(--fg) 8%, transparent);
   }
@@ -2894,7 +2894,7 @@
   }
   /* Drag handle sits on the TOP border of the title bar (not under it). */
   .lineage-resize,
-  .operator-resize {
+  .minibuffer-resize {
     position: absolute;
     top: -3px;
     left: 0;
@@ -2905,14 +2905,14 @@
     background: transparent;
   }
   .lineage-resize:hover,
-  .operator-resize:hover,
+  .minibuffer-resize:hover,
   .lineage-resize.is-dragging,
-  .operator-resize.is-dragging {
+  .minibuffer-resize.is-dragging {
     background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
 
-  /* Operator ambient panel (spec 0019 / 0167): fleet token meter by default. */
-  .operator-panel {
+  /* Minibuffer ambient panel (spec 0019 / 0167): fleet token meter by default. */
+  .minibuffer-panel {
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
@@ -2920,19 +2920,19 @@
     border-top: 1px solid var(--border);
     background: var(--bg);
   }
-  .operator-panel.is-collapsed .operator-body {
+  .minibuffer-panel.is-collapsed .minibuffer-body {
     display: none;
   }
-  .operator-body {
+  .minibuffer-body {
     flex: 0 0 auto;
-    height: var(--operator-h, 148px);
+    height: var(--minibuffer-h, 148px);
     min-height: 72px;
     display: flex;
     flex-direction: column;
     min-width: 0;
     overflow: hidden;
   }
-  .operator-meter {
+  .minibuffer-meter {
     flex: 1 1 auto;
     min-height: 0;
     display: flex;
@@ -2940,9 +2940,9 @@
     padding: 4px 6px 6px;
     gap: 4px;
   }
-  .operator-meter[hidden],
-  .operator-rain[hidden] { display: none !important; }
-  .operator-meter-graph {
+  .minibuffer-meter[hidden],
+  .minibuffer-rain[hidden] { display: none !important; }
+  .minibuffer-meter-graph {
     flex: 1 1 auto;
     min-height: 40px;
     width: 100%;
@@ -2952,12 +2952,12 @@
   }
   /* `display: block` above must not defeat the HTML `hidden` attribute —
      otherwise the empty-state message and the canvas show together. */
-  .operator-meter-graph[hidden],
-  .operator-meter-empty[hidden],
-  .operator-meter-legend[hidden] {
+  .minibuffer-meter-graph[hidden],
+  .minibuffer-meter-empty[hidden],
+  .minibuffer-meter-legend[hidden] {
     display: none !important;
   }
-  .operator-meter-empty {
+  .minibuffer-meter-empty {
     flex: 1 1 auto;
     display: flex;
     align-items: center;
@@ -2968,7 +2968,7 @@
     text-align: center;
     padding: 8px;
   }
-  .operator-meter-legend {
+  .minibuffer-meter-legend {
     flex: 0 0 auto;
     display: grid;
     gap: 2px 8px;
@@ -2978,36 +2978,36 @@
     max-height: 4.8em;
     overflow: hidden;
   }
-  .operator-meter-legend .leg-row {
+  .minibuffer-meter-legend .leg-row {
     display: flex;
     align-items: baseline;
     gap: 4px;
     min-width: 0;
   }
-  .operator-meter-legend .leg-dot {
+  .minibuffer-meter-legend .leg-dot {
     flex: 0 0 auto;
     width: 7px;
     height: 7px;
     border-radius: 50%;
     margin-top: 2px;
   }
-  .operator-meter-legend .leg-name {
+  .minibuffer-meter-legend .leg-name {
     flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .operator-meter-legend .leg-rate {
+  .minibuffer-meter-legend .leg-rate {
     flex: 0 0 auto;
     font-variant-numeric: tabular-nums;
     color: var(--fg-faint);
   }
-  .operator-meter-legend .leg-rate.is-active {
+  .minibuffer-meter-legend .leg-rate.is-active {
     color: inherit;
     font-weight: 600;
   }
-  .operator-rain {
+  .minibuffer-rain {
     flex: 1 1 auto;
     min-height: 0;
     width: 100%;
@@ -3015,7 +3015,7 @@
   }
   @media (max-width: 720px) {
     .lineage-body { height: var(--lineage-h, 120px); }
-    .operator-body { height: var(--operator-h, 120px); }
+    .minibuffer-body { height: var(--minibuffer-h, 120px); }
   }
 
   /* New-session form rows reuse the approval-sheet shell. */
@@ -3787,7 +3787,7 @@
   html[data-theme="matrix"] .session-list .item.active .state {
     color: var(--accent-fg);
   }
-  html[data-theme="matrix"] .session-list .item.is-operator.active .name {
+  html[data-theme="matrix"] .session-list .item.is-minibuffer.active .name {
     color: var(--accent-fg);
   }
 </style>
@@ -3880,31 +3880,31 @@
         <div class="lineage-body" id="lineageBody" role="tree" aria-label="session lineage"></div>
       </section>
       <!--
-        Operator ambient panel (specs 0019 / 0167): fleet token meter by
+        Minibuffer ambient panel (specs 0019 / 0167): fleet token meter by
         default, with a rain mode toggle. Anchored at the bottom of the
         sidebar like the TUI matrix-rain region.
       -->
-      <section class="operator-panel" id="operatorPanel">
+      <section class="minibuffer-panel" id="minibufferPanel">
         <!-- Resize handle on the TOP border of the title bar (TUI parity). -->
-        <div class="operator-resize" id="operatorResize" role="separator"
-             aria-orientation="horizontal" aria-label="resize operator panel"></div>
-        <div class="operator-header" id="operatorHeader">
-          <span class="section-title" id="operatorTitle">operator</span>
-          <button type="button" id="operatorModeBtn" aria-label="toggle operator panel mode"
+        <div class="minibuffer-resize" id="minibufferResize" role="separator"
+             aria-orientation="horizontal" aria-label="resize minibuffer panel"></div>
+        <div class="minibuffer-header" id="minibufferHeader">
+          <span class="section-title" id="minibufferTitle">minibuffer</span>
+          <button type="button" id="minibufferModeBtn" aria-label="toggle minibuffer panel mode"
                   title="Toggle rain / tokens">tokens ⇄</button>
-          <button type="button" id="operatorCollapseBtn" aria-label="collapse operator panel"
+          <button type="button" id="minibufferCollapseBtn" aria-label="collapse minibuffer panel"
                   title="Collapse">−</button>
         </div>
-        <div class="operator-body" id="operatorBody">
-          <div class="operator-meter" id="operatorMeter">
-            <canvas class="operator-meter-graph" id="operatorMeterGraph" width="260" height="90"
+        <div class="minibuffer-body" id="minibufferBody">
+          <div class="minibuffer-meter" id="minibufferMeter">
+            <canvas class="minibuffer-meter-graph" id="minibufferMeterGraph" width="260" height="90"
                     aria-label="fleet token usage"></canvas>
-            <div class="operator-meter-empty" id="operatorMeterEmpty" hidden>
+            <div class="minibuffer-meter-empty" id="minibufferMeterEmpty" hidden>
               no token usage reported yet
             </div>
-            <div class="operator-meter-legend" id="operatorMeterLegend"></div>
+            <div class="minibuffer-meter-legend" id="minibufferMeterLegend"></div>
           </div>
-          <canvas class="operator-rain" id="operatorRain" width="260" height="120" hidden
+          <canvas class="minibuffer-rain" id="minibufferRain" width="260" height="120" hidden
                   aria-label="matrix rain"></canvas>
         </div>
       </section>
@@ -4068,24 +4068,24 @@
       <div class="inline-widget-backdrop" id="inlineWidgetBackdrop" hidden></div>
       <section class="session-widgets" id="sessionWidgets" hidden></section>
       <div class="editor-state" id="editorState" hidden></div>
-      <section class="service-view" id="serviceView" hidden aria-label="service view">
-        <div class="service-view-header">
+      <section class="operator-view" id="operatorView" hidden aria-label="operator view">
+        <div class="operator-view-header">
           <div>
-            <div class="service-view-kicker">SERVICE</div>
-            <h2 id="serviceViewTitle"></h2>
+            <div class="operator-view-kicker">OPERATOR</div>
+            <h2 id="operatorViewTitle"></h2>
           </div>
-          <div class="service-view-actions">
-            <button type="button" id="serviceEditBtn">Edit</button>
-            <button type="button" id="serviceRotateBtn">Rotate credential</button>
-            <button type="button" id="serviceDeleteBtn" class="danger">Delete</button>
+          <div class="operator-view-actions">
+            <button type="button" id="operatorEditBtn">Edit</button>
+            <button type="button" id="operatorRotateBtn">Rotate credential</button>
+            <button type="button" id="operatorDeleteBtn" class="danger">Delete</button>
           </div>
         </div>
-        <div class="service-view-grid">
-          <div class="service-definition" id="serviceDefinition"></div>
-          <aside class="service-help" id="serviceHelp"></aside>
+        <div class="operator-view-grid">
+          <div class="operator-definition" id="operatorDefinition"></div>
+          <aside class="operator-help" id="operatorHelp"></aside>
         </div>
-        <div class="service-activity" id="serviceActivity"></div>
-        <div class="service-view-footer" id="serviceViewFooter"></div>
+        <div class="operator-activity" id="operatorActivity"></div>
+        <div class="operator-view-footer" id="operatorViewFooter"></div>
       </section>
       <!--
         Composer: two submit-style buttons. "Insert" writes the
@@ -4427,15 +4427,15 @@ const browserPreviewEl = $("browserPreview");
 const browserPreviewImgEl = $("browserPreviewImg");
 const browserPreviewCaptionEl = $("browserPreviewCaption");
 const browserPreviewCloseEl = $("browserPreviewClose");
-const serviceViewEl = $("serviceView");
-const serviceViewTitleEl = $("serviceViewTitle");
-const serviceDefinitionEl = $("serviceDefinition");
-const serviceHelpEl = $("serviceHelp");
-const serviceActivityEl = $("serviceActivity");
-const serviceViewFooterEl = $("serviceViewFooter");
-const serviceEditBtn = $("serviceEditBtn");
-const serviceRotateBtn = $("serviceRotateBtn");
-const serviceDeleteBtn = $("serviceDeleteBtn");
+const operatorViewEl = $("operatorView");
+const operatorViewTitleEl = $("operatorViewTitle");
+const operatorDefinitionEl = $("operatorDefinition");
+const operatorHelpEl = $("operatorHelp");
+const operatorActivityEl = $("operatorActivity");
+const operatorViewFooterEl = $("operatorViewFooter");
+const operatorEditBtn = $("operatorEditBtn");
+const operatorRotateBtn = $("operatorRotateBtn");
+const operatorDeleteBtn = $("operatorDeleteBtn");
 /** Autohide timer for the browser-preview overlay (mirrors the TUI's
  *  ~7s timeout). Hover pins it (clears the timer); the × dismisses. */
 let browserPreviewHideTimer = null;
@@ -4680,9 +4680,9 @@ function sessionIdFromLocation() {
   return null;
 }
 
-function serviceNameFromLocation() {
+function operatorNameFromLocation() {
   const parts = location.pathname.split("/").filter(Boolean);
-  if (parts.length === 2 && parts[0] === "services" && parts[1]) {
+  if (parts.length === 2 && parts[0] === "operators" && parts[1]) {
     try { return decodeURIComponent(parts[1]); } catch { return parts[1]; }
   }
   return null;
@@ -4698,9 +4698,9 @@ function setLocationSessionId(id, { replace = false } = {}) {
   else history.pushState(null, "", next);
 }
 
-function setLocationServiceName(name, { replace = false } = {}) {
+function setLocationOperatorName(name, { replace = false } = {}) {
   const url = new URL(location.href);
-  url.pathname = name ? `/services/${encodeURIComponent(name)}` : "/";
+  url.pathname = name ? `/operators/${encodeURIComponent(name)}` : "/";
   url.hash = "";
   const next = url.pathname + url.search + url.hash;
   if (next === location.pathname + location.search + location.hash) return;
@@ -4721,8 +4721,8 @@ const state = {
   pending: new Map(),
   reconnectDelay: 1000,
   sessions: [], // [{id, title, harness, state, group_id, position, ...}]
-  services: [],
-  serviceChannelCatalog: [],
+  operators: [],
+  operatorChannelCatalog: [],
   harnesses: [],
   groups: [],   // [{id, name, position, collapsed}], TUI-style ordering
   subagentCollapsed: new Set(),
@@ -4730,12 +4730,12 @@ const state = {
   showArchivedGroups: new Set(),
   showArchivedSubagents: new Set(),
   currentId: null,
-  currentServiceName: null,
-  serviceDraft: null,
-  serviceEditing: false,
-  serviceField: "instruction",
-  serviceNewToken: null,
-  serviceChannelDraft: null,
+  currentOperatorName: null,
+  operatorDraft: null,
+  operatorEditing: false,
+  operatorField: "instruction",
+  operatorNewToken: null,
+  operatorChannelDraft: null,
   // Per-session transcript items (the rows we've rendered). Keyed by
   // session_id so switching sessions is just a re-render of cached
   // events. Cleared on explicit `Reset` events from the adapter.
@@ -4805,7 +4805,7 @@ const state = {
   // first session.list snapshot can honor a refresh/deep link before the
   // normal first-session fallback runs.
   urlRequestedSessionId: sessionIdFromLocation(),
-  urlRequestedServiceName: serviceNameFromLocation(),
+  urlRequestedOperatorName: operatorNameFromLocation(),
   // Current view mode — "chat" (headless transcript + composer)
   // or "terminal" (xterm.js mounted to a PTY-backed session). Set by
   // `selectSession` based on `has_pty` plus the session mode.
@@ -4905,10 +4905,10 @@ const state = {
   // "boxes" (full, default) | "rails" (compact) — matches TUI LineageViewMode.
   lineageMode: "boxes",
   lineageSubagentsExpanded: new Set(),
-  // Operator ambient panel (specs 0019 / 0167 web parity).
-  operatorCollapsed: false,
+  // Minibuffer ambient panel (specs 0019 / 0167 web parity).
+  minibufferCollapsed: false,
   // "tokens" | "rain" — default tokens (spec 0019).
-  operatorPanelMode: "tokens",
+  minibufferPanelMode: "tokens",
   // Fleet token meter state (JS port of crates/cli/src/token_meter.rs).
   tokenMeter: null,
   // Last observed busy_ms per session id, for rate denominators.
@@ -5028,7 +5028,7 @@ function observeSessionPtyActivity(sessionId, atMs = Date.now()) {
 
 function initMiniUsageGraph() {
   if (!miniUsageGraphEl) return;
-  const repaint = () => scheduleOperatorPanelPaint();
+  const repaint = () => scheduleMinibufferPanelPaint();
   if (typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(repaint);
     ro.observe(miniUsageGraphEl);
@@ -5068,7 +5068,7 @@ function setComposerEnabled(on) {
 }
 
 // ---------------------------------------------------------------------------
-// Sidebar lineage + operator token meter (web parity for specs 0081 / 0019 / 0167)
+// Sidebar lineage + minibuffer token meter (web parity for specs 0081 / 0019 / 0167)
 // ---------------------------------------------------------------------------
 
 // The unsuffixed keys predate responsive preferences. Keep them as read-only
@@ -5077,13 +5077,13 @@ function setComposerEnabled(on) {
 const LINEAGE_COLLAPSED_KEY = "agentd.web.lineageCollapsed";
 const LINEAGE_MODE_KEY = "agentd.web.lineageMode";
 const LINEAGE_H_KEY = "agentd.web.lineageH";
-const OPERATOR_COLLAPSED_KEY = "agentd.web.operatorCollapsed";
-const OPERATOR_H_KEY = "agentd.web.operatorH";
-const OPERATOR_MODE_KEY = "agentd.web.operatorPanelMode";
+const MINIBUFFER_COLLAPSED_KEY = "agentd.web.minibufferCollapsed";
+const MINIBUFFER_H_KEY = "agentd.web.minibufferH";
+const MINIBUFFER_MODE_KEY = "agentd.web.minibufferPanelMode";
 const LINEAGE_H_MIN = 64;
 const LINEAGE_H_MAX = 360;
-const OPERATOR_H_MIN = 72;
-const OPERATOR_H_MAX = 320;
+const MINIBUFFER_H_MIN = 72;
+const MINIBUFFER_H_MAX = 320;
 const TOKEN_BUCKET_SECS = 60;
 const TOKEN_MAX_BUCKETS = 600;
 const TOKEN_PEAK_DECAY = 0.8;
@@ -5110,16 +5110,16 @@ const lineageSectionEl = $("lineageSection");
 const lineageBodyEl = $("lineageBody");
 const lineageCollapseBtn = $("lineageCollapseBtn");
 const lineageResizeEl = $("lineageResize");
-const operatorPanelEl = $("operatorPanel");
-const operatorBodyEl = $("operatorBody");
-const operatorCollapseBtn = $("operatorCollapseBtn");
-const operatorModeBtn = $("operatorModeBtn");
-const operatorResizeEl = $("operatorResize");
-const operatorMeterEl = $("operatorMeter");
-const operatorMeterGraphEl = $("operatorMeterGraph");
-const operatorMeterEmptyEl = $("operatorMeterEmpty");
-const operatorMeterLegendEl = $("operatorMeterLegend");
-const operatorRainEl = $("operatorRain");
+const minibufferPanelEl = $("minibufferPanel");
+const minibufferBodyEl = $("minibufferBody");
+const minibufferCollapseBtn = $("minibufferCollapseBtn");
+const minibufferModeBtn = $("minibufferModeBtn");
+const minibufferResizeEl = $("minibufferResize");
+const minibufferMeterEl = $("minibufferMeter");
+const minibufferMeterGraphEl = $("minibufferMeterGraph");
+const minibufferMeterEmptyEl = $("minibufferMeterEmpty");
+const minibufferMeterLegendEl = $("minibufferMeterLegend");
+const minibufferRainEl = $("minibufferRain");
 
 function sidebarPanelLayout() {
   return isNarrowLayout() ? "narrow" : "wide";
@@ -5147,14 +5147,14 @@ function loadSidebarPanelPrefs() {
     state.sidebarPanelLayout,
   );
   state.lineageMode = localStorage.getItem(LINEAGE_MODE_KEY) === "rails" ? "rails" : "boxes";
-  state.operatorCollapsed = loadSidebarPanelCollapsed(
-    OPERATOR_COLLAPSED_KEY,
+  state.minibufferCollapsed = loadSidebarPanelCollapsed(
+    MINIBUFFER_COLLAPSED_KEY,
     state.sidebarPanelLayout,
   );
-  const mode = localStorage.getItem(OPERATOR_MODE_KEY);
-  state.operatorPanelMode = mode === "rain" ? "rain" : "tokens";
+  const mode = localStorage.getItem(MINIBUFFER_MODE_KEY);
+  state.minibufferPanelMode = mode === "rain" ? "rain" : "tokens";
   const lh = Number(localStorage.getItem(LINEAGE_H_KEY));
-  const oh = Number(localStorage.getItem(OPERATOR_H_KEY));
+  const oh = Number(localStorage.getItem(MINIBUFFER_H_KEY));
   if (Number.isFinite(lh) && lh > 0) {
     document.documentElement.style.setProperty(
       "--lineage-h",
@@ -5163,8 +5163,8 @@ function loadSidebarPanelPrefs() {
   }
   if (Number.isFinite(oh) && oh > 0) {
     document.documentElement.style.setProperty(
-      "--operator-h",
-      `${Math.min(OPERATOR_H_MAX, Math.max(OPERATOR_H_MIN, oh))}px`,
+      "--minibuffer-h",
+      `${Math.min(MINIBUFFER_H_MAX, Math.max(MINIBUFFER_H_MIN, oh))}px`,
     );
   }
 }
@@ -5181,7 +5181,7 @@ function sessionBusyMsAt(session, nowMs = Date.now()) {
 
 function sessionDisplayTitle(s) {
   if (!s) return "";
-  if (s.kind === "orchestrator") return "operator";
+  if (s.kind === "minibuffer") return "minibuffer";
   const title = String(s.title || "").trim();
   if (title) return title;
   return String(s.harness || s.id || "session");
@@ -6032,7 +6032,7 @@ function observeCostForMeter(sessionId, event) {
   const session = state.sessions.find((s) => s.id === sessionId);
   const model = event.model || (session && session.model) || null;
   tokenObserve(ensureTokenMeter(), model, tokens, tokensCached, Date.now());
-  scheduleOperatorPanelPaint();
+  scheduleMinibufferPanelPaint();
 }
 
 function sampleComputeTimeForMeter() {
@@ -6082,12 +6082,12 @@ async function seedTokenMeterFromDaemon() {
       if (!session.model) continue;
       state.tokenMeterBusy.set(session.id, sessionBusyMsAt(session, t));
     }
-    scheduleOperatorPanelPaint();
+    scheduleMinibufferPanelPaint();
   } catch (_) {
     // Older daemon without usage.token_history — live Cost events still work.
     state.tokenMeter = createTokenMeter(Date.now());
     state.tokenMeterSeeded = true;
-    scheduleOperatorPanelPaint();
+    scheduleMinibufferPanelPaint();
   }
 }
 
@@ -6101,35 +6101,35 @@ function tokenIsIdle(meter) {
 }
 
 function paintTokenMeter() {
-  if (!operatorMeterEl || !operatorMeterGraphEl) return;
+  if (!minibufferMeterEl || !minibufferMeterGraphEl) return;
   const meter = ensureTokenMeter();
   const nowMs = Date.now();
   tokenAdvanceTo(meter, nowMs);
   sampleComputeTimeForMeter();
 
   const idle = tokenIsIdle(meter);
-  if (operatorMeterEmptyEl) operatorMeterEmptyEl.hidden = !idle;
-  operatorMeterGraphEl.hidden = idle;
-  if (operatorMeterLegendEl) operatorMeterLegendEl.hidden = idle;
+  if (minibufferMeterEmptyEl) minibufferMeterEmptyEl.hidden = !idle;
+  minibufferMeterGraphEl.hidden = idle;
+  if (minibufferMeterLegendEl) minibufferMeterLegendEl.hidden = idle;
   if (idle) {
-    if (operatorMeterLegendEl) operatorMeterLegendEl.replaceChildren();
+    if (minibufferMeterLegendEl) minibufferMeterLegendEl.replaceChildren();
     return;
   }
 
   // TUI paints one terminal cell per 1-minute bucket. Use a monospaced
   // cell width so columns read like the TUI bars, not hairline pixels.
-  const cssW = Math.max(40, operatorMeterGraphEl.clientWidth || operatorMeterEl.clientWidth || 200);
-  const { cols } = paintTokenBars(operatorMeterGraphEl, meter, {
+  const cssW = Math.max(40, minibufferMeterGraphEl.clientWidth || minibufferMeterEl.clientWidth || 200);
+  const { cols } = paintTokenBars(minibufferMeterGraphEl, meter, {
     columnWidth: 7,
     minWidth: cssW,
     minHeight: 32,
   });
 
   const entries = tokenLegend(meter, cols);
-  if (operatorMeterLegendEl) {
+  if (minibufferMeterLegendEl) {
     const colsN = Math.max(1, Math.min(3, Math.floor(cssW / 110)));
-    operatorMeterLegendEl.style.gridTemplateColumns = `repeat(${colsN}, minmax(0, 1fr))`;
-    operatorMeterLegendEl.innerHTML = entries.map((e) => {
+    minibufferMeterLegendEl.style.gridTemplateColumns = `repeat(${colsN}, minmax(0, 1fr))`;
+    minibufferMeterLegendEl.innerHTML = entries.map((e) => {
       const rate = formatTokenRate(e.rate);
       const active = e.rate != null;
       return `<div class="leg-row" title="${attr(e.label)} · ${attr(formatTokenCount(e.tokens))} tokens / ${TOKEN_BUCKET_SECS}s column">` +
@@ -6152,11 +6152,11 @@ function rainGlyph() {
 function ensureRainDrops(cssW, cssH) {
   const colW = 12;
   const cols = Math.max(6, Math.floor(cssW / colW));
-  if (!paintOperatorRain.drops) paintOperatorRain.drops = [];
-  const drops = paintOperatorRain.drops;
+  if (!paintMinibufferRain.drops) paintMinibufferRain.drops = [];
+  const drops = paintMinibufferRain.drops;
   // Rebuild columns when width changes enough that the count drifts.
-  if (drops.length !== cols || paintOperatorRain.colsW !== colW) {
-    paintOperatorRain.colsW = colW;
+  if (drops.length !== cols || paintMinibufferRain.colsW !== colW) {
+    paintMinibufferRain.colsW = colW;
     drops.length = 0;
     for (let i = 0; i < cols; i++) {
       drops.push({
@@ -6176,11 +6176,11 @@ function ensureRainDrops(cssW, cssH) {
   return drops;
 }
 
-function paintOperatorRain(dtMs = 16) {
-  if (!operatorRainEl || operatorRainEl.hidden) return;
-  const canvas = operatorRainEl;
+function paintMinibufferRain(dtMs = 16) {
+  if (!minibufferRainEl || minibufferRainEl.hidden) return;
+  const canvas = minibufferRainEl;
   const dpr = window.devicePixelRatio || 1;
-  const cssW = Math.max(40, canvas.clientWidth || (operatorBodyEl && operatorBodyEl.clientWidth) || 200);
+  const cssW = Math.max(40, canvas.clientWidth || (minibufferBodyEl && minibufferBodyEl.clientWidth) || 200);
   const cssH = Math.max(40, canvas.clientHeight || 100);
   const w = Math.round(cssW * dpr);
   const h = Math.round(cssH * dpr);
@@ -6188,7 +6188,7 @@ function paintOperatorRain(dtMs = 16) {
     canvas.width = w;
     canvas.height = h;
     // Fresh field on resize so trails don't smear at the wrong scale.
-    paintOperatorRain.drops = null;
+    paintMinibufferRain.drops = null;
   }
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -6256,39 +6256,39 @@ function paintOperatorRain(dtMs = 16) {
   ctx.shadowBlur = 0;
 }
 
-function applyOperatorPanelMode() {
-  if (!operatorPanelEl) return;
-  operatorPanelEl.classList.toggle("is-collapsed", !!state.operatorCollapsed);
-  if (operatorCollapseBtn) {
-    operatorCollapseBtn.textContent = state.operatorCollapsed ? "+" : "−";
-    operatorCollapseBtn.setAttribute(
+function applyMinibufferPanelMode() {
+  if (!minibufferPanelEl) return;
+  minibufferPanelEl.classList.toggle("is-collapsed", !!state.minibufferCollapsed);
+  if (minibufferCollapseBtn) {
+    minibufferCollapseBtn.textContent = state.minibufferCollapsed ? "+" : "−";
+    minibufferCollapseBtn.setAttribute(
       "aria-label",
-      state.operatorCollapsed ? "expand operator panel" : "collapse operator panel",
+      state.minibufferCollapsed ? "expand minibuffer panel" : "collapse minibuffer panel",
     );
   }
-  const tokens = state.operatorPanelMode !== "rain";
-  if (operatorMeterEl) operatorMeterEl.hidden = !tokens;
-  if (operatorRainEl) operatorRainEl.hidden = tokens;
-  if (operatorModeBtn) {
-    operatorModeBtn.textContent = tokens ? "tokens ⇄" : "rain ⇄";
-    operatorModeBtn.title = tokens ? "Show matrix rain" : "Show token usage";
+  const tokens = state.minibufferPanelMode !== "rain";
+  if (minibufferMeterEl) minibufferMeterEl.hidden = !tokens;
+  if (minibufferRainEl) minibufferRainEl.hidden = tokens;
+  if (minibufferModeBtn) {
+    minibufferModeBtn.textContent = tokens ? "tokens ⇄" : "rain ⇄";
+    minibufferModeBtn.title = tokens ? "Show matrix rain" : "Show token usage";
   }
   // Rain needs a continuous rAF loop; tokens only need a slow tick.
-  if (!tokens && !state.operatorCollapsed) startRainLoop();
+  if (!tokens && !state.minibufferCollapsed) startRainLoop();
   else stopRainLoop();
-  scheduleOperatorPanelPaint();
+  scheduleMinibufferPanelPaint();
 }
 
-function scheduleOperatorPanelPaint() {
+function scheduleMinibufferPanelPaint() {
   if (state.tokenMeterRaf) return;
   state.tokenMeterRaf = requestAnimationFrame(() => {
     state.tokenMeterRaf = 0;
     paintMiniUsageGraph();
-    if (!operatorPanelEl || state.operatorCollapsed) return;
-    if (state.operatorPanelMode === "rain") {
+    if (!minibufferPanelEl || state.minibufferCollapsed) return;
+    if (state.minibufferPanelMode === "rain") {
       // Rain is driven by startRainLoop; a one-shot is still useful on
       // mode switches / resize before the loop's next frame.
-      paintOperatorRain(16);
+      paintMinibufferRain(16);
     } else {
       paintTokenMeter();
     }
@@ -6300,12 +6300,12 @@ function startRainLoop() {
   let last = performance.now();
   const tick = (now) => {
     state.rainLoopRaf = 0;
-    if (!operatorPanelEl || state.operatorCollapsed || state.operatorPanelMode !== "rain") {
+    if (!minibufferPanelEl || state.minibufferCollapsed || state.minibufferPanelMode !== "rain") {
       return;
     }
     const dt = now - last;
     last = now;
-    paintOperatorRain(dt);
+    paintMinibufferRain(dt);
     state.rainLoopRaf = requestAnimationFrame(tick);
   };
   state.rainLoopRaf = requestAnimationFrame(tick);
@@ -6318,58 +6318,58 @@ function stopRainLoop() {
   }
 }
 
-function startOperatorPanelLoop() {
-  if (startOperatorPanelLoop.timer) return;
+function startMinibufferPanelLoop() {
+  if (startMinibufferPanelLoop.timer) return;
   // Token meter: refresh once a second. Rain runs on its own rAF loop.
-  startOperatorPanelLoop.timer = setInterval(() => {
+  startMinibufferPanelLoop.timer = setInterval(() => {
     if (!state.ws || state.ws.readyState !== 1) return;
-    scheduleOperatorPanelPaint();
-    if (!state.operatorCollapsed && state.operatorPanelMode === "rain") {
+    scheduleMinibufferPanelPaint();
+    if (!state.minibufferCollapsed && state.minibufferPanelMode === "rain") {
       if (!state.rainLoopRaf) startRainLoop();
     }
   }, 1000);
-  if (state.operatorPanelMode === "rain" && !state.operatorCollapsed) startRainLoop();
+  if (state.minibufferPanelMode === "rain" && !state.minibufferCollapsed) startRainLoop();
 }
 
-function bindOperatorPanel() {
-  if (!operatorPanelEl || operatorPanelEl.__bound) return;
-  operatorPanelEl.__bound = true;
-  if (operatorCollapseBtn) {
-    operatorCollapseBtn.addEventListener("click", (e) => {
+function bindMinibufferPanel() {
+  if (!minibufferPanelEl || minibufferPanelEl.__bound) return;
+  minibufferPanelEl.__bound = true;
+  if (minibufferCollapseBtn) {
+    minibufferCollapseBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      state.operatorCollapsed = !state.operatorCollapsed;
-      saveSidebarPanelCollapsed(OPERATOR_COLLAPSED_KEY, state.operatorCollapsed);
-      applyOperatorPanelMode();
+      state.minibufferCollapsed = !state.minibufferCollapsed;
+      saveSidebarPanelCollapsed(MINIBUFFER_COLLAPSED_KEY, state.minibufferCollapsed);
+      applyMinibufferPanelMode();
     });
   }
-  if (operatorModeBtn) {
-    operatorModeBtn.addEventListener("click", (e) => {
+  if (minibufferModeBtn) {
+    minibufferModeBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      state.operatorPanelMode = state.operatorPanelMode === "rain" ? "tokens" : "rain";
-      localStorage.setItem(OPERATOR_MODE_KEY, state.operatorPanelMode);
-      applyOperatorPanelMode();
+      state.minibufferPanelMode = state.minibufferPanelMode === "rain" ? "tokens" : "rain";
+      localStorage.setItem(MINIBUFFER_MODE_KEY, state.minibufferPanelMode);
+      applyMinibufferPanelMode();
     });
   }
-  bindVerticalResize(operatorResizeEl, {
-    min: OPERATOR_H_MIN,
-    max: OPERATOR_H_MAX,
-    cssVar: "--operator-h",
-    storageKey: OPERATOR_H_KEY,
-    getHeight: () => (operatorBodyEl ? operatorBodyEl.clientHeight : 148),
+  bindVerticalResize(minibufferResizeEl, {
+    min: MINIBUFFER_H_MIN,
+    max: MINIBUFFER_H_MAX,
+    cssVar: "--minibuffer-h",
+    storageKey: MINIBUFFER_H_KEY,
+    getHeight: () => (minibufferBodyEl ? minibufferBodyEl.clientHeight : 148),
   });
   // Redraw on sidebar width changes.
-  if (typeof ResizeObserver !== "undefined" && operatorBodyEl) {
-    const ro = new ResizeObserver(() => scheduleOperatorPanelPaint());
-    ro.observe(operatorBodyEl);
+  if (typeof ResizeObserver !== "undefined" && minibufferBodyEl) {
+    const ro = new ResizeObserver(() => scheduleMinibufferPanelPaint());
+    ro.observe(minibufferBodyEl);
   }
 }
 
 function initSidebarAmbientPanels() {
   loadSidebarPanelPrefs();
   bindLineageSection();
-  bindOperatorPanel();
-  applyOperatorPanelMode();
-  startOperatorPanelLoop();
+  bindMinibufferPanel();
+  applyMinibufferPanelMode();
+  startMinibufferPanelLoop();
 }
 
 function syncSidebarPanelLayout() {
@@ -6378,9 +6378,9 @@ function syncSidebarPanelLayout() {
 
   state.sidebarPanelLayout = layout;
   state.lineageCollapsed = loadSidebarPanelCollapsed(LINEAGE_COLLAPSED_KEY, layout);
-  state.operatorCollapsed = loadSidebarPanelCollapsed(OPERATOR_COLLAPSED_KEY, layout);
+  state.minibufferCollapsed = loadSidebarPanelCollapsed(MINIBUFFER_COLLAPSED_KEY, layout);
   renderLineageSection();
-  applyOperatorPanelMode();
+  applyMinibufferPanelMode();
 }
 
 function connect() {
@@ -6495,8 +6495,8 @@ setInterval(() => {
 }, 30000);
 
 function refreshCurrentSessionAfterReconnect() {
-  if (state.currentServiceName) {
-    renderServiceView();
+  if (state.currentOperatorName) {
+    renderOperatorView();
     return;
   }
   if (!state.currentId) return;
@@ -6558,54 +6558,54 @@ async function refreshSessions(startingLayoutTree = null) {
     // `project/state`, `project/deleted` — the
     // existing `handleNotification` path updates the caches and
     // re-renders.
-    const [list, groups, services, channelCatalog] = await Promise.all([
+    const [list, groups, operators, channelCatalog] = await Promise.all([
       rpc("session.list", null),
       rpc("project.list", null).catch(() => []),
-      rpc("service.list", null).catch(() => []),
-      rpc("service.channel.catalog.list", null).catch(() => []),
+      rpc("operator.list", null).catch(() => []),
+      rpc("operator.channel.catalog.list", null).catch(() => []),
     ]);
     state.sessions = Array.isArray(list) ? list : [];
-    state.services = Array.isArray(services) ? services : [];
-    state.serviceChannelCatalog = Array.isArray(channelCatalog)
+    state.operators = Array.isArray(operators) ? operators : [];
+    state.operatorChannelCatalog = Array.isArray(channelCatalog)
       ? channelCatalog.slice().sort((a, b) => String(a.id || "").localeCompare(String(b.id || "")))
       : [];
-    // The orchestrator session ("operator") used to be filtered out
+    // The minibuffer session ("minibuffer") used to be filtered out
     // to mirror the TUI, which surfaces it via a special
     // minibuffer panel instead of the list. The web client
-    // doesn't have that panel, so include operator in the list at the
+    // doesn't have that panel, so include minibuffer in the list at the
     // top — `orderedItems` pins it ahead of everything else.
     state.groups = Array.isArray(groups) ? groups : [];
     renderSessions();
-    if (state.currentServiceName && !state.services.some((service) => service.name === state.currentServiceName)) {
-      const deletedName = state.currentServiceName;
-      clearServiceFromLayout(deletedName);
-      state.currentServiceName = null;
-      state.urlRequestedServiceName = null;
-      state.serviceDraft = null;
-      state.serviceEditing = false;
-      state.serviceNewToken = null;
-      state.serviceChannelDraft = null;
-      serviceViewEl.hidden = true;
-      const fallback = orderedSessions().find((session) => session.kind !== "orchestrator") || orderedSessions()[0];
+    if (state.currentOperatorName && !state.operators.some((operator) => operator.name === state.currentOperatorName)) {
+      const deletedName = state.currentOperatorName;
+      clearOperatorFromLayout(deletedName);
+      state.currentOperatorName = null;
+      state.urlRequestedOperatorName = null;
+      state.operatorDraft = null;
+      state.operatorEditing = false;
+      state.operatorNewToken = null;
+      state.operatorChannelDraft = null;
+      operatorViewEl.hidden = true;
+      const fallback = orderedSessions().find((session) => session.kind !== "minibuffer") || orderedSessions()[0];
       if (fallback) selectSession(fallback.id, { replaceUrl: true });
       return;
     }
-    if (state.currentServiceName) {
-      renderServiceView();
+    if (state.currentOperatorName) {
+      renderOperatorView();
       renderPaneGrid();
     }
-    const requestedService = state.urlRequestedServiceName
-      ? state.services.find((service) => service.name === state.urlRequestedServiceName)
+    const requestedOperator = state.urlRequestedOperatorName
+      ? state.operators.find((operator) => operator.name === state.urlRequestedOperatorName)
       : null;
-    if (requestedService && state.currentServiceName !== requestedService.name) {
-      selectService(requestedService.name, { replaceUrl: true });
+    if (requestedOperator && state.currentOperatorName !== requestedOperator.name) {
+      selectOperator(requestedOperator.name, { replaceUrl: true });
       return;
     }
-    // Auto-select the first *user* session; operator is shown but
+    // Auto-select the first *user* session; minibuffer is shown but
     // shouldn't be the default landing — most phone visits are
     // to look at a real workload, not the dispatcher. Fall back
-    // to operator only when there are no user sessions yet.
-    if (!state.currentId && !state.currentServiceName) {
+    // to minibuffer only when there are no user sessions yet.
+    if (!state.currentId && !state.currentOperatorName) {
       const ordered = orderedSessions();
       const requested = state.urlRequestedSessionId
         ? ordered.find((s) => s.id === state.urlRequestedSessionId)
@@ -6617,20 +6617,20 @@ async function refreshSessions(startingLayoutTree = null) {
       const layoutSessionId = state.layout.tree
         ? focusedPaneSessionId() || layoutStartingSessionId()
         : layoutStartingSessionId(startingLayoutTree);
-      const layoutServiceName = state.layout.tree
-        ? focusedPaneServiceName() || layoutStartingServiceName()
-        : layoutStartingServiceName(startingLayoutTree);
-      const fromLayoutService = layoutServiceName
-        ? state.services.find((service) => service.name === layoutServiceName)
+      const layoutOperatorName = state.layout.tree
+        ? focusedPaneOperatorName() || layoutStartingOperatorName()
+        : layoutStartingOperatorName(startingLayoutTree);
+      const fromLayoutOperator = layoutOperatorName
+        ? state.operators.find((operator) => operator.name === layoutOperatorName)
         : null;
-      if (fromLayoutService) {
-        selectService(fromLayoutService.name, { replaceUrl: true, fromPane: true });
+      if (fromLayoutOperator) {
+        selectOperator(fromLayoutOperator.name, { replaceUrl: true, fromPane: true });
         return;
       }
       const fromLayout = layoutSessionId
         ? ordered.find((s) => s.id === layoutSessionId)
         : null;
-      const firstUser = ordered.find((s) => s.kind !== "orchestrator");
+      const firstUser = ordered.find((s) => s.kind !== "minibuffer");
       const pick = requested || fromLayout || firstUser || ordered[0];
       if (pick) selectSession(pick.id, { replaceUrl: true });
     } else {
@@ -6647,31 +6647,31 @@ async function refreshSessions(startingLayoutTree = null) {
   }
 }
 
-function serviceFieldHelp(field, service) {
-  const route = service?.routing || "session-key";
+function operatorFieldHelp(field, operator) {
+  const route = operator?.routing || "session-key";
   const descriptions = {
-    name: ["Service name", "Stable identifier used in the service URL and TOML filename.", "Locked after creation."],
-    instruction: ["Instruction", "Prepended to every incoming message. Define the service role, boundaries, and response behavior here.", "Applies to new sessions."],
-    harness: ["Harness", "Agent harness used for new service sessions, such as smith, claude, or codex.", "Applies to new sessions."],
+    name: ["Operator name", "Stable identifier used in the operator URL and TOML filename.", "Locked after creation."],
+    instruction: ["Instruction", "Prepended to every incoming message. Define the operator role, boundaries, and response behavior here.", "Applies to new sessions."],
+    harness: ["Harness", "Agent harness used for new operator sessions, such as smith, claude, or codex.", "Applies to new sessions."],
     model: ["Model", "Optional model override passed to the harness. Blank uses the harness default.", "Applies to new sessions."],
-    cwd: ["Working directory", "Directory where service sessions start and relative paths resolve.", "Applies to new sessions."],
+    cwd: ["Working directory", "Directory where operator sessions start and relative paths resolve.", "Applies to new sessions."],
     routing: ["Routing", route === "per-event" ? "Creates a fresh session for every accepted request." : route === "single" ? "Routes every request into one shared session." : "Reuses one session for each caller-supplied session_key.", "Applies to the next request."],
-    channels: ["Channels", "Transport endpoints attached to this service. HTTP listens on loopback; Slack connects outbound with Socket Mode.", "Add, edit, disable, or detach channels below."],
-    paused: ["State", "Paused services stop their listeners and refuse requests, keeping the definition and history.", "Applies immediately."],
+    channels: ["Channels", "Transport endpoints attached to this operator. HTTP listens on loopback; Slack connects outbound with Socket Mode.", "Add, edit, disable, or detach channels below."],
+    paused: ["State", "Paused operators stop their listeners and refuse requests, keeping the definition and history.", "Applies immediately."],
   };
   return descriptions[field] || descriptions.instruction;
 }
 
-function serviceDraftFrom(service) {
+function operatorDraftFrom(operator) {
   return {
-    name: service?.name || "service",
-    instruction: service?.instruction || "",
-    harness: service?.harness || "smith",
-    model: service?.model || "",
-    cwd: service?.cwd || ".",
-    routing: service?.routing || "session-key",
-    paused: !!service?.paused,
-    channels: Array.isArray(service?.channels) ? service.channels.map((channel) => ({ ...channel })) : [],
+    name: operator?.name || "operator",
+    instruction: operator?.instruction || "",
+    harness: operator?.harness || "smith",
+    model: operator?.model || "",
+    cwd: operator?.cwd || ".",
+    routing: operator?.routing || "session-key",
+    paused: !!operator?.paused,
+    channels: Array.isArray(operator?.channels) ? operator.channels.map((channel) => ({ ...channel })) : [],
   };
 }
 
@@ -6688,34 +6688,34 @@ function slackOptionMarkup(values, selected) {
   return values.map((value) => `<option value="${attr(value)}" ${value === selected ? "selected" : ""}>${escape(value)}</option>`).join("");
 }
 
-function nextServiceChannelId(service) {
-  const channels = service?.channels || [];
+function nextOperatorChannelId(operator) {
+  const channels = operator?.channels || [];
   if (!channels.some((channel) => channel.id === "http")) return "http";
   let index = 2;
   while (channels.some((channel) => channel.id === `http-${index}`)) index += 1;
   return `http-${index}`;
 }
 
-function nextServiceChannelPort(service) {
-  const used = new Set((service?.channels || []).map((channel) => Number(channel.port)).filter(Boolean));
+function nextOperatorChannelPort(operator) {
+  const used = new Set((operator?.channels || []).map((channel) => Number(channel.port)).filter(Boolean));
   let port = 8787;
   while (used.has(port) && port < 65535) port += 1;
   return port;
 }
 
-function beginNewServiceChannel() {
-  const service = state.currentServiceName && state.services.find((item) => item.name === state.currentServiceName);
-  if (!service) {
-    serviceViewFooterEl.textContent = "Save the service before adding a channel.";
+function beginNewOperatorChannel() {
+  const operator = state.currentOperatorName && state.operators.find((item) => item.name === state.currentOperatorName);
+  if (!operator) {
+    operatorViewFooterEl.textContent = "Save the operator before adding a channel.";
     return;
   }
-  state.serviceChannelDraft = {
+  state.operatorChannelDraft = {
     mode: "create",
-    serviceName: service.name,
-    id: nextServiceChannelId(service),
+    operatorName: operator.name,
+    id: nextOperatorChannelId(operator),
     kind: "http",
     enabled: true,
-    port: nextServiceChannelPort(service),
+    port: nextOperatorChannelPort(operator),
     app_token: "",
     bot_token: "",
     allowed_workspaces: [],
@@ -6724,52 +6724,52 @@ function beginNewServiceChannel() {
     follow_up: SLACK_FOLLOW_UP_DEFAULT,
     thread_context: SLACK_THREAD_CONTEXT_DEFAULT,
   };
-  renderServiceView();
-  const input = serviceActivityEl.querySelector('[data-channel-field="id"]');
+  renderOperatorView();
+  const input = operatorActivityEl.querySelector('[data-channel-field="id"]');
   if (input) input.focus();
 }
 
-function beginEditServiceChannel(id) {
-  const service = state.currentServiceName && state.services.find((item) => item.name === state.currentServiceName);
-  const channel = service?.channels?.find((item) => item.id === id);
-  if (!service || !channel) return;
-  state.serviceChannelDraft = { mode: "edit", serviceName: service.name, ...channel };
-  renderServiceView();
-  const input = serviceActivityEl.querySelector('[data-channel-field="port"]');
+function beginEditOperatorChannel(id) {
+  const operator = state.currentOperatorName && state.operators.find((item) => item.name === state.currentOperatorName);
+  const channel = operator?.channels?.find((item) => item.id === id);
+  if (!operator || !channel) return;
+  state.operatorChannelDraft = { mode: "edit", operatorName: operator.name, ...channel };
+  renderOperatorView();
+  const input = operatorActivityEl.querySelector('[data-channel-field="port"]');
   if (input) input.focus();
 }
 
-function clearServiceChannelDraft() {
-  state.serviceChannelDraft = null;
-  renderServiceView();
+function clearOperatorChannelDraft() {
+  state.operatorChannelDraft = null;
+  renderOperatorView();
 }
 
-function syncServiceDraftChannels(name) {
-  const service = state.services.find((item) => item.name === name);
-  if (service && state.serviceDraft && state.serviceDraft.name === name) {
-    state.serviceDraft = { ...state.serviceDraft, channels: service.channels || [] };
+function syncOperatorDraftChannels(name) {
+  const operator = state.operators.find((item) => item.name === name);
+  if (operator && state.operatorDraft && state.operatorDraft.name === name) {
+    state.operatorDraft = { ...state.operatorDraft, channels: operator.channels || [] };
   }
 }
 
-async function saveServiceChannelDraft() {
-  const draft = state.serviceChannelDraft;
+async function saveOperatorChannelDraft() {
+  const draft = state.operatorChannelDraft;
   if (!draft) return;
   const kind = draft.kind === "slack" ? "slack" : "http";
   const port = Number(draft.port) || 0;
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(draft.id || "") || draft.id.length > 32) {
-    serviceViewFooterEl.textContent = "Channel ID must use lowercase letters, digits, and interior hyphens.";
+    operatorViewFooterEl.textContent = "Channel ID must use lowercase letters, digits, and interior hyphens.";
     return;
   }
   if (kind === "http" && (port < 1 || port > 65535)) {
-    serviceViewFooterEl.textContent = "HTTP port must be between 1 and 65535.";
+    operatorViewFooterEl.textContent = "HTTP port must be between 1 and 65535.";
     return;
   }
   if (kind === "slack" && draft.mode === "create" && !String(draft.app_token || "").startsWith("xapp-")) {
-    serviceViewFooterEl.textContent = "Slack app token must start with xapp-.";
+    operatorViewFooterEl.textContent = "Slack app token must start with xapp-.";
     return;
   }
   if (kind === "slack" && draft.mode === "create" && !String(draft.bot_token || "").startsWith("xoxb-")) {
-    serviceViewFooterEl.textContent = "Slack bot token must start with xoxb-.";
+    operatorViewFooterEl.textContent = "Slack bot token must start with xoxb-.";
     return;
   }
   try {
@@ -6791,124 +6791,124 @@ async function saveServiceChannelDraft() {
         channel.thread_context = Math.max(0, Math.min(SLACK_THREAD_CONTEXT_MAX, Number(draft.thread_context)));
       }
     }
-    const result = await rpc("service.channel.put", {
-      service_name: draft.serviceName,
+    const result = await rpc("operator.channel.put", {
+      operator_name: draft.operatorName,
       channel,
       rotate_secret: false,
     });
-    state.services = state.services.map((item) => {
-      if (item.name !== draft.serviceName) return item;
+    state.operators = state.operators.map((item) => {
+      if (item.name !== draft.operatorName) return item;
       const channels = (item.channels || []).filter((channel) => channel.id !== result.channel.id).concat(result.channel).sort((a, b) => a.id.localeCompare(b.id));
       return { ...item, channels };
     });
-    syncServiceDraftChannels(draft.serviceName);
-    state.serviceNewToken = result.new_secret || null;
-    state.serviceChannelDraft = { mode: "edit", serviceName: draft.serviceName, ...result.channel };
+    syncOperatorDraftChannels(draft.operatorName);
+    state.operatorNewToken = result.new_secret || null;
+    state.operatorChannelDraft = { mode: "edit", operatorName: draft.operatorName, ...result.channel };
     renderSessions();
-    renderServiceView();
+    renderOperatorView();
   } catch (e) {
-    serviceViewFooterEl.textContent = `Channel save failed: ${e.message}`;
+    operatorViewFooterEl.textContent = `Channel save failed: ${e.message}`;
   }
 }
 
-async function deleteServiceChannel(id) {
-  const name = state.currentServiceName;
+async function deleteOperatorChannel(id) {
+  const name = state.currentOperatorName;
   if (!name || !window.confirm(`Detach channel '${id}'?`)) return;
   try {
-    await rpc("service.channel.detach", { service_name: name, channel_id: id });
+    await rpc("operator.channel.detach", { operator_name: name, channel_id: id });
     await refreshSessions();
-    state.serviceChannelDraft = null;
-    renderServiceView();
+    state.operatorChannelDraft = null;
+    renderOperatorView();
   } catch (e) {
-    serviceViewFooterEl.textContent = `Channel detach failed: ${e.message}`;
+    operatorViewFooterEl.textContent = `Channel detach failed: ${e.message}`;
   }
 }
 
-async function toggleServiceChannel(id) {
-  const name = state.currentServiceName;
-  const service = name && state.services.find((item) => item.name === name);
-  const channel = state.serviceChannelCatalog.find((item) => item.id === id);
-  if (!name || !service || !channel) return;
+async function toggleOperatorChannel(id) {
+  const name = state.currentOperatorName;
+  const operator = name && state.operators.find((item) => item.name === name);
+  const channel = state.operatorChannelCatalog.find((item) => item.id === id);
+  if (!name || !operator || !channel) return;
   if (channel.attached_to && channel.attached_to !== name) {
-    serviceViewFooterEl.textContent = `Channel '${id}' is attached to '${channel.attached_to}'.`;
-    renderServiceView();
+    operatorViewFooterEl.textContent = `Channel '${id}' is attached to '${channel.attached_to}'.`;
+    renderOperatorView();
     return;
   }
   const attach = !channel.attached_to;
   try {
-    await rpc(attach ? "service.channel.attach" : "service.channel.detach", {
-      service_name: name,
+    await rpc(attach ? "operator.channel.attach" : "operator.channel.detach", {
+      operator_name: name,
       channel_id: id,
     });
     await refreshSessions();
-    state.serviceChannelDraft = null;
-    renderServiceView();
-    serviceViewFooterEl.textContent = `Channel '${id}' ${attach ? "attached" : "detached"}.`;
+    state.operatorChannelDraft = null;
+    renderOperatorView();
+    operatorViewFooterEl.textContent = `Channel '${id}' ${attach ? "attached" : "detached"}.`;
   } catch (e) {
-    serviceViewFooterEl.textContent = `Channel ${attach ? "attach" : "detach"} failed: ${e.message}`;
-    renderServiceView();
+    operatorViewFooterEl.textContent = `Channel ${attach ? "attach" : "detach"} failed: ${e.message}`;
+    renderOperatorView();
   }
 }
 
-async function rotateServiceChannel(id) {
-  const name = state.currentServiceName;
+async function rotateOperatorChannel(id) {
+  const name = state.currentOperatorName;
   if (!name || !window.confirm(`Rotate the credential for '${id}'?`)) return;
   try {
-    const result = await rpc("service.channel.rotate_secret", { service_name: name, channel_id: id });
-    state.services = state.services.map((item) => item.name === name ? { ...item, channels: (item.channels || []).map((channel) => channel.id === id ? result.channel : channel) } : item);
-    syncServiceDraftChannels(name);
-    state.serviceNewToken = result.new_secret || null;
-    state.serviceChannelDraft = { mode: "edit", serviceName: name, ...result.channel };
+    const result = await rpc("operator.channel.rotate_secret", { operator_name: name, channel_id: id });
+    state.operators = state.operators.map((item) => item.name === name ? { ...item, channels: (item.channels || []).map((channel) => channel.id === id ? result.channel : channel) } : item);
+    syncOperatorDraftChannels(name);
+    state.operatorNewToken = result.new_secret || null;
+    state.operatorChannelDraft = { mode: "edit", operatorName: name, ...result.channel };
     renderSessions();
-    renderServiceView();
+    renderOperatorView();
   } catch (e) {
-    serviceViewFooterEl.textContent = `Credential rotation failed: ${e.message}`;
+    operatorViewFooterEl.textContent = `Credential rotation failed: ${e.message}`;
   }
 }
 
 function applyChannelPublicationState(payload) {
-  if (!payload?.service_name || !payload?.channel_id) return;
+  if (!payload?.operator_name || !payload?.channel_id) return;
   const apply = (channel) => channel.id === payload.channel_id
     ? { ...channel, publication: payload.publication || null }
     : channel;
-  state.serviceChannelCatalog = (state.serviceChannelCatalog || []).map((channel) => {
-    if (channel.attached_to !== payload.service_name) return channel;
+  state.operatorChannelCatalog = (state.operatorChannelCatalog || []).map((channel) => {
+    if (channel.attached_to !== payload.operator_name) return channel;
     return apply(channel);
   });
-  state.services = (state.services || []).map((service) => service.name === payload.service_name
-    ? { ...service, channels: (service.channels || []).map(apply) }
-    : service);
-  if (state.currentServiceName === payload.service_name) renderServiceView();
+  state.operators = (state.operators || []).map((operator) => operator.name === payload.operator_name
+    ? { ...operator, channels: (operator.channels || []).map(apply) }
+    : operator);
+  if (state.currentOperatorName === payload.operator_name) renderOperatorView();
 }
 
 async function toggleChannelPublication(id) {
-  const name = state.currentServiceName;
-  const channel = (state.serviceChannelCatalog || []).find((item) => item.id === id && item.attached_to === name);
+  const name = state.currentOperatorName;
+  const channel = (state.operatorChannelCatalog || []).find((item) => item.id === id && item.attached_to === name);
   if (!name || !channel) return;
   try {
     if (channel.publication) {
-      await rpc("service.channel.unpublish", { service_name: name, channel_id: id });
-      applyChannelPublicationState({ service_name: name, channel_id: id, publication: null });
-      serviceViewFooterEl.textContent = `Channel '${id}' is loopback-only.`;
+      await rpc("operator.channel.unpublish", { operator_name: name, channel_id: id });
+      applyChannelPublicationState({ operator_name: name, channel_id: id, publication: null });
+      operatorViewFooterEl.textContent = `Channel '${id}' is loopback-only.`;
     } else {
-      const publication = await rpc("service.channel.publish", { service_name: name, channel_id: id, provider: "construct" });
-      applyChannelPublicationState({ service_name: name, channel_id: id, publication });
-      serviceViewFooterEl.textContent = `Publishing '${id}' through the Construct tunnel…`;
+      const publication = await rpc("operator.channel.publish", { operator_name: name, channel_id: id, provider: "construct" });
+      applyChannelPublicationState({ operator_name: name, channel_id: id, publication });
+      operatorViewFooterEl.textContent = `Publishing '${id}' through the Construct tunnel…`;
     }
   } catch (e) {
-    serviceViewFooterEl.textContent = `Channel publication failed: ${e.message}`;
+    operatorViewFooterEl.textContent = `Channel publication failed: ${e.message}`;
   }
 }
 
-function serviceSessionRouteLabel(session, serviceName, catalog, serviceChannels) {
+function operatorSessionRouteLabel(session, operatorName, catalog, operatorChannels) {
   const attached = (catalog || [])
-    .filter((channel) => channel.attached_to === serviceName)
+    .filter((channel) => channel.attached_to === operatorName)
     .map((channel) => channel.id)
-    .concat((serviceChannels || [])
-      .filter((channel) => channel.attached_to === serviceName)
+    .concat((operatorChannels || [])
+      .filter((channel) => channel.attached_to === operatorName)
       .map((channel) => channel.id));
   const fallback = attached[0] || "unknown";
-  const prefix = `service:${serviceName}:`;
+  const prefix = `operator:${operatorName}:`;
   const suffix = (session.title || "").startsWith(prefix)
     ? session.title.slice(prefix.length)
     : "";
@@ -6922,59 +6922,59 @@ function serviceSessionRouteLabel(session, serviceName, catalog, serviceChannels
     channel = pieces[0];
     key = "";
   } else {
-    // Legacy v1 titles used the session key directly after the service name.
+    // Legacy v1 titles used the session key directly after the operator name.
     channel = fallback;
     key = suffix;
   }
   return { channel, label: key || "event" };
 }
 
-function renderServiceView() {
-  if (!serviceViewEl) return;
-  const name = state.currentServiceName;
-  const service = name && state.services.find((item) => item.name === name);
-  if (!name || (!service && !state.serviceDraft)) {
-    serviceViewEl.hidden = true;
+function renderOperatorView() {
+  if (!operatorViewEl) return;
+  const name = state.currentOperatorName;
+  const operator = name && state.operators.find((item) => item.name === name);
+  if (!name || (!operator && !state.operatorDraft)) {
+    operatorViewEl.hidden = true;
     return;
   }
-  const draft = state.serviceDraft && state.serviceDraft.name === name
-    ? state.serviceDraft
-    : serviceDraftFrom(service);
-  serviceViewEl.hidden = false;
-  serviceViewTitleEl.textContent = draft.name;
-  const editing = !!state.serviceEditing;
+  const draft = state.operatorDraft && state.operatorDraft.name === name
+    ? state.operatorDraft
+    : operatorDraftFrom(operator);
+  operatorViewEl.hidden = false;
+  operatorViewTitleEl.textContent = draft.name;
+  const editing = !!state.operatorEditing;
   const field = (key, label, value, multiline = false) => {
-    const locked = key === "name" && !!service;
+    const locked = key === "name" && !!operator;
     const readOnly = !editing || locked;
     const control = multiline
-      ? `<textarea data-service-field="${key}" ${readOnly ? "readonly" : ""}>${escape(value || "")}</textarea>`
-      : `<input data-service-field="${key}" value="${attr(value ?? "")}" ${readOnly ? "readonly" : ""} />`;
-    return `<div class="service-field"><label class="service-field-label" for="service-field-${key}">${label}</label><div class="service-field-value">${control}</div></div>`;
+      ? `<textarea data-operator-field="${key}" ${readOnly ? "readonly" : ""}>${escape(value || "")}</textarea>`
+      : `<input data-operator-field="${key}" value="${attr(value ?? "")}" ${readOnly ? "readonly" : ""} />`;
+    return `<div class="operator-field"><label class="operator-field-label" for="operator-field-${key}">${label}</label><div class="operator-field-value">${control}</div></div>`;
   };
   const route = editing
-    ? `<select data-service-field="routing"><option value="session-key" ${draft.routing === "session-key" ? "selected" : ""}>session-key</option><option value="per-event" ${draft.routing === "per-event" ? "selected" : ""}>per-event</option><option value="single" ${draft.routing === "single" ? "selected" : ""}>single</option></select>`
+    ? `<select data-operator-field="routing"><option value="session-key" ${draft.routing === "session-key" ? "selected" : ""}>session-key</option><option value="per-event" ${draft.routing === "per-event" ? "selected" : ""}>per-event</option><option value="single" ${draft.routing === "single" ? "selected" : ""}>single</option></select>`
     : escape(draft.routing);
   const paused = editing
-    ? `<label class="service-check"><input type="checkbox" data-service-field="paused" ${draft.paused ? "checked" : ""}> paused</label>`
+    ? `<label class="operator-check"><input type="checkbox" data-operator-field="paused" ${draft.paused ? "checked" : ""}> paused</label>`
     : (draft.paused ? "paused" : "serving");
-  serviceDefinitionEl.innerHTML =
+  operatorDefinitionEl.innerHTML =
     field("name", "Name", draft.name) +
     field("instruction", "Instruction", draft.instruction, true) +
     field("harness", "Harness", draft.harness) +
     field("model", "Model", draft.model) +
     field("cwd", "Working dir", draft.cwd) +
-    `<div class="service-field"><label class="service-field-label">Routing</label><div class="service-field-value">${route}</div></div>` +
-    `<div class="service-field"><label class="service-field-label">Channels</label><div class="service-field-value">${(state.serviceChannelCatalog || []).filter((channel) => channel.attached_to === name).length} attached</div></div>` +
-    `<div class="service-field"><label class="service-field-label">State</label><div class="service-field-value">${paused}</div></div>`;
-  const selected = state.serviceField || "instruction";
-  const help = serviceFieldHelp(selected, draft);
-  serviceHelpEl.innerHTML = `<h3>${escape(help[0])}</h3><p>${escape(help[1])}</p><p class="hint">${escape(help[2])}</p><p class="hint">Each service persists in its own TOML file.</p>`;
+    `<div class="operator-field"><label class="operator-field-label">Routing</label><div class="operator-field-value">${route}</div></div>` +
+    `<div class="operator-field"><label class="operator-field-label">Channels</label><div class="operator-field-value">${(state.operatorChannelCatalog || []).filter((channel) => channel.attached_to === name).length} attached</div></div>` +
+    `<div class="operator-field"><label class="operator-field-label">State</label><div class="operator-field-value">${paused}</div></div>`;
+  const selected = state.operatorField || "instruction";
+  const help = operatorFieldHelp(selected, draft);
+  operatorHelpEl.innerHTML = `<h3>${escape(help[0])}</h3><p>${escape(help[1])}</p><p class="hint">${escape(help[2])}</p><p class="hint">Each operator persists in its own TOML file.</p>`;
   const routed = state.sessions.filter((session) => {
     const title = session.title || "";
-    return title === `service:${name}` || title.startsWith(`service:${name}:`);
+    return title === `operator:${name}` || title.startsWith(`operator:${name}:`);
   });
-  const channels = state.serviceChannelCatalog || [];
-  const channelDraft = state.serviceChannelDraft && state.serviceChannelDraft.serviceName === name ? state.serviceChannelDraft : null;
+  const channels = state.operatorChannelCatalog || [];
+  const channelDraft = state.operatorChannelDraft && state.operatorChannelDraft.operatorName === name ? state.operatorChannelDraft : null;
   const channelRows = channels.length
     ? channels.map((channel) => {
       const localEndpoint = channel.kind === "slack"
@@ -6983,7 +6983,7 @@ function renderServiceView() {
       const channelState = channel.enabled ? "enabled" : "disabled";
       const attached = channel.attached_to === name;
       const ownedByOther = !!channel.attached_to && !attached;
-      const owner = ownedByOther ? `<span class="service-channel-owner">attached to ${escape(channel.attached_to)}</span>` : "";
+      const owner = ownedByOther ? `<span class="operator-channel-owner">attached to ${escape(channel.attached_to)}</span>` : "";
       const publication = channel.publication || null;
       const publicationEndpoint = publication?.public_endpoint?.kind === "url"
         ? publication.public_endpoint.url
@@ -7003,99 +7003,99 @@ function renderServiceView() {
         : "";
       const rotate = channel.kind === "http" ? `<button type="button" data-channel-rotate="${attr(channel.id)}">rotate</button>` : "";
       const controls = attached
-        ? `<span class="service-channel-actions">${publish}<button type="button" data-channel-edit="${attr(channel.id)}">edit</button>${rotate}<button type="button" class="danger" data-channel-delete="${attr(channel.id)}">detach</button></span>`
+        ? `<span class="operator-channel-actions">${publish}<button type="button" data-channel-edit="${attr(channel.id)}">edit</button>${rotate}<button type="button" class="danger" data-channel-delete="${attr(channel.id)}">detach</button></span>`
         : "";
-      return `<div class="service-channel-row${ownedByOther ? " unavailable" : ""}"><input class="channel-toggle" type="checkbox" data-channel-toggle="${attr(channel.id)}" ${attached ? "checked" : ""} ${ownedByOther || !service ? "disabled" : ""} aria-label="${attr(attached ? `Detach ${channel.id}` : `Attach ${channel.id}`)}"><span class="channel-id">${escape(channel.id)}</span><span>${escape(channel.kind || "http")}</span><span class="channel-endpoint">${escape(endpoint)}</span><span class="channel-state ${channel.enabled ? "" : "disabled"}">${channelState}</span>${owner}${controls}</div>`;
+      return `<div class="operator-channel-row${ownedByOther ? " unavailable" : ""}"><input class="channel-toggle" type="checkbox" data-channel-toggle="${attr(channel.id)}" ${attached ? "checked" : ""} ${ownedByOther || !operator ? "disabled" : ""} aria-label="${attr(attached ? `Detach ${channel.id}` : `Attach ${channel.id}`)}"><span class="channel-id">${escape(channel.id)}</span><span>${escape(channel.kind || "http")}</span><span class="channel-endpoint">${escape(endpoint)}</span><span class="channel-state ${channel.enabled ? "" : "disabled"}">${channelState}</span>${owner}${controls}</div>`;
     }).join("")
-    : `<div class="service-view-footer">No channels in the catalog.</div>`;
+    : `<div class="operator-view-footer">No channels in the catalog.</div>`;
   const channelSpecificFields = channelDraft?.kind === "slack"
     ? `<label>App token<input data-channel-field="app_token" type="password" value="" placeholder="${channelDraft.has_app_token ? "xapp-… (set)" : "xapp-…"}" autocomplete="off"></label><label>Bot token<input data-channel-field="bot_token" type="password" value="" placeholder="${channelDraft.has_bot_token ? "xoxb-… (set)" : "xoxb-…"}" autocomplete="off"></label><label>Workspace allowlist<input data-channel-field="allowed_workspaces" value="${attr((channelDraft.allowed_workspaces || []).join(","))}" placeholder="T123,T456"></label><label>Channel allowlist<input data-channel-field="allowed_channels" value="${attr((channelDraft.allowed_channels || []).join(","))}" placeholder="C123,D456"></label><label title="What the thread shows while a turn is still running. Reactions need the reactions:write scope.">Progress<select data-channel-field="progress">${slackOptionMarkup(SLACK_PROGRESS_VALUES, channelDraft.progress || SLACK_PROGRESS_DEFAULT)}</select></label><label title="Where the bot keeps answering once addressed. Anything past off needs the message.channels subscription.">Follow-up<select data-channel-field="follow_up">${slackOptionMarkup(SLACK_FOLLOW_UP_VALUES, channelDraft.follow_up || SLACK_FOLLOW_UP_DEFAULT)}</select></label><label title="Earlier thread messages read when first pulled in; 0 reads none. Needs channels:history, and puts other people's text in front of a session that holds tools.">Thread context<input data-channel-field="thread_context" type="number" min="0" max="${SLACK_THREAD_CONTEXT_MAX}" value="${attr(channelDraft.thread_context ?? SLACK_THREAD_CONTEXT_DEFAULT)}"></label>`
     : `<label>HTTP port<input data-channel-field="port" type="number" min="1" max="65535" value="${attr(channelDraft?.port ?? "")}"></label>`;
-  const channelEditor = channelDraft ? `<div class="service-channel-editor"><div class="service-channel-editor-grid"><label>Channel ID<input data-channel-field="id" value="${attr(channelDraft.id || "")}" ${channelDraft.mode === "edit" ? "readonly" : ""}></label><label>Kind<select data-channel-field="kind" ${channelDraft.mode === "edit" ? "disabled" : ""}><option value="http" ${channelDraft.kind === "http" ? "selected" : ""}>http</option><option value="slack" ${channelDraft.kind === "slack" ? "selected" : ""}>slack</option></select></label>${channelSpecificFields}<label>State<select data-channel-field="enabled"><option value="true" ${channelDraft.enabled ? "selected" : ""}>enabled</option><option value="false" ${channelDraft.enabled ? "" : "selected"}>disabled</option></select></label></div><div class="channel-editor-actions"><button type="button" data-channel-save>Save channel</button><button type="button" data-channel-cancel>Cancel</button></div></div>` : "";
+  const channelEditor = channelDraft ? `<div class="operator-channel-editor"><div class="operator-channel-editor-grid"><label>Channel ID<input data-channel-field="id" value="${attr(channelDraft.id || "")}" ${channelDraft.mode === "edit" ? "readonly" : ""}></label><label>Kind<select data-channel-field="kind" ${channelDraft.mode === "edit" ? "disabled" : ""}><option value="http" ${channelDraft.kind === "http" ? "selected" : ""}>http</option><option value="slack" ${channelDraft.kind === "slack" ? "selected" : ""}>slack</option></select></label>${channelSpecificFields}<label>State<select data-channel-field="enabled"><option value="true" ${channelDraft.enabled ? "selected" : ""}>enabled</option><option value="false" ${channelDraft.enabled ? "" : "selected"}>disabled</option></select></label></div><div class="channel-editor-actions"><button type="button" data-channel-save>Save channel</button><button type="button" data-channel-cancel>Cancel</button></div></div>` : "";
   const attachedCount = channels.filter((channel) => channel.attached_to === name).length;
-  serviceActivityEl.innerHTML = `<h3>Channels · ${attachedCount} attached · ${channels.length} in catalog</h3>${channelRows}<div class="channel-editor-actions"><button type="button" data-channel-add ${service ? "" : "disabled"}>Add channel</button></div>${channelEditor}<h3 style="margin-top:18px">Sessions · ${routed.length} routed session${routed.length === 1 ? "" : "s"}</h3>` +
+  operatorActivityEl.innerHTML = `<h3>Channels · ${attachedCount} attached · ${channels.length} in catalog</h3>${channelRows}<div class="channel-editor-actions"><button type="button" data-channel-add ${operator ? "" : "disabled"}>Add channel</button></div>${channelEditor}<h3 style="margin-top:18px">Sessions · ${routed.length} routed session${routed.length === 1 ? "" : "s"}</h3>` +
     (routed.length ? routed.map((session) => {
-      const route = serviceSessionRouteLabel(session, name, channels, service?.channels || []);
-      return `<div class="service-session-link" data-session-id="${attr(session.id)}"><span class="service-session-state">${escape(session.state || "idle")}</span><span class="service-session-channel">channel: ${escape(route.channel)}</span><span>${escape(route.label)}</span></div>`;
-    }).join("") : `<div class="service-view-footer">No requests have created a session yet.</div>`);
-  const tokenNote = state.serviceNewToken ? `Token (shown once): ${state.serviceNewToken}` : "";
-  serviceViewFooterEl.textContent = editing
+      const route = operatorSessionRouteLabel(session, name, channels, operator?.channels || []);
+      return `<div class="operator-session-link" data-session-id="${attr(session.id)}"><span class="operator-session-state">${escape(session.state || "idle")}</span><span class="operator-session-channel">channel: ${escape(route.channel)}</span><span>${escape(route.label)}</span></div>`;
+    }).join("") : `<div class="operator-view-footer">No requests have created a session yet.</div>`);
+  const tokenNote = state.operatorNewToken ? `Token (shown once): ${state.operatorNewToken}` : "";
+  operatorViewFooterEl.textContent = editing
     ? `Enter saves · Esc cancels${tokenNote ? `\n${tokenNote}` : ""}`
     : `HTTP publishing is explicit · Slack uses outbound Socket Mode · stored credentials are never returned${tokenNote ? `\n${tokenNote}` : ""}`;
-  serviceEditBtn.textContent = editing ? "Save" : "Edit";
-  serviceRotateBtn.hidden = !service;
-  serviceDeleteBtn.hidden = !service;
-  serviceDefinitionEl.querySelectorAll("[data-service-field]").forEach((control) => {
-    control.id = `service-field-${control.dataset.serviceField}`;
+  operatorEditBtn.textContent = editing ? "Save" : "Edit";
+  operatorRotateBtn.hidden = !operator;
+  operatorDeleteBtn.hidden = !operator;
+  operatorDefinitionEl.querySelectorAll("[data-operator-field]").forEach((control) => {
+    control.id = `operator-field-${control.dataset.operatorField}`;
     control.addEventListener("focus", () => {
-      state.serviceField = control.dataset.serviceField;
-      const helpNow = serviceFieldHelp(state.serviceField, state.serviceDraft || draft);
-      serviceHelpEl.innerHTML = `<h3>${escape(helpNow[0])}</h3><p>${escape(helpNow[1])}</p><p class="hint">${escape(helpNow[2])}</p><p class="hint">Each service persists in its own TOML file.</p>`;
+      state.operatorField = control.dataset.operatorField;
+      const helpNow = operatorFieldHelp(state.operatorField, state.operatorDraft || draft);
+      operatorHelpEl.innerHTML = `<h3>${escape(helpNow[0])}</h3><p>${escape(helpNow[1])}</p><p class="hint">${escape(helpNow[2])}</p><p class="hint">Each operator persists in its own TOML file.</p>`;
     });
     control.addEventListener("input", () => {
-      if (!state.serviceDraft) return;
-      const key = control.dataset.serviceField;
-      state.serviceDraft[key] = control.value;
-      if (key === "paused") state.serviceDraft[key] = !!control.checked;
-      state.serviceField = key;
-      const helpNow = serviceFieldHelp(key, state.serviceDraft);
-      serviceHelpEl.innerHTML = `<h3>${escape(helpNow[0])}</h3><p>${escape(helpNow[1])}</p><p class="hint">${escape(helpNow[2])}</p><p class="hint">Each service persists in its own TOML file.</p>`;
+      if (!state.operatorDraft) return;
+      const key = control.dataset.operatorField;
+      state.operatorDraft[key] = control.value;
+      if (key === "paused") state.operatorDraft[key] = !!control.checked;
+      state.operatorField = key;
+      const helpNow = operatorFieldHelp(key, state.operatorDraft);
+      operatorHelpEl.innerHTML = `<h3>${escape(helpNow[0])}</h3><p>${escape(helpNow[1])}</p><p class="hint">${escape(helpNow[2])}</p><p class="hint">Each operator persists in its own TOML file.</p>`;
     });
     control.addEventListener("change", () => control.dispatchEvent(new Event("input")));
   });
-  serviceActivityEl.querySelectorAll("[data-channel-field]").forEach((control) => {
+  operatorActivityEl.querySelectorAll("[data-channel-field]").forEach((control) => {
     control.addEventListener("input", () => {
-      if (!state.serviceChannelDraft) return;
+      if (!state.operatorChannelDraft) return;
       const key = control.dataset.channelField;
-      if (key === "port") state.serviceChannelDraft.port = Number(control.value) || 0;
-      else if (key === "thread_context") state.serviceChannelDraft.thread_context = Math.max(0, Math.min(SLACK_THREAD_CONTEXT_MAX, Number(control.value) || 0));
-      else if (key === "enabled") state.serviceChannelDraft.enabled = control.value === "true";
-      else if (key === "allowed_workspaces" || key === "allowed_channels") state.serviceChannelDraft[key] = control.value.split(",").map((value) => value.trim()).filter(Boolean);
-      else state.serviceChannelDraft[key] = control.value;
-      if (key === "kind") renderServiceView();
+      if (key === "port") state.operatorChannelDraft.port = Number(control.value) || 0;
+      else if (key === "thread_context") state.operatorChannelDraft.thread_context = Math.max(0, Math.min(SLACK_THREAD_CONTEXT_MAX, Number(control.value) || 0));
+      else if (key === "enabled") state.operatorChannelDraft.enabled = control.value === "true";
+      else if (key === "allowed_workspaces" || key === "allowed_channels") state.operatorChannelDraft[key] = control.value.split(",").map((value) => value.trim()).filter(Boolean);
+      else state.operatorChannelDraft[key] = control.value;
+      if (key === "kind") renderOperatorView();
     });
     control.addEventListener("change", () => control.dispatchEvent(new Event("input")));
   });
-  serviceActivityEl.querySelector("[data-channel-add]")?.addEventListener("click", beginNewServiceChannel);
-  serviceActivityEl.querySelectorAll("[data-channel-toggle]").forEach((control) => control.addEventListener("change", () => toggleServiceChannel(control.dataset.channelToggle)));
-  serviceActivityEl.querySelectorAll("[data-channel-edit]").forEach((button) => button.addEventListener("click", () => beginEditServiceChannel(button.dataset.channelEdit)));
-  serviceActivityEl.querySelectorAll("[data-channel-publish]").forEach((button) => button.addEventListener("click", () => toggleChannelPublication(button.dataset.channelPublish)));
-  serviceActivityEl.querySelectorAll("[data-channel-delete]").forEach((button) => button.addEventListener("click", () => deleteServiceChannel(button.dataset.channelDelete)));
-  serviceActivityEl.querySelectorAll("[data-channel-rotate]").forEach((button) => button.addEventListener("click", () => rotateServiceChannel(button.dataset.channelRotate)));
-  serviceActivityEl.querySelector("[data-channel-save]")?.addEventListener("click", saveServiceChannelDraft);
-  serviceActivityEl.querySelector("[data-channel-cancel]")?.addEventListener("click", clearServiceChannelDraft);
+  operatorActivityEl.querySelector("[data-channel-add]")?.addEventListener("click", beginNewOperatorChannel);
+  operatorActivityEl.querySelectorAll("[data-channel-toggle]").forEach((control) => control.addEventListener("change", () => toggleOperatorChannel(control.dataset.channelToggle)));
+  operatorActivityEl.querySelectorAll("[data-channel-edit]").forEach((button) => button.addEventListener("click", () => beginEditOperatorChannel(button.dataset.channelEdit)));
+  operatorActivityEl.querySelectorAll("[data-channel-publish]").forEach((button) => button.addEventListener("click", () => toggleChannelPublication(button.dataset.channelPublish)));
+  operatorActivityEl.querySelectorAll("[data-channel-delete]").forEach((button) => button.addEventListener("click", () => deleteOperatorChannel(button.dataset.channelDelete)));
+  operatorActivityEl.querySelectorAll("[data-channel-rotate]").forEach((button) => button.addEventListener("click", () => rotateOperatorChannel(button.dataset.channelRotate)));
+  operatorActivityEl.querySelector("[data-channel-save]")?.addEventListener("click", saveOperatorChannelDraft);
+  operatorActivityEl.querySelector("[data-channel-cancel]")?.addEventListener("click", clearOperatorChannelDraft);
 }
 
-async function selectService(name, { replaceUrl = false, fromPane = false } = {}) {
-  const service = state.services.find((item) => item.name === name);
-  if (!service) return;
-  if (!fromPane) setFocusedPaneService(name);
-  state.currentServiceName = name;
+async function selectOperator(name, { replaceUrl = false, fromPane = false } = {}) {
+  const operator = state.operators.find((item) => item.name === name);
+  if (!operator) return;
+  if (!fromPane) setFocusedPaneOperator(name);
+  state.currentOperatorName = name;
   state.currentId = null;
-  state.urlRequestedServiceName = name;
+  state.urlRequestedOperatorName = name;
   state.urlRequestedSessionId = null;
-  state.serviceDraft = null;
-  state.serviceEditing = false;
-  state.serviceNewToken = null;
-  state.serviceChannelDraft = null;
-  state.serviceField = "instruction";
-  setLocationServiceName(name, { replace: replaceUrl });
-  serviceTitleAndChrome(name);
+  state.operatorDraft = null;
+  state.operatorEditing = false;
+  state.operatorNewToken = null;
+  state.operatorChannelDraft = null;
+  state.operatorField = "instruction";
+  setLocationOperatorName(name, { replace: replaceUrl });
+  operatorTitleAndChrome(name);
   renderSessions();
-  enterServiceView();
+  enterOperatorView();
   if (isNarrowLayout()) setSessionListVisible(false, false);
 }
 
-function serviceTitleAndChrome(name) {
-  setSessionChromeTitle(name ? `service · ${name}` : "");
+function operatorTitleAndChrome(name) {
+  setSessionChromeTitle(name ? `operator · ${name}` : "");
   sessionRuntimeEl.hidden = true;
   viewModeToggleEl.hidden = true;
   sessionMenuOverlayEl.hidden = true;
 }
 
-function enterServiceView() {
+function enterOperatorView() {
   leaveProgramView();
-  state.mode = "service";
+  state.mode = "operator";
   transcriptEl.hidden = true;
   terminalWrapEl.hidden = true;
   terminalScrollOverlayEl.hidden = true;
@@ -7103,108 +7103,108 @@ function enterServiceView() {
   sessionWidgetsEl.hidden = true;
   composerEl.hidden = true;
   if (typeof vkbdEl !== "undefined" && vkbdEl) vkbdEl.hidden = true;
-  renderServiceView();
+  renderOperatorView();
   refreshSessionActions();
 }
 
-async function saveServiceDraft() {
-  if (!state.serviceDraft) return;
-  const previousName = state.currentServiceName;
-  const service = { ...state.serviceDraft, model: state.serviceDraft.model || null };
+async function saveOperatorDraft() {
+  if (!state.operatorDraft) return;
+  const previousName = state.currentOperatorName;
+  const operator = { ...state.operatorDraft, model: state.operatorDraft.model || null };
   try {
-    const result = await rpc("service.put", { service });
-    state.services = state.services
-      .filter((item) => item.name !== service.name)
-      .concat(result.service)
+    const result = await rpc("operator.put", { operator });
+    state.operators = state.operators
+      .filter((item) => item.name !== operator.name)
+      .concat(result.operator)
       .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || a.name.localeCompare(b.name));
-    if (previousName && previousName !== result.service.name) {
-      renameServiceInLayout(previousName, result.service.name);
+    if (previousName && previousName !== result.operator.name) {
+      renameOperatorInLayout(previousName, result.operator.name);
     }
-    state.currentServiceName = result.service.name;
-    state.urlRequestedServiceName = result.service.name;
-    setLocationServiceName(result.service.name, { replace: true });
-    state.serviceDraft = { ...result.service };
-    state.serviceEditing = false;
-    state.serviceNewToken = null;
+    state.currentOperatorName = result.operator.name;
+    state.urlRequestedOperatorName = result.operator.name;
+    setLocationOperatorName(result.operator.name, { replace: true });
+    state.operatorDraft = { ...result.operator };
+    state.operatorEditing = false;
+    state.operatorNewToken = null;
     renderSessions();
-    renderServiceView();
+    renderOperatorView();
   } catch (e) {
-    serviceViewFooterEl.textContent = `Save failed: ${e.message}`;
+    operatorViewFooterEl.textContent = `Save failed: ${e.message}`;
   }
 }
 
-function beginNewService() {
-  let name = "service";
+function beginNewOperator() {
+  let name = "operator";
   let suffix = 2;
-  while (state.services.some((service) => service.name === name)) name = `service-${suffix++}`;
-  state.serviceDraft = serviceDraftFrom({ name });
-  state.serviceChannelDraft = null;
-  state.serviceEditing = true;
-  state.currentServiceName = name;
-  state.urlRequestedServiceName = name;
+  while (state.operators.some((operator) => operator.name === name)) name = `operator-${suffix++}`;
+  state.operatorDraft = operatorDraftFrom({ name });
+  state.operatorChannelDraft = null;
+  state.operatorEditing = true;
+  state.currentOperatorName = name;
+  state.urlRequestedOperatorName = name;
   state.currentId = null;
-  setFocusedPaneService(name);
-  state.serviceField = "name";
-  setLocationServiceName(name);
-  serviceTitleAndChrome(name);
-  enterServiceView();
+  setFocusedPaneOperator(name);
+  state.operatorField = "name";
+  setLocationOperatorName(name);
+  operatorTitleAndChrome(name);
+  enterOperatorView();
   renderSessions();
 }
 
-serviceEditBtn.addEventListener("click", () => {
-  if (!state.currentServiceName) return;
-  if (state.serviceEditing) {
-    saveServiceDraft();
+operatorEditBtn.addEventListener("click", () => {
+  if (!state.currentOperatorName) return;
+  if (state.operatorEditing) {
+    saveOperatorDraft();
     return;
   }
-  const service = state.services.find((item) => item.name === state.currentServiceName);
-  if (!service) return;
-  state.serviceDraft = serviceDraftFrom(service);
-  state.serviceEditing = true;
-  state.serviceField = "instruction";
-  renderServiceView();
-  const input = serviceDefinitionEl.querySelector(`[data-service-field="${state.serviceField}"]`);
+  const operator = state.operators.find((item) => item.name === state.currentOperatorName);
+  if (!operator) return;
+  state.operatorDraft = operatorDraftFrom(operator);
+  state.operatorEditing = true;
+  state.operatorField = "instruction";
+  renderOperatorView();
+  const input = operatorDefinitionEl.querySelector(`[data-operator-field="${state.operatorField}"]`);
   if (input) input.focus();
 });
-serviceRotateBtn.addEventListener("click", async () => {
-  const name = state.currentServiceName;
-  const service = name && state.services.find((item) => item.name === name);
-  const channel = service?.channels?.find((item) => item.kind === "http");
-  if (!service || !channel) {
-    serviceViewFooterEl.textContent = "This service has no HTTP channel to rotate.";
+operatorRotateBtn.addEventListener("click", async () => {
+  const name = state.currentOperatorName;
+  const operator = name && state.operators.find((item) => item.name === name);
+  const channel = operator?.channels?.find((item) => item.kind === "http");
+  if (!operator || !channel) {
+    operatorViewFooterEl.textContent = "This operator has no HTTP channel to rotate.";
     return;
   }
-  rotateServiceChannel(channel.id);
+  rotateOperatorChannel(channel.id);
 });
-serviceDeleteBtn.addEventListener("click", async () => {
-  const name = state.currentServiceName;
-  if (!name || !state.services.some((service) => service.name === name)) return;
-  if (!window.confirm(`Delete service '${name}'?`)) return;
+operatorDeleteBtn.addEventListener("click", async () => {
+  const name = state.currentOperatorName;
+  if (!name || !state.operators.some((operator) => operator.name === name)) return;
+  if (!window.confirm(`Delete operator '${name}'?`)) return;
   try {
-    await rpc("service.delete", { name });
-    clearServiceFromLayout(name);
-    state.services = state.services.filter((service) => service.name !== name);
-    state.currentServiceName = null;
-    state.serviceDraft = null;
-    state.serviceEditing = false;
-    state.serviceNewToken = null;
-    state.serviceChannelDraft = null;
-    setLocationServiceName(null, { replace: true });
-    serviceViewEl.hidden = true;
-    serviceTitleAndChrome(null);
+    await rpc("operator.delete", { name });
+    clearOperatorFromLayout(name);
+    state.operators = state.operators.filter((operator) => operator.name !== name);
+    state.currentOperatorName = null;
+    state.operatorDraft = null;
+    state.operatorEditing = false;
+    state.operatorNewToken = null;
+    state.operatorChannelDraft = null;
+    setLocationOperatorName(null, { replace: true });
+    operatorViewEl.hidden = true;
+    operatorTitleAndChrome(null);
     renderSessions();
     renderPaneGrid();
-    const first = state.services[0];
-    if (first) selectService(first.name, { replaceUrl: true });
+    const first = state.operators[0];
+    if (first) selectOperator(first.name, { replaceUrl: true });
     else {
-      const firstSession = orderedSessions().find((session) => session.kind !== "orchestrator") || orderedSessions()[0];
+      const firstSession = orderedSessions().find((session) => session.kind !== "minibuffer") || orderedSessions()[0];
       if (firstSession) selectSession(firstSession.id, { replaceUrl: true });
     }
   } catch (e) {
-    serviceViewFooterEl.textContent = `Delete failed: ${e.message}`;
+    operatorViewFooterEl.textContent = `Delete failed: ${e.message}`;
   }
 });
-serviceActivityEl.addEventListener("click", (event) => {
+operatorActivityEl.addEventListener("click", (event) => {
   const row = event.target.closest("[data-session-id]");
   if (row) selectSession(row.dataset.sessionId);
 });
@@ -7217,15 +7217,15 @@ serviceActivityEl.addEventListener("click", (event) => {
  *      member sessions (ascending by `position` within the
  *      group).
  *
- * Returns a flat array of sessions, services, archived rows, or
+ * Returns a flat array of sessions, operators, archived rows, or
  * `{kind: "group", group}` markers. Renderer paints each typed row
  * differently.
  */
 function orderedItems() {
-  // Operator session (orchestrator) goes at the very top, distinct
+  // Minibuffer session (minibuffer) goes at the very top, distinct
   // from the position-sorted user sessions. No reorder or
   // restart actions on this row — the daemon owns its lifecycle.
-  const operator = state.sessions.find((s) => s.kind === "orchestrator");
+  const minibuffer = state.sessions.find((s) => s.kind === "minibuffer");
   const userSessions = state.sessions.filter((s) => s.kind === "user" || !s.kind);
   const byId = new Map(state.sessions.map((s) => [s.id, s]));
   const subagentsByParent = new Map();
@@ -7332,38 +7332,38 @@ function orderedItems() {
   const groups = state.groups
     .slice()
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
-  const services = state.services
+  const operators = state.operators
     .slice()
     .sort((a, b) => (a.position ?? 0) - (b.position ?? 0) || String(a.name || "").localeCompare(String(b.name || "")));
-  // Services without a placement form the leading block; placed ones are
+  // Operators without a placement form the leading block; placed ones are
   // spliced into the session/project flow, pinned to the position value of
-  // the row they were dropped after (row first on ties, then service order —
+  // the row they were dropped after (row first on ties, then operator order —
   // the same rule the daemon's reorder and the terminal client use).
-  const placedIn = (region) => services.filter(
-    (service) => service.placement && service.placement.region === region,
+  const placedIn = (region) => operators.filter(
+    (operator) => operator.placement && operator.placement.region === region,
   ).sort((a, b) => (a.placement.position - b.placement.position)
     || ((a.position ?? 0) - (b.position ?? 0))
     || String(a.name || "").localeCompare(String(b.name || "")));
-  const sessionRegionServices = placedIn("sessions");
-  const projectRegionServices = placedIn("projects");
-  let sessionServiceIdx = 0;
-  let projectServiceIdx = 0;
+  const sessionRegionOperators = placedIn("sessions");
+  const projectRegionOperators = placedIn("projects");
+  let sessionOperatorIdx = 0;
+  let projectOperatorIdx = 0;
   const items = [];
-  if (operator) items.push({ kind: "session", session: operator, isOperator: true, depth: 0 });
-  for (const service of services) {
-    if (!service.placement) items.push({ kind: "service", service, depth: 0 });
+  if (minibuffer) items.push({ kind: "session", session: minibuffer, isMinibuffer: true, depth: 0 });
+  for (const operator of operators) {
+    if (!operator.placement) items.push({ kind: "operator", operator, depth: 0 });
   }
   for (const s of ungrouped) {
-    while (sessionServiceIdx < sessionRegionServices.length
-        && sessionRegionServices[sessionServiceIdx].placement.position < (s.position ?? 0)) {
-      items.push({ kind: "service", service: sessionRegionServices[sessionServiceIdx++], depth: 0 });
+    while (sessionOperatorIdx < sessionRegionOperators.length
+        && sessionRegionOperators[sessionOperatorIdx].placement.position < (s.position ?? 0)) {
+      items.push({ kind: "operator", operator: sessionRegionOperators[sessionOperatorIdx++], depth: 0 });
     }
     pushSession(items, s);
   }
-  // Services placed below every ungrouped session still belong to the
+  // Operators placed below every ungrouped session still belong to the
   // session run: they render above its trailing archived row.
-  while (sessionServiceIdx < sessionRegionServices.length) {
-    items.push({ kind: "service", service: sessionRegionServices[sessionServiceIdx++], depth: 0 });
+  while (sessionOperatorIdx < sessionRegionOperators.length) {
+    items.push({ kind: "operator", operator: sessionRegionOperators[sessionOperatorIdx++], depth: 0 });
   }
   if (archivedUngrouped.length > 0) {
     const expanded = state.showArchivedUngrouped;
@@ -7373,9 +7373,9 @@ function orderedItems() {
     }
   }
   for (const g of groups) {
-    while (projectServiceIdx < projectRegionServices.length
-        && projectRegionServices[projectServiceIdx].placement.position < (g.position ?? 0)) {
-      items.push({ kind: "service", service: projectRegionServices[projectServiceIdx++], depth: 0 });
+    while (projectOperatorIdx < projectRegionOperators.length
+        && projectRegionOperators[projectOperatorIdx].placement.position < (g.position ?? 0)) {
+      items.push({ kind: "operator", operator: projectRegionOperators[projectOperatorIdx++], depth: 0 });
     }
     const membersAll = userSessions
       .filter((s) => s.group_id === g.id && !forkParentId(s))
@@ -7396,8 +7396,8 @@ function orderedItems() {
       }
     }
   }
-  while (projectServiceIdx < projectRegionServices.length) {
-    items.push({ kind: "service", service: projectRegionServices[projectServiceIdx++], depth: 0 });
+  while (projectOperatorIdx < projectRegionOperators.length) {
+    items.push({ kind: "operator", operator: projectRegionOperators[projectOperatorIdx++], depth: 0 });
   }
   return items;
 }
@@ -7441,7 +7441,7 @@ function sessionStatusGlyph(s, now = Date.now()) {
     case "pending": return "○";
     case "running": return "●";
     // Same dot as running on purpose: "at a prompt" is usually just idle,
-    // not blocked on the operator. The attention marker carries "wants
+    // not blocked on the user. The attention marker carries "wants
     // you" (spec 0169).
     case "awaiting_input": return "●";
     case "paused": return "⏸";
@@ -7581,7 +7581,7 @@ function bindSessionListClicks() {
     }
     const item = t.closest(".item");
     if (item) {
-      if (item.dataset.serviceName) selectService(item.dataset.serviceName);
+      if (item.dataset.operatorName) selectOperator(item.dataset.operatorName);
       else selectSession(item.dataset.id);
     }
   });
@@ -7593,7 +7593,7 @@ function bindSessionListClicks() {
 // press-and-hold on touch (so plain swipes keep scrolling the list),
 // then drop on the target position. The daemon's reorder primitives are
 // single-step moves within each row kind, so a drop replays one step per row
-// crossed and respects the same session, service, and project boundaries as
+// crossed and respects the same session, operator, and project boundaries as
 // the keyboard commands.
 const listDrag = {
   armed: false,        // pointer is down on a draggable row
@@ -7605,7 +7605,7 @@ const listDrag = {
   holdTimer: null,     // touch press-and-hold timer
   sourceId: null,
   sourceGroupId: null,
-  sourceServiceName: null,
+  sourceOperatorName: null,
   targetEl: null,
   dropAfter: false,
   suppressClick: false, // swallow the click that follows a drag
@@ -7627,7 +7627,7 @@ const listDrag = {
  */
 function listFocusRows() {
   return Array.from(
-    sessionListEl.querySelectorAll(".item[data-id], .item[data-service-name], .group-header[data-group-id]")
+    sessionListEl.querySelectorAll(".item[data-id], .item[data-operator-name], .group-header[data-group-id]")
   );
 }
 
@@ -7646,7 +7646,7 @@ function focusListRow(row) {
 function listFocusedRow() {
   const active = document.activeElement;
   return active && active.closest
-    ? active.closest(".item[data-id], .item[data-service-name], .group-header[data-group-id]")
+    ? active.closest(".item[data-id], .item[data-operator-name], .group-header[data-group-id]")
     : null;
 }
 
@@ -7669,9 +7669,9 @@ function syncListTabStops() {
 }
 
 /** Re-find a list row after a re-render and put the caret back on it. */
-function refocusListRow(rowKey, isService = false) {
+function refocusListRow(rowKey, isOperator = false) {
   if (!rowKey) return;
-  const attrName = isService ? "serviceName" : "id";
+  const attrName = isOperator ? "operatorName" : "id";
   const row = sessionListEl.querySelector(`.item[data-${attrName}="${CSS.escape(rowKey)}"]`);
   if (row) focusListRow(row);
 }
@@ -7687,15 +7687,15 @@ async function moveListFocus(step) {
   // Moving the list cursor selects, mirroring the TUI where the list cursor
   // IS the selection — not a separate highlight the user must confirm.
   const id = next.dataset.id;
-  const serviceName = next.dataset.serviceName;
-  if (!id && !serviceName) return;
-  if (serviceName) await selectService(serviceName, { keepFocus: true });
+  const operatorName = next.dataset.operatorName;
+  if (!id && !operatorName) return;
+  if (operatorName) await selectOperator(operatorName, { keepFocus: true });
   else await selectSession(id, { keepFocus: true });
   // The switch is async and re-renders the list on the way through, so
   // re-assert the caret once it has settled: anything the incoming view
   // focused after our `focusListRow` would otherwise have the last word,
   // and the next keypress would land somewhere other than the list.
-  refocusListRow(serviceName || id, !!serviceName);
+  refocusListRow(operatorName || id, !!operatorName);
 }
 
 function handleSessionListKey(ev) {
@@ -7703,7 +7703,7 @@ function handleSessionListKey(ev) {
   const row = listFocusedRow();
   const groupId = row && row.dataset ? row.dataset.groupId : null;
   const sessionId = row && row.dataset ? row.dataset.id : null;
-  const serviceName = row && row.dataset ? row.dataset.serviceName : null;
+  const operatorName = row && row.dataset ? row.dataset.operatorName : null;
   const key = ev.key;
 
   // Reorder before plain navigation: Shift+Arrow is the TUI's move binding.
@@ -7711,7 +7711,7 @@ function handleSessionListKey(ev) {
     const steps = key === "ArrowDown" ? 1 : -1;
     if (sessionId) moveSessionSteps(sessionId, steps);
     else if (groupId) moveGroupSteps(groupId, steps);
-    else if (serviceName) moveServiceSteps(serviceName, steps);
+    else if (operatorName) moveOperatorSteps(operatorName, steps);
     else return;
     ev.preventDefault();
     return;
@@ -7733,8 +7733,8 @@ function handleSessionListKey(ev) {
       if (sessionId) {
         selectSession(sessionId);
         focusActiveSurface();
-      } else if (serviceName) {
-        selectService(serviceName);
+      } else if (operatorName) {
+        selectOperator(operatorName);
       }
       ev.preventDefault();
       return;
@@ -7771,8 +7771,8 @@ function listDragSourceEl() {
   if (listDrag.sourceGroupId) {
     return sessionListEl.querySelector(`.group-header[data-group-id="${CSS.escape(listDrag.sourceGroupId)}"]`);
   }
-  if (listDrag.sourceServiceName) {
-    return sessionListEl.querySelector(`.item[data-service-name="${CSS.escape(listDrag.sourceServiceName)}"]`);
+  if (listDrag.sourceOperatorName) {
+    return sessionListEl.querySelector(`.item[data-operator-name="${CSS.escape(listDrag.sourceOperatorName)}"]`);
   }
   return null;
 }
@@ -7803,17 +7803,17 @@ function listDragTrack(x, y) {
   listDragClearIndicator();
   const under = document.elementFromPoint(x, y);
   const isGroup = !!listDrag.sourceGroupId;
-  const isService = !!listDrag.sourceServiceName;
+  const isOperator = !!listDrag.sourceOperatorName;
   const selector = isGroup
     ? ".session-list .group-header[data-group-id]"
-    : isService
-      ? ".session-list .item[data-service-name]"
+    : isOperator
+      ? ".session-list .item[data-operator-name]"
       : ".session-list .item[data-id]";
   const row = under && under.closest ? under.closest(selector) : null;
   if (!row || !sessionListEl.contains(row)) return;
   if (isGroup && row.dataset.groupId === listDrag.sourceGroupId) return;
-  if (isService && row.dataset.serviceName === listDrag.sourceServiceName) return;
-  if (!isGroup && (row.dataset.id === listDrag.sourceId || row.classList.contains("is-operator"))) return;
+  if (isOperator && row.dataset.operatorName === listDrag.sourceOperatorName) return;
+  if (!isGroup && (row.dataset.id === listDrag.sourceId || row.classList.contains("is-minibuffer"))) return;
   const r = row.getBoundingClientRect();
   listDrag.dropAfter = y > r.top + r.height / 2;
   row.classList.add(listDrag.dropAfter ? "drop-after" : "drop-before");
@@ -7849,18 +7849,18 @@ async function moveGroupSteps(groupId, steps) {
   }
 }
 
-async function moveServiceSteps(serviceName, steps) {
+async function moveOperatorSteps(operatorName, steps) {
   const direction = steps > 0 ? "down" : "up";
   for (let i = 0; i < Math.abs(steps); i += 1) {
     try {
-      await rpc("service.move", { name: serviceName, direction });
+      await rpc("operator.move", { name: operatorName, direction });
     } catch (e) {
       appendError(`reorder failed: ${e.message}`);
       break;
     }
   }
   await refreshSessions();
-  refocusListRow(serviceName, true);
+  refocusListRow(operatorName, true);
 }
 
 function listDragFinish(commit) {
@@ -7869,7 +7869,7 @@ function listDragFinish(commit) {
   const wasActive = listDrag.active;
   const sourceId = listDrag.sourceId;
   const sourceGroupId = listDrag.sourceGroupId;
-  const sourceServiceName = listDrag.sourceServiceName;
+  const sourceOperatorName = listDrag.sourceOperatorName;
   const targetEl = listDrag.targetEl;
   const dropAfter = listDrag.dropAfter;
   listDrag.armed = false;
@@ -7877,51 +7877,51 @@ function listDragFinish(commit) {
   listDrag.pointerId = null;
   listDrag.sourceId = null;
   listDrag.sourceGroupId = null;
-  listDrag.sourceServiceName = null;
+  listDrag.sourceOperatorName = null;
   sessionListEl.classList.remove("drag-active");
   const src = sourceId
     ? sessionListEl.querySelector(`.item[data-id="${CSS.escape(sourceId)}"]`)
     : sourceGroupId
       ? sessionListEl.querySelector(`.group-header[data-group-id="${CSS.escape(sourceGroupId)}"]`)
-      : sourceServiceName
-        ? sessionListEl.querySelector(`.item[data-service-name="${CSS.escape(sourceServiceName)}"]`)
+      : sourceOperatorName
+        ? sessionListEl.querySelector(`.item[data-operator-name="${CSS.escape(sourceOperatorName)}"]`)
         : null;
   if (src) src.classList.remove("drag-source");
   listDragClearIndicator();
   if (!wasActive) return;
   listDrag.suppressClick = true;
-  if (commit && (sourceId || sourceGroupId || sourceServiceName) && targetEl) {
+  if (commit && (sourceId || sourceGroupId || sourceOperatorName) && targetEl) {
     const isGroup = !!sourceGroupId;
-    const isService = !!sourceServiceName;
-    // A dragged service steps through the whole top-level flow — other
-    // services, top-level sessions, and project blocks — one daemon move per
+    const isOperator = !!sourceOperatorName;
+    // A dragged operator steps through the whole top-level flow — other
+    // operators, top-level sessions, and project blocks — one daemon move per
     // row, so its step count runs over the same rows the daemon walks.
     // Sessions outside that flow are skipped: archived rows, and routed
-    // service sessions (which nest under their service row in the daemon's
+    // operator sessions (which nest under their operator row in the daemon's
     // flow).
-    const outsideServiceFlow = (el) => {
+    const outsideOperatorFlow = (el) => {
       const id = el.dataset.id;
       if (!id) return false;
       const session = state.sessions.find((s) => s.id === id);
       if (!session) return true;
       if (session.archived) return true;
       const title = session.title || "";
-      return (state.services || []).some(
-        (svc) => title === `service:${svc.name}` || title.startsWith(`service:${svc.name}:`),
+      return (state.operators || []).some(
+        (svc) => title === `operator:${svc.name}` || title.startsWith(`operator:${svc.name}:`),
       );
     };
     const selector = isGroup
       ? ".group-header[data-group-id]"
-      : isService
-        ? ".item[data-service-name], .item[data-id].depth-0:not(.is-operator), .group-header[data-group-id]"
-        : ".item[data-id]:not(.is-operator)";
-    const rowKey = (el) => el.dataset.serviceName || el.dataset.groupId || el.dataset.id;
+      : isOperator
+        ? ".item[data-operator-name], .item[data-id].depth-0:not(.is-minibuffer), .group-header[data-group-id]"
+        : ".item[data-id]:not(.is-minibuffer)";
+    const rowKey = (el) => el.dataset.operatorName || el.dataset.groupId || el.dataset.id;
     const ids = Array.from(sessionListEl.querySelectorAll(selector))
-      .filter((el) => !(isService && outsideServiceFlow(el)))
-      .map((el) => isGroup ? el.dataset.groupId : isService ? rowKey(el) : el.dataset.id);
-    const idToMove = isGroup ? sourceGroupId : isService ? sourceServiceName : sourceId;
+      .filter((el) => !(isOperator && outsideOperatorFlow(el)))
+      .map((el) => isGroup ? el.dataset.groupId : isOperator ? rowKey(el) : el.dataset.id);
+    const idToMove = isGroup ? sourceGroupId : isOperator ? sourceOperatorName : sourceId;
     const from = ids.indexOf(idToMove);
-    const targetId = isGroup ? targetEl.dataset.groupId : isService ? rowKey(targetEl) : targetEl.dataset.id;
+    const targetId = isGroup ? targetEl.dataset.groupId : isOperator ? rowKey(targetEl) : targetEl.dataset.id;
     const slot = ids.indexOf(targetId) + (dropAfter ? 1 : 0);
     if (from >= 0 && slot >= 0) {
       // Removing the row from its old index shifts every later slot
@@ -7931,8 +7931,8 @@ function listDragFinish(commit) {
       if (steps !== 0) {
         if (isGroup) {
           moveGroupSteps(idToMove, steps);
-        } else if (isService) {
-          moveServiceSteps(idToMove, steps);
+        } else if (isOperator) {
+          moveOperatorSteps(idToMove, steps);
         } else {
           moveSessionSteps(idToMove, steps);
         }
@@ -7950,8 +7950,8 @@ function bindSessionListDrag() {
   sessionListEl.__dragBound = true;
   sessionListEl.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0 || listDrag.armed) return;
-    const row = ev.target.closest(".item[data-id], .item[data-service-name], .group-header[data-group-id]");
-    if (!row || row.classList.contains("is-operator")) return;
+    const row = ev.target.closest(".item[data-id], .item[data-operator-name], .group-header[data-group-id]");
+    if (!row || row.classList.contains("is-minibuffer")) return;
     if (ev.target.closest(".disclosure.can-toggle")) return;
     listDrag.armed = true;
     listDrag.pointerId = ev.pointerId;
@@ -7960,8 +7960,8 @@ function bindSessionListDrag() {
     listDrag.startY = ev.clientY;
     if (row.classList.contains("group-header")) {
       listDrag.sourceGroupId = row.dataset.groupId;
-    } else if (row.dataset.serviceName) {
-      listDrag.sourceServiceName = row.dataset.serviceName;
+    } else if (row.dataset.operatorName) {
+      listDrag.sourceOperatorName = row.dataset.operatorName;
     } else {
       listDrag.sourceId = row.dataset.id;
     }
@@ -8013,7 +8013,7 @@ function bindSessionListDrag() {
  *  aria-level / aria-posinset / aria-setsize. Items arrive in DFS order;
  *  a sibling run is a maximal stretch of rows at one depth uninterrupted
  *  by a shallower row — the same grouping the indentation shows visually.
- *  (Group headers, services, and the operator carry no `depth` and count
+ *  (Group headers, operators, and the user carry no `depth` and count
  *  as depth 0.) */
 function annotateTreePositions(items) {
   const stack = []; // stack[d] = the sibling run currently open at depth d
@@ -8112,16 +8112,16 @@ function sessionRowDescriptor(item) {
         `<span class="group-count">${item.memberCount ?? 0}</span>`,
     };
   }
-  if (item.kind === "service") {
-    const service = item.service;
-    const active = state.currentServiceName === service.name ? " active" : "";
-    const paused = service.paused ? " paused" : "";
-    const harness = service.harness ? `<div class="sub">${escape(service.harness)}</div>` : "";
+  if (item.kind === "operator") {
+    const operator = item.operator;
+    const active = state.currentOperatorName === operator.name ? " active" : "";
+    const paused = operator.paused ? " paused" : "";
+    const harness = operator.harness ? `<div class="sub">${escape(operator.harness)}</div>` : "";
     return {
-      key: "v:" + service.name,
-      datasetKey: "serviceName",
-      datasetVal: service.name,
-      className: "item is-service" + active + paused,
+      key: "v:" + operator.name,
+      datasetKey: "operatorName",
+      datasetVal: operator.name,
+      className: "item is-operator" + active + paused,
       aria: {
         role: "treeitem",
         "aria-selected": active ? "true" : "false",
@@ -8130,23 +8130,23 @@ function sessionRowDescriptor(item) {
       inner:
         `<div class="title-row">` +
         `<span class="disclosure"></span>` +
-        `<span class="service-glyph" title="service" aria-label="service">⛓︎</span>` +
-        `<div class="name">${escape(service.name)}</div>` +
-        (service.paused ? `<span class="service-state" title="paused">⏸</span>` : "") +
+        `<span class="operator-glyph" title="operator" aria-label="operator">⛓︎</span>` +
+        `<div class="name">${escape(operator.name)}</div>` +
+        (operator.paused ? `<span class="operator-state" title="paused">⏸</span>` : "") +
         harness +
         `</div>`,
     };
   }
   const s = item.session;
   const active = s.id === state.currentId ? " active" : "";
-  // Operator / orchestrator row: fixed label, daemon-owned lifecycle, no
+  // Minibuffer / minibuffer row: fixed label, daemon-owned lifecycle, no
   // action affordances — an empty disclosure spacer keeps the grid aligned.
-  if (item.isOperator) {
+  if (item.isMinibuffer) {
     return {
       key: "s:" + s.id,
       datasetKey: "id",
       datasetVal: s.id,
-      className: "item is-operator" + active,
+      className: "item is-minibuffer" + active,
       aria: {
         role: "treeitem",
         "aria-selected": active ? "true" : "false",
@@ -8156,7 +8156,7 @@ function sessionRowDescriptor(item) {
         `<div class="title-row">` +
         `<span class="disclosure"></span>` +
         sessionStatusHtml(s) +
-        `<div class="name">operator</div>` +
+        `<div class="name">minibuffer</div>` +
         `</div>`,
     };
   }
@@ -8277,22 +8277,22 @@ function renderSessions() {
   }
   for (const node of existing.values()) node.remove();
   syncListTabStops();
-  if (state.currentServiceName) renderServiceView();
+  if (state.currentOperatorName) renderOperatorView();
   refreshSessionActions();
   renderLineageSection();
-  scheduleOperatorPanelPaint();
+  scheduleMinibufferPanelPaint();
 }
 
 /** Recompute the per-session action affordances against the
  *  currently-selected session: the title-bar pin/rename buttons and
  *  the session-menu dropdown items. Rename/pin/fork/archive/delete
- *  apply to user sessions only — the operator's label/lifecycle is
+ *  apply to user sessions only — the user's label/lifecycle is
  *  daemon-owned; restart only enables on terminal-state sessions;
  *  merge only enables on forks (kept visible on non-forks so the menu
  *  teaches the workflow, matching the TUI). */
 function refreshSessionActions() {
   const sel = state.sessions.find((s) => s.id === state.currentId);
-  const isUserSession = !!(sel && sel.kind !== "orchestrator");
+  const isUserSession = !!(sel && sel.kind !== "minibuffer");
   const status = (sel && sel.state ? sel.state : "").toLowerCase();
   const terminal = ["done", "errored", "killed", "stopped"].includes(status);
   const archived = !!(sel && sel.archived);
@@ -8742,12 +8742,12 @@ async function selectSession(
     claimGeometry = true,
   } = {},
 ) {
-  state.currentServiceName = null;
-  state.urlRequestedServiceName = null;
+  state.currentOperatorName = null;
+  state.urlRequestedOperatorName = null;
   state.urlRequestedSessionId = id;
-  state.serviceDraft = null;
-  state.serviceEditing = false;
-  state.serviceNewToken = null;
+  state.operatorDraft = null;
+  state.operatorEditing = false;
+  state.operatorNewToken = null;
   rpc("session.mark_seen", { session_id: id }).catch(() => {});
   // Picking a session from the list points the FOCUSED pane at it, which is
   // shared state. `fromPane` is the one exception: focusing a pane already
@@ -8769,7 +8769,7 @@ async function selectSession(
   const focusTerminalAfterSwitch = !keepFocus && shouldFocusTerminalAfterSessionSwitch();
   state.currentId = id;
   setLocationSessionId(id, { replace: replaceUrl });
-  serviceViewEl.hidden = true;
+  operatorViewEl.hidden = true;
   renderSessions();
   const s = state.sessions.find((x) => x.id === id);
   setSessionChromeTitle(s ? sessionViewTitle(s) : "");
@@ -13445,10 +13445,10 @@ function applySharedLayout(doc) {
   const leaves = layoutLeaves(state.layout.tree);
   if (!leaves.some((l) => l.id === state.focusedPaneId)) {
     const restoreTarget = adoptingFirstLayout
-      ? { session: state.urlRequestedSessionId || state.currentId, service: state.urlRequestedServiceName || state.currentServiceName }
+      ? { session: state.urlRequestedSessionId || state.currentId, operator: state.urlRequestedOperatorName || state.currentOperatorName }
       : null;
     const restored = restoreTarget
-      ? leaves.find((l) => (restoreTarget.service && l.service_name === restoreTarget.service) || (restoreTarget.session && l.session_id === restoreTarget.session))
+      ? leaves.find((l) => (restoreTarget.operator && l.operator_name === restoreTarget.operator) || (restoreTarget.session && l.session_id === restoreTarget.session))
       : null;
     state.focusedPaneId = restored
       ? restored.id
@@ -13463,14 +13463,14 @@ function applySharedLayout(doc) {
   // selection is local and stays put.
   if (splitLayoutActive()) {
     const focused = focusedPaneSessionId();
-    const focusedService = focusedPaneServiceName();
+    const focusedOperator = focusedPaneOperatorName();
     // Do not bind the interactive surface until session.list has told us
     // whether this session is PTY-backed. Selecting against an empty metadata
     // cache guesses "chat" and leaves terminal sessions blank after refresh.
     const known = focused && state.sessions.some((s) => s.id === focused);
-    const serviceKnown = focusedService && state.services.some((service) => service.name === focusedService);
-    if (serviceKnown && focusedService !== state.currentServiceName) {
-      selectService(focusedService, { fromPane: true });
+    const operatorKnown = focusedOperator && state.operators.some((operator) => operator.name === focusedOperator);
+    if (operatorKnown && focusedOperator !== state.currentOperatorName) {
+      selectOperator(focusedOperator, { fromPane: true });
     } else if (known && focused !== state.currentId) {
       selectSession(focused, { fromPane: true, claimGeometry: false });
     }
@@ -13492,11 +13492,11 @@ function layoutStartingSessionId(tree = state.layout.tree) {
   return null;
 }
 
-function layoutStartingServiceName(tree = state.layout.tree) {
+function layoutStartingOperatorName(tree = state.layout.tree) {
   const leaves = layoutLeaves(tree);
   for (const leaf of leaves) {
-    if (leaf.service_name && state.services.some((service) => service.name === leaf.service_name)) {
-      return leaf.service_name;
+    if (leaf.operator_name && state.operators.some((operator) => operator.name === leaf.operator_name)) {
+      return leaf.operator_name;
     }
   }
   return null;
@@ -13508,9 +13508,9 @@ function focusedPaneSessionId() {
   return leaf ? leaf.session_id || null : null;
 }
 
-function focusedPaneServiceName() {
+function focusedPaneOperatorName() {
   const leaf = layoutFindLeaf(state.layout.tree, state.focusedPaneId);
-  return leaf ? leaf.service_name || null : null;
+  return leaf ? leaf.operator_name || null : null;
 }
 
 /**
@@ -13530,20 +13530,20 @@ function setFocusedPaneSession(sessionId) {
   if (!focused) return false;
   if (focused.session_id === sessionId) return false;
   const previous = focused.session_id || null;
-  const previousService = focused.service_name || null;
+  const previousOperator = focused.operator_name || null;
   const other = layoutLeaves(tree).find(
     (l) => l.id !== focused.id && l.session_id === sessionId
   );
   if (other) {
     if (previous) other.session_id = previous;
-    else if (previousService) {
+    else if (previousOperator) {
       delete other.session_id;
-      other.service_name = previousService;
+      other.operator_name = previousOperator;
     }
     else delete other.session_id;
-    delete other.service_name;
+    delete other.operator_name;
   }
-  delete focused.service_name;
+  delete focused.operator_name;
   if (sessionId) focused.session_id = sessionId;
   else delete focused.session_id;
   state.layout.tree = tree;
@@ -13552,35 +13552,35 @@ function setFocusedPaneSession(sessionId) {
   return true;
 }
 
-function setFocusedPaneService(serviceName) {
+function setFocusedPaneOperator(operatorName) {
   if (!splitLayoutActive() || !state.layout.tree) return false;
   const tree = cloneLayout(state.layout.tree);
   const focused = layoutFindLeaf(tree, state.focusedPaneId);
-  if (!focused || focused.service_name === serviceName) return false;
+  if (!focused || focused.operator_name === operatorName) return false;
   const previousSession = focused.session_id || null;
-  const previousService = focused.service_name || null;
-  const other = layoutLeaves(tree).find((leaf) => leaf.id !== focused.id && leaf.service_name === serviceName);
+  const previousOperator = focused.operator_name || null;
+  const other = layoutLeaves(tree).find((leaf) => leaf.id !== focused.id && leaf.operator_name === operatorName);
   if (other) {
-    delete other.service_name;
+    delete other.operator_name;
     if (previousSession) other.session_id = previousSession;
-    else if (previousService) other.service_name = previousService;
+    else if (previousOperator) other.operator_name = previousOperator;
     else delete other.session_id;
   }
   delete focused.session_id;
-  focused.service_name = serviceName;
+  focused.operator_name = operatorName;
   state.layout.tree = tree;
   renderPaneGrid();
   pushLayout(tree);
   return true;
 }
 
-function renameServiceInLayout(previousName, nextName) {
+function renameOperatorInLayout(previousName, nextName) {
   if (!splitLayoutAvailable() || !state.layout.tree || previousName === nextName) return false;
   const tree = cloneLayout(state.layout.tree);
   let changed = false;
   for (const leaf of layoutLeaves(tree)) {
-    if (leaf.service_name === previousName) {
-      leaf.service_name = nextName;
+    if (leaf.operator_name === previousName) {
+      leaf.operator_name = nextName;
       changed = true;
     }
   }
@@ -13591,13 +13591,13 @@ function renameServiceInLayout(previousName, nextName) {
   return true;
 }
 
-function clearServiceFromLayout(serviceName) {
+function clearOperatorFromLayout(operatorName) {
   if (!splitLayoutAvailable() || !state.layout.tree) return false;
   const tree = cloneLayout(state.layout.tree);
   let changed = false;
   for (const leaf of layoutLeaves(tree)) {
-    if (leaf.service_name === serviceName) {
-      delete leaf.service_name;
+    if (leaf.operator_name === operatorName) {
+      delete leaf.operator_name;
       changed = true;
     }
   }
@@ -13615,9 +13615,9 @@ function splitFocusedPane(direction) {
   // Until now this client's session was local (single pane). Splitting is
   // the moment it joins the shared layout, so publish what it is showing.
   const seed = layoutFindLeaf(tree, state.focusedPaneId);
-  if (seed && !seed.session_id && !seed.service_name) {
+  if (seed && !seed.session_id && !seed.operator_name) {
     if (state.currentId) seed.session_id = state.currentId;
-    else if (state.currentServiceName) seed.service_name = state.currentServiceName;
+    else if (state.currentOperatorName) seed.operator_name = state.currentOperatorName;
   }
   const replaceLeaf = (node) => {
     if (node.kind === "leaf") {
@@ -13626,7 +13626,7 @@ function splitFocusedPane(direction) {
       // does; picking a different session in it is a separate gesture.
       const copy = { kind: "leaf", id: newId };
       if (node.session_id) copy.session_id = node.session_id;
-      if (node.service_name) copy.service_name = node.service_name;
+      if (node.operator_name) copy.operator_name = node.operator_name;
       return {
         kind: "split",
         direction,
@@ -13697,8 +13697,8 @@ function focusPane(
     state.focusedPaneId = paneId;
     renderPaneGrid();
   }
-  if (selectSessionToo && leaf.service_name && leaf.service_name !== state.currentServiceName) {
-    selectService(leaf.service_name, { fromPane: true });
+  if (selectSessionToo && leaf.operator_name && leaf.operator_name !== state.currentOperatorName) {
+    selectOperator(leaf.operator_name, { fromPane: true });
   } else if (selectSessionToo && leaf.session_id && leaf.session_id !== state.currentId) {
     // Moving focus to a pane means looking at its session, so the singleton
     // stack follows. `fromPane` stops selectSession from writing the session
@@ -13817,21 +13817,21 @@ function paneGridSignature() {
       walk(node.second);
       return;
     }
-    const service = node.service_name
-      ? state.services.find((item) => item.name === node.service_name)
+    const operator = node.operator_name
+      ? state.operators.find((item) => item.name === node.operator_name)
       : null;
     const session = node.session_id
       ? state.sessions.find((s) => s.id === node.session_id)
       : null;
     parts.push(
-      `leaf:${node.id}:${node.session_id || ""}:${node.service_name || ""}`,
+      `leaf:${node.id}:${node.session_id || ""}:${node.operator_name || ""}`,
       // Pane title + which surface the mirror mounts are the only
       // session-derived things a pane draws.
       session
         ? `${sessionViewTitle(session)}|${preferredViewModeForSession(session)}`
         : "-",
-      service
-        ? `${service.routing || ""}|${service.harness || ""}|${service.paused ? "paused" : "-"}`
+      operator
+        ? `${operator.routing || ""}|${operator.harness || ""}|${operator.paused ? "paused" : "-"}`
         : "-",
     );
   };
@@ -13940,14 +13940,14 @@ function renderPaneGridNow() {
     head.className = "pane-head";
     const title = document.createElement("span");
     title.className = "pane-title";
-    const service = leaf.service_name
-      ? state.services.find((item) => item.name === leaf.service_name)
+    const operator = leaf.operator_name
+      ? state.operators.find((item) => item.name === leaf.operator_name)
       : null;
     const session = leaf.session_id
       ? state.sessions.find((s) => s.id === leaf.session_id)
       : null;
-    title.textContent = service
-      ? `service · ${service.name}`
+    title.textContent = operator
+      ? `operator · ${operator.name}`
       : session
       ? sessionViewTitle(session)
       : leaf.session_id
@@ -14033,13 +14033,13 @@ function buildMirror(leaf, { duplicate = false } = {}) {
   mirror.className = "pane-mirror";
   mirror.dataset.paneId = String(leaf.id);
   const id = leaf.session_id;
-  if (leaf.service_name) {
-    const service = state.services.find((item) => item.name === leaf.service_name);
+  if (leaf.operator_name) {
+    const operator = state.operators.find((item) => item.name === leaf.operator_name);
     const panel = document.createElement("div");
-    panel.className = "service-pane-mirror";
-    panel.innerHTML = service
-      ? `<div class="service-pane-mirror-kicker">SERVICE</div><h3>${escape(service.name)}</h3><p>${escape(service.routing || "session-key")} · ${escape(service.harness || "")}</p><p>${service.paused ? "paused" : "loopback endpoint ready"}</p>`
-      : `<p>service unavailable</p>`;
+    panel.className = "operator-pane-mirror";
+    panel.innerHTML = operator
+      ? `<div class="operator-pane-mirror-kicker">OPERATOR</div><h3>${escape(operator.name)}</h3><p>${escape(operator.routing || "session-key")} · ${escape(operator.harness || "")}</p><p>${operator.paused ? "paused" : "loopback endpoint ready"}</p>`
+      : `<p>operator unavailable</p>`;
     mirror.appendChild(panel);
     return mirror;
   }
@@ -15552,7 +15552,7 @@ function handleNotification(method, params) {
     if (consoleUi.open) closeConsole({ notifyDaemon: false });
     return;
   }
-  if (method === "service/channel-publication-state") {
+  if (method === "operator/channel-publication-state") {
     applyChannelPublicationState(params);
     return;
   }
@@ -19443,10 +19443,10 @@ document.addEventListener(
 // --- Boot ---------------------------------------------------------------
 
 window.addEventListener("popstate", () => {
-  const serviceName = serviceNameFromLocation();
-  state.urlRequestedServiceName = serviceName;
-  if (serviceName && state.services.some((service) => service.name === serviceName)) {
-    selectService(serviceName, { replaceUrl: true });
+  const operatorName = operatorNameFromLocation();
+  state.urlRequestedOperatorName = operatorName;
+  if (operatorName && state.operators.some((operator) => operator.name === operatorName)) {
+    selectOperator(operatorName, { replaceUrl: true });
     return;
   }
   const id = sessionIdFromLocation();

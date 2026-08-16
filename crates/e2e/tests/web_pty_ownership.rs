@@ -268,12 +268,12 @@ async fn remote_split_session_switch_does_not_reclaim_tui_geometry() {
         first: Box::new(LayoutNode::Leaf {
             id: 1,
             session_id: Some(a.clone()),
-            service_name: None,
+            operator_name: None,
         }),
         second: Box::new(LayoutNode::Leaf {
             id: 2,
             session_id: Some(b.clone()),
-            service_name: None,
+            operator_name: None,
         }),
     };
     let initial_doc = d
@@ -363,12 +363,12 @@ async fn remote_split_session_switch_does_not_reclaim_tui_geometry() {
         first: Box::new(LayoutNode::Leaf {
             id: 1,
             session_id: Some(incoming.clone()),
-            service_name: None,
+            operator_name: None,
         }),
         second: Box::new(LayoutNode::Leaf {
             id: 2,
             session_id: Some(a),
-            service_name: None,
+            operator_name: None,
         }),
     };
     d.client

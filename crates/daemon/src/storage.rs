@@ -215,7 +215,7 @@ const PROMPT_HISTORY_MAX_CHARS: usize = 4000;
 /// Spec 0155: only reusable user-typed prompts enter history.
 ///
 /// Rejects empty/whitespace, slash commands (UI verbs), and
-/// machine-written pseudo-user messages. Smith/orchestrator inject
+/// machine-written pseudo-user messages. Smith/minibuffer inject
 /// those as `MessageRole::User` so the agent can react — background
 /// tool completion, fleet events, ambient ticks, widget actions — but
 /// they always carry the `OBSERVATION:` prefix and are never the
@@ -841,7 +841,7 @@ impl Storage {
         let dir = self.playbook_templates_dir();
         // Migrate user templates from the former `canvas/templates` location.
         // Only for the default location — when an explicit override is set the
-        // operator owns that directory, so we never move files into it.
+        // minibuffer owns that directory, so we never move files into it.
         if self.overrides().playbook_templates_dir.is_none() {
             let legacy_dir = self.data_dir.join("canvas").join("templates");
             if legacy_dir.exists() && !dir.exists() {
@@ -1159,8 +1159,15 @@ impl Storage {
     pub fn load_summary(&self, id: &str) -> Result<SessionSummary> {
         let path = self.meta_path(id);
         let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        let s: SessionSummary =
+        let mut s: SessionSummary =
             serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+        // Lazy migration for the service→operator rename: routed sessions
+        // carry their owner in the title (`operator:<name>:…`), and every
+        // client parses that prefix. Rewriting here keeps pre-rename
+        // sessions attached to their operator without touching disk.
+        if let Some(rest) = s.title.as_deref().and_then(|t| t.strip_prefix("service:")) {
+            s.title = Some(format!("operator:{rest}"));
+        }
         Ok(s)
     }
 
@@ -1658,7 +1665,7 @@ impl Storage {
 
     /// Append raw PTY bytes to the session's `pty.log`. Best-effort; this
     /// gets called on every Pty event so it has to stay cheap. Append-only,
-    /// no rotation — operators can truncate / rotate externally if needed.
+    /// no rotation — minibuffers can truncate / rotate externally if needed.
     /// Truncate the session's `pty.log` to zero bytes. Called on
     /// session respawn so the new adapter's child can render into a
     /// clean PTY without bytes from the previous incarnation
@@ -2957,7 +2964,7 @@ mod search_tests {
             archived: false,
             forked_from: None,
             merge: None,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: false,
         }
     }

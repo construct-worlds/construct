@@ -9,7 +9,7 @@ Scope: The terminal TUI's persistent session-view affordance.
 
 The TUI does not provide a pinned-session view or pin strip. The normal
 session layout consists of the session list, one or more split session panes,
-and the existing operator/minibuffer surfaces. Session panes are the way to
+and the existing minibuffer/minibuffer surfaces. Session panes are the way to
 keep multiple worker sessions visible and interactive at the same time.
 
 The TUI therefore does not render a pin marker in session-list rows, bind
@@ -36,7 +36,7 @@ value to justify those costs.
 ## Consequences
 
 Session visibility in the TUI is derived from the main window tree and the
-operator panel, not from the daemon's session pin flag. Background PTY output
+minibuffer panel, not from the daemon's session pin flag. Background PTY output
 from sessions outside those surfaces may skip an immediate full-frame redraw,
 while sessions in split panes are rendered and resized according to their own
 pane geometry.

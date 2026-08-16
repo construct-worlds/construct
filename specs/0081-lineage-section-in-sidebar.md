@@ -3,12 +3,12 @@
 Status: accepted
 Date: 2026-08-01
 Area: tui
-Scope: Fork/subagent lineage renders as a collapsible section of the left sidebar — between the session rows and the operator panel — showing the selected session's tree; there is no floating per-pane lineage widget.
+Scope: Fork/subagent lineage renders as a collapsible section of the left sidebar — between the session rows and the minibuffer panel — showing the selected session's tree; there is no floating per-pane lineage widget.
 
 ## Decision
 
 The sidebar stacks four regions top to bottom: the session rows, the lineage
-section, services, and the operator panel. The lineage section renders the
+section, operators, and the minibuffer panel. The lineage section renders the
 SELECTED session's fork/subagent tree — the same tree data, diagram modes
 (boxed-lane and compact rails, toggled from the section header; the full
 boxed-lane diagram is the default), turn-info stats, and row
@@ -43,7 +43,7 @@ diagram glyph beneath them, while their full-cell tracks remain
 mouse-interactive.
 
 The section's header is a one-row horizontal rule carrying its label and
-controls — the same visual furniture as the operator panel's title bar
+controls — the same visual furniture as the minibuffer panel's title bar
 lower in the sidebar: a `−`/`+` collapse button at the right end, the view-mode
 toggle beside it, and the bare rule doubling as a height drag handle (dragging
 up grows the section, within the same caps). The collapse state, the dragged
@@ -52,12 +52,12 @@ height, and the view mode persist across launches (all global, not per session).
 Keyboard focus:
 
 - Bare `Tab`, while the list pane holds focus, advances keyboard focus through
-  the visible sidebar regions in visual order: session rows, lineage, services,
+  the visible sidebar regions in visual order: session rows, lineage, operators,
   then session rows again. Missing regions are skipped.
   It is an intercept scoped to list-pane focus, NOT a global keymap
   binding — view-focused PTY sessions keep receiving Tab (terminal
   completion is untouched). If lineage is absent, Tab advances directly
-  between session rows and services.
+  between session rows and operators.
 - `C-x Tab` toggles the section's focus from anywhere, expanding a
   collapsed section on entry.
 - While focused, the section owns the row vocabulary carried over from the

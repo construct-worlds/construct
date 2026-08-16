@@ -265,7 +265,7 @@ impl App {
         let matched = |s: &SessionSummary| switch_session_match_score(s, query).is_some();
 
         let mut out: Vec<SessionPickerRow> = Vec::new();
-        let orch_id = self.orchestrator_id.as_deref();
+        let orch_id = self.minibuffer_id.as_deref();
 
         // Ungrouped sessions, ordered exactly like the list view.
         let mut ungrouped: Vec<&SessionSummary> = self
@@ -866,7 +866,7 @@ mod tests {
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: construct_protocol::SessionKind::User,
             archived: false,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
             merge: None,

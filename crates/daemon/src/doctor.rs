@@ -630,9 +630,9 @@ fn config_section(paths: &Paths) -> (Section, Config) {
     // installs nothing, matching the fallback config it just chose.
     crate::daemon_env::install(cfg.daemon.env.clone());
 
-    let orchestrator = match cfg.orchestrator.effective_harness() {
-        Some(h) => Finding::info("config.orchestrator", "operator", format!("enabled ({h})")),
-        None => Finding::info("config.orchestrator", "operator", "disabled"),
+    let minibuffer = match cfg.minibuffer.effective_harness() {
+        Some(h) => Finding::info("config.minibuffer", "minibuffer", format!("enabled ({h})")),
+        None => Finding::info("config.minibuffer", "minibuffer", "disabled"),
     };
 
     let router = Finding::info(
@@ -648,7 +648,7 @@ fn config_section(paths: &Paths) -> (Section, Config) {
         Section::new(
             "config",
             "config",
-            vec![parse_finding, orchestrator, router],
+            vec![parse_finding, minibuffer, router],
         ),
         cfg,
     )
@@ -1040,7 +1040,7 @@ async fn features_section(
         ),
         _ => {
             let smith = probe_smith(cache).await;
-            let orchestrator = match cfg.orchestrator.effective_harness() {
+            let minibuffer = match cfg.minibuffer.effective_harness() {
                 None => None,
                 Some(name) => {
                     let avail = if name == "smith" {
@@ -1061,7 +1061,7 @@ async fn features_section(
                 smith,
                 title_gen: availability::smith_title_gen_available(),
                 suggest_enabled: cfg.suggest.enabled,
-                orchestrator,
+                minibuffer,
             });
             (
                 features

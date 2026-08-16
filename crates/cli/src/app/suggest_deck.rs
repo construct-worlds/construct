@@ -276,7 +276,7 @@ pub fn history_rows(history: &[PromptHistoryEntry], query: &str, cap: usize) -> 
         .collect()
 }
 
-use super::{short_id, App, Minibuffer, MinibufferIntent, PaneFocus};
+use super::{short_id, App, Prompt, PromptIntent, PaneFocus};
 use construct_protocol::{MessageRole, SessionEvent, SessionState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
@@ -901,11 +901,11 @@ impl App {
             self.focus = PaneFocus::View;
         } else {
             let cursor = text.chars().count();
-            self.minibuffer = Some(Minibuffer {
+            self.prompt = Some(Prompt {
                 prompt: format!("Send to {}: ", short_id(session_id)),
                 input: text,
                 cursor,
-                intent: MinibufferIntent::SendInput {
+                intent: PromptIntent::SendInput {
                     session_id: session_id.to_string(),
                 },
                 error: None,

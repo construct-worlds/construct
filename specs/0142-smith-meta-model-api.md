@@ -17,7 +17,7 @@ The provider must support streaming text, parallel function calls, function-call
 
 Selecting a provider identifies its endpoint, wire protocol, credential, and billing path. Treating Meta as an OpenAI-compatible base URL would route it through Smith's incompatible Chat Completions implementation and would make the selected provider misleading in persisted model state and UI status.
 
-Muse Spark 1.1 advertises a one-million-token context window, so Smith starts with that input budget and retains its existing provider-error learning behavior if the service applies a lower limit.
+Muse Spark 1.1 advertises a one-million-token context window, so Smith starts with that input budget and retains its existing provider-error learning behavior if the operator applies a lower limit.
 
 ## Consequences
 

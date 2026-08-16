@@ -70,7 +70,7 @@ const CODEX_WS_BETA: &str = "responses_websockets=2026-02-06";
 
 /// Optional env var that overrides the `instructions` field. When
 /// set, takes precedence over the agent's `system` prompt — useful
-/// when an operator wants to mirror Codex CLI exactly by pasting the
+/// when the user wants to mirror Codex CLI exactly by pasting the
 /// upstream `gpt_5_codex_prompt.md`. When unset, we fall back to the
 /// `system` arg the agent loop already builds (same shape every
 /// other provider uses). The Codex backend rejects empty
@@ -683,7 +683,7 @@ impl CodexOauth {
 /// Resolve the `instructions` field for the Codex backend. Order:
 ///
 ///   1. `CONSTRUCT_SMITH_CODEX_INSTRUCTIONS` env var, if set and
-///      non-empty — explicit operator override (e.g. to mirror Codex
+///      non-empty — explicit minibuffer override (e.g. to mirror Codex
 ///      CLI exactly with the upstream `gpt_5_codex_prompt.md`).
 ///   2. The `system` argument the agent loop passes — same prompt
 ///      every other provider (openai / anthropic / ollama) uses for
@@ -905,7 +905,7 @@ impl LlmProvider for CodexOauth {
         // inline system message. We pass the agent's `system` arg
         // through as-is, matching what every other provider does
         // for the equivalent slot. `CONSTRUCT_SMITH_CODEX_INSTRUCTIONS`
-        // is an optional operator override (handy for mirroring
+        // is an optional minibuffer override (handy for mirroring
         // Codex CLI exactly with the upstream prompt).
         let instructions = resolve_instructions(system)?;
         // Defense in depth against `400 "No tool output found for function
@@ -951,7 +951,7 @@ impl LlmProvider for CodexOauth {
         drop(state);
 
         // A warm, reused Responses WebSocket caches far better (~97%) than a
-        // stateless HTTP POST per request, so it is the default. Operators can
+        // stateless HTTP POST per request, so it is the default. Minibuffers can
         // explicitly opt out with CONSTRUCT_SMITH_CODEX_WS=0. On a connect /
         // pre-stream failure it falls back to HTTP and disables WS for the rest
         // of the session; a mid-stream failure propagates (no double-emit).

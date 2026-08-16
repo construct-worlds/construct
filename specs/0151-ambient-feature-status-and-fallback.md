@@ -10,7 +10,7 @@ Scope: Ambient smith-dependent features must report their status with a cause, d
 The daemon's *ambient features* — the conveniences it runs on the user's
 behalf that depend on the built-in smith harness having a usable model
 credential (session auto-naming, next-prompt suggestions for smith/shell
-sessions, the operator session) — follow three rules:
+sessions, the minibuffer session) — follow three rules:
 
 1. **Status is queryable and mapped to causes.** The daemon exposes a
    feature-status surface listing each ambient feature as working, degraded,

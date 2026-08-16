@@ -87,7 +87,7 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # Per-harness environment variables ──────────────────────────────────────────
 #
 # `env` is a table of key = "value" pairs merged into every session spawned
-# under this harness. Lets operators set per-harness defaults (e.g. a default
+# under this harness. Lets users set per-harness defaults (e.g. a default
 # model) from config.toml without exporting vars in the shell that starts the
 # daemon. Per-session `construct new --env KEY=VAL` takes precedence.
 #
@@ -158,20 +158,20 @@ pub const CONFIG_TOML_TEMPLATE: &str = r#"# construct configuration template
 # Default: false
 worktree = false
 
-# ── Orchestrator (minibuffer) ─────────────────────────────────────────────────
+# ── Minibuffer (minibuffer) ─────────────────────────────────────────────────
 #
-# The orchestrator is a persistent smith session rendered as the minibuffer
+# The minibuffer is a persistent smith session rendered as the minibuffer
 # at the bottom of the TUI. It receives fleet-wide events and can dispatch
 # commands to other sessions.
 
-[orchestrator]
-# Which harness backs the orchestrator session. Set to "" or use enabled =
-# false to disable the orchestrator entirely — clients fall back to the
+[minibuffer]
+# Which harness backs the minibuffer session. Set to "" or use enabled =
+# false to disable the minibuffer entirely — clients fall back to the
 # static command palette.
 # Default: "smith"
 harness = "smith"
 
-# Hard kill switch. Set to false to disable the orchestrator even when
+# Hard kill switch. Set to false to disable the minibuffer even when
 # `harness` is configured.
 # Default: true
 enabled = true
@@ -362,11 +362,11 @@ enabled = true
 #   META_BASE_URL                 — Meta Model API base URL override
 #   CONSTRUCT_SHELL_BIN           — shell binary used by smith hooks
 #
-# Operator / orchestrator:
-#   CONSTRUCT_OPERATOR_LOOP_DISABLED      — set to "1" to disable the ambient loop
-#   CONSTRUCT_OPERATOR_MONITOR_MODEL      — model used for the ambient monitor
-#   CONSTRUCT_OPERATOR_AMBIENT_LOOP_SECS  — ambient loop interval in seconds
-#   CONSTRUCT_OPERATOR_ACTIVE_WINDOW_SECS — active-window duration in seconds
+# Minibuffer / minibuffer:
+#   CONSTRUCT_MINIBUFFER_LOOP_DISABLED      — set to "1" to disable the ambient loop
+#   CONSTRUCT_MINIBUFFER_MONITOR_MODEL      — model used for the ambient monitor
+#   CONSTRUCT_MINIBUFFER_AMBIENT_LOOP_SECS  — ambient loop interval in seconds
+#   CONSTRUCT_MINIBUFFER_ACTIVE_WINDOW_SECS — active-window duration in seconds
 #   CONSTRUCT_LOOP_MIN_SECS               — minimum loop interval
 #   CONSTRUCT_LOOP_MAX_SECS               — maximum loop interval
 #
@@ -555,8 +555,10 @@ pub struct Config {
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub defaults: Defaults,
-    #[serde(default)]
-    pub orchestrator: OrchestratorConfig,
+    // Renamed from `[orchestrator]`; the alias keeps hand-written config
+    // files from before the rename loading.
+    #[serde(default, alias = "orchestrator")]
+    pub minibuffer: MinibufferConfig,
     #[serde(default)]
     pub playbook: PlaybookConfig,
     #[serde(default)]
@@ -954,24 +956,24 @@ pub fn resolve_playbook_templates_dir(cfg: &Config, env_override: Option<&str>) 
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct OrchestratorConfig {
-    /// Which harness backs the daemon-created orchestrator session.
+pub struct MinibufferConfig {
+    /// Which harness backs the daemon-created minibuffer session.
     /// `None` (TOML: `harness = ""` or `enabled = false`) disables
-    /// the orchestrator entirely — clients then fall back to the
+    /// the minibuffer entirely — clients then fall back to the
     /// static command palette. Default: `"smith"`.
     #[serde(default)]
     pub harness: Option<String>,
-    /// Hard kill switch; set to `false` to disable the orchestrator
+    /// Hard kill switch; set to `false` to disable the minibuffer
     /// even when `harness` is configured. Default: `true`.
-    #[serde(default = "default_orchestrator_enabled")]
+    #[serde(default = "default_minibuffer_enabled")]
     pub enabled: bool,
 }
 
-fn default_orchestrator_enabled() -> bool {
+fn default_minibuffer_enabled() -> bool {
     true
 }
 
-impl Default for OrchestratorConfig {
+impl Default for MinibufferConfig {
     fn default() -> Self {
         Self {
             harness: Some("smith".to_string()),
@@ -980,8 +982,8 @@ impl Default for OrchestratorConfig {
     }
 }
 
-impl OrchestratorConfig {
-    /// The effective harness name when the orchestrator is enabled.
+impl MinibufferConfig {
+    /// The effective harness name when the minibuffer is enabled.
     pub fn effective_harness(&self) -> Option<&str> {
         if !self.enabled {
             return None;
@@ -999,7 +1001,7 @@ pub struct AdapterConfig {
     #[serde(default)]
     pub args: Vec<String>,
     /// Extra environment variables to inject when spawning this
-    /// adapter. Lets operators set per-harness defaults — e.g. a
+    /// adapter. Lets users set per-harness defaults — e.g. a
     /// default model — from `config.toml` without touching the
     /// shell where the daemon launches. Merged INTO the per-session
     /// `env_with_meta` (see `daemon/src/session.rs`); existing
@@ -1120,7 +1122,7 @@ pub const BUILTIN_ADAPTERS: &[BuiltinAdapter] = &[
 
 /// Built-in usage-probe command for each harness that has an interactive
 /// usage/status slash command (spec 0086). Harnesses not listed here
-/// (`shell`, `smith`) have no probe unless an operator sets `usage_probe`
+/// (`shell`, `smith`) have no probe unless a user sets `usage_probe`
 /// explicitly in `config.toml`.
 const DEFAULT_USAGE_PROBE: &[(&str, &str)] = &[
     ("claude", "/usage"),
@@ -1144,7 +1146,7 @@ fn default_usage_probe(harness: &str) -> Option<&'static str> {
 impl Config {
     /// The command a usage-probe session should send for `harness`
     /// (spec 0086), or `None` when probing is disabled for it. Mirrors the
-    /// empty-string-means-unset convention `OrchestratorConfig::effective_harness`
+    /// empty-string-means-unset convention `MinibufferConfig::effective_harness`
     /// uses: an explicit `usage_probe = ""` disables the probe, an absent
     /// field falls back to the harness's built-in default command (see
     /// [`DEFAULT_USAGE_PROBE`]), and any other string is sent verbatim.
@@ -1789,7 +1791,7 @@ mod tests {
         assert!(profiles.contains_key(DEEPSEEK_ROUTE_NAME));
     }
 
-    /// Config fills gaps, it never overrides: whatever the operator exported
+    /// Config fills gaps, it never overrides: whatever the user exported
     /// for this run is what the endpoint is called with.
     #[test]
     fn an_exported_key_wins_over_daemon_env() {

@@ -29,4 +29,4 @@ This does not mean every small UI preference belongs in session state. Pure clie
 
 ## Examples
 
-A terminal-backed worker, a chat-style agent, and the orchestrator command surface are all sessions, even though clients render them differently.
+A terminal-backed worker, a chat-style agent, and the minibuffer command surface are all sessions, even though clients render them differently.

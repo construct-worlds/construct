@@ -72,7 +72,7 @@ pub fn published_model_id_for_harness(harness: &str, route: &str, model: &str) -
 /// accepted by `harness`.
 ///
 /// Durable configuration stores the ordinary `construct-` form so changing a
-/// service's harness does not leave a Claude-only prefix behind. Session
+/// operator's harness does not leave a Claude-only prefix behind. Session
 /// creation materializes that stable selection for the actual harness. Native
 /// model ids return `Ok(None)` and must pass through unchanged.
 pub fn published_model_id_for_harness_from_id(harness: &str, id: &str) -> Result<Option<String>> {

@@ -643,7 +643,7 @@ pub struct Router {
     /// have no way to be told it moved. Changing it in config is recorded as
     /// needing a restart rather than applied.
     preferred_port: u16,
-    /// When true the operator pinned `[router] port` — do not auto-fallback
+    /// When true the user pinned `[router] port` — do not auto-fallback
     /// on EADDRINUSE and do not overwrite the persisted port file.
     port_pinned: bool,
     state_dir: PathBuf,
@@ -827,7 +827,7 @@ impl Router {
         let claimed_preferred = self.preferred_port == 0 || bound == self.preferred_port;
         self.bound_port.store(bound, Ordering::SeqCst);
         // Persist only when the port was auto-selected for this home. A
-        // pinned `[router] port = N` is operator intent and must not be
+        // pinned `[router] port = N` is minibuffer intent and must not be
         // overwritten by whatever happened to bind; `port = 0` is the
         // test "ask the OS" path and has no reclaim story.
         //
@@ -1859,7 +1859,7 @@ mod tests {
         // becomes the home's port. A second home on one machine lands here.
         assert!(records_port(false, 5000, false, false));
 
-        // A pinned port is operator intent; the file is never rewritten.
+        // A pinned port is minibuffer intent; the file is never rewritten.
         assert!(!records_port(true, 5000, true, true));
         assert!(!records_port(true, 5000, false, false));
 

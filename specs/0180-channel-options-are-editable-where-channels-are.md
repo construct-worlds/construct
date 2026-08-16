@@ -30,7 +30,7 @@ submitting it for another kind is refused rather than stored unread.
 ## Reason
 
 Two consecutive changes each added a Slack option to the definition and to the
-documentation, and neither added it to a client. The result was an operator who
+documentation, and neither added it to a client. The result was a user who
 could see in the docs that a bot can answer untagged messages, find the channel
 editor in front of them, and still have to go find a TOML file — while the
 editor sat one field away, silently preserving a value it would not show.
@@ -47,19 +47,19 @@ what leaves a client unable to render a field even once someone wants to.
   validation, and every client that edits channels — in one change. That is
   more work per option than a configuration-only field, and it is the point.
 - The option's propagation class must be declared, per
-  [0173](0173-service-definitions-apply-without-restart.md). For an outbound
+  [0173](0173-operator-definitions-apply-without-restart.md). For an outbound
   channel that holds its configuration in a live connection, saving an option
   replaces that connection.
 - A client written against an older protocol keeps working: it sends no option,
   and preserves every value it cannot show.
 - Options whose safe use depends on context — anything that widens who can put
   text in front of a session — carry that caveat in the client, not only in the
-  documentation. The operator making the decision is the one looking at the
+  documentation. The user making the decision is the one looking at the
   field.
 
 ## Non-Goals
 
-- This does not say every service definition field must be editable from every
+- This does not say every operator definition field must be editable from every
   client. It is about channel options specifically, and about the client that
   already edits that channel.
 - It does not require a CLI subcommand for each option. "The clients that edit

@@ -24,7 +24,7 @@
 //! directly (not from inside the spawned child, and often after the child
 //! has already exited), is the one caller that needs to pass a real map —
 //! typically the harness's `[adapters.<name>].env` config layer — to
-//! correctly account for an operator-configured `*_HOME` override.
+//! correctly account for a user-configured `*_HOME` override.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

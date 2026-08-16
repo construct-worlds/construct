@@ -8,7 +8,7 @@
 //!
 //! Deliberately not asserted: anything requiring a model. A CI runner has no
 //! harness credential, so the test never lets a request reach a session; a
-//! rejected request is enough to prove the endpoint is up and is this service.
+//! rejected request is enough to prove the endpoint is up and is this operator.
 //! Timings are polled with generous deadlines rather than slept, because the
 //! watcher's interval is an implementation detail and CI runners are slow.
 
@@ -54,10 +54,10 @@ fn write_definition(path: &PathBuf, body: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether the service endpoint is answering on `port`.
+/// Whether the operator endpoint is answering on `port`.
 ///
 /// An unauthenticated request is enough: a 401 proves something is listening
-/// *and* that it is a service channel rather than an unrelated socket, without
+/// *and* that it is a operator channel rather than an unrelated socket, without
 /// ever creating a session.
 async fn endpoint_rejects_unauthenticated(client: &reqwest::Client, port: u16) -> bool {
     let url = format!("http://127.0.0.1:{port}/svc/watched");
@@ -85,9 +85,9 @@ where
 #[tokio::test]
 async fn a_definition_written_by_hand_starts_and_stops_serving() -> Result<()> {
     let daemon = construct_e2e::Daemon::spawn().await?;
-    let services_dir = daemon.dir.path().join("config").join("services");
-    std::fs::create_dir_all(&services_dir)?;
-    let definition_path = services_dir.join("watched.toml");
+    let operators_dir = daemon.dir.path().join("config").join("operators");
+    std::fs::create_dir_all(&operators_dir)?;
+    let definition_path = operators_dir.join("watched.toml");
     let port = free_port().await?;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -110,10 +110,10 @@ async fn a_definition_written_by_hand_starts_and_stops_serving() -> Result<()> {
     .await?;
 
     // An edit to that same file withdraws the endpoint. Before definitions
-    // were applied live this did nothing at all: a paused service kept its
+    // were applied live this did nothing at all: a paused operator kept its
     // listener bound and kept answering.
     write_definition(&definition_path, &definition(port, true))?;
-    wait_until("the paused service to release its port", || async {
+    wait_until("the paused operator to release its port", || async {
         !endpoint_rejects_unauthenticated(&http, port).await
     })
     .await?;
@@ -121,7 +121,7 @@ async fn a_definition_written_by_hand_starts_and_stops_serving() -> Result<()> {
     // ...and resuming brings it back, so the edit path works in both
     // directions rather than only tearing things down.
     write_definition(&definition_path, &definition(port, false))?;
-    wait_until("the resumed service to serve again", || {
+    wait_until("the resumed operator to serve again", || {
         endpoint_rejects_unauthenticated(&http, port)
     })
     .await?;
@@ -130,11 +130,11 @@ async fn a_definition_written_by_hand_starts_and_stops_serving() -> Result<()> {
 }
 
 #[tokio::test]
-async fn a_definition_that_does_not_parse_leaves_the_service_running() -> Result<()> {
+async fn a_definition_that_does_not_parse_leaves_the_operator_running() -> Result<()> {
     let daemon = construct_e2e::Daemon::spawn().await?;
-    let services_dir = daemon.dir.path().join("config").join("services");
-    std::fs::create_dir_all(&services_dir)?;
-    let definition_path = services_dir.join("watched.toml");
+    let operators_dir = daemon.dir.path().join("config").join("operators");
+    std::fs::create_dir_all(&operators_dir)?;
+    let definition_path = operators_dir.join("watched.toml");
     let port = free_port().await?;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -147,12 +147,12 @@ async fn a_definition_that_does_not_parse_leaves_the_service_running() -> Result
     .await?;
 
     // A file that cannot be parsed must not disturb what is already running:
-    // the operator's mistake costs them the edit, not the service.
+    // the user's mistake costs them the edit, not the operator.
     write_definition(&definition_path, "this is not valid toml [[[")?;
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert!(
         endpoint_rejects_unauthenticated(&http, port).await,
-        "a definition that does not parse must leave the running service alone"
+        "a definition that does not parse must leave the running operator alone"
     );
 
     // Correcting the file is picked up on a later pass, so a bad save is not

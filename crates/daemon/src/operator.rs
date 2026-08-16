@@ -1,6 +1,6 @@
-//! Daemon-owned service definitions and channel lifecycle.
+//! Daemon-owned operator definitions and channel lifecycle.
 //!
-//! Service definitions live in `services/<name>.toml` in the config dir.
+//! Operator definitions live in `operators/<name>.toml` in the config dir.
 //! HTTP remains loopback-only. Transport adapters are separate from the shared
 //! ingress router so adding a channel does not fork session semantics.
 
@@ -24,49 +24,49 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceConfig {
-    /// Stable position among service rows. This is display metadata only;
-    /// service runtime behavior does not depend on it.
+pub struct OperatorConfig {
+    /// Stable position among operator rows. This is display metadata only;
+    /// operator runtime behavior does not depend on it.
     #[serde(default)]
     pub position: u64,
     #[serde(default)]
     pub instruction: String,
-    #[serde(default = "default_service_harness")]
+    #[serde(default = "default_operator_harness")]
     pub harness: String,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
-    pub session_mode: ServiceSessionMode,
-    #[serde(default = "default_service_cwd")]
+    pub session_mode: OperatorSessionMode,
+    #[serde(default = "default_operator_cwd")]
     pub cwd: String,
     #[serde(default)]
-    pub routing: ServiceRouting,
+    pub routing: OperatorRouting,
     #[serde(default)]
     pub paused: bool,
     /// Seconds to hold a turn stopped at an approval before denying it on the
-    /// caller's behalf. `0` waits indefinitely, which keeps the operator as
+    /// caller's behalf. `0` waits indefinitely, which keeps the user as
     /// the only one who can decide.
     #[serde(default)]
     pub approval_timeout_secs: u64,
     /// Slot in the top-level list flow when the row has been moved out of the
-    /// leading service block (display metadata only; `None` = leading block).
+    /// leading operator block (display metadata only; `None` = leading block).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placement: Option<construct_protocol::ServicePlacement>,
+    pub placement: Option<construct_protocol::OperatorPlacement>,
     #[serde(default)]
-    pub sandbox: ServiceSandboxConfig,
+    pub sandbox: OperatorSandboxConfig,
     #[serde(default)]
-    pub channels: BTreeMap<String, ServiceChannelConfig>,
+    pub channels: BTreeMap<String, OperatorChannelConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum ServiceSessionMode {
+pub enum OperatorSessionMode {
     #[default]
     Headless,
     Interactive,
 }
 
-impl ServiceSessionMode {
+impl OperatorSessionMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Headless => "headless",
@@ -75,16 +75,16 @@ impl ServiceSessionMode {
     }
 }
 
-/// Capability limits applied to every session a service creates.
+/// Capability limits applied to every session a operator creates.
 ///
-/// A service session is prompted by a third party, so it is confined by
+/// A operator session is prompted by a third party, so it is confined by
 /// default and widened only by explicit configuration. Filesystem and network
 /// confinement are not represented here: the harness sandbox already limits
-/// writes to the session's working directory and denies egress, and a service
+/// writes to the session's working directory and denies egress, and a operator
 /// must not be able to relax that from its own definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub struct ServiceSandboxConfig {
+pub struct OperatorSandboxConfig {
     /// Allow tools that reach other sessions or the daemon itself.
     #[serde(default)]
     pub fleet_control: bool,
@@ -101,7 +101,7 @@ fn default_sandbox_skills() -> bool {
     true
 }
 
-impl Default for ServiceSandboxConfig {
+impl Default for OperatorSandboxConfig {
     fn default() -> Self {
         Self {
             fleet_control: false,
@@ -111,9 +111,9 @@ impl Default for ServiceSandboxConfig {
     }
 }
 
-impl ServiceSandboxConfig {
+impl OperatorSandboxConfig {
     /// Environment applied at session creation. Each entry withholds a
-    /// capability; an allowed capability adds nothing, so a service session
+    /// capability; an allowed capability adds nothing, so a operator session
     /// with everything enabled is indistinguishable from an ordinary one.
     pub fn session_env(&self) -> HashMap<String, String> {
         let mut env = HashMap::new();
@@ -130,17 +130,17 @@ impl ServiceSandboxConfig {
     }
 }
 
-fn default_service_harness() -> String {
+fn default_operator_harness() -> String {
     "smith".to_string()
 }
 
-fn default_service_cwd() -> String {
+fn default_operator_cwd() -> String {
     ".".to_string()
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum ServiceRouting {
+pub enum OperatorRouting {
     PerEvent,
     #[default]
     SessionKey,
@@ -150,9 +150,9 @@ pub enum ServiceRouting {
 /// What a Slack channel shows while a turn it accepted is still running.
 ///
 /// A long turn is indistinguishable from a dropped one when the channel stays
-/// silent, so the operator picks how visible the wait should be. `Reaction`
+/// silent, so the user picks how visible the wait should be. `Reaction`
 /// and `Both` call `reactions.add`, which needs the `reactions:write` scope —
-/// an app the operator has not reinstalled since granting it will log the
+/// an app the user has not reinstalled since granting it will log the
 /// refusal and keep answering normally.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -201,7 +201,7 @@ impl SlackProgress {
 /// A bot that must be `@`-mentioned for every turn cannot hold a conversation:
 /// the person asking has to keep re-addressing an participant that is visibly
 /// already in the room. Once engaged, the bot behaves like a participant —
-/// within a boundary the operator sets, because "answers everything in this
+/// within a boundary the user sets, because "answers everything in this
 /// channel" is right for a dedicated channel and wrong for a busy shared one.
 ///
 /// Anything past `Off` needs the `message.channels` event subscription (plus
@@ -250,7 +250,7 @@ fn default_thread_context() -> usize {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceChannelConfig {
+pub struct OperatorChannelConfig {
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default = "default_channel_enabled")]
@@ -281,10 +281,10 @@ fn default_channel_enabled() -> bool {
     true
 }
 
-pub fn load_definitions(dir: &std::path::Path) -> Result<BTreeMap<String, ServiceConfig>> {
-    let mut services = BTreeMap::new();
+pub fn load_definitions(dir: &std::path::Path) -> Result<BTreeMap<String, OperatorConfig>> {
+    let mut operators = BTreeMap::new();
     if !dir.exists() {
-        return Ok(services);
+        return Ok(operators);
     }
     for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
         let entry = entry?;
@@ -295,39 +295,39 @@ pub fn load_definitions(dir: &std::path::Path) -> Result<BTreeMap<String, Servic
         let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        validate_service_name(name)?;
+        validate_operator_name(name)?;
         let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("read service definition {}", path.display()))?;
+            .with_context(|| format!("read operator definition {}", path.display()))?;
         let definition = toml::from_str(&raw)
-            .with_context(|| format!("parse service definition {}", path.display()))?;
-        services.insert(name.to_string(), definition);
+            .with_context(|| format!("parse operator definition {}", path.display()))?;
+        operators.insert(name.to_string(), definition);
     }
-    Ok(services)
+    Ok(operators)
 }
 
-pub fn list_summaries(dir: &std::path::Path) -> Result<Vec<construct_protocol::ServiceSummary>> {
-    let mut services: Vec<_> = load_definitions(dir)?
+pub fn list_summaries(dir: &std::path::Path) -> Result<Vec<construct_protocol::OperatorSummary>> {
+    let mut operators: Vec<_> = load_definitions(dir)?
         .into_iter()
         .map(|(name, config)| summary(name, &config))
         .collect();
-    services.sort_by(|a, b| {
+    operators.sort_by(|a, b| {
         a.position
             .cmp(&b.position)
             .then_with(|| a.name.cmp(&b.name))
     });
-    Ok(services)
+    Ok(operators)
 }
 
 pub fn put_definition(
     dir: &std::path::Path,
-    params: construct_protocol::ServicePutParams,
-) -> Result<construct_protocol::ServicePutResult> {
-    validate_service_name(&params.service.name)?;
+    params: construct_protocol::OperatorPutParams,
+) -> Result<construct_protocol::OperatorPutResult> {
+    validate_operator_name(&params.operator.name)?;
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = dir.join(format!("{}.toml", params.service.name));
+    let path = dir.join(format!("{}.toml", params.operator.name));
     let existing = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|raw| toml::from_str::<ServiceConfig>(&raw).ok());
+        .and_then(|raw| toml::from_str::<OperatorConfig>(&raw).ok());
     let channels = existing
         .as_ref()
         .map(|config| config.channels.clone())
@@ -339,14 +339,14 @@ pub fn put_definition(
         .as_ref()
         .map(|config| config.sandbox.clone())
         .unwrap_or_default();
-    let routing = match params.service.routing.as_str() {
-        "per-event" => ServiceRouting::PerEvent,
-        "session-key" => ServiceRouting::SessionKey,
-        "single" => ServiceRouting::Single,
+    let routing = match params.operator.routing.as_str() {
+        "per-event" => OperatorRouting::PerEvent,
+        "session-key" => OperatorRouting::SessionKey,
+        "single" => OperatorRouting::Single,
         other => return Err(anyhow!("invalid routing mode `{other}`")),
     };
     let session_mode =
-        parse_service_session_mode(&params.service.harness, &params.service.session_mode)?;
+        parse_operator_session_mode(&params.operator.harness, &params.operator.session_mode)?;
     let position = match existing.as_ref() {
         Some(config) => config.position,
         None => load_definitions(dir)?
@@ -356,88 +356,88 @@ pub fn put_definition(
             .map(|position| position.saturating_add(1))
             .unwrap_or_default(),
     };
-    let config = ServiceConfig {
+    let config = OperatorConfig {
         position,
-        instruction: params.service.instruction,
-        harness: params.service.harness,
-        model: params.service.model,
+        instruction: params.operator.instruction,
+        harness: params.operator.harness,
+        model: params.operator.model,
         session_mode,
-        cwd: params.service.cwd,
+        cwd: params.operator.cwd,
         routing,
-        paused: params.service.paused,
+        paused: params.operator.paused,
         approval_timeout_secs: existing
             .as_ref()
             .map(|config| config.approval_timeout_secs)
             .unwrap_or_default(),
         // Like `position`, a row's slot in the list is not part of the edit
         // surface: an unrelated field change must not snap the row back to
-        // the leading service block.
+        // the leading operator block.
         placement: existing.as_ref().and_then(|config| config.placement),
         sandbox,
         channels,
     };
-    write_definition(dir, &params.service.name, &config)?;
-    Ok(construct_protocol::ServicePutResult {
-        service: summary(params.service.name, &config),
+    write_definition(dir, &params.operator.name, &config)?;
+    Ok(construct_protocol::OperatorPutResult {
+        operator: summary(params.operator.name, &config),
         applied: Default::default(),
     })
 }
 
-/// One row of the top-level list flow a service row can step across: another
-/// service, an ungrouped session, or a whole project block (services never
+/// One row of the top-level list flow a operator row can step across: another
+/// operator, an ungrouped session, or a whole project block (operators never
 /// nest inside a project, so a project is a single hop).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FlowRow {
-    Service(String),
+    Operator(String),
     Session { position: i64 },
     Project { position: i64 },
 }
 
 /// Whether a session renders as a top-level ungrouped row in every
-/// first-party list client. Routed service sessions nest under their service
+/// first-party list client. Routed operator sessions nest under their operator
 /// row, so they are matched by title key the same way clients match them.
 fn is_top_level_ungrouped_session(
     session: &construct_protocol::SessionSummary,
-    service_names: &[&str],
+    operator_names: &[&str],
 ) -> bool {
     session.kind == construct_protocol::SessionKind::User
         && !session.archived
         && session.group_id.is_none()
         && session.forked_from.is_none()
-        && !service_names.iter().any(|name| {
+        && !operator_names.iter().any(|name| {
             let Some(title) = session.title.as_deref() else {
                 return false;
             };
-            let prefix = format!("service:{name}");
+            let prefix = format!("operator:{name}");
             title == prefix || title.starts_with(&format!("{prefix}:"))
         })
 }
 
-/// Current top-level display flow: the leading service block, then the
-/// ungrouped-session run with placed services interleaved, then the projects
+/// Current top-level display flow: the leading operator block, then the
+/// ungrouped-session run with placed operators interleaved, then the projects
 /// run likewise. Mirrors the order every list client renders.
 fn top_level_flow(
-    services: &BTreeMap<String, ServiceConfig>,
+    operators: &BTreeMap<String, OperatorConfig>,
     sessions: &[construct_protocol::SessionSummary],
     groups: &[construct_protocol::GroupSummary],
 ) -> Vec<FlowRow> {
-    use construct_protocol::ServicePlacementRegion as Region;
+    use construct_protocol::OperatorPlacementRegion as Region;
 
-    let service_order = |name: &str| {
-        let config = &services[name];
+    let operator_order = |name: &str| {
+        let config = &operators[name];
         (config.position, name.to_string())
     };
-    let mut block: Vec<&String> = services
+    let mut block: Vec<&String> = operators
         .iter()
         .filter(|(_, config)| config.placement.is_none())
         .map(|(name, _)| name)
         .collect();
-    block.sort_by_key(|name| service_order(name));
+    block.sort_by_key(|name| operator_order(name));
 
-    let service_names: Vec<&str> = services.keys().map(String::as_str).collect();
+    let operator_names: Vec<&str> = operators.keys().map(String::as_str).collect();
     let mut ungrouped: Vec<&construct_protocol::SessionSummary> = sessions
         .iter()
-        .filter(|session| is_top_level_ungrouped_session(session, &service_names))
+        .filter(|session| is_top_level_ungrouped_session(session, &operator_names))
         .collect();
     ungrouped.sort_by(|a, b| {
         a.position
@@ -447,11 +447,11 @@ fn top_level_flow(
     let mut projects: Vec<&construct_protocol::GroupSummary> = groups.iter().collect();
     projects.sort_by_key(|group| group.position);
 
-    // Placed services merge into a region by (position, row-first, service
+    // Placed operators merge into a region by (position, row-first, operator
     // order): at equal positions the session/project row they were dropped
     // after renders first.
     let placed_in = |region: Region| {
-        let mut placed: Vec<(&String, i64)> = services
+        let mut placed: Vec<(&String, i64)> = operators
             .iter()
             .filter_map(|(name, config)| {
                 config
@@ -460,13 +460,13 @@ fn top_level_flow(
                     .map(|placement| (name, placement.position))
             })
             .collect();
-        placed.sort_by_key(|(name, position)| (*position, service_order(name)));
+        placed.sort_by_key(|(name, position)| (*position, operator_order(name)));
         placed
     };
 
     let mut rows: Vec<FlowRow> = block
         .into_iter()
-        .map(|name| FlowRow::Service(name.clone()))
+        .map(|name| FlowRow::Operator(name.clone()))
         .collect();
     let mut sessions_region = placed_in(Region::Sessions).into_iter().peekable();
     for session in ungrouped {
@@ -475,14 +475,14 @@ fn top_level_flow(
             .is_some_and(|(_, position)| *position < session.position)
         {
             let (name, _) = sessions_region.next().unwrap();
-            rows.push(FlowRow::Service(name.clone()));
+            rows.push(FlowRow::Operator(name.clone()));
         }
         rows.push(FlowRow::Session {
             position: session.position,
         });
     }
     for (name, _) in sessions_region {
-        rows.push(FlowRow::Service(name.clone()));
+        rows.push(FlowRow::Operator(name.clone()));
     }
     let mut projects_region = placed_in(Region::Projects).into_iter().peekable();
     for project in projects {
@@ -491,23 +491,23 @@ fn top_level_flow(
             .is_some_and(|(_, position)| *position < project.position)
         {
             let (name, _) = projects_region.next().unwrap();
-            rows.push(FlowRow::Service(name.clone()));
+            rows.push(FlowRow::Operator(name.clone()));
         }
         rows.push(FlowRow::Project {
             position: project.position,
         });
     }
     for (name, _) in projects_region {
-        rows.push(FlowRow::Service(name.clone()));
+        rows.push(FlowRow::Operator(name.clone()));
     }
     rows
 }
 
-/// Move one service row past its adjacent top-level row: another service, an
+/// Move one operator row past its adjacent top-level row: another operator, an
 /// ungrouped session, or a whole project block. The step is applied to the
-/// current display flow, then every service's persisted order is re-derived
-/// from the result — contiguous service positions in flow order, and each
-/// interleaved service re-pinned to the position value of the session or
+/// current display flow, then every operator's persisted order is re-derived
+/// from the result — contiguous operator positions in flow order, and each
+/// interleaved operator re-pinned to the position value of the session or
 /// project row it now renders after (`None` placement = leading block). That
 /// normalization also heals placements whose pinned row has since vanished.
 pub fn move_definition(
@@ -517,18 +517,18 @@ pub fn move_definition(
     sessions: &[construct_protocol::SessionSummary],
     groups: &[construct_protocol::GroupSummary],
 ) -> Result<()> {
-    use construct_protocol::ServicePlacement;
-    use construct_protocol::ServicePlacementRegion as Region;
+    use construct_protocol::OperatorPlacement;
+    use construct_protocol::OperatorPlacementRegion as Region;
 
-    let mut services = load_definitions(dir)?;
-    if !services.contains_key(name) {
-        return Err(anyhow!("service not found: {name}"));
+    let mut operators = load_definitions(dir)?;
+    if !operators.contains_key(name) {
+        return Err(anyhow!("operator not found: {name}"));
     }
-    let mut rows = top_level_flow(&services, sessions, groups);
+    let mut rows = top_level_flow(&operators, sessions, groups);
     let index = rows
         .iter()
-        .position(|row| matches!(row, FlowRow::Service(candidate) if candidate == name))
-        .expect("every service has a flow row");
+        .position(|row| matches!(row, FlowRow::Operator(candidate) if candidate == name))
+        .expect("every operator has a flow row");
     let neighbor = match direction {
         construct_protocol::MoveDirection::Up if index > 0 => index - 1,
         construct_protocol::MoveDirection::Down if index + 1 < rows.len() => index + 1,
@@ -536,35 +536,35 @@ pub fn move_definition(
     };
     rows.swap(index, neighbor);
 
-    // Re-derive persisted state from the desired order. A service row's
+    // Re-derive persisted state from the desired order. A operator row's
     // placement is the position value of the nearest preceding session or
     // project row; with none it belongs to the leading block.
-    let mut preceding: Option<ServicePlacement> = None;
+    let mut preceding: Option<OperatorPlacement> = None;
     let mut next_position: u64 = 0;
     for row in &rows {
         match row {
             FlowRow::Session { position } => {
-                preceding = Some(ServicePlacement {
+                preceding = Some(OperatorPlacement {
                     region: Region::Sessions,
                     position: *position,
                 });
             }
             FlowRow::Project { position } => {
-                preceding = Some(ServicePlacement {
+                preceding = Some(OperatorPlacement {
                     region: Region::Projects,
                     position: *position,
                 });
             }
-            FlowRow::Service(service_name) => {
-                let config = services
-                    .get_mut(service_name)
-                    .ok_or_else(|| anyhow!("service disappeared while reordering: {service_name}"))?;
+            FlowRow::Operator(operator_name) => {
+                let config = operators
+                    .get_mut(operator_name)
+                    .ok_or_else(|| anyhow!("operator disappeared while reordering: {operator_name}"))?;
                 let position = next_position;
                 next_position += 1;
                 if config.position != position || config.placement != preceding {
                     config.position = position;
                     config.placement = preceding;
-                    write_definition(dir, service_name, config)?;
+                    write_definition(dir, operator_name, config)?;
                 }
             }
         }
@@ -572,23 +572,23 @@ pub fn move_definition(
     Ok(())
 }
 
-fn parse_service_session_mode(harness: &str, mode: &str) -> Result<ServiceSessionMode> {
+fn parse_operator_session_mode(harness: &str, mode: &str) -> Result<OperatorSessionMode> {
     match mode {
-        "headless" => Ok(ServiceSessionMode::Headless),
+        "headless" => Ok(OperatorSessionMode::Headless),
         "interactive" if matches!(harness, "codex" | "claude") => {
-            Ok(ServiceSessionMode::Interactive)
+            Ok(OperatorSessionMode::Interactive)
         }
         "interactive" => {
             return Err(anyhow!(
-                "interactive service sessions currently require the `codex` or `claude` harness"
+                "interactive operator sessions currently require the `codex` or `claude` harness"
             ))
         }
-        other => return Err(anyhow!("invalid service session mode `{other}`")),
+        other => return Err(anyhow!("invalid operator session mode `{other}`")),
     }
 }
 
 pub fn delete_definition(dir: &std::path::Path, name: &str) -> Result<()> {
-    validate_service_name(name)?;
+    validate_operator_name(name)?;
     let path = dir.join(format!("{name}.toml"));
     if path.exists() {
         std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
@@ -599,7 +599,7 @@ pub fn delete_definition(dir: &std::path::Path, name: &str) -> Result<()> {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct ChannelCatalog {
     #[serde(default)]
-    channels: BTreeMap<String, ServiceChannelConfig>,
+    channels: BTreeMap<String, OperatorChannelConfig>,
 }
 
 fn channel_catalog_path(dir: &std::path::Path) -> PathBuf {
@@ -629,31 +629,31 @@ fn write_channel_catalog(dir: &std::path::Path, catalog: &ChannelCatalog) -> Res
     Ok(())
 }
 
-fn channel_owners(services: &BTreeMap<String, ServiceConfig>) -> BTreeMap<String, Vec<String>> {
+fn channel_owners(operators: &BTreeMap<String, OperatorConfig>) -> BTreeMap<String, Vec<String>> {
     let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (service_name, service) in services {
-        for channel_id in service.channels.keys() {
+    for (operator_name, operator) in operators {
+        for channel_id in operator.channels.keys() {
             owners
                 .entry(channel_id.clone())
                 .or_default()
-                .push(service_name.clone());
+                .push(operator_name.clone());
         }
     }
     owners
 }
 
 fn owner_label(owners: &BTreeMap<String, Vec<String>>, channel_id: &str) -> Option<String> {
-    owners.get(channel_id).map(|services| services.join(", "))
+    owners.get(channel_id).map(|operators| operators.join(", "))
 }
 
 fn migrate_legacy_channels(
     dir: &std::path::Path,
-    services: &BTreeMap<String, ServiceConfig>,
+    operators: &BTreeMap<String, OperatorConfig>,
     catalog: &mut ChannelCatalog,
 ) -> Result<()> {
     let mut changed = false;
-    for service in services.values() {
-        for (id, config) in &service.channels {
+    for operator in operators.values() {
+        for (id, config) in &operator.channels {
             if !catalog.channels.contains_key(id) {
                 catalog.channels.insert(id.clone(), config.clone());
                 changed = true;
@@ -668,27 +668,27 @@ fn migrate_legacy_channels(
 
 pub fn list_channel_summaries(
     dir: &std::path::Path,
-    service_name: &str,
-) -> Result<Vec<construct_protocol::ServiceChannelSummary>> {
-    validate_service_name(service_name)?;
-    let services = load_definitions(dir)?;
-    let service = services
-        .get(service_name)
-        .ok_or_else(|| anyhow!("service `{service_name}` not found"))?;
-    Ok(service
+    operator_name: &str,
+) -> Result<Vec<construct_protocol::OperatorChannelSummary>> {
+    validate_operator_name(operator_name)?;
+    let operators = load_definitions(dir)?;
+    let operator = operators
+        .get(operator_name)
+        .ok_or_else(|| anyhow!("operator `{operator_name}` not found"))?;
+    Ok(operator
         .channels
         .iter()
-        .map(|(id, channel)| channel_summary(id.clone(), channel, Some(service_name.to_string())))
+        .map(|(id, channel)| channel_summary(id.clone(), channel, Some(operator_name.to_string())))
         .collect())
 }
 
 pub fn list_channel_catalog(
     dir: &std::path::Path,
-) -> Result<Vec<construct_protocol::ServiceChannelSummary>> {
-    let services = load_definitions(dir)?;
+) -> Result<Vec<construct_protocol::OperatorChannelSummary>> {
+    let operators = load_definitions(dir)?;
     let mut catalog = load_channel_catalog(dir)?;
-    migrate_legacy_channels(dir, &services, &mut catalog)?;
-    let owners = channel_owners(&services);
+    migrate_legacy_channels(dir, &operators, &mut catalog)?;
+    let owners = channel_owners(&operators);
     Ok(catalog
         .channels
         .iter()
@@ -698,9 +698,9 @@ pub fn list_channel_catalog(
 
 pub fn put_channel(
     dir: &std::path::Path,
-    params: construct_protocol::ServiceChannelPutParams,
-) -> Result<construct_protocol::ServiceChannelPutResult> {
-    validate_service_name(&params.service_name)?;
+    params: construct_protocol::OperatorChannelPutParams,
+) -> Result<construct_protocol::OperatorChannelPutResult> {
+    validate_operator_name(&params.operator_name)?;
     validate_channel_id(&params.channel.id)?;
     if !matches!(params.channel.kind.as_str(), "http" | "slack") {
         return Err(anyhow!(
@@ -718,14 +718,14 @@ pub fn put_channel(
         ),
         _ => None,
     };
-    let mut services = load_definitions(dir)?;
+    let mut operators = load_definitions(dir)?;
     let mut catalog = load_channel_catalog(dir)?;
-    migrate_legacy_channels(dir, &services, &mut catalog)?;
-    let owners = channel_owners(&services);
+    migrate_legacy_channels(dir, &operators, &mut catalog)?;
+    let owners = channel_owners(&operators);
     if let Some(owner) = owner_label(&owners, &params.channel.id) {
-        if owner != params.service_name {
+        if owner != params.operator_name {
             return Err(anyhow!(
-                "channel `{}` is already attached to service `{owner}`",
+                "channel `{}` is already attached to operator `{owner}`",
                 params.channel.id
             ));
         }
@@ -736,13 +736,13 @@ pub fn put_channel(
                 && channel_kind(id, channel) == "http"
                 && channel.port == Some(port)
         }) {
-            return Err(anyhow!("HTTP port {port} is already used by this service"));
+            return Err(anyhow!("HTTP port {port} is already used by this operator"));
         }
     }
-    let service = services
-        .get_mut(&params.service_name)
-        .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
-    let existing = service
+    let operator = operators
+        .get_mut(&params.operator_name)
+        .ok_or_else(|| anyhow!("operator `{}` not found", params.operator_name))?;
+    let existing = operator
         .channels
         .get(&params.channel.id)
         .cloned()
@@ -834,7 +834,7 @@ pub fn put_channel(
             .map(|channel| channel.thread_context)
             .unwrap_or_else(default_thread_context),
     };
-    let config = ServiceChannelConfig {
+    let config = OperatorChannelConfig {
         kind: Some(params.channel.kind),
         enabled: params.channel.enabled,
         port,
@@ -847,7 +847,7 @@ pub fn put_channel(
         follow_up,
         thread_context,
     };
-    service
+    operator
         .channels
         .insert(params.channel.id.clone(), config.clone());
     catalog
@@ -856,11 +856,11 @@ pub fn put_channel(
     let summary = channel_summary(
         params.channel.id,
         &config,
-        Some(params.service_name.clone()),
+        Some(params.operator_name.clone()),
     );
-    write_definition(dir, &params.service_name, service)?;
+    write_definition(dir, &params.operator_name, operator)?;
     write_channel_catalog(dir, &catalog)?;
-    Ok(construct_protocol::ServiceChannelPutResult {
+    Ok(construct_protocol::OperatorChannelPutResult {
         channel: summary,
         new_secret,
         applied: Default::default(),
@@ -868,37 +868,37 @@ pub fn put_channel(
 }
 
 /// Remove a channel from the catalog for good, detaching it from the caller's
-/// service first when it is attached there. Deletion is honest — unlike
+/// operator first when it is attached there. Deletion is honest — unlike
 /// [`detach_channel`], the channel does not survive as an available catalog
-/// entry. A channel owned by another service is refused rather than stolen.
+/// entry. A channel owned by another operator is refused rather than stolen.
 pub fn delete_channel(
     dir: &std::path::Path,
-    params: construct_protocol::ServiceChannelNameParams,
+    params: construct_protocol::OperatorChannelNameParams,
 ) -> Result<()> {
-    validate_service_name(&params.service_name)?;
+    validate_operator_name(&params.operator_name)?;
     validate_channel_id(&params.channel_id)?;
-    let mut services = load_definitions(dir)?;
+    let mut operators = load_definitions(dir)?;
     let mut catalog = load_channel_catalog(dir)?;
-    migrate_legacy_channels(dir, &services, &mut catalog)?;
+    migrate_legacy_channels(dir, &operators, &mut catalog)?;
     if !catalog.channels.contains_key(&params.channel_id) {
         return Err(anyhow!(
             "channel `{}` not found in catalog",
             params.channel_id
         ));
     }
-    let owners = channel_owners(&services);
+    let owners = channel_owners(&operators);
     if let Some(owner) = owner_label(&owners, &params.channel_id) {
-        if owner != params.service_name {
+        if owner != params.operator_name {
             return Err(anyhow!(
-                "channel `{}` is attached to service `{owner}`; delete it from there",
+                "channel `{}` is attached to operator `{owner}`; delete it from there",
                 params.channel_id
             ));
         }
-        let service = services
-            .get_mut(&params.service_name)
-            .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
-        service.channels.remove(&params.channel_id);
-        write_definition(dir, &params.service_name, service)?;
+        let operator = operators
+            .get_mut(&params.operator_name)
+            .ok_or_else(|| anyhow!("operator `{}` not found", params.operator_name))?;
+        operator.channels.remove(&params.channel_id);
+        write_definition(dir, &params.operator_name, operator)?;
     }
     catalog.channels.remove(&params.channel_id);
     write_channel_catalog(dir, &catalog)?;
@@ -907,18 +907,18 @@ pub fn delete_channel(
 
 pub fn attach_channel(
     dir: &std::path::Path,
-    params: construct_protocol::ServiceChannelAttachParams,
-) -> Result<construct_protocol::ServiceChannelPutResult> {
-    validate_service_name(&params.service_name)?;
+    params: construct_protocol::OperatorChannelAttachParams,
+) -> Result<construct_protocol::OperatorChannelPutResult> {
+    validate_operator_name(&params.operator_name)?;
     validate_channel_id(&params.channel_id)?;
-    let mut services = load_definitions(dir)?;
+    let mut operators = load_definitions(dir)?;
     let mut catalog = load_channel_catalog(dir)?;
-    migrate_legacy_channels(dir, &services, &mut catalog)?;
-    let owners = channel_owners(&services);
+    migrate_legacy_channels(dir, &operators, &mut catalog)?;
+    let owners = channel_owners(&operators);
     if let Some(owner) = owner_label(&owners, &params.channel_id) {
-        if owner != params.service_name {
+        if owner != params.operator_name {
             return Err(anyhow!(
-                "channel `{}` is already attached to service `{owner}`",
+                "channel `{}` is already attached to operator `{owner}`",
                 params.channel_id
             ));
         }
@@ -928,27 +928,27 @@ pub fn attach_channel(
         .get(&params.channel_id)
         .cloned()
         .ok_or_else(|| anyhow!("channel `{}` not found in catalog", params.channel_id))?;
-    let service = services
-        .get_mut(&params.service_name)
-        .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
+    let operator = operators
+        .get_mut(&params.operator_name)
+        .ok_or_else(|| anyhow!("operator `{}` not found", params.operator_name))?;
     if channel_kind(&params.channel_id, &config) == "http" {
-        if service.channels.iter().any(|(id, channel)| {
+        if operator.channels.iter().any(|(id, channel)| {
             id != &params.channel_id
                 && channel_kind(id, channel) == "http"
                 && channel.port == config.port
         }) {
             return Err(anyhow!(
-                "HTTP port {:?} is already used by this service",
+                "HTTP port {:?} is already used by this operator",
                 config.port
             ));
         }
     }
-    service
+    operator
         .channels
         .insert(params.channel_id.clone(), config.clone());
-    write_definition(dir, &params.service_name, service)?;
-    Ok(construct_protocol::ServiceChannelPutResult {
-        channel: channel_summary(params.channel_id, &config, Some(params.service_name)),
+    write_definition(dir, &params.operator_name, operator)?;
+    Ok(construct_protocol::OperatorChannelPutResult {
+        channel: channel_summary(params.channel_id, &config, Some(params.operator_name)),
         new_secret: None,
         applied: Default::default(),
     })
@@ -956,30 +956,30 @@ pub fn attach_channel(
 
 pub fn detach_channel(
     dir: &std::path::Path,
-    params: construct_protocol::ServiceChannelAttachParams,
-) -> Result<construct_protocol::ServiceChannelPutResult> {
-    validate_service_name(&params.service_name)?;
+    params: construct_protocol::OperatorChannelAttachParams,
+) -> Result<construct_protocol::OperatorChannelPutResult> {
+    validate_operator_name(&params.operator_name)?;
     validate_channel_id(&params.channel_id)?;
-    let mut services = load_definitions(dir)?;
+    let mut operators = load_definitions(dir)?;
     let mut catalog = load_channel_catalog(dir)?;
-    migrate_legacy_channels(dir, &services, &mut catalog)?;
-    let service = services
-        .get_mut(&params.service_name)
-        .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
-    let config = service.channels.remove(&params.channel_id).ok_or_else(|| {
+    migrate_legacy_channels(dir, &operators, &mut catalog)?;
+    let operator = operators
+        .get_mut(&params.operator_name)
+        .ok_or_else(|| anyhow!("operator `{}` not found", params.operator_name))?;
+    let config = operator.channels.remove(&params.channel_id).ok_or_else(|| {
         anyhow!(
-            "channel `{}` is not attached to service `{}`",
+            "channel `{}` is not attached to operator `{}`",
             params.channel_id,
-            params.service_name
+            params.operator_name
         )
     })?;
     catalog
         .channels
         .entry(params.channel_id.clone())
         .or_insert_with(|| config.clone());
-    write_definition(dir, &params.service_name, service)?;
+    write_definition(dir, &params.operator_name, operator)?;
     write_channel_catalog(dir, &catalog)?;
-    Ok(construct_protocol::ServiceChannelPutResult {
+    Ok(construct_protocol::OperatorChannelPutResult {
         channel: channel_summary(params.channel_id, &config, None),
         new_secret: None,
         applied: Default::default(),
@@ -988,24 +988,24 @@ pub fn detach_channel(
 
 pub fn rotate_channel_secret(
     dir: &std::path::Path,
-    params: construct_protocol::ServiceChannelNameParams,
-) -> Result<construct_protocol::ServiceChannelPutResult> {
-    validate_service_name(&params.service_name)?;
+    params: construct_protocol::OperatorChannelNameParams,
+) -> Result<construct_protocol::OperatorChannelPutResult> {
+    validate_operator_name(&params.operator_name)?;
     validate_channel_id(&params.channel_id)?;
-    let mut services = load_definitions(dir)?;
+    let mut operators = load_definitions(dir)?;
     let mut catalog = load_channel_catalog(dir)?;
-    migrate_legacy_channels(dir, &services, &mut catalog)?;
-    let service = services
-        .get_mut(&params.service_name)
-        .ok_or_else(|| anyhow!("service `{}` not found", params.service_name))?;
-    let channel = service
+    migrate_legacy_channels(dir, &operators, &mut catalog)?;
+    let operator = operators
+        .get_mut(&params.operator_name)
+        .ok_or_else(|| anyhow!("operator `{}` not found", params.operator_name))?;
+    let channel = operator
         .channels
         .get_mut(&params.channel_id)
         .ok_or_else(|| {
             anyhow!(
-                "channel `{}` not found on service `{}`",
+                "channel `{}` not found on operator `{}`",
                 params.channel_id,
-                params.service_name
+                params.operator_name
             )
         })?;
     if channel_kind(&params.channel_id, channel) != "http" {
@@ -1022,18 +1022,18 @@ pub fn rotate_channel_secret(
     let summary = channel_summary(
         params.channel_id.clone(),
         &config,
-        Some(params.service_name.clone()),
+        Some(params.operator_name.clone()),
     );
-    write_definition(dir, &params.service_name, service)?;
+    write_definition(dir, &params.operator_name, operator)?;
     write_channel_catalog(dir, &catalog)?;
-    Ok(construct_protocol::ServiceChannelPutResult {
+    Ok(construct_protocol::OperatorChannelPutResult {
         channel: summary,
         new_secret: Some(secret),
         applied: Default::default(),
     })
 }
 
-fn write_definition(dir: &std::path::Path, name: &str, config: &ServiceConfig) -> Result<()> {
+fn write_definition(dir: &std::path::Path, name: &str, config: &OperatorConfig) -> Result<()> {
     let path = dir.join(format!("{name}.toml"));
     let encoded = toml::to_string_pretty(config)?;
     let temporary = dir.join(format!(".{name}.toml.tmp"));
@@ -1043,7 +1043,7 @@ fn write_definition(dir: &std::path::Path, name: &str, config: &ServiceConfig) -
     Ok(())
 }
 
-pub(crate) fn channel_kind(id: &str, config: &ServiceChannelConfig) -> String {
+pub(crate) fn channel_kind(id: &str, config: &OperatorChannelConfig) -> String {
     config
         .kind
         .clone()
@@ -1089,13 +1089,13 @@ fn normalize_allowlist(values: Vec<String>) -> Vec<String> {
 
 fn channel_summary(
     id: String,
-    config: &ServiceChannelConfig,
+    config: &OperatorChannelConfig,
     attached_to: Option<String>,
-) -> construct_protocol::ServiceChannelSummary {
+) -> construct_protocol::OperatorChannelSummary {
     // Behavior options belong to Slack, and a client that cannot see the stored
     // value cannot show what an omitted field is preserving.
     let slack = channel_kind(&id, config) == "slack";
-    construct_protocol::ServiceChannelSummary {
+    construct_protocol::OperatorChannelSummary {
         id: id.clone(),
         kind: channel_kind(&id, config),
         enabled: config.enabled,
@@ -1133,9 +1133,9 @@ fn channel_summary(
     }
 }
 
-fn summary(name: String, config: &ServiceConfig) -> construct_protocol::ServiceSummary {
-    let service_name = name.clone();
-    construct_protocol::ServiceSummary {
+fn summary(name: String, config: &OperatorConfig) -> construct_protocol::OperatorSummary {
+    let operator_name = name.clone();
+    construct_protocol::OperatorSummary {
         name,
         position: config.position,
         placement: config.placement,
@@ -1145,21 +1145,21 @@ fn summary(name: String, config: &ServiceConfig) -> construct_protocol::ServiceS
         session_mode: config.session_mode.as_str().to_string(),
         cwd: config.cwd.clone(),
         routing: match config.routing {
-            ServiceRouting::PerEvent => "per-event",
-            ServiceRouting::SessionKey => "session-key",
-            ServiceRouting::Single => "single",
+            OperatorRouting::PerEvent => "per-event",
+            OperatorRouting::SessionKey => "session-key",
+            OperatorRouting::Single => "single",
         }
         .to_string(),
         paused: config.paused,
         channels: config
             .channels
             .iter()
-            .map(|(id, channel)| channel_summary(id.clone(), channel, Some(service_name.clone())))
+            .map(|(id, channel)| channel_summary(id.clone(), channel, Some(operator_name.clone())))
             .collect(),
     }
 }
 
-fn validate_service_name(name: &str) -> Result<()> {
+fn validate_operator_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 32
         && name
@@ -1170,27 +1170,27 @@ fn validate_service_name(name: &str) -> Result<()> {
     if valid {
         Ok(())
     } else {
-        Err(anyhow!("invalid service name `{name}`"))
+        Err(anyhow!("invalid operator name `{name}`"))
     }
 }
 
-pub(crate) use ingress::{ServiceIngress as ServiceRuntime, ServiceIngressShared as ServiceShared};
+pub(crate) use ingress::{OperatorIngress as OperatorRuntime, OperatorIngressShared as OperatorShared};
 pub(crate) use slack::SlackConfig;
 
 /// Build the transport-neutral ingress runtime for one channel.
 pub(crate) fn channel_runtime(
-    shared: Arc<ServiceShared>,
+    shared: Arc<OperatorShared>,
     channel_id: String,
-) -> Arc<ServiceRuntime> {
-    Arc::new(ServiceRuntime::new(channel_id, shared))
+) -> Arc<OperatorRuntime> {
+    Arc::new(OperatorRuntime::new(channel_id, shared))
 }
 
 /// Whether a channel is one this daemon knows how to bind, logging the reason
 /// when it is not. Used by the supervisor to build the desired listener set.
 pub(crate) fn bindable_port(
-    service: &str,
+    operator: &str,
     channel_id: &str,
-    channel: &ServiceChannelConfig,
+    channel: &OperatorChannelConfig,
 ) -> Option<u16> {
     if !channel.enabled {
         return None;
@@ -1200,40 +1200,40 @@ pub(crate) fn bindable_port(
         return None;
     }
     if kind != "http" {
-        tracing::warn!(service = %service, channel = %channel_id, "unsupported service channel kind; skipping");
+        tracing::warn!(operator = %operator, channel = %channel_id, "unsupported operator channel kind; skipping");
         return None;
     }
     let Some(port) = channel.port else {
-        tracing::warn!(service = %service, channel = %channel_id, "HTTP channel has no port; skipping");
+        tracing::warn!(operator = %operator, channel = %channel_id, "HTTP channel has no port; skipping");
         return None;
     };
     if channel.token.as_deref().unwrap_or("").is_empty() {
-        tracing::warn!(service = %service, channel = %channel_id, "HTTP channel has no token; skipping");
+        tracing::warn!(operator = %operator, channel = %channel_id, "HTTP channel has no token; skipping");
         return None;
     }
     Some(port)
 }
 
 /// Describe the local ingress this channel adapter owns. Publication code
-/// consumes this typed endpoint and never inspects `ServiceChannelConfig`.
+/// consumes this typed endpoint and never inspects `OperatorChannelConfig`.
 /// A future channel kind adds its adapter mapping here (or in a registry)
 /// without adding protocol branches to the tunnel supervisor.
 pub(crate) fn ingress_endpoint(
-    service: &str,
+    operator: &str,
     channel_id: &str,
-    channel: &ServiceChannelConfig,
+    channel: &OperatorChannelConfig,
 ) -> Option<crate::channel_publication::ChannelIngressEndpoint> {
-    bindable_port(service, channel_id, channel).map(|port| {
+    bindable_port(operator, channel_id, channel).map(|port| {
         crate::channel_publication::ChannelIngressEndpoint::loopback_http(
             port,
-            format!("/svc/{service}"),
+            format!("/svc/{operator}"),
         )
     })
 }
 
 /// Drive one supervisor-owned HTTP listener until it is cancelled.
 pub(crate) async fn serve(
-    runtime: Arc<ServiceRuntime>,
+    runtime: Arc<OperatorRuntime>,
     listener: tokio::net::TcpListener,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
@@ -1242,9 +1242,9 @@ pub(crate) async fn serve(
 
 /// Validate and snapshot one Slack channel without exposing its credentials.
 pub(crate) fn slack_config(
-    service: &str,
+    operator: &str,
     channel_id: &str,
-    channel: &ServiceChannelConfig,
+    channel: &OperatorChannelConfig,
 ) -> Option<slack::SlackConfig> {
     if !channel.enabled || channel_kind(channel_id, channel) != "slack" {
         return None;
@@ -1258,7 +1258,7 @@ pub(crate) fn slack_config(
         .clone()
         .filter(|token| token.starts_with("xoxb-"));
     let (Some(app_token), Some(bot_token)) = (app_token, bot_token) else {
-        tracing::warn!(service = %service, channel = %channel_id, "Slack channel credentials are missing or invalid; skipping");
+        tracing::warn!(operator = %operator, channel = %channel_id, "Slack channel credentials are missing or invalid; skipping");
         return None;
     };
     Some(slack::SlackConfig {
@@ -1273,7 +1273,7 @@ pub(crate) fn slack_config(
 }
 
 pub(crate) async fn serve_slack(
-    runtime: Arc<ServiceRuntime>,
+    runtime: Arc<OperatorRuntime>,
     config: slack::SlackConfig,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
@@ -1287,9 +1287,9 @@ mod tests {
     use super::*;
     use construct_protocol::{MessageRole, SessionEvent, SessionState};
 
-    /// A live service plus one channel runtime, so the tests below read
+    /// A live operator plus one channel runtime, so the tests below read
     /// configuration the way a request does rather than inspecting the struct.
-    async fn live_service(config: ServiceConfig) -> (Arc<ServiceShared>, Arc<ServiceRuntime>) {
+    async fn live_operator(config: OperatorConfig) -> (Arc<OperatorShared>, Arc<OperatorRuntime>) {
         let tmp = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
         let storage =
             Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
@@ -1300,7 +1300,7 @@ mod tests {
         )
         .await
         .expect("session manager");
-        let shared = ServiceShared::load(
+        let shared = OperatorShared::load(
             "svc".to_string(),
             config,
             Arc::new(manager),
@@ -1310,22 +1310,22 @@ mod tests {
         (shared, runtime)
     }
 
-    fn config_with_channel(token: &str, enabled: bool, paused: bool) -> ServiceConfig {
-        ServiceConfig {
+    fn config_with_channel(token: &str, enabled: bool, paused: bool) -> OperatorConfig {
+        OperatorConfig {
             position: 0,
             placement: None,
             instruction: String::new(),
             harness: "smith".into(),
             model: None,
-            session_mode: ServiceSessionMode::Headless,
+            session_mode: OperatorSessionMode::Headless,
             cwd: ".".into(),
-            routing: ServiceRouting::SessionKey,
+            routing: OperatorRouting::SessionKey,
             paused,
             approval_timeout_secs: 0,
-            sandbox: ServiceSandboxConfig::default(),
+            sandbox: OperatorSandboxConfig::default(),
             channels: BTreeMap::from([(
                 "http1".to_string(),
-                ServiceChannelConfig {
+                OperatorChannelConfig {
                     kind: Some("http".into()),
                     enabled,
                     port: Some(9000),
@@ -1345,18 +1345,18 @@ mod tests {
     #[test]
     fn interactive_mode_is_limited_to_native_agent_harnesses() {
         assert_eq!(
-            parse_service_session_mode("codex", "interactive").unwrap(),
-            ServiceSessionMode::Interactive
+            parse_operator_session_mode("codex", "interactive").unwrap(),
+            OperatorSessionMode::Interactive
         );
         assert_eq!(
-            parse_service_session_mode("claude", "interactive").unwrap(),
-            ServiceSessionMode::Interactive
+            parse_operator_session_mode("claude", "interactive").unwrap(),
+            OperatorSessionMode::Interactive
         );
-        assert!(parse_service_session_mode("smith", "interactive")
+        assert!(parse_operator_session_mode("smith", "interactive")
             .unwrap_err()
             .to_string()
             .contains("codex` or `claude"));
-        assert!(parse_service_session_mode("codex", "unknown").is_err());
+        assert!(parse_operator_session_mode("codex", "unknown").is_err());
     }
 
     #[tokio::test]
@@ -1364,7 +1364,7 @@ mod tests {
         // The listener never moves for a rotation, so the credential has to be
         // read per request. Before this, the old secret kept working until the
         // daemon restarted.
-        let (shared, runtime) = live_service(config_with_channel("first", true, false)).await;
+        let (shared, runtime) = live_operator(config_with_channel("first", true, false)).await;
         assert_eq!(http::token(&runtime).as_deref(), Some("first"));
 
         shared.set_config(config_with_channel("second", true, false));
@@ -1384,13 +1384,13 @@ mod tests {
 
     #[tokio::test]
     async fn pausing_or_disabling_stops_a_channel_serving() {
-        let (shared, runtime) = live_service(config_with_channel("t", true, false)).await;
+        let (shared, runtime) = live_operator(config_with_channel("t", true, false)).await;
         assert!(http::serving(&runtime));
 
         shared.set_config(config_with_channel("t", true, true));
         assert!(
             !http::serving(&runtime),
-            "a paused service refuses requests"
+            "a paused operator refuses requests"
         );
 
         shared.set_config(config_with_channel("t", false, false));
@@ -1408,7 +1408,7 @@ mod tests {
         // Editing a definition must not lose which session serves a key, nor
         // which deliveries were already handled — the first would strand live
         // conversations, the second would let a retry open a duplicate.
-        let (shared, _runtime) = live_service(config_with_channel("t", true, false)).await;
+        let (shared, _runtime) = live_operator(config_with_channel("t", true, false)).await;
         shared
             .state
             .lock()
@@ -1422,7 +1422,7 @@ mod tests {
         }
 
         let mut edited = config_with_channel("t", true, false);
-        edited.routing = ServiceRouting::PerEvent;
+        edited.routing = OperatorRouting::PerEvent;
         shared.set_config(edited);
 
         assert_eq!(
@@ -1434,7 +1434,7 @@ mod tests {
             shared.seen_requests.lock().await.1.contains("http1:req-1"),
             "an already-handled delivery is still recognized after the edit"
         );
-        assert_eq!(shared.config().routing, ServiceRouting::PerEvent);
+        assert_eq!(shared.config().routing, OperatorRouting::PerEvent);
     }
 
     fn msg(role: MessageRole, text: &str) -> SessionEvent {
@@ -1516,7 +1516,7 @@ mod tests {
 
     #[test]
     fn reply_survives_a_tool_result_recorded_after_the_answer() {
-        // Transcript shape observed from a live interactive codex service
+        // Transcript shape observed from a live interactive codex operator
         // turn: codex flushed the reply tool's result *after* the assistant
         // text it produced. Treating that trailing result as a turn boundary
         // hid the answer entirely — the poll endpoint reported `ready` with a
@@ -1524,13 +1524,13 @@ mod tests {
         let events = vec![
             msg(MessageRole::User, "say CHARLIE"),
             SessionEvent::ToolUse {
-                tool: "construct_service_reply".into(),
+                tool: "construct_operator_reply".into(),
                 args: serde_json::Value::Null,
                 call_id: Some("call-1".into()),
             },
             msg(MessageRole::Assistant, "CHARLIE"),
             SessionEvent::ToolResult {
-                tool: "construct_service_reply".into(),
+                tool: "construct_operator_reply".into(),
                 ok: true,
                 output: String::new(),
                 call_id: Some("call-1".into()),
@@ -1577,11 +1577,11 @@ mod tests {
     }
 
     #[test]
-    fn services_withhold_fleet_access_unless_asked() {
-        // The default matters on its own: a service is prompted by whoever can
+    fn operators_withhold_fleet_access_unless_asked() {
+        // The default matters on its own: a operator is prompted by whoever can
         // reach its channel, so an omitted [sandbox] section must not hand that
         // caller the fleet.
-        let env = ServiceSandboxConfig::default().session_env();
+        let env = OperatorSandboxConfig::default().session_env();
         assert_eq!(
             env.get("CONSTRUCT_SMITH_FLEET_TOOLS").map(String::as_str),
             Some("off")
@@ -1592,7 +1592,7 @@ mod tests {
         );
         assert!(!env.contains_key("CONSTRUCT_SMITH_SKILLS"));
 
-        let opened = ServiceSandboxConfig {
+        let opened = OperatorSandboxConfig {
             fleet_control: true,
             mcp: true,
             skills: false,
@@ -1609,29 +1609,29 @@ mod tests {
     #[test]
     fn sandbox_limits_survive_an_unrelated_edit() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = ServiceConfig {
+        let mut config = OperatorConfig {
             position: 0,
             placement: None,
             instruction: "hi".into(),
             harness: "smith".into(),
             model: None,
-            session_mode: ServiceSessionMode::Headless,
+            session_mode: OperatorSessionMode::Headless,
             cwd: ".".into(),
-            routing: ServiceRouting::SessionKey,
+            routing: OperatorRouting::SessionKey,
             paused: false,
             approval_timeout_secs: 0,
-            sandbox: ServiceSandboxConfig::default(),
+            sandbox: OperatorSandboxConfig::default(),
             channels: BTreeMap::new(),
         };
         config.sandbox.fleet_control = true;
         write_definition(dir.path(), "svc", &config).unwrap();
 
         // An edit that never mentions the sandbox must not re-confine (or
-        // re-open) the service behind the operator's back.
+        // re-open) the operator behind the user's back.
         put_definition(
             dir.path(),
-            construct_protocol::ServicePutParams {
-                service: construct_protocol::ServiceSummary {
+            construct_protocol::OperatorPutParams {
+                operator: construct_protocol::OperatorSummary {
                     name: "svc".into(),
                     position: 0,
                     placement: None,
@@ -1724,13 +1724,13 @@ mod tests {
 
     #[test]
     fn approval_timeout_defaults_to_waiting_forever() {
-        // The operator stays the only one who can approve unless they opt into
+        // The user stays the only one who can approve unless they opt into
         // a bound; turning this on by default would deny work nobody refused.
         let raw = "instruction = \"x\"\nharness = \"smith\"\ncwd = \".\"\n";
-        let config: ServiceConfig = toml::from_str(raw).unwrap();
+        let config: OperatorConfig = toml::from_str(raw).unwrap();
         assert_eq!(config.approval_timeout_secs, 0);
 
-        let bounded: ServiceConfig =
+        let bounded: OperatorConfig =
             toml::from_str(&format!("{raw}approval_timeout_secs = 120\n")).unwrap();
         assert_eq!(bounded.approval_timeout_secs, 120);
     }
@@ -1743,7 +1743,7 @@ mod tests {
     }
 
     #[test]
-    fn http_routes_distinguish_submit_result_method_and_wrong_service() {
+    fn http_routes_distinguish_submit_result_method_and_wrong_operator() {
         assert_eq!(
             parse_http_route("alerts", "POST /svc/alerts HTTP/1.1"),
             Ok(HttpRoute::Submit)
@@ -1767,7 +1767,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_keyed_sessions_become_service_owned() {
+    fn legacy_keyed_sessions_become_operator_owned() {
         let mut state: PersistedState =
             serde_json::from_str(r#"{"sessions":{"incident-1":"s123"}}"#).unwrap();
         assert!(state.owned_sessions.is_empty());
@@ -1776,8 +1776,8 @@ mod tests {
     }
 
     #[test]
-    fn service_config_accepts_v1_routing_mode() {
-        let service: ServiceConfig = toml::from_str(
+    fn operator_config_accepts_v1_routing_mode() {
+        let operator: OperatorConfig = toml::from_str(
             r#"
             instruction = "triage alert"
             harness = "smith"
@@ -1788,25 +1788,25 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(service.routing, ServiceRouting::SessionKey);
-        assert_eq!(service.channels["http"].port, Some(8787));
+        assert_eq!(operator.routing, OperatorRouting::SessionKey);
+        assert_eq!(operator.channels["http"].port, Some(8787));
     }
 
     #[test]
-    fn loads_one_toml_document_per_service() {
+    fn loads_one_toml_document_per_operator() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("alerts.toml"),
             "harness = \"smith\"\n[channels.http]\nport = 8787\ntoken = \"secret\"\n",
         )
         .unwrap();
-        let services = load_definitions(dir.path()).unwrap();
-        assert_eq!(services.len(), 1);
-        assert_eq!(services["alerts"].channels["http"].port, Some(8787));
+        let operators = load_definitions(dir.path()).unwrap();
+        assert_eq!(operators.len(), 1);
+        assert_eq!(operators["alerts"].channels["http"].port, Some(8787));
     }
 
     #[test]
-    fn service_reorder_materializes_and_preserves_positions() {
+    fn operator_reorder_materializes_and_preserves_positions() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["alpha", "bravo", "charlie"] {
             std::fs::write(
@@ -1820,7 +1820,7 @@ mod tests {
             list_summaries(dir.path())
                 .unwrap()
                 .into_iter()
-                .map(|service| service.name)
+                .map(|operator| operator.name)
                 .collect::<Vec<_>>()
         };
         assert_eq!(names(), ["alpha", "bravo", "charlie"]);
@@ -1838,7 +1838,7 @@ mod tests {
             list_summaries(dir.path())
                 .unwrap()
                 .iter()
-                .map(|service| service.position)
+                .map(|operator| operator.position)
                 .collect::<Vec<_>>(),
             [0, 1, 2]
         );
@@ -1848,7 +1848,7 @@ mod tests {
         edited.position = 99;
         put_definition(
             dir.path(),
-            construct_protocol::ServicePutParams { service: edited },
+            construct_protocol::OperatorPutParams { operator: edited },
         )
         .unwrap();
         assert_eq!(names(), ["alpha", "charlie", "bravo"]);
@@ -1895,7 +1895,7 @@ mod tests {
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: construct_protocol::SessionKind::User,
             archived: false,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
             merge: None,
@@ -1919,11 +1919,11 @@ mod tests {
         sessions: &[construct_protocol::SessionSummary],
         groups: &[construct_protocol::GroupSummary],
     ) -> Vec<String> {
-        let services = load_definitions(dir).unwrap();
-        super::top_level_flow(&services, sessions, groups)
+        let operators = load_definitions(dir).unwrap();
+        super::top_level_flow(&operators, sessions, groups)
             .into_iter()
             .map(|row| match row {
-                super::FlowRow::Service(name) => format!("svc:{name}"),
+                super::FlowRow::Operator(name) => format!("svc:{name}"),
                 super::FlowRow::Session { position } => format!("sess@{position}"),
                 super::FlowRow::Project { position } => format!("proj@{position}"),
             })
@@ -1931,7 +1931,7 @@ mod tests {
     }
 
     #[test]
-    fn service_reorders_across_sessions_and_projects_at_top_level() {
+    fn operator_reorders_across_sessions_and_projects_at_top_level() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["alpha", "bravo"] {
             std::fs::write(
@@ -2015,7 +2015,7 @@ mod tests {
     }
 
     #[test]
-    fn placed_service_stays_put_when_its_pinned_neighbor_vanishes() {
+    fn placed_operator_stays_put_when_its_pinned_neighbor_vanishes() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("alpha.toml"), "harness = \"smith\"\n").unwrap();
         let sessions = vec![
@@ -2049,11 +2049,11 @@ mod tests {
     }
 
     #[test]
-    fn routed_service_sessions_are_not_reorder_neighbors() {
+    fn routed_operator_sessions_are_not_reorder_neighbors() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("alpha.toml"), "harness = \"smith\"\n").unwrap();
         let mut routed = flow_session("routed", 10);
-        routed.title = Some("service:alpha:key".to_string());
+        routed.title = Some("operator:alpha:key".to_string());
         let plain = flow_session("s1", 20);
         let sessions = vec![routed, plain];
 
@@ -2065,7 +2065,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        // The routed session nests under the service row in every client, so
+        // The routed session nests under the operator row in every client, so
         // one step down lands past the first *top-level* session.
         assert_eq!(
             flow_names(dir.path(), &sessions, &[]),
@@ -2116,11 +2116,11 @@ mod tests {
     }
 
     #[test]
-    fn service_put_preserves_channels_and_channel_crud_rotates_credentials() {
+    fn operator_put_preserves_channels_and_channel_crud_rotates_credentials() {
         let config = tempfile::tempdir().unwrap();
-        let services = config.path().join("services");
-        std::fs::create_dir_all(&services).unwrap();
-        let service = construct_protocol::ServiceSummary {
+        let operators = config.path().join("operators");
+        std::fs::create_dir_all(&operators).unwrap();
+        let operator = construct_protocol::OperatorSummary {
             name: "alerts".into(),
             position: 0,
             placement: None,
@@ -2134,18 +2134,18 @@ mod tests {
             channels: Vec::new(),
         };
         let first = put_definition(
-            &services,
-            construct_protocol::ServicePutParams {
-                service: service.clone(),
+            &operators,
+            construct_protocol::OperatorPutParams {
+                operator: operator.clone(),
             },
         )
         .unwrap();
-        assert!(first.service.channels.is_empty());
+        assert!(first.operator.channels.is_empty());
         let first_channel = put_channel(
-            &services,
-            construct_protocol::ServiceChannelPutParams {
-                service_name: "alerts".into(),
-                channel: construct_protocol::ServiceChannelPut {
+            &operators,
+            construct_protocol::OperatorChannelPutParams {
+                operator_name: "alerts".into(),
+                channel: construct_protocol::OperatorChannelPut {
                     id: "http".into(),
                     kind: "http".into(),
                     enabled: true,
@@ -2164,53 +2164,53 @@ mod tests {
         .unwrap();
         let original = first_channel.new_secret.unwrap();
         let second = put_definition(
-            &services,
-            construct_protocol::ServicePutParams {
-                service: service.clone(),
+            &operators,
+            construct_protocol::OperatorPutParams {
+                operator: operator.clone(),
             },
         )
         .unwrap();
-        assert_eq!(second.service.channels.len(), 1);
-        let stored = load_definitions(&services).unwrap();
+        assert_eq!(second.operator.channels.len(), 1);
+        let stored = load_definitions(&operators).unwrap();
         assert_eq!(
             stored["alerts"].channels["http"].token.as_deref(),
             Some(original.as_str())
         );
         let rotated = rotate_channel_secret(
-            &services,
-            construct_protocol::ServiceChannelNameParams {
-                service_name: "alerts".into(),
+            &operators,
+            construct_protocol::OperatorChannelNameParams {
+                operator_name: "alerts".into(),
                 channel_id: "http".into(),
             },
         )
         .unwrap();
         assert_ne!(rotated.new_secret.as_deref(), Some(original.as_str()));
         delete_channel(
-            &services,
-            construct_protocol::ServiceChannelNameParams {
-                service_name: "alerts".into(),
+            &operators,
+            construct_protocol::OperatorChannelNameParams {
+                operator_name: "alerts".into(),
                 channel_id: "http".into(),
             },
         )
         .unwrap();
-        assert!(load_definitions(&services)
+        assert!(load_definitions(&operators)
             .unwrap()
             .get("alerts")
             .unwrap()
             .channels
             .is_empty());
-        assert!(list_channel_catalog(&services).unwrap().is_empty());
+        assert!(list_channel_catalog(&operators).unwrap().is_empty());
     }
 
     #[test]
-    fn channel_ports_are_unique_within_a_service() {
+    fn channel_ports_are_unique_within_a_operator() {
         let config = tempfile::tempdir().unwrap();
-        let services = config.path().join("services");
-        std::fs::create_dir_all(&services).unwrap();
+        let operators = config.path().join("operators");
+        std::fs::create_dir_all(&operators).unwrap();
         put_definition(
-            &services,
-            construct_protocol::ServicePutParams {
-                service: construct_protocol::ServiceSummary {
+            &operators,
+            construct_protocol::OperatorPutParams {
+                operator: construct_protocol::OperatorSummary {
                     name: "alerts".into(),
                     position: 0,
                     placement: None,
@@ -2227,10 +2227,10 @@ mod tests {
         )
         .unwrap();
         put_channel(
-            &services,
-            construct_protocol::ServiceChannelPutParams {
-                service_name: "alerts".into(),
-                channel: construct_protocol::ServiceChannelPut {
+            &operators,
+            construct_protocol::OperatorChannelPutParams {
+                operator_name: "alerts".into(),
+                channel: construct_protocol::OperatorChannelPut {
                     id: "http".into(),
                     kind: "http".into(),
                     enabled: true,
@@ -2248,10 +2248,10 @@ mod tests {
         )
         .unwrap();
         let duplicate = put_channel(
-            &services,
-            construct_protocol::ServiceChannelPutParams {
-                service_name: "alerts".into(),
-                channel: construct_protocol::ServiceChannelPut {
+            &operators,
+            construct_protocol::OperatorChannelPutParams {
+                operator_name: "alerts".into(),
+                channel: construct_protocol::OperatorChannelPut {
                     id: "monitoring".into(),
                     kind: "http".into(),
                     enabled: true,
@@ -2273,17 +2273,17 @@ mod tests {
     #[test]
     fn channel_catalog_migrates_and_controls_exclusive_attachments() {
         let config = tempfile::tempdir().unwrap();
-        let services = config.path().join("services");
-        std::fs::create_dir_all(&services).unwrap();
+        let operators = config.path().join("operators");
+        std::fs::create_dir_all(&operators).unwrap();
         std::fs::write(
-            services.join("alerts.toml"),
+            operators.join("alerts.toml"),
             "harness = \"smith\"\n[channels.http]\nport = 8787\ntoken = \"secret\"\n",
         )
         .unwrap();
         put_definition(
-            &services,
-            construct_protocol::ServicePutParams {
-                service: construct_protocol::ServiceSummary {
+            &operators,
+            construct_protocol::OperatorPutParams {
+                operator: construct_protocol::OperatorSummary {
                     name: "backup".into(),
                     position: 0,
                     placement: None,
@@ -2300,15 +2300,15 @@ mod tests {
         )
         .unwrap();
 
-        let catalog = list_channel_catalog(&services).unwrap();
+        let catalog = list_channel_catalog(&operators).unwrap();
         assert_eq!(catalog.len(), 1);
         assert_eq!(catalog[0].attached_to.as_deref(), Some("alerts"));
         assert!(config.path().join("channels.toml").exists());
 
         let rejected = attach_channel(
-            &services,
-            construct_protocol::ServiceChannelAttachParams {
-                service_name: "backup".into(),
+            &operators,
+            construct_protocol::OperatorChannelAttachParams {
+                operator_name: "backup".into(),
                 channel_id: "http".into(),
             },
         )
@@ -2316,28 +2316,28 @@ mod tests {
         assert!(rejected.to_string().contains("already attached"));
 
         detach_channel(
-            &services,
-            construct_protocol::ServiceChannelAttachParams {
-                service_name: "alerts".into(),
+            &operators,
+            construct_protocol::OperatorChannelAttachParams {
+                operator_name: "alerts".into(),
                 channel_id: "http".into(),
             },
         )
         .unwrap();
         assert_eq!(
-            list_channel_catalog(&services).unwrap()[0].attached_to,
+            list_channel_catalog(&operators).unwrap()[0].attached_to,
             None
         );
 
         attach_channel(
-            &services,
-            construct_protocol::ServiceChannelAttachParams {
-                service_name: "backup".into(),
+            &operators,
+            construct_protocol::OperatorChannelAttachParams {
+                operator_name: "backup".into(),
                 channel_id: "http".into(),
             },
         )
         .unwrap();
         assert_eq!(
-            list_channel_catalog(&services).unwrap()[0]
+            list_channel_catalog(&operators).unwrap()[0]
                 .attached_to
                 .as_deref(),
             Some("backup")
@@ -2347,13 +2347,13 @@ mod tests {
     #[test]
     fn deleting_a_channel_removes_it_from_the_catalog() {
         let config = tempfile::tempdir().unwrap();
-        let services = config.path().join("services");
-        std::fs::create_dir_all(&services).unwrap();
+        let operators = config.path().join("operators");
+        std::fs::create_dir_all(&operators).unwrap();
         for name in ["alerts", "backup"] {
             put_definition(
-                &services,
-                construct_protocol::ServicePutParams {
-                    service: construct_protocol::ServiceSummary {
+                &operators,
+                construct_protocol::OperatorPutParams {
+                    operator: construct_protocol::OperatorSummary {
                         name: name.into(),
                         position: 0,
                         placement: None,
@@ -2371,10 +2371,10 @@ mod tests {
             .unwrap();
         }
         put_channel(
-            &services,
-            construct_protocol::ServiceChannelPutParams {
-                service_name: "alerts".into(),
-                channel: construct_protocol::ServiceChannelPut {
+            &operators,
+            construct_protocol::OperatorChannelPutParams {
+                operator_name: "alerts".into(),
+                channel: construct_protocol::OperatorChannelPut {
                     id: "http".into(),
                     kind: "http".into(),
                     enabled: true,
@@ -2392,42 +2392,42 @@ mod tests {
         )
         .unwrap();
 
-        // Another service may not delete a channel out from under its owner.
+        // Another operator may not delete a channel out from under its owner.
         let stolen = delete_channel(
-            &services,
-            construct_protocol::ServiceChannelNameParams {
-                service_name: "backup".into(),
+            &operators,
+            construct_protocol::OperatorChannelNameParams {
+                operator_name: "backup".into(),
                 channel_id: "http".into(),
             },
         )
         .unwrap_err();
-        assert!(stolen.to_string().contains("attached to service `alerts`"));
-        assert_eq!(list_channel_catalog(&services).unwrap().len(), 1);
+        assert!(stolen.to_string().contains("attached to operator `alerts`"));
+        assert_eq!(list_channel_catalog(&operators).unwrap().len(), 1);
 
         // An unattached channel is deleted from the catalog outright.
         detach_channel(
-            &services,
-            construct_protocol::ServiceChannelAttachParams {
-                service_name: "alerts".into(),
+            &operators,
+            construct_protocol::OperatorChannelAttachParams {
+                operator_name: "alerts".into(),
                 channel_id: "http".into(),
             },
         )
         .unwrap();
         delete_channel(
-            &services,
-            construct_protocol::ServiceChannelNameParams {
-                service_name: "backup".into(),
+            &operators,
+            construct_protocol::OperatorChannelNameParams {
+                operator_name: "backup".into(),
                 channel_id: "http".into(),
             },
         )
         .unwrap();
-        assert!(list_channel_catalog(&services).unwrap().is_empty());
+        assert!(list_channel_catalog(&operators).unwrap().is_empty());
 
         // A channel that is not in the catalog at all cannot be deleted.
         let missing = delete_channel(
-            &services,
-            construct_protocol::ServiceChannelNameParams {
-                service_name: "alerts".into(),
+            &operators,
+            construct_protocol::OperatorChannelNameParams {
+                operator_name: "alerts".into(),
                 channel_id: "http".into(),
             },
         )
@@ -2438,12 +2438,12 @@ mod tests {
     #[test]
     fn rotating_an_attached_channel_updates_the_catalog_credential() {
         let config = tempfile::tempdir().unwrap();
-        let services = config.path().join("services");
-        std::fs::create_dir_all(&services).unwrap();
+        let operators = config.path().join("operators");
+        std::fs::create_dir_all(&operators).unwrap();
         put_definition(
-            &services,
-            construct_protocol::ServicePutParams {
-                service: construct_protocol::ServiceSummary {
+            &operators,
+            construct_protocol::OperatorPutParams {
+                operator: construct_protocol::OperatorSummary {
                     name: "alerts".into(),
                     position: 0,
                     placement: None,
@@ -2460,10 +2460,10 @@ mod tests {
         )
         .unwrap();
         let created = put_channel(
-            &services,
-            construct_protocol::ServiceChannelPutParams {
-                service_name: "alerts".into(),
-                channel: construct_protocol::ServiceChannelPut {
+            &operators,
+            construct_protocol::OperatorChannelPutParams {
+                operator_name: "alerts".into(),
+                channel: construct_protocol::OperatorChannelPut {
                     id: "http".into(),
                     kind: "http".into(),
                     enabled: true,
@@ -2482,27 +2482,27 @@ mod tests {
         .unwrap();
         let original = created.new_secret.unwrap();
         let rotated = rotate_channel_secret(
-            &services,
-            construct_protocol::ServiceChannelNameParams {
-                service_name: "alerts".into(),
+            &operators,
+            construct_protocol::OperatorChannelNameParams {
+                operator_name: "alerts".into(),
                 channel_id: "http".into(),
             },
         )
         .unwrap();
         assert_ne!(rotated.new_secret.as_deref(), Some(original.as_str()));
-        assert!(list_channel_catalog(&services).unwrap()[0].has_credential);
+        assert!(list_channel_catalog(&operators).unwrap()[0].has_credential);
     }
 
     #[test]
     fn an_omitted_option_keeps_the_value_the_channel_was_given() {
         // Absent means unchanged, never default: a client that does not offer
         // these fields must be able to save an allowlist without resetting an
-        // operator's choice behind their back.
+        // minibuffer's choice behind their back.
         let config = tempfile::tempdir().unwrap();
-        let services = config.path().join("services");
-        std::fs::create_dir_all(&services).unwrap();
+        let operators = config.path().join("operators");
+        std::fs::create_dir_all(&operators).unwrap();
         std::fs::write(
-            services.join("chat.toml"),
+            operators.join("chat.toml"),
             "harness = \"codex\"\n\
              [channels.bot]\nkind = \"slack\"\nprogress = \"reaction\"\n\
              follow_up = \"channel\"\nthread_context = 7\n\
@@ -2511,10 +2511,10 @@ mod tests {
         .unwrap();
 
         put_channel(
-            &services,
-            construct_protocol::ServiceChannelPutParams {
-                service_name: "chat".into(),
-                channel: construct_protocol::ServiceChannelPut {
+            &operators,
+            construct_protocol::OperatorChannelPutParams {
+                operator_name: "chat".into(),
+                channel: construct_protocol::OperatorChannelPut {
                     id: "bot".into(),
                     kind: "slack".into(),
                     enabled: true,
@@ -2532,7 +2532,7 @@ mod tests {
         )
         .unwrap();
 
-        let stored = &load_definitions(&services).unwrap()["chat"].channels["bot"];
+        let stored = &load_definitions(&operators).unwrap()["chat"].channels["bot"];
         assert_eq!(stored.progress, SlackProgress::Reaction);
         assert_eq!(stored.follow_up, SlackFollowUp::Channel);
         assert_eq!(stored.thread_context, 7);
@@ -2542,26 +2542,26 @@ mod tests {
     /// A Slack channel with every behavior option left at its default.
     fn slack_channel_fixture() -> (tempfile::TempDir, PathBuf) {
         let config = tempfile::tempdir().unwrap();
-        let services = config.path().join("services");
-        std::fs::create_dir_all(&services).unwrap();
+        let operators = config.path().join("operators");
+        std::fs::create_dir_all(&operators).unwrap();
         std::fs::write(
-            services.join("chat.toml"),
+            operators.join("chat.toml"),
             "harness = \"codex\"\n\
              [channels.bot]\nkind = \"slack\"\n\
              app_token = \"xapp-1\"\nbot_token = \"xoxb-1\"\n",
         )
         .unwrap();
-        (config, services)
+        (config, operators)
     }
 
     fn slack_option_put(
         progress: Option<&str>,
         follow_up: Option<&str>,
         thread_context: Option<usize>,
-    ) -> construct_protocol::ServiceChannelPutParams {
-        construct_protocol::ServiceChannelPutParams {
-            service_name: "chat".into(),
-            channel: construct_protocol::ServiceChannelPut {
+    ) -> construct_protocol::OperatorChannelPutParams {
+        construct_protocol::OperatorChannelPutParams {
+            operator_name: "chat".into(),
+            channel: construct_protocol::OperatorChannelPut {
                 id: "bot".into(),
                 kind: "slack".into(),
                 enabled: true,
@@ -2580,10 +2580,10 @@ mod tests {
 
     #[test]
     fn a_channel_put_sets_the_slack_options_and_reports_them_back() {
-        let (_config, services) = slack_channel_fixture();
+        let (_config, operators) = slack_channel_fixture();
 
         let result = put_channel(
-            &services,
+            &operators,
             slack_option_put(Some("both"), Some("channel"), Some(12)),
         )
         .unwrap();
@@ -2593,7 +2593,7 @@ mod tests {
         assert_eq!(result.channel.follow_up.as_deref(), Some("channel"));
         assert_eq!(result.channel.thread_context, Some(12));
 
-        let stored = &load_definitions(&services).unwrap()["chat"].channels["bot"];
+        let stored = &load_definitions(&operators).unwrap()["chat"].channels["bot"];
         assert_eq!(stored.progress, SlackProgress::Both);
         assert_eq!(stored.follow_up, SlackFollowUp::Channel);
         assert_eq!(stored.thread_context, 12);
@@ -2601,27 +2601,27 @@ mod tests {
 
     #[test]
     fn an_unknown_option_value_is_refused_rather_than_defaulted() {
-        let (_config, services) = slack_channel_fixture();
+        let (_config, operators) = slack_channel_fixture();
 
         for params in [
             slack_option_put(Some("loud"), None, None),
             slack_option_put(None, Some("everywhere"), None),
         ] {
-            let error = put_channel(&services, params).unwrap_err().to_string();
+            let error = put_channel(&operators, params).unwrap_err().to_string();
             assert!(error.contains("expected one of"), "unexpected: {error}");
         }
         // A refused edit leaves the stored definition untouched.
-        let stored = &load_definitions(&services).unwrap()["chat"].channels["bot"];
+        let stored = &load_definitions(&operators).unwrap()["chat"].channels["bot"];
         assert_eq!(stored.progress, SlackProgress::default());
         assert_eq!(stored.follow_up, SlackFollowUp::default());
     }
 
     #[test]
     fn a_thread_context_past_slacks_own_page_limit_is_refused() {
-        let (_config, services) = slack_channel_fixture();
+        let (_config, operators) = slack_channel_fixture();
 
         let error = put_channel(
-            &services,
+            &operators,
             slack_option_put(None, None, Some(THREAD_CONTEXT_MAX + 1)),
         )
         .unwrap_err()
@@ -2629,7 +2629,7 @@ mod tests {
 
         assert!(error.contains("at most"), "unexpected: {error}");
         assert_eq!(
-            put_channel(&services, slack_option_put(None, None, Some(0)))
+            put_channel(&operators, slack_option_put(None, None, Some(0)))
                 .unwrap()
                 .channel
                 .thread_context,
@@ -2641,15 +2641,15 @@ mod tests {
     #[test]
     fn slack_options_are_refused_on_a_channel_that_cannot_read_them() {
         let config = tempfile::tempdir().unwrap();
-        let services = config.path().join("services");
-        std::fs::create_dir_all(&services).unwrap();
-        std::fs::write(services.join("alerts.toml"), "harness = \"codex\"\n").unwrap();
+        let operators = config.path().join("operators");
+        std::fs::create_dir_all(&operators).unwrap();
+        std::fs::write(operators.join("alerts.toml"), "harness = \"codex\"\n").unwrap();
 
         let error = put_channel(
-            &services,
-            construct_protocol::ServiceChannelPutParams {
-                service_name: "alerts".into(),
-                channel: construct_protocol::ServiceChannelPut {
+            &operators,
+            construct_protocol::OperatorChannelPutParams {
+                operator_name: "alerts".into(),
+                channel: construct_protocol::OperatorChannelPut {
                     id: "http".into(),
                     kind: "http".into(),
                     enabled: true,
@@ -2670,14 +2670,14 @@ mod tests {
 
         assert!(error.contains("Slack channels only"), "unexpected: {error}");
         // An HTTP channel reports no options rather than defaults it ignores.
-        let summary = &list_channel_catalog(&services).unwrap();
+        let summary = &list_channel_catalog(&operators).unwrap();
         assert!(summary.is_empty(), "the refused put must not have stored");
     }
 
     #[test]
     fn the_published_option_defaults_match_the_ones_a_definition_gets() {
         // Clients seed a new channel from the published defaults, so a drift
-        // here would show the operator a value the daemon would not store.
+        // here would show the user a value the daemon would not store.
         assert_eq!(
             SlackProgress::default().as_str(),
             construct_protocol::SLACK_PROGRESS_DEFAULT
@@ -2699,12 +2699,12 @@ mod tests {
     #[test]
     fn slack_credentials_are_persisted_but_never_returned_in_summaries() {
         let config = tempfile::tempdir().unwrap();
-        let services = config.path().join("services");
-        std::fs::create_dir_all(&services).unwrap();
+        let operators = config.path().join("operators");
+        std::fs::create_dir_all(&operators).unwrap();
         put_definition(
-            &services,
-            construct_protocol::ServicePutParams {
-                service: construct_protocol::ServiceSummary {
+            &operators,
+            construct_protocol::OperatorPutParams {
+                operator: construct_protocol::OperatorSummary {
                     name: "chat".into(),
                     position: 0,
                     placement: None,
@@ -2721,10 +2721,10 @@ mod tests {
         )
         .unwrap();
         let result = put_channel(
-            &services,
-            construct_protocol::ServiceChannelPutParams {
-                service_name: "chat".into(),
-                channel: construct_protocol::ServiceChannelPut {
+            &operators,
+            construct_protocol::OperatorChannelPutParams {
+                operator_name: "chat".into(),
+                channel: construct_protocol::OperatorChannelPut {
                     id: "slack".into(),
                     kind: "slack".into(),
                     enabled: true,
@@ -2746,7 +2746,7 @@ mod tests {
         assert!(result.channel.has_app_token);
         assert!(result.channel.has_bot_token);
         assert_eq!(result.channel.allowed_workspaces, vec!["T1", "T2"]);
-        let encoded = std::fs::read_to_string(services.join("chat.toml")).unwrap();
+        let encoded = std::fs::read_to_string(operators.join("chat.toml")).unwrap();
         assert!(encoded.contains("xapp-secret"));
         assert!(encoded.contains("xoxb-secret"));
         let summary = serde_json::to_string(&result.channel).unwrap();

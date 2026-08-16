@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use construct_client::Client;
 use construct_protocol::{
     EventNotificationPayload, GroupSummary, HarnessInfo, MessageRole, Notification, Request,
-    ServiceChannelSummary, ServiceSummary, SessionEvent, SessionSummary, StateNotificationPayload,
+    OperatorChannelSummary, OperatorSummary, SessionEvent, SessionSummary, StateNotificationPayload,
     TimestampedEvent,
 };
 use crossterm::event::{
@@ -36,12 +36,12 @@ mod editor;
 mod fleet_panel;
 mod lineage_section;
 mod matrix_clicks;
-mod minibuffer;
+mod prompt;
 mod mouse;
 mod playbook_popup;
 pub mod route_menu;
-mod service_dialog;
-mod service_title_menu;
+mod operator_dialog;
+mod operator_title_menu;
 mod session_picker;
 mod session_title_menu;
 mod session_title_rename;
@@ -51,10 +51,10 @@ pub use configure::{
     feature_guidance, harness_guidance, no_agent_harness_available, smith_method_guidance,
     ConfigurePopup, ConfigureTab, CONFIGURE_TABS,
 };
-pub use service_dialog::{
-    ServiceChannelAction, ServiceChannelActionAddress, ServiceChannelActions, ServiceChannelDialog,
-    ServiceChannelDialogMode, ServiceDialog, ServiceDialogFocus, ServiceDialogMode,
-    ServiceDialogPickerKind, SERVICE_FIELD_COUNT, SERVICE_PICKER_VISIBLE_ROWS,
+pub use operator_dialog::{
+    OperatorChannelAction, OperatorChannelActionAddress, OperatorChannelActions, OperatorChannelDialog,
+    OperatorChannelDialogMode, OperatorDialog, OperatorDialogFocus, OperatorDialogMode,
+    OperatorDialogPickerKind, OPERATOR_FIELD_COUNT, OPERATOR_PICKER_VISIBLE_ROWS,
 };
 pub use session_picker::{
     session_picker_scroll, SessionPickerDialog, SessionPickerPurpose, SessionPickerRow,
@@ -207,16 +207,16 @@ const LARGE_TEXT_PASTE_CHARS: usize = 16 * 1024;
 /// bounds client-side IPC chatter, so it can stay short.
 const HARNESS_USAGE_QUERY_INTERVAL: Duration = Duration::from_secs(2);
 
-/// A row in the rendered list view. Sessions, services, and group headers
+/// A row in the rendered list view. Sessions, operators, and group headers
 /// share the list; key dispatch and selection are typed.
 #[derive(Debug, Clone)]
 pub enum ListItem {
-    /// A service is a top-level fleet item. It has no PTY or transcript, but
-    /// selecting it opens the service view in exactly the same split-pane
+    /// A operator is a top-level fleet item. It has no PTY or transcript, but
+    /// selecting it opens the operator view in exactly the same split-pane
     /// lifecycle as selecting a session.
-    Service {
-        summary: ServiceSummary,
-        /// Number of active routed sessions shown beneath this service when
+    Operator {
+        summary: OperatorSummary,
+        /// Number of active routed sessions shown beneath this operator when
         /// its disclosure is expanded.
         session_count: usize,
         sessions_expanded: bool,
@@ -329,23 +329,23 @@ fn is_subagent_session(s: &SessionSummary) -> bool {
     matches!(s.kind, construct_protocol::SessionKind::Subagent)
 }
 
-fn service_session_matches(s: &SessionSummary, service_name: &str) -> bool {
+fn operator_session_matches(s: &SessionSummary, operator_name: &str) -> bool {
     let Some(title) = s.title.as_deref() else {
         return false;
     };
-    let prefix = format!("service:{service_name}");
+    let prefix = format!("operator:{operator_name}");
     title == prefix || title.starts_with(&format!("{prefix}:"))
 }
 
-fn service_children_key(service_name: &str) -> String {
-    format!("service:{service_name}")
+fn operator_children_key(operator_name: &str) -> String {
+    format!("operator:{operator_name}")
 }
 
 fn selection_is_valid_for_sessions(
     selection: &Selection,
     sessions: &[SessionSummary],
     groups: &[GroupSummary],
-    services: &[ServiceSummary],
+    operators: &[OperatorSummary],
 ) -> bool {
     match selection {
         Selection::None => true,
@@ -354,7 +354,7 @@ fn selection_is_valid_for_sessions(
         // long as the session still exists; pruning only fires once it's gone.
         Selection::Session(id) => sessions.iter().any(|s| s.id == *id),
         Selection::Group(id) => groups.iter().any(|g| g.id == *id),
-        Selection::Service(name) => services.iter().any(|service| service.name == *name),
+        Selection::Operator(name) => operators.iter().any(|operator| operator.name == *name),
         Selection::ArchivedRow(section) => match section {
             ArchiveSection::Ungrouped => sessions
                 .iter()
@@ -377,13 +377,13 @@ fn prune_window_tree(
     tree: MainWindowTree,
     sessions: &[SessionSummary],
     groups: &[GroupSummary],
-    services: &[ServiceSummary],
+    operators: &[OperatorSummary],
     fallback: &Selection,
 ) -> MainWindowTree {
     match tree {
         MainWindowTree::Leaf { id, selection } => MainWindowTree::Leaf {
             id,
-            selection: if selection_is_valid_for_sessions(&selection, sessions, groups, services) {
+            selection: if selection_is_valid_for_sessions(&selection, sessions, groups, operators) {
                 selection
             } else {
                 fallback.clone()
@@ -398,10 +398,10 @@ fn prune_window_tree(
             direction,
             ratio_percent,
             first: Box::new(prune_window_tree(
-                *first, sessions, groups, services, fallback,
+                *first, sessions, groups, operators, fallback,
             )),
             second: Box::new(prune_window_tree(
-                *second, sessions, groups, services, fallback,
+                *second, sessions, groups, operators, fallback,
             )),
         },
     }
@@ -625,7 +625,7 @@ pub(crate) const PROJECT_MARGIN_ROWS: usize = 2;
 impl ListItem {
     pub fn matches(&self, sel: &Selection) -> bool {
         match (self, sel) {
-            (ListItem::Service { summary, .. }, Selection::Service(name)) => summary.name == *name,
+            (ListItem::Operator { summary, .. }, Selection::Operator(name)) => summary.name == *name,
             (ListItem::Session { summary, .. }, Selection::Session(id)) => summary.id == *id,
             (ListItem::GroupHeader { group, .. }, Selection::Group(id)) => group.id == *id,
             (ListItem::ArchivedRow { section, .. }, Selection::ArchivedRow(sel)) => section == sel,
@@ -640,7 +640,7 @@ pub enum Selection {
     #[default]
     None,
     Session(String),
-    Service(String),
+    Operator(String),
     Group(String),
     /// A section's "N archived" disclosure row. Selectable like a group header
     /// so keyboard nav can land on it and left/right expand/collapse it.
@@ -662,21 +662,21 @@ impl Selection {
             None
         }
     }
-    pub fn service_name(&self) -> Option<&str> {
-        if let Self::Service(name) = self {
+    pub fn operator_name(&self) -> Option<&str> {
+        if let Self::Operator(name) = self {
             Some(name)
         } else {
             None
         }
     }
-    /// The stable fleet identity represented by this selection. Service
-    /// names are service ids in the protocol; archived disclosure rows are
+    /// The stable fleet identity represented by this selection. Operator
+    /// names are operator ids in the protocol; archived disclosure rows are
     /// navigation controls and therefore have no identity of their own.
     pub fn fleet_identity(&self) -> Option<(&'static str, &str)> {
         match self {
             Self::Session(id) => Some(("session", id)),
             Self::Group(id) => Some(("project", id)),
-            Self::Service(name) => Some(("service", name)),
+            Self::Operator(name) => Some(("operator", name)),
             Self::None | Self::ArchivedRow(_) => None,
         }
     }
@@ -742,7 +742,7 @@ impl MainWindowTree {
             Self::Leaf { id, selection } => construct_protocol::LayoutNode::Leaf {
                 id: *id,
                 session_id: selection.session_id().map(str::to_string),
-                service_name: selection.service_name().map(str::to_string),
+                operator_name: selection.operator_name().map(str::to_string),
             },
             Self::Split {
                 direction,
@@ -769,12 +769,12 @@ impl MainWindowTree {
             construct_protocol::LayoutNode::Leaf {
                 id,
                 session_id,
-                service_name,
+                operator_name,
             } => Self::Leaf {
                 id: *id,
-                selection: match (session_id, service_name) {
+                selection: match (session_id, operator_name) {
                     (Some(s), _) => Selection::Session(s.clone()),
-                    (None, Some(name)) => Selection::Service(name.clone()),
+                    (None, Some(name)) => Selection::Operator(name.clone()),
                     (None, None) => Selection::None,
                 },
             },
@@ -808,11 +808,11 @@ impl MainWindowTree {
             construct_protocol::LayoutNode::Leaf {
                 id,
                 session_id,
-                service_name,
+                operator_name,
             } => {
-                let selection = match (session_id, service_name) {
+                let selection = match (session_id, operator_name) {
                     (Some(s), _) => Selection::Session(s.clone()),
-                    (None, Some(name)) => Selection::Service(name.clone()),
+                    (None, Some(name)) => Selection::Operator(name.clone()),
                     (None, None) => match self.find_selection(*id) {
                         // Only a non-session selection is worth preserving:
                         // an empty pane that used to show a session means the
@@ -908,16 +908,16 @@ impl MainWindowTree {
         }
     }
 
-    fn find_window_with_service_except(&self, target_name: &str, except_id: u64) -> Option<u64> {
+    fn find_window_with_operator_except(&self, target_name: &str, except_id: u64) -> Option<u64> {
         match self {
             Self::Leaf {
                 id,
-                selection: Selection::Service(name),
+                selection: Selection::Operator(name),
             } if *id != except_id && name == target_name => Some(*id),
             Self::Leaf { .. } => None,
             Self::Split { first, second, .. } => first
-                .find_window_with_service_except(target_name, except_id)
-                .or_else(|| second.find_window_with_service_except(target_name, except_id)),
+                .find_window_with_operator_except(target_name, except_id)
+                .or_else(|| second.find_window_with_operator_except(target_name, except_id)),
         }
     }
 
@@ -935,10 +935,10 @@ impl MainWindowTree {
         }
     }
 
-    fn clear_service(&mut self, service_name: &str) -> bool {
+    fn clear_operator(&mut self, operator_name: &str) -> bool {
         match self {
             Self::Leaf { selection, .. } => {
-                if selection.service_name() == Some(service_name) {
+                if selection.operator_name() == Some(operator_name) {
                     *selection = Selection::None;
                     true
                 } else {
@@ -946,8 +946,8 @@ impl MainWindowTree {
                 }
             }
             Self::Split { first, second, .. } => {
-                let a = first.clear_service(service_name);
-                let b = second.clear_service(service_name);
+                let a = first.clear_operator(operator_name);
+                let b = second.clear_operator(operator_name);
                 a || b
             }
         }
@@ -1024,7 +1024,7 @@ fn chat_scroll_kind(ev: &SessionEvent) -> ChatScrollKind {
         | SessionEvent::ClientCommand { .. }
         | SessionEvent::ToolApprovalResolved { .. }
         | SessionEvent::ApprovalModeChanged { .. }
-        | SessionEvent::OperatorLoopChanged { .. }
+        | SessionEvent::MinibufferLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
         | SessionEvent::NativeIdChanged { .. }
         | SessionEvent::EffortChanged { .. }
@@ -1112,7 +1112,7 @@ pub enum ZoomMode {
 }
 
 /// What the Matrix-rain panel's body is currently showing (spec 0167).
-/// The panel hosts named built-in modes; the operator-widget viewport
+/// The panel hosts named built-in modes; the minibuffer-widget viewport
 /// (spec 0019) remains a transient overlay on top of whichever mode is
 /// selected, not a third value here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1147,7 +1147,7 @@ impl MatrixPanelMode {
 }
 
 #[derive(Debug, Clone)]
-pub enum MinibufferIntent {
+pub enum PromptIntent {
     SendInput {
         session_id: String,
     },
@@ -1237,15 +1237,15 @@ pub enum MinibufferIntent {
         group_id: String,
     },
     CommandPalette,
-    ServiceDeleteConfirm {
+    OperatorDeleteConfirm {
         name: String,
     },
-    /// Persistent orchestrator session input. Unlike other intents
+    /// Persistent minibuffer session input. Unlike other intents
     /// this one stays open across Enter — the panel re-opens with an
     /// empty input after each submission. Slash-prefixed input is
     /// dispatched locally (no LLM cost); non-slash input is sent to
-    /// the orchestrator session via `session.send_input`.
-    Orchestrator,
+    /// the minibuffer session via `session.send_input`.
+    Minibuffer,
     /// Approval prompt for a Risky tool call from an agent harness
     /// without inline approval UI. Single-key dispatch: `y`/Enter
     /// approve, `n`/Esc deny, `a` auto-review, `f` always-approve.
@@ -1263,11 +1263,11 @@ pub enum MinibufferIntent {
 }
 
 #[derive(Debug, Clone)]
-pub struct Minibuffer {
+pub struct Prompt {
     pub prompt: String,
     pub input: String,
     pub cursor: usize,
-    pub intent: MinibufferIntent,
+    pub intent: PromptIntent,
     /// Inline status appended after the input. Examples: "no such harness"
     /// or an unavailable-harness diagnostic. Cleared by the next text edit.
     pub error: Option<String>,
@@ -1426,7 +1426,7 @@ impl FleetTallyHit {
 }
 
 /// The panel a fleet tally opens: the rows that tally counted, listed and
-/// clickable, so a number the operator can't act on becomes a way to reach
+/// clickable, so a number the user can't act on becomes a way to reach
 /// the sessions behind it (spec 0169).
 ///
 /// Held open while the pointer is over the tally *or* over the panel
@@ -1506,7 +1506,7 @@ pub enum SessionTitleMenuAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceTitleMenuAction {
+pub enum OperatorTitleMenuAction {
     SplitHorizontal,
     SplitVertical,
     CloseSplit,
@@ -1514,7 +1514,7 @@ pub enum ServiceTitleMenuAction {
     CopyId,
 }
 
-impl ServiceTitleMenuAction {
+impl OperatorTitleMenuAction {
     pub const ALL: [Self; 5] = [
         Self::SplitHorizontal,
         Self::SplitVertical,
@@ -1529,7 +1529,7 @@ impl ServiceTitleMenuAction {
             Self::SplitHorizontal => "split horizontal",
             Self::SplitVertical => "split vertical",
             Self::CloseSplit => "close split",
-            Self::Delete => "delete service",
+            Self::Delete => "delete operator",
         }
     }
 }
@@ -1586,13 +1586,13 @@ pub struct SessionTitleMenu {
 }
 
 #[derive(Debug, Clone)]
-pub struct ServiceTitleMenu {
+pub struct OperatorTitleMenu {
     pub name: String,
     pub area: ratatui::layout::Rect,
 }
 
-impl ServiceTitleMenu {
-    pub fn item_at(&self, col: u16, row: u16) -> Option<ServiceTitleMenuAction> {
+impl OperatorTitleMenu {
+    pub fn item_at(&self, col: u16, row: u16) -> Option<OperatorTitleMenuAction> {
         if col <= self.area.x
             || col
                 >= self
@@ -1611,7 +1611,7 @@ impl ServiceTitleMenu {
             return None;
         }
         let idx = row.saturating_sub(self.area.y).saturating_sub(1) as usize;
-        ServiceTitleMenuAction::ALL.get(idx).copied()
+        OperatorTitleMenuAction::ALL.get(idx).copied()
     }
 
     pub fn contains(&self, col: u16, row: u16) -> bool {
@@ -1685,7 +1685,7 @@ impl SessionTitleMenu {
     }
 }
 
-/// Operator-rain analogue of [`DynamicUiHover`]: the rain panel shows a single
+/// Prompt-rain analogue of [`DynamicUiHover`]: the rain panel shows a single
 /// widget at a time, so only the panel id and expiry are needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatrixWidgetHover {
@@ -1715,11 +1715,11 @@ pub struct App {
     last_reported_view: Option<(String, construct_protocol::ClientView)>,
     pub sessions: Vec<SessionSummary>,
     pub groups: Vec<GroupSummary>,
-    pub services: Vec<ServiceSummary>,
-    /// Daemon-wide channel catalog. Service views use this list to make
+    pub operators: Vec<OperatorSummary>,
+    /// Daemon-wide channel catalog. Operator views use this list to make
     /// attachment ownership visible and to keep attach/detach a selection
-    /// operation rather than a per-service create/delete operation.
-    pub service_channel_catalog: Vec<ServiceChannelSummary>,
+    /// operation rather than a per-operator create/delete operation.
+    pub operator_channel_catalog: Vec<OperatorChannelSummary>,
     pub selection: Selection,
     pub focus: PaneFocus,
     pub main_windows: MainWindowTree,
@@ -1740,9 +1740,9 @@ pub struct App {
     /// Cache for `ui::render_chat`'s formatted chat lines, keyed to
     /// `transcript`/`transcript_session` — see `ui::ChatLinesCache`.
     pub chat_lines_cache: ui::ChatLinesCache,
-    pub minibuffer: Option<Minibuffer>,
+    pub prompt: Option<Prompt>,
     /// Keyboard highlight within the expanded harness completion menu.
-    /// Kept outside `Minibuffer` because it is presentation state specific
+    /// Kept outside `Prompt` because it is presentation state specific
     /// to the two harness-picker intents.
     pub harness_picker_selected: usize,
     /// Fork pickers open with the source harness pre-filled but still show
@@ -1766,25 +1766,25 @@ pub struct App {
     /// Rotation index into the idle minibuffer placeholder's context hint
     /// pool: advances by the shown-window size every
     /// `MINIBUFFER_HINT_ROTATE_EVERY`, or immediately whenever
-    /// `minibuffer_hint_context` shows the context (zoom mode) changed,
+    /// `prompt_hint_context` shows the context (zoom mode) changed,
     /// cycling through candidates the current viewport is too narrow to
     /// show all at once.
-    pub minibuffer_hint_offset: usize,
-    pub minibuffer_hint_rotated_at: Option<Instant>,
+    pub prompt_hint_offset: usize,
+    pub prompt_hint_rotated_at: Option<Instant>,
     /// Zoom mode as of the last placeholder render — compared each frame so
     /// a zoom change (a new relevant-hints context) rotates the window
     /// immediately instead of waiting out the timer.
-    pub minibuffer_hint_context: Option<ZoomMode>,
+    pub prompt_hint_context: Option<ZoomMode>,
     pub harnesses: Vec<HarnessInfo>,
     /// Ambient-feature status rows from `features.status` (spec 0151),
     /// refreshed alongside `harnesses` and updated live by the
     /// `features/state` notification. Drives the configure dialog's
     /// Features tab and the modeline degradation notice.
     pub features: Vec<construct_protocol::FeatureInfo>,
-    /// Route/model catalog used by service-definition model pickers. This is
-    /// the same catalog the pin-router picker receives, but service editing
+    /// Route/model catalog used by operator-definition model pickers. This is
+    /// the same catalog the pin-router picker receives, but operator editing
     /// stores only the selected model override.
-    pub service_route_catalog: Vec<construct_protocol::RouteOption>,
+    pub operator_route_catalog: Vec<construct_protocol::RouteOption>,
     /// Whether the daemon has actually skipped ambient work (auto-title,
     /// suggestions) for lack of a smith credential this run — the gate for
     /// showing the modeline degradation notice at all.
@@ -1887,7 +1887,7 @@ pub struct App {
     /// clickable "restart daemon" segment.
     pub daemon_build_id: Option<String>,
     /// Configuration the daemon has read but cannot apply until it restarts
-    /// (spec 0190), named for an operator — `[router] port`, and disabling a
+    /// (spec 0190), named for a user — `[router] port`, and disabling a
     /// router that is already serving. Non-empty renders a clickable
     /// "restart to apply" segment beside the version notice. Pushed by
     /// `config/state`, and replayed when this client subscribes, so it
@@ -1949,11 +1949,11 @@ pub struct App {
     /// Written by `render_matrix_rain`, consumed by mouse hover (tooltip)
     /// and click (switch to the session). Reset every frame.
     pub matrix_reveal_hits: Vec<MatrixRevealHit>,
-    /// The orchestrator panel's most recent inner (cols, rows) as
+    /// The minibuffer panel's most recent inner (cols, rows) as
     /// computed during render. Written by `ui::render`, consumed by
     /// `run_loop`'s debounce — once the value stays stable for
     /// `RESIZE_DEBOUNCE_MS`, a single `pty_resize` IPC fires.
-    pub orchestrator_desired_size: Option<(u16, u16)>,
+    pub minibuffer_desired_size: Option<(u16, u16)>,
     pub terminal_pane_size: (u16, u16), // (cols, rows) of the right pane.
     /// Desired PTY size per split window, keyed by main-window id. Split panes
     /// can have different widths/heights, so adapters like claude need the
@@ -1990,12 +1990,12 @@ pub struct App {
     /// similar to editor overlay scrollbars. Keyed per window so scrolling one
     /// split does not flash the scrollbar over its (at-bottom) siblings.
     pub terminal_scrollbar_visible_until: HashMap<u64, Instant>,
-    /// First visible rendered row of the open service view's lower section
+    /// First visible rendered row of the open operator view's lower section
     /// (channel catalog, routed sessions, note, footer). Counted from the top,
     /// unlike terminal scrollback; clamped to the section's extent at render
     /// time, which is where the wrapped height is known. Reset whenever the
-    /// editor opens on a different service.
-    pub service_view_scroll: usize,
+    /// editor opens on a different operator.
+    pub operator_view_scroll: usize,
     /// Set by an event handler when the just-handled event produced
     /// no local display change that needs an immediate repaint — the
     /// canonical case being a keystroke forwarded straight to a PTY,
@@ -2011,7 +2011,7 @@ pub struct App {
     tick_redraw_requested: Cell<bool>,
     /// Set by `on_notification` to report whether the just-handled
     /// notification changed something currently *visible* (a focused /
-    /// split pane, the orchestrator panel, or any structural /
+    /// split pane, the minibuffer panel, or any structural /
     /// status change shown in the list). The run loop reads it to avoid a
     /// full-frame `terminal.draw()` for the high-frequency background
     /// `Pty` chunks of off-screen sessions — those only warm history /
@@ -2026,22 +2026,22 @@ pub struct App {
     /// the TUI stays responsive instead of blocking startup on full transcript
     /// replay.
     pub hydrating_sessions: HashSet<String>,
-    /// Scrollback offset for the daemon-owned orchestrator panel rendered in
-    /// the minibuffer. Kept separate from `view_scrollback` so reading operator
+    /// Scrollback offset for the daemon-owned minibuffer panel rendered in
+    /// the minibuffer. Kept separate from `view_scrollback` so reading minibuffer
     /// history does not leave the main session view scrolled when the panel
     /// closes.
-    pub orchestrator_scrollback: usize,
-    /// Active operator monolog typewritten over the matrix rain (`None` = rain).
-    pub operator_monolog: Option<OperatorMonolog>,
-    /// Accumulates the orchestrator's streaming assistant text across the
-    /// current turn; consolidated into `operator_monolog` at turn end.
-    pub operator_utterance: String,
-    /// User-preferred height for the daemon-owned orchestrator panel rendered
+    pub minibuffer_scrollback: usize,
+    /// Active minibuffer monolog typewritten over the matrix rain (`None` = rain).
+    pub minibuffer_monolog: Option<MinibufferMonolog>,
+    /// Accumulates the minibuffer's streaming assistant text across the
+    /// current turn; consolidated into `minibuffer_monolog` at turn end.
+    pub minibuffer_utterance: String,
+    /// User-preferred height for the daemon-owned minibuffer panel rendered
     /// in the minibuffer. Clamped by terminal height at render time.
-    pub orchestrator_panel_h: Option<u16>,
+    pub minibuffer_panel_h: Option<u16>,
     /// `Some((anchor_row, anchor_height))` while the user drags the
-    /// orchestrator panel's top border.
-    pub resizing_orchestrator_panel: Option<(u16, u16)>,
+    /// minibuffer panel's top border.
+    pub resizing_minibuffer_panel: Option<(u16, u16)>,
     /// Animated vertical offset of the main block while a multi-row footer is
     /// open (spec 0112).
     pub main_slide: MainSlideState,
@@ -2066,8 +2066,8 @@ pub struct App {
     pub layout: LayoutSnapshot,
     /// Session-view title hamburger dropdown.
     pub session_title_menu: Option<SessionTitleMenu>,
-    /// Service-view title actions dropdown.
-    pub service_title_menu: Option<ServiceTitleMenu>,
+    /// Operator-view title actions dropdown.
+    pub operator_title_menu: Option<OperatorTitleMenu>,
     /// Open fleet-tally panel listing the rows one tally counted (spec 0169).
     pub fleet_panel: Option<FleetTallyPanel>,
     /// A session or group the list should scroll into view on the next
@@ -2129,12 +2129,12 @@ pub struct App {
     /// (`PlaybookPopup::pinned_clip`); a double-click navigates to the full
     /// session view, same as every click did before pinning existed.
     pub last_playbook_clip_click: Option<(String, Instant)>,
-    /// ID of the daemon-owned orchestrator session, if one is present
-    /// in the sessions list. The orchestrator runs as a smith
+    /// ID of the daemon-owned minibuffer session, if one is present
+    /// in the sessions list. The minibuffer runs as a smith
     /// interactive (PTY) session; the TUI renders its PTY in the
     /// minibuffer panel and routes keystrokes there when the panel is
     /// focused. `None` falls back to the static palette UX.
-    pub orchestrator_id: Option<String>,
+    pub minibuffer_id: Option<String>,
     /// Width (in terminal cells) of the session-list pane in the
     /// normal (non-zoomed) layout. Adjustable by dragging the right
     /// border with the mouse; clamped at render time to
@@ -2206,7 +2206,7 @@ pub struct App {
     pub lineage_mode: crate::lineage::LineageViewMode,
     /// User drag-resized height of the lineage section (header row
     /// included); `None` = size to the diagram's content. Set by dragging
-    /// the section's header bar (same gesture as the operator panel's
+    /// the section's header bar (same gesture as the minibuffer panel's
     /// title bar). Clamped to the sidebar's caps at render time and
     /// persisted across launches.
     pub lineage_h: Option<u16>,
@@ -2228,8 +2228,8 @@ pub struct App {
     /// the command palette, or automatically on first run / when no agent
     /// harness is available. Captures all input while open.
     pub configure_popup: Option<ConfigurePopup>,
-    /// Inline create/edit state for the first-class service view.
-    pub service_dialog: Option<ServiceDialog>,
+    /// Inline create/edit state for the first-class operator view.
+    pub operator_dialog: Option<OperatorDialog>,
     /// Reusable session-picker dialog (spec 0063): `None` = closed. Opened by
     /// `C-x b` (switch the active window's session) and by the playbook view's
     /// `@`→session path (insert a session clip). Captures all input while open.
@@ -2306,7 +2306,7 @@ pub struct App {
     /// and rendered above queued input while a turn is active.
     pub agent_statuses: HashMap<String, construct_protocol::AgentStatus>,
     /// Pending tool approvals by session id, with the tool/args each prompt
-    /// is waiting on. Orchestrator approvals stay inline in the Operator
+    /// is waiting on. Prompt approvals stay inline in the User
     /// PTY, but this lets the Matrix title bar surface a clear attention
     /// marker and the project dashboard say *what* wants approval.
     pub pending_tool_approvals:
@@ -2375,11 +2375,11 @@ pub struct App {
     /// Matrix-rain drop cycle keys that already spawned. Intensity decay stops
     /// future cycles from entering this set; existing drops finish their fall.
     pub matrix_rain_active_drops: HashMap<u64, u16>,
-    /// Operator widget pinned open by a click on its title square. Persistent
+    /// Minibuffer widget pinned open by a click on its title square. Persistent
     /// until clicked again (or the panel is deleted) — survives the cursor
     /// leaving the rain panel, unlike a hover preview.
     pub matrix_widget_pinned: Option<String>,
-    /// Operator widget shown transiently on hover. Takes visual precedence over
+    /// Minibuffer widget shown transiently on hover. Takes visual precedence over
     /// `matrix_widget_pinned` while live, then reverts to the pin when it lapses.
     pub matrix_widget_hover: Option<MatrixWidgetHover>,
     /// User-hidden Matrix-rain panel. Toggle with `/rain`; close with the
@@ -2396,10 +2396,10 @@ pub struct App {
     /// 0167). Keyed by session id; entries for vanished sessions are pruned
     /// as they are noticed.
     pub token_meter_busy: HashMap<String, u64>,
-    /// Service name → live token history for sessions routed by that service.
-    /// Fed alongside the fleet and project meters even while no service view
+    /// Operator name → live token history for sessions routed by that operator.
+    /// Fed alongside the fleet and project meters even while no operator view
     /// is open, so opening one reveals the activity already observed.
-    pub service_token_meters: HashMap<String, crate::token_meter::TokenMeter>,
+    pub operator_token_meters: HashMap<String, crate::token_meter::TokenMeter>,
     /// Project dashboard state: activity feed, per-project token meters,
     /// chat-preview cache, and cursor when a project header is selected.
     pub project_dashboard: crate::project_dashboard::ProjectDashboard,
@@ -2471,13 +2471,13 @@ fn valid_collapsed_session_ids(
     ids
 }
 
-/// Keep only collapse preferences for services that still exist, preventing
-/// removed service names from accumulating indefinitely in local UI state.
-fn valid_collapsed_service_names(
-    services: &[ServiceSummary],
+/// Keep only collapse preferences for operators that still exist, preventing
+/// removed operator names from accumulating indefinitely in local UI state.
+fn valid_collapsed_operator_names(
+    operators: &[OperatorSummary],
     candidates: impl IntoIterator<Item = String>,
 ) -> Vec<String> {
-    let live_names: HashSet<&str> = services.iter().map(|service| service.name.as_str()).collect();
+    let live_names: HashSet<&str> = operators.iter().map(|operator| operator.name.as_str()).collect();
     let mut names: Vec<String> = candidates
         .into_iter()
         .filter(|name| live_names.contains(name.as_str()))
@@ -2651,19 +2651,19 @@ impl PromptDraft {
     }
 }
 
-/// The operator's latest finalized utterance, typewritten over the matrix
+/// The user's latest finalized utterance, typewritten over the matrix
 /// rain as an ambient "monolog" then auto-cleared. Lets the user see what the
-/// operator said without opening the (collapsed) minibuffer panel.
+/// minibuffer said without opening the (collapsed) minibuffer panel.
 #[derive(Debug, Clone)]
-pub struct OperatorMonolog {
+pub struct MinibufferMonolog {
     pub text: String,
     pub started_at: Instant,
 }
 
-/// Consolidate the orchestrator's streaming assistant text into a user-facing
+/// Consolidate the minibuffer's streaming assistant text into a user-facing
 /// monolog line, or `None` if it's empty or the internal `noted` no-op token
-/// (which the operator replies when nothing needs surfacing).
-pub fn operator_monolog_text(raw: &str) -> Option<String> {
+/// (which the user replies when nothing needs surfacing).
+pub fn minibuffer_monolog_text(raw: &str) -> Option<String> {
     let t = raw.trim();
     if t.is_empty() {
         return None;
@@ -3721,7 +3721,7 @@ pub const SESSION_LIST_H_MIN: u16 = 3;
 
 /// A clickable / hoverable text segment in the minibuffer hint line —
 /// e.g. "C-x z unzoom" or "? help" — that dispatches a KeyAction when
-/// clicked. Geometry is filled by `render_minibuffer` so the click
+/// clicked. Geometry is filled by `render_prompt` so the click
 /// handler can hit-test against the live last-frame layout.
 #[derive(Debug, Clone, Copy)]
 pub struct HintZone {
@@ -3994,48 +3994,48 @@ impl LineageBoxHit {
     }
 }
 
-/// A routed session row rendered inside a service view. The whole row is a
-/// navigation target so the operator can jump from service configuration to
+/// A routed session row rendered inside a operator view. The whole row is a
+/// navigation target so the user can jump from operator configuration to
 /// the live conversation without first finding it in the global session list.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceSessionHit {
+pub struct OperatorSessionHit {
     pub session_id: String,
     pub area: ratatui::layout::Rect,
 }
 
-/// One visible action button for the selected service channel. The hit keeps
-/// the service identity captured by the rendered frame so mouse dispatch
-/// cannot accidentally act on a newly selected service at the same position.
+/// One visible action button for the selected operator channel. The hit keeps
+/// the operator identity captured by the rendered frame so mouse dispatch
+/// cannot accidentally act on a newly selected operator at the same position.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceChannelActionHit {
-    pub service_name: String,
+pub struct OperatorChannelActionHit {
+    pub operator_name: String,
     pub channel_index: usize,
-    pub action: ServiceChannelAction,
+    pub action: OperatorChannelAction,
     pub area: ratatui::layout::Rect,
 }
 
-impl ServiceChannelActionHit {
+impl OperatorChannelActionHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         App::rect_contains(self.area, col, row)
     }
 }
 
-impl ServiceSessionHit {
+impl OperatorSessionHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         App::rect_contains(self.area, col, row)
     }
 }
 
-/// One visible channel-catalog row in the service view. Carries the catalog
-/// index the frame painted, so a click acts on the channel the operator saw
+/// One visible channel-catalog row in the operator view. Carries the catalog
+/// index the frame painted, so a click acts on the channel the user saw
 /// even after the section has been scrolled.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceChannelRowHit {
+pub struct OperatorChannelRowHit {
     pub channel_index: usize,
     pub area: ratatui::layout::Rect,
 }
 
-impl ServiceChannelRowHit {
+impl OperatorChannelRowHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         App::rect_contains(self.area, col, row)
     }
@@ -4049,7 +4049,7 @@ pub struct LayoutSnapshot {
     pub main_window_areas: Vec<WindowPaneHit>,
     pub main_window_dividers: Vec<WindowDividerHit>,
     pub matrix_rain_area: Option<ratatui::layout::Rect>,
-    pub minibuffer_area: Option<ratatui::layout::Rect>,
+    pub prompt_area: Option<ratatui::layout::Rect>,
     /// Last rendered chat areas by session id to conditionally clear only
     /// when geometry grows (editor shrinks), avoiding per-frame clears.
     pub last_chat_areas: std::collections::HashMap<String, ratatui::layout::Rect>,
@@ -4122,18 +4122,18 @@ pub struct LayoutSnapshot {
     /// their owner, and an open help modal's close-on-interaction wins.
     pub tutorial_card_area: Option<ratatui::layout::Rect>,
     /// Clickable harness names in the new-session picker prompt
-    /// (`MinibufferIntent::NewSessionHarness`). Click → submit the
+    /// (`PromptIntent::NewSessionHarness`). Click → submit the
     /// matching name as if the user typed it and hit Enter.
-    pub minibuffer_harness_hits: Vec<HarnessHit>,
+    pub prompt_harness_hits: Vec<HarnessHit>,
     /// Clickable choice labels (`y`, `N`, `d`, `a`, `y=approve`, ...) in the
     /// last-rendered minibuffer confirm/approval prompt (spec 0075). Click →
     /// dispatch exactly as the matching keypress would, via whichever of the
-    /// two keyboard mechanisms (`MinibufferChoiceAction`) the intent uses.
-    pub minibuffer_choice_hits: Vec<MinibufferChoiceHit>,
+    /// two keyboard mechanisms (`PromptChoiceAction`) the intent uses.
+    pub prompt_choice_hits: Vec<PromptChoiceHit>,
     /// Clickable rows of the anchored fork's turn picker
-    /// (`MinibufferIntent::ForkTurnPick`, spec 0163). Click → select that
+    /// (`PromptIntent::ForkTurnPick`, spec 0163). Click → select that
     /// turn and submit, exactly as Enter on it would.
-    pub minibuffer_turn_hits: Vec<TurnRowHit>,
+    pub prompt_turn_hits: Vec<TurnRowHit>,
     /// Bounds of the topmost modal/dialog rendered in the last frame.
     /// Mouse clicks outside this rect dismiss the modal instead of
     /// falling through to panes underneath it.
@@ -4161,7 +4161,7 @@ pub struct LayoutSnapshot {
     /// between expanded and collapsed-to-header.
     pub lineage_header_hit: Option<ratatui::layout::Rect>,
     /// The collapse/expand `−`/`+` button at the right end of the section
-    /// header — mirrors the operator panel's toggle.
+    /// header — mirrors the minibuffer panel's toggle.
     pub lineage_collapse_hit: Option<ratatui::layout::Rect>,
     /// The view-mode toggle on the section header — click switches between
     /// the boxed-lane diagram and git-graph-style rails.
@@ -4182,20 +4182,20 @@ pub struct LayoutSnapshot {
     /// screen coordinates — hover brightens a box's border, click jumps to
     /// that session. Rebuilt every frame the section renders.
     pub lineage_box_hits: Vec<LineageBoxHit>,
-    /// Clickable routed-session rows inside the focused service view.
-    pub service_session_hits: Vec<ServiceSessionHit>,
-    /// Clickable channel-catalog rows inside the focused service view. The
+    /// Clickable routed-session rows inside the focused operator view.
+    pub operator_session_hits: Vec<OperatorSessionHit>,
+    /// Clickable channel-catalog rows inside the focused operator view. The
     /// section scrolls, so a row's screen position is only knowable from the
     /// frame that painted it.
-    pub service_channel_row_hits: Vec<ServiceChannelRowHit>,
+    pub operator_channel_row_hits: Vec<OperatorChannelRowHit>,
     /// Visible Publish/Withdraw/Open/Copy buttons for the selected channel.
-    pub service_channel_action_hits: Vec<ServiceChannelActionHit>,
+    pub operator_channel_action_hits: Vec<OperatorChannelActionHit>,
     /// The top-left `< back` affordance in the channel configuration editor.
-    pub service_channel_back_hit: Option<ratatui::layout::Rect>,
-    /// `(service name, graph rect)` for every service-scoped token meter
-    /// painted in the last frame. Split panes can show more than one service,
+    pub operator_channel_back_hit: Option<ratatui::layout::Rect>,
+    /// `(operator name, graph rect)` for every operator-scoped token meter
+    /// painted in the last frame. Split panes can show more than one operator,
     /// so this is a collection rather than a single active hit zone.
-    pub service_token_graphs: Vec<(String, ratatui::layout::Rect)>,
+    pub operator_token_graphs: Vec<(String, ratatui::layout::Rect)>,
     /// The "▸/▾ N subagents" group-toggle rows — click toggles that
     /// parent's group between collapsed and expanded.
     pub lineage_subagent_toggle_hits: Vec<LineageBoxHit>,
@@ -4282,9 +4282,9 @@ pub struct LayoutSnapshot {
     pub dynamic_ui_panel_close_hits: Vec<DynamicUiPanelCloseHit>,
     pub dynamic_ui_inline_hit: Option<DynamicUiInlineHit>,
     /// Matrix-rain title-bar play/pause loop-toggle button: `(x_start, x_end, y)`.
-    pub matrix_operator_loop_hit: Option<(u16, u16, u16)>,
-    /// Matrix-rain title-bar Operator label bounds: `(x_start, x_end, y)`.
-    pub matrix_operator_title_hit: Option<(u16, u16, u16)>,
+    pub matrix_minibuffer_loop_hit: Option<(u16, u16, u16)>,
+    /// Matrix-rain title-bar Prompt label bounds: `(x_start, x_end, y)`.
+    pub matrix_minibuffer_title_hit: Option<(u16, u16, u16)>,
     /// Matrix-panel body mode switch (rain ↔ token meter, spec 0167):
     /// `(start_col, end_col, row)`.
     pub matrix_panel_mode_hit: Option<(u16, u16, u16)>,
@@ -4301,7 +4301,7 @@ pub struct LayoutSnapshot {
     /// it stands for (spec 0169). Empty when the tallies don't fit or all
     /// read zero.
     pub list_title_tally_hits: Vec<FleetTallyHit>,
-    /// Matrix-rain title-bar widget viewport affordances for the operator session.
+    /// Matrix-rain title-bar widget viewport affordances for the minibuffer session.
     pub matrix_widget_hits: Vec<MatrixWidgetHit>,
     /// Dynamic UI title-bar affordance bounds: `(x_start, x_end, y, session_id)`.
     pub dynamic_ui_trigger: Option<(u16, u16, u16, String)>,
@@ -4396,7 +4396,7 @@ impl MainSlideState {
 ///
 /// The main block — session list, split panes, lineage, playbook
 /// popups — is always laid out at the size it has when the footer occupies a
-/// single row. A taller footer (operator panel, harness picker) slides that
+/// single row. A taller footer (minibuffer panel, harness picker) slides that
 /// block up out of the viewport instead of shrinking it, so no pane changes
 /// size and no child PTY sees a resize. Rendering runs in the block's own
 /// unslid coordinates; this maps the hit geometry it recorded back into screen
@@ -4521,11 +4521,11 @@ impl LayoutSnapshot {
             lineage_vscrollbar,
             lineage_hscrollbar,
             lineage_box_hits,
-            service_session_hits,
-            service_channel_row_hits,
-            service_channel_action_hits,
-            service_channel_back_hit,
-            service_token_graphs,
+            operator_session_hits,
+            operator_channel_row_hits,
+            operator_channel_action_hits,
+            operator_channel_back_hit,
+            operator_token_graphs,
             lineage_subagent_toggle_hits,
             playbook_title_run_hit,
             playbook_title_toggle_hit,
@@ -4552,8 +4552,8 @@ impl LayoutSnapshot {
             dynamic_ui_widget_hits,
             dynamic_ui_panel_close_hits,
             dynamic_ui_inline_hit,
-            matrix_operator_loop_hit,
-            matrix_operator_title_hit,
+            matrix_minibuffer_loop_hit,
+            matrix_minibuffer_title_hit,
             matrix_panel_mode_hit,
             matrix_token_graph_area,
             matrix_theme_hit,
@@ -4565,7 +4565,7 @@ impl LayoutSnapshot {
             dynamic_ui_dropdown_area,
             // Footer, modeline and modal surfaces render *after* the slide, in
             // screen coordinates already — they must not be translated.
-            minibuffer_area: _,
+            prompt_area: _,
             modeline_approval_mode_hit: _,
             modeline_context_gauge_hit: _,
             modeline_model_hit: _,
@@ -4576,9 +4576,9 @@ impl LayoutSnapshot {
             suggest_deck_visible_rows: _,
             suggest_deck_divider_x: _,
             tutorial_card_area: _,
-            minibuffer_harness_hits: _,
-            minibuffer_choice_hits: _,
-            minibuffer_turn_hits: _,
+            prompt_harness_hits: _,
+            prompt_choice_hits: _,
+            prompt_turn_hits: _,
             remote_control_hits: _,
             configure_tab_hits: _,
             // Consumed inside the main block's own render pass (or carries no
@@ -4669,11 +4669,11 @@ impl LayoutSnapshot {
         shift.retain_rows(playbook_action_link_hits, |hit| &mut hit.row);
         shift.retain_rows(dynamic_ui_triggers, |hit| &mut hit.2);
         shift.retain_rects(lineage_box_hits, |hit| &mut hit.area);
-        shift.retain_rects(service_session_hits, |hit| &mut hit.area);
-        shift.retain_rects(service_channel_row_hits, |hit| &mut hit.area);
-        shift.retain_rects(service_channel_action_hits, |hit| &mut hit.area);
-        shift.opt_rect(service_channel_back_hit);
-        shift.retain_rects(service_token_graphs, |hit| &mut hit.1);
+        shift.retain_rects(operator_session_hits, |hit| &mut hit.area);
+        shift.retain_rects(operator_channel_row_hits, |hit| &mut hit.area);
+        shift.retain_rects(operator_channel_action_hits, |hit| &mut hit.area);
+        shift.opt_rect(operator_channel_back_hit);
+        shift.retain_rects(operator_token_graphs, |hit| &mut hit.1);
         shift.retain_rects(lineage_subagent_toggle_hits, |hit| &mut hit.area);
 
         *dynamic_ui_inline_hit = dynamic_ui_inline_hit.take().and_then(|mut hit| {
@@ -4722,8 +4722,8 @@ impl LayoutSnapshot {
         shift.opt_triple(playbook_title_close_hit);
         shift.opt_triple(playbook_title_name_hit);
         shift.opt_triple(playbook_selection_run_hit);
-        shift.opt_triple(matrix_operator_loop_hit);
-        shift.opt_triple(matrix_operator_title_hit);
+        shift.opt_triple(matrix_minibuffer_loop_hit);
+        shift.opt_triple(matrix_minibuffer_title_hit);
         shift.opt_triple(matrix_panel_mode_hit);
         shift.opt_rect(matrix_token_graph_area);
         shift.opt_triple(matrix_theme_hit);
@@ -4965,7 +4965,7 @@ pub struct TurnRowHit {
 /// minibuffer prompt that offers a small fixed set of keyboard choices
 /// (`y`/`N`, `y`/`n`/`a`/`f`, `d`/`a`/`N`, ...).
 #[derive(Debug, Clone)]
-pub struct MinibufferChoiceHit {
+pub struct PromptChoiceHit {
     pub x_start: u16,
     /// Exclusive end column.
     pub x_end: u16,
@@ -4973,18 +4973,18 @@ pub struct MinibufferChoiceHit {
     /// How a click on this label should be dispatched. Always mirrors
     /// whichever of the two keyboard mechanisms the owning intent already
     /// uses — never a third, click-only decision path.
-    pub action: MinibufferChoiceAction,
+    pub action: PromptChoiceAction,
 }
 
-/// Dispatch shape for a `MinibufferChoiceHit`.
+/// Dispatch shape for a `PromptChoiceHit`.
 #[derive(Debug, Clone)]
-pub enum MinibufferChoiceAction {
+pub enum PromptChoiceAction {
     /// Single-keypress fast path (the early-return `match key.code` blocks
-    /// near the top of `handle_minibuffer_key`): synthesize this key and
+    /// near the top of `handle_prompt_key`): synthesize this key and
     /// feed it through the same handler a real keypress goes through, so
     /// the decision logic never gets duplicated for the click path.
     Key(char),
-    /// Typed-then-submit path (`run_minibuffer_submit`): submit this
+    /// Typed-then-submit path (`run_prompt_submit`): submit this
     /// literal string, exactly as if the user had typed it and pressed
     /// Enter.
     Submit(String),
@@ -5025,7 +5025,7 @@ pub enum RemoteControlHitAction {
 
 fn selection_bounds_for_layout(
     layout: &LayoutSnapshot,
-    is_orchestrator_panel: bool,
+    is_minibuffer_panel: bool,
     col: u16,
     row: u16,
 ) -> Option<ratatui::layout::Rect> {
@@ -5063,8 +5063,8 @@ fn selection_bounds_for_layout(
         }
     }
 
-    if let Some(minibuffer) = layout.minibuffer_area {
-        let minibuffer_content = if is_orchestrator_panel {
+    if let Some(minibuffer) = layout.prompt_area {
+        let prompt_content = if is_minibuffer_panel {
             ratatui::layout::Rect {
                 x: minibuffer.x,
                 y: minibuffer.y.saturating_add(1),
@@ -5074,8 +5074,8 @@ fn selection_bounds_for_layout(
         } else {
             minibuffer
         };
-        if contains(minibuffer_content, col, row) {
-            return Some(minibuffer_content);
+        if contains(prompt_content, col, row) {
+            return Some(prompt_content);
         }
     }
 
@@ -5176,19 +5176,19 @@ async fn run_with_socket_initial_selection(
     // Initial fetches.
     let sessions = client.list().await.unwrap_or_default();
     let groups = client.list_projects().await.unwrap_or_default();
-    let mut services = client.list_services().await.unwrap_or_default();
-    services.sort_by(|a, b| {
+    let mut operators = client.list_operators().await.unwrap_or_default();
+    operators.sort_by(|a, b| {
         a.position
             .cmp(&b.position)
             .then_with(|| a.name.cmp(&b.name))
     });
-    let mut service_channel_catalog = client
-        .list_service_channel_catalog()
+    let mut operator_channel_catalog = client
+        .list_operator_channel_catalog()
         .await
         .unwrap_or_default();
-    service_channel_catalog.sort_by(|a, b| a.id.cmp(&b.id));
+    operator_channel_catalog.sort_by(|a, b| a.id.cmp(&b.id));
     let harnesses = client.harnesses().await.unwrap_or_default();
-    let service_route_catalog = client
+    let operator_route_catalog = client
         .list_routes(None)
         .await
         .map(|result| result.routes)
@@ -5219,10 +5219,10 @@ async fn run_with_socket_initial_selection(
     let theme = theme_config.resolve(None);
     let initial_orch_id = sessions
         .iter()
-        .find(|s| s.kind == construct_protocol::SessionKind::Orchestrator && !s.state.is_terminal())
+        .find(|s| s.kind == construct_protocol::SessionKind::Minibuffer && !s.state.is_terminal())
         .map(|s| s.id.clone());
     // Restore the previously-selected session if it still exists,
-    // else fall back to the first non-orchestrator session.
+    // else fall back to the first non-minibuffer session.
     let persisted = crate::tui_state::load();
     let requested_initial_sel = initial_session_id.as_ref().and_then(|id| {
         sessions
@@ -5275,7 +5275,7 @@ async fn run_with_socket_initial_selection(
         _ => match persisted.main_windows.clone() {
             Some(tree) => {
                 seed_shared_layout = true;
-                prune_window_tree(tree, &sessions, &groups, &services, &initial_sel)
+                prune_window_tree(tree, &sessions, &groups, &operators, &initial_sel)
             }
             None => MainWindowTree::single(1, initial_sel.clone()),
         },
@@ -5338,20 +5338,20 @@ async fn run_with_socket_initial_selection(
             .into_iter()
             .collect();
     initial_children_collapsed.extend(
-        valid_collapsed_service_names(
-            &services,
-            persisted.collapsed_service_names.iter().cloned(),
+        valid_collapsed_operator_names(
+            &operators,
+            persisted.collapsed_operator_names.iter().cloned(),
         )
         .into_iter()
-        .map(|name| service_children_key(&name)),
+        .map(|name| operator_children_key(&name)),
     );
     let mut app = App {
         client: client.clone(),
         last_reported_view: None,
         sessions,
         groups,
-        services,
-        service_channel_catalog,
+        operators,
+        operator_channel_catalog,
         selection: initial_window_sel,
         // Default focus is the view — the selected session is usually
         // what the user wants to interact with first. List navigation
@@ -5367,22 +5367,22 @@ async fn run_with_socket_initial_selection(
         transcript_session: None,
         transcript_scroll: 0,
         chat_lines_cache: ui::ChatLinesCache::default(),
-        minibuffer: None,
+        prompt: None,
         harness_picker_selected: 0,
         harness_picker_filter_active: false,
         turn_picker_entries: Vec::new(),
         turn_picker_selected: 0,
         turn_picker_loading: false,
         selected_load_generation: 0,
-        minibuffer_hint_offset: 0,
-        minibuffer_hint_rotated_at: None,
-        minibuffer_hint_context: None,
+        prompt_hint_offset: 0,
+        prompt_hint_rotated_at: None,
+        prompt_hint_context: None,
         harnesses,
         features: features_status
             .as_ref()
             .map(|s| s.features.clone())
             .unwrap_or_default(),
-        service_route_catalog,
+        operator_route_catalog,
         features_degradation_observed: features_status
             .as_ref()
             .is_some_and(|s| s.degradation_observed),
@@ -5429,7 +5429,7 @@ async fn run_with_socket_initial_selection(
         block_hits: HashMap::new(),
         turn_mark_hits: HashMap::new(),
         matrix_reveal_hits: Vec::new(),
-        orchestrator_desired_size: None,
+        minibuffer_desired_size: None,
         tasks_popup: None,
         lineage_focused: false,
         lineage_collapsed: false,
@@ -5443,7 +5443,7 @@ async fn run_with_socket_initial_selection(
         lineage_follow_selection: false,
         lineage_subagents_expanded: HashSet::new(),
         configure_popup: None,
-        service_dialog: None,
+        operator_dialog: None,
         session_picker: None,
         playbook_popup: None,
         playbook_popups: HashMap::new(),
@@ -5466,16 +5466,16 @@ async fn run_with_socket_initial_selection(
         window_scrollback: HashMap::new(),
         window_views: HashMap::new(),
         terminal_scrollbar_visible_until: HashMap::new(),
-        service_view_scroll: 0,
+        operator_view_scroll: 0,
         skip_redraw_after_event: false,
         tick_redraw_requested: Cell::new(false),
         notification_dirtied_view: true,
         hydrating_sessions: HashSet::new(),
-        orchestrator_scrollback: 0,
-        operator_monolog: None,
-        operator_utterance: String::new(),
-        orchestrator_panel_h: persisted.orchestrator_panel_h,
-        resizing_orchestrator_panel: None,
+        minibuffer_scrollback: 0,
+        minibuffer_monolog: None,
+        minibuffer_utterance: String::new(),
+        minibuffer_panel_h: persisted.minibuffer_panel_h,
+        resizing_minibuffer_panel: None,
         main_slide: MainSlideState::default(),
         dragging_terminal_scrollbar: None,
         dragging_list_scrollbar: None,
@@ -5484,7 +5484,7 @@ async fn run_with_socket_initial_selection(
         start_instant: now,
         layout: LayoutSnapshot::default(),
         session_title_menu: None,
-        service_title_menu: None,
+        operator_title_menu: None,
         fleet_panel: None,
         list_scroll_target: None,
         route_menu: None,
@@ -5498,7 +5498,7 @@ async fn run_with_socket_initial_selection(
         saw_mouse_motion: false,
         mouse_capture_enabled: true,
         last_playbook_clip_click: None,
-        orchestrator_id: initial_orch_id,
+        minibuffer_id: initial_orch_id,
         list_panel_w: persisted.list_panel_w.unwrap_or(LIST_PANEL_W_DEFAULT),
         resizing_list: None,
         matrix_rain_h: persisted.matrix_rain_h,
@@ -5567,7 +5567,7 @@ async fn run_with_socket_initial_selection(
             meter
         },
         token_meter_busy: HashMap::new(),
-        service_token_meters: HashMap::new(),
+        operator_token_meters: HashMap::new(),
         project_dashboard: crate::project_dashboard::ProjectDashboard::default(),
         show_archived_ungrouped: false,
         show_archived_groups: HashSet::new(),
@@ -5639,7 +5639,7 @@ async fn run_with_socket_initial_selection(
     for id in app
         .main_window_sessions_needing_hydration()
         .into_iter()
-        .chain(app.orchestrator_session_needing_hydration())
+        .chain(app.minibuffer_session_needing_hydration())
     {
         app.hydrating_sessions.insert(id);
     }
@@ -5740,7 +5740,7 @@ async fn run_with_socket_initial_selection(
         last_selected_session_id: app.selection.session_id().map(|s| s.to_string()),
         zoom: app.zoom,
         list_panel_w: Some(app.list_panel_w),
-        orchestrator_panel_h: app.orchestrator_panel_h,
+        minibuffer_panel_h: app.minibuffer_panel_h,
         matrix_rain_h: app.matrix_rain_h,
         list_collapsed: app.list_collapsed,
         matrix_rain_hidden: app.matrix_rain_hidden,
@@ -5753,10 +5753,10 @@ async fn run_with_socket_initial_selection(
             &app.sessions,
             app.children_collapsed.iter().cloned(),
         ),
-        collapsed_service_names: valid_collapsed_service_names(
-            &app.services,
+        collapsed_operator_names: valid_collapsed_operator_names(
+            &app.operators,
             app.children_collapsed.iter().filter_map(|key| {
-                key.strip_prefix("service:")
+                key.strip_prefix("operator:")
                     .map(std::string::ToString::to_string)
             }),
         ),
@@ -5826,7 +5826,7 @@ async fn run_loop(
         mpsc::unbounded_channel::<(String, String)>();
     app.playbook_projection_tx = playbook_projection_tx;
     // Status messages from a background `spawn_detached_upgrade` (see
-    // `MinibufferIntent::UpgradeConfirm`). The sender lives on `app` so the
+    // `PromptIntent::UpgradeConfirm`). The sender lives on `app` so the
     // minibuffer handler can kick off the install without blocking the event
     // loop on the download/install; this loop drains the result and surfaces
     // it via `set_status`.
@@ -5877,7 +5877,7 @@ async fn run_loop(
 
     // Debounce window for resize events. Terminal-app drags and
     // list/view divider drags both flood `terminal_pane_size` (and
-    // the orchestrator panel's size) with many close-spaced values;
+    // the minibuffer panel's size) with many close-spaced values;
     // firing `pty_resize` per frame creates IPC churn and asks every
     // child PTY to reflow repeatedly. Sitting on the size until it
     // stays stable for this window collapses the storm into one IPC.
@@ -5999,7 +5999,7 @@ async fn run_loop(
             for id in app
                 .main_window_sessions_needing_hydration()
                 .into_iter()
-                .chain(app.orchestrator_session_needing_hydration())
+                .chain(app.minibuffer_session_needing_hydration())
                 .chain(app.playbook_referenced_sessions_needing_hydration())
             {
                 if selected_hydrating.contains(&id)
@@ -6052,8 +6052,8 @@ async fn run_loop(
                 }
                 None => {}
             }
-            // Orchestrator panel resize — same debounce, separate target.
-            if let Some(orch_size) = app.orchestrator_desired_size {
+            // Minibuffer panel resize — same debounce, separate target.
+            if let Some(orch_size) = app.minibuffer_desired_size {
                 if orch_size != last_orch_sent && orch_size.0 > 0 && orch_size.1 > 0 {
                     match pending_orch {
                         Some((p, _)) if p == orch_size => {}
@@ -6065,7 +6065,7 @@ async fn run_loop(
             }
             if let Some((size, at)) = pending_orch {
                 if at.elapsed() >= resize_debounce {
-                    if let Some(orch_id) = app.orchestrator_id.clone() {
+                    if let Some(orch_id) = app.minibuffer_id.clone() {
                         // Fire-and-forget: the adapter may still be in its startup
                         // health-check when the panel first opens (model broken,
                         // OAuth refresh in flight, etc.).  Awaiting it directly
@@ -6177,7 +6177,7 @@ async fn run_loop(
             // background notification batch below. When several
             // sessions flood PTY output, `notifications.recv()` is
             // almost always ready, so an unbiased `select!` would
-            // service the feed work as often as input — adding
+            // operator the feed work as often as input — adding
             // keystroke→render latency in the focused session. Input is
             // bursty (human-paced), so giving it top priority can't
             // starve the lower arms: between keystrokes `input_stream`
@@ -6799,11 +6799,11 @@ impl App {
         self.refresh_daemon_build_id().await;
         self.connected = true;
         self.ensure_selection_valid();
-        self.orchestrator_id = self
+        self.minibuffer_id = self
             .sessions
             .iter()
             .find(|s| {
-                s.kind == construct_protocol::SessionKind::Orchestrator && !s.state.is_terminal()
+                s.kind == construct_protocol::SessionKind::Minibuffer && !s.state.is_terminal()
             })
             .map(|s| s.id.clone());
         self.transcript_session = None;
@@ -6933,7 +6933,7 @@ impl App {
             return;
         }
 
-        if self.insert_service_dialog_text(&text) {
+        if self.insert_operator_dialog_text(&text) {
             return;
         }
 
@@ -6953,13 +6953,13 @@ impl App {
         // text lands in the playbook only when no minibuffer/palette overlay is
         // capturing input *and* the view pane holds focus. With an overlay open,
         // `dispatch_paste_text` below routes the paste to the minibuffer /
-        // orchestrator instead; with focus on the list, it routes to the
+        // minibuffer instead; with focus on the list, it routes to the
         // selected session rather than editing the playbook.
         if self
             .playbook_popup
             .as_ref()
             .is_some_and(|popup| !popup.terminal_focus)
-            && self.minibuffer.is_none()
+            && self.prompt.is_none()
             && self.focus == PaneFocus::View
         {
             // A file dropped onto the playbook editor over an ssh bridge:
@@ -6977,11 +6977,11 @@ impl App {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| path.clone());
-                        self.minibuffer = Some(Minibuffer {
+                        self.prompt = Some(Prompt {
                             prompt: format!("Upload local file {name} to the playbook? [y/n] "),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::ConfirmLocalFileUpload {
+                            intent: PromptIntent::ConfirmLocalFileUpload {
                                 session_id,
                                 path,
                                 to_playbook: true,
@@ -7040,14 +7040,14 @@ impl App {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.clone());
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!(
                             "Upload local file {name} to {}? [y/n] ",
                             short_id(&session_id)
                         ),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::ConfirmLocalFileUpload {
+                        intent: PromptIntent::ConfirmLocalFileUpload {
                             session_id,
                             path,
                             to_playbook: false,
@@ -7091,9 +7091,9 @@ impl App {
     }
 
     fn large_text_paste_target(&self) -> Option<String> {
-        match self.minibuffer.as_ref().map(|m| &m.intent) {
-            Some(MinibufferIntent::SendInput { session_id }) => Some(session_id.clone()),
-            Some(MinibufferIntent::Orchestrator) => self.orchestrator_id.clone(),
+        match self.prompt.as_ref().map(|m| &m.intent) {
+            Some(PromptIntent::SendInput { session_id }) => Some(session_id.clone()),
+            Some(PromptIntent::Minibuffer) => self.minibuffer_id.clone(),
             Some(_) => None,
             None if self.is_pty_captured() => self.selected_id(),
             None => None,
@@ -7101,17 +7101,17 @@ impl App {
     }
 
     fn dispatch_paste_text(&mut self, text: String) {
-        match self.minibuffer.as_ref().map(|m| &m.intent) {
-            Some(MinibufferIntent::Orchestrator) => {
-                if let Some(orch_id) = self.orchestrator_id.clone() {
-                    self.orchestrator_scrollback = 0;
+        match self.prompt.as_ref().map(|m| &m.intent) {
+            Some(PromptIntent::Minibuffer) => {
+                if let Some(orch_id) = self.minibuffer_id.clone() {
+                    self.minibuffer_scrollback = 0;
                     let bytes = self.encode_paste_for_pty(&orch_id, text);
-                    self.queue_pty_input(orch_id, bytes, "orchestrator pty_input");
+                    self.queue_pty_input(orch_id, bytes, "minibuffer pty_input");
                 }
             }
             Some(_) => {
-                if let Some(mb) = self.minibuffer.as_mut() {
-                    minibuffer::insert_minibuffer_text(mb, &text);
+                if let Some(mb) = self.prompt.as_mut() {
+                    prompt::insert_prompt_text(mb, &text);
                 }
             }
             None if self.is_pty_captured() => {
@@ -7239,7 +7239,7 @@ impl App {
             .playbook_popup
             .as_ref()
             .is_some_and(|popup| !popup.terminal_focus)
-            && self.minibuffer.is_none()
+            && self.prompt.is_none()
             && self.focus == PaneFocus::View
         {
             self.attach_item_to_playbook(item).await;
@@ -7420,32 +7420,32 @@ impl App {
         self.select_session_inner(id, true, true);
     }
 
-    /// Select a service as the active split-pane view. Services share the
+    /// Select a operator as the active split-pane view. Operators share the
     /// session pane lifecycle (including split/focus/layout synchronization)
     /// but deliberately do not participate in session transcript or PTY
     /// state.
-    pub fn select_service(&mut self, name: String) {
+    pub fn select_operator(&mut self, name: String) {
         self.reset_vim_mode();
-        if self.selection.service_name() != Some(name.as_str()) {
+        if self.selection.operator_name() != Some(name.as_str()) {
             self.start_session_transition();
         }
-        self.selection = Selection::Service(name);
+        self.selection = Selection::Operator(name);
         self.focus = PaneFocus::View;
         self.lineage_focused = false;
         self.transcript.clear();
         self.transcript_session = None;
         self.set_scrollback_for_window(Some(self.active_window_id), 0);
         self.sync_active_window_selection();
-        // Focusing a service view is edit mode — there is no separate
+        // Focusing a operator view is edit mode — there is no separate
         // read-only state to step out of (spec 0175).
-        self.sync_service_editor_with_selection();
+        self.sync_operator_editor_with_selection();
     }
 
-    /// Show a service in the active pane while navigation remains owned by
+    /// Show a operator in the active pane while navigation remains owned by
     /// the sidebar. The editor is prepared for an explicit drill-in, but list
     /// traversal must not redirect the next Up/Down or C-p/C-n into its fields.
-    fn select_service_from_list(&mut self, name: String) {
-        self.select_service(name);
+    fn select_operator_from_list(&mut self, name: String) {
+        self.select_operator(name);
         self.focus = PaneFocus::List;
     }
 
@@ -7462,8 +7462,8 @@ impl App {
 
     fn select_session_inner(&mut self, id: String, transition: bool, sync_window: bool) {
         self.reset_vim_mode();
-        if self.selection.service_name().is_some() {
-            self.service_dialog = None;
+        if self.selection.operator_name().is_some() {
+            self.operator_dialog = None;
         }
         let previous_id = self.selection.session_id().map(str::to_owned);
         if transition && self.selection.session_id() != Some(id.as_str()) {
@@ -7677,8 +7677,8 @@ impl App {
 
     pub fn select_group(&mut self, id: String) {
         self.reset_vim_mode();
-        if self.selection.service_name().is_some() {
-            self.service_dialog = None;
+        if self.selection.operator_name().is_some() {
+            self.operator_dialog = None;
         }
         if self.selection.group_id() != Some(id.as_str()) {
             self.start_session_transition();
@@ -7815,7 +7815,7 @@ impl App {
     /// row stands in for. Mirrors the membership filters in `list_items` so
     /// the count shown on the row matches what a cascade delete removes.
     fn archived_sessions_in_section(&self, section: &ArchiveSection) -> Vec<String> {
-        let orch_id = self.orchestrator_id.as_deref();
+        let orch_id = self.minibuffer_id.as_deref();
         match section {
             ArchiveSection::Ungrouped => self
                 .sessions
@@ -7899,17 +7899,17 @@ impl App {
             .then(|| id.to_string())
     }
 
-    fn selected_service_children_key(&self) -> Option<String> {
-        let name = self.selection.service_name()?;
+    fn selected_operator_children_key(&self) -> Option<String> {
+        let name = self.selection.operator_name()?;
         self.sessions
             .iter()
             .any(|session| {
                 is_user_list_session(session)
                     && !session.archived
                     && session.forked_from.is_none()
-                    && service_session_matches(session, name)
+                    && operator_session_matches(session, name)
             })
-            .then(|| service_children_key(name))
+            .then(|| operator_children_key(name))
     }
 
     pub fn selected_id(&self) -> Option<String> {
@@ -7978,9 +7978,9 @@ impl App {
     /// are excluded — a boundary item would evict them from the fast
     /// renderer and shadow-scrollback paths, and their alt-screen children
     /// repaint rows too freely for a content-anchored icon to be truthful.
-    /// The hidden orchestrator is excluded too: it isn't forkable UI.
+    /// The hidden minibuffer is excluded too: it isn't forkable UI.
     fn session_records_turn_boundaries(&self, session_id: &str) -> bool {
-        if self.orchestrator_id.as_deref() == Some(session_id) {
+        if self.minibuffer_id.as_deref() == Some(session_id) {
             return false;
         }
         self.sessions
@@ -8000,8 +8000,8 @@ impl App {
         entries: Vec<TurnPickerEntry>,
     ) {
         let still_open = matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::ForkTurnPick { source_session_id })
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::ForkTurnPick { source_session_id })
                 if source_session_id == session_id
         );
         if !still_open {
@@ -8046,8 +8046,8 @@ impl App {
             .collect()
     }
 
-    fn orchestrator_session_needing_hydration(&self) -> Option<String> {
-        let id = self.orchestrator_id.as_ref()?;
+    fn minibuffer_session_needing_hydration(&self) -> Option<String> {
+        let id = self.minibuffer_id.as_ref()?;
         let needs_history = self
             .sessions
             .iter()
@@ -8063,7 +8063,7 @@ impl App {
     /// tail the instant the pointer lands on the clip. (The shimmer-text hover
     /// always targets the playbook's own dispatching session, which is already
     /// warm, so it doesn't need this.) These workers are usually neither
-    /// selected nor the orchestrator, so without this nothing else
+    /// selected nor the minibuffer, so without this nothing else
     /// hydrates them and the clip-chip preview silently degrades to the bare
     /// text tooltip.
     fn playbook_referenced_sessions_needing_hydration(&self) -> Vec<String> {
@@ -8187,19 +8187,19 @@ impl App {
     pub fn list_items(&self) -> Vec<ListItem> {
         let mut out: Vec<ListItem> = Vec::new();
 
-        // Services are ordinary top-level list rows rather than a separate
+        // Operators are ordinary top-level list rows rather than a separate
         // sidebar section. Their persisted positions order the section; name
         // keeps legacy equal-position definitions deterministic until moved.
-        // Routed sessions are inserted below each service row after the
+        // Routed sessions are inserted below each operator row after the
         // session-tree indexes exist.
-        let mut services = self.services.clone();
-        services.sort_by(|a, b| {
+        let mut operators = self.operators.clone();
+        operators.sort_by(|a, b| {
             a.position
                 .cmp(&b.position)
                 .then_with(|| a.name.cmp(&b.name))
         });
 
-        let orch_id = self.orchestrator_id.as_deref();
+        let orch_id = self.minibuffer_id.as_deref();
         let mut subagents_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
         for s in self.sessions.iter().filter(|s| is_subagent_session(s)) {
             if let Some(parent) = s.parent_session_id.as_deref() {
@@ -8418,7 +8418,7 @@ impl App {
             );
         };
 
-        let push_service = |out: &mut Vec<ListItem>, service: &construct_protocol::ServiceSummary| {
+        let push_operator = |out: &mut Vec<ListItem>, operator: &construct_protocol::OperatorSummary| {
             let mut routed: Vec<&SessionSummary> = self
                 .sessions
                 .iter()
@@ -8426,7 +8426,7 @@ impl App {
                     is_user_list_session(session)
                         && !session.archived
                         && session.forked_from.is_none()
-                        && service_session_matches(session, &service.name)
+                        && operator_session_matches(session, &operator.name)
                 })
                 .collect();
             routed.sort_by(|a, b| {
@@ -8438,9 +8438,9 @@ impl App {
             let sessions_expanded = session_count > 0
                 && !self
                     .children_collapsed
-                    .contains(&service_children_key(&service.name));
-            out.push(ListItem::Service {
-                summary: service.clone(),
+                    .contains(&operator_children_key(&operator.name));
+            out.push(ListItem::Operator {
+                summary: operator.clone(),
                 session_count,
                 sessions_expanded,
             });
@@ -8451,19 +8451,19 @@ impl App {
             }
         };
 
-        // Services without a placement form the leading block; placed ones
+        // Operators without a placement form the leading block; placed ones
         // are spliced into the session/project flow below, pinned to the
         // position value of the row they were dropped after (row first on
-        // ties, then service order — the same rule the daemon's reorder and
+        // ties, then operator order — the same rule the daemon's reorder and
         // the web client use).
-        let placed_in = |region: construct_protocol::ServicePlacementRegion| {
-            let mut placed: Vec<(&construct_protocol::ServiceSummary, i64)> = services
+        let placed_in = |region: construct_protocol::OperatorPlacementRegion| {
+            let mut placed: Vec<(&construct_protocol::OperatorSummary, i64)> = operators
                 .iter()
-                .filter_map(|service| {
-                    service
+                .filter_map(|operator| {
+                    operator
                         .placement
                         .filter(|placement| placement.region == region)
-                        .map(|placement| (service, placement.position))
+                        .map(|placement| (operator, placement.position))
                 })
                 .collect();
             placed.sort_by(|(a, a_pos), (b, b_pos)| {
@@ -8474,30 +8474,30 @@ impl App {
             });
             placed
         };
-        let mut sessions_region = placed_in(construct_protocol::ServicePlacementRegion::Sessions)
+        let mut sessions_region = placed_in(construct_protocol::OperatorPlacementRegion::Sessions)
             .into_iter()
             .peekable();
-        let mut projects_region = placed_in(construct_protocol::ServicePlacementRegion::Projects)
+        let mut projects_region = placed_in(construct_protocol::OperatorPlacementRegion::Projects)
             .into_iter()
             .peekable();
-        for service in services.iter().filter(|s| s.placement.is_none()) {
-            push_service(&mut out, service);
+        for operator in operators.iter().filter(|s| s.placement.is_none()) {
+            push_operator(&mut out, operator);
         }
 
         let mut ungrouped: Vec<&SessionSummary> = self
             .sessions
             .iter()
             .filter(|s| s.group_id.is_none())
-            // Hide the orchestrator from the list — it's rendered in
+            // Hide the minibuffer from the list — it's rendered in
             // the minibuffer instead. Subagents render only as children
             // of their parent session.
             .filter(|s| Some(s.id.as_str()) != orch_id)
             .filter(|s| is_user_list_session(s))
             .filter(|s| s.forked_from.is_none())
             .filter(|s| {
-                !services
+                !operators
                     .iter()
-                    .any(|service| service_session_matches(s, &service.name))
+                    .any(|operator| operator_session_matches(s, &operator.name))
             })
             .collect();
         ungrouped.sort_by(|a, b| {
@@ -8514,15 +8514,15 @@ impl App {
                 .peek()
                 .is_some_and(|(_, position)| *position < s.position)
             {
-                let (service, _) = sessions_region.next().unwrap();
-                push_service(&mut out, service);
+                let (operator, _) = sessions_region.next().unwrap();
+                push_operator(&mut out, operator);
             }
             push_session(&mut out, s, 0);
         }
-        // Services placed below every ungrouped session still belong to the
+        // Operators placed below every ungrouped session still belong to the
         // session run: they render above its trailing "N archived" row.
-        for (service, _) in sessions_region {
-            push_service(&mut out, service);
+        for (operator, _) in sessions_region {
+            push_operator(&mut out, operator);
         }
         if !ungrouped_archived.is_empty() {
             let expanded = self.show_archived_ungrouped;
@@ -8546,8 +8546,8 @@ impl App {
                 .peek()
                 .is_some_and(|(_, position)| *position < g.position)
             {
-                let (service, _) = projects_region.next().unwrap();
-                push_service(&mut out, service);
+                let (operator, _) = projects_region.next().unwrap();
+                push_operator(&mut out, operator);
             }
             let mut members: Vec<&SessionSummary> = self
                 .sessions
@@ -8556,9 +8556,9 @@ impl App {
                 .filter(|s| is_user_list_session(s))
                 .filter(|s| s.forked_from.is_none())
                 .filter(|s| {
-                    !services
+                    !operators
                         .iter()
-                        .any(|service| service_session_matches(s, &service.name))
+                        .any(|operator| operator_session_matches(s, &operator.name))
                 })
                 .collect();
             members.sort_by_key(|s| s.position);
@@ -8598,8 +8598,8 @@ impl App {
                 }
             }
         }
-        for (service, _) in projects_region {
-            push_service(&mut out, service);
+        for (operator, _) in projects_region {
+            push_operator(&mut out, operator);
         }
         out
     }
@@ -8671,7 +8671,7 @@ impl App {
                 .and_then(|s| s.group_id.clone())
                 .map(ArchiveSection::Group)
                 .unwrap_or(ArchiveSection::Ungrouped),
-            Selection::Service(_) => ArchiveSection::Ungrouped,
+            Selection::Operator(_) => ArchiveSection::Ungrouped,
             Selection::None => ArchiveSection::Ungrouped,
         };
         self.toggle_archive_section(&section);
@@ -9103,8 +9103,8 @@ impl App {
                     self.set_status(format!("move failed: {e}"));
                 }
             }
-            Selection::Service(name) => match self.client.move_service(&name, dir).await {
-                Ok(()) => self.refresh_services().await,
+            Selection::Operator(name) => match self.client.move_operator(&name, dir).await {
+                Ok(()) => self.refresh_operators().await,
                 Err(e) => self.set_status(format!("move failed: {e}")),
             },
             Selection::None => self.set_status("nothing selected".into()),
@@ -9122,26 +9122,26 @@ impl App {
             Ok(list) => self.groups = list,
             Err(e) => self.set_status(format!("project list failed: {e}")),
         }
-        self.refresh_orchestrator_id();
+        self.refresh_minibuffer_id();
         self.ensure_selection_valid();
     }
 
-    /// Re-derive `orchestrator_id` from the current sessions list.
+    /// Re-derive `minibuffer_id` from the current sessions list.
     /// Called after any list mutation (refresh, state notification,
     /// session-deleted) so the minibuffer stays bound to the right
-    /// session — and falls back to palette mode if the orchestrator
+    /// session — and falls back to palette mode if the minibuffer
     /// goes away.
     ///
-    /// Prefers a *live* (non-terminal) orchestrator. If only terminal
-    /// orchestrators exist (e.g. a previous run failed to start
-    /// smith), we behave as if there's no orchestrator so the user
+    /// Prefers a *live* (non-terminal) minibuffer. If only terminal
+    /// minibuffers exist (e.g. a previous run failed to start
+    /// smith), we behave as if there's no minibuffer so the user
     /// gets the palette fallback.
-    fn refresh_orchestrator_id(&mut self) {
-        self.orchestrator_id = self
+    fn refresh_minibuffer_id(&mut self) {
+        self.minibuffer_id = self
             .sessions
             .iter()
             .find(|s| {
-                s.kind == construct_protocol::SessionKind::Orchestrator && !s.state.is_terminal()
+                s.kind == construct_protocol::SessionKind::Minibuffer && !s.state.is_terminal()
             })
             .map(|s| s.id.clone());
     }
@@ -9161,11 +9161,11 @@ impl App {
                 }
             }
         }
-        if let (Some(previous), Selection::Service(next_service_name)) = (&previous, &replacement) {
-            if previous.service_name() != Some(next_service_name.as_str()) {
+        if let (Some(previous), Selection::Operator(next_operator_name)) = (&previous, &replacement) {
+            if previous.operator_name() != Some(next_operator_name.as_str()) {
                 if let Some(other_id) = self
                     .main_windows
-                    .find_window_with_service_except(next_service_name, active_id)
+                    .find_window_with_operator_except(next_operator_name, active_id)
                 {
                     self.main_windows.set_selection(other_id, previous.clone());
                     self.set_scrollback_for_window(Some(other_id), 0);
@@ -9280,7 +9280,7 @@ impl App {
         if index == 0 {
             // Pane 1 is the session list.
             self.reset_vim_mode();
-            self.collapse_orchestrator_panel_on_focus_change();
+            self.collapse_minibuffer_panel_on_focus_change();
             if matches!(self.zoom, ZoomMode::View) {
                 self.zoom = ZoomMode::List;
             }
@@ -9293,7 +9293,7 @@ impl App {
             return false;
         };
         self.reset_vim_mode();
-        self.collapse_orchestrator_panel_on_focus_change();
+        self.collapse_minibuffer_panel_on_focus_change();
         // Asking for a window implies the view side should be visible.
         if matches!(self.zoom, ZoomMode::List) {
             self.zoom = ZoomMode::View;
@@ -9340,7 +9340,7 @@ impl App {
             return false;
         };
         self.reset_vim_mode();
-        self.collapse_orchestrator_panel_on_focus_change();
+        self.collapse_minibuffer_panel_on_focus_change();
         self.focus_main_window(id);
         self.set_status(format!("focus: window {id}"));
         true
@@ -9397,9 +9397,9 @@ impl App {
             // the outgoing one, reveal the incoming). A no-op when the
             // selection didn't actually change.
             self.sync_playbook_popup_with_selection();
-            // Same for the service editor: whichever pane holds focus, a
-            // service in it is being edited and a session in it is not.
-            self.sync_service_editor_with_selection();
+            // Same for the operator editor: whichever pane holds focus, a
+            // operator in it is being edited and a session in it is not.
+            self.sync_operator_editor_with_selection();
             self.report_focused_sessions();
         }
     }
@@ -9639,8 +9639,8 @@ impl App {
             }
         }
         match &items[next] {
-            ListItem::Service { summary, .. } => {
-                self.select_service_from_list(summary.name.clone())
+            ListItem::Operator { summary, .. } => {
+                self.select_operator_from_list(summary.name.clone())
             }
             ListItem::Session { summary, .. } => self.select_session(summary.id.clone()),
             ListItem::GroupHeader { group, .. } => self.select_group(group.id.clone()),
@@ -9662,7 +9662,7 @@ impl App {
 
     fn is_primary_list_target(item: &ListItem) -> bool {
         match item {
-            ListItem::Service { .. } => true,
+            ListItem::Operator { .. } => true,
             ListItem::Session { summary, .. } => !summary.archived,
             ListItem::GroupHeader { .. } => true,
             ListItem::ArchivedRow { .. } => false,
@@ -9734,7 +9734,7 @@ impl App {
         // A session selection stays valid as long as the session still
         // exists, even when it has no navigable list row — e.g. a subagent,
         // which renders only as a child of its parent (and never at all when
-        // the parent is the hidden orchestrator) but is reachable through a
+        // the parent is the hidden minibuffer) but is reachable through a
         // playbook session clip. The main view can display any live session;
         // the list simply won't highlight a row for it. Without this, clicking
         // such a clip selects the session and the next session-list refresh
@@ -9745,8 +9745,8 @@ impl App {
                 return;
             }
         }
-        if let Selection::Service(name) = &self.selection {
-            if self.services.iter().any(|service| service.name == *name) {
+        if let Selection::Operator(name) = &self.selection {
+            if self.operators.iter().any(|operator| operator.name == *name) {
                 return;
             }
         }
@@ -9759,7 +9759,7 @@ impl App {
         self.selection = items
             .iter()
             .find_map(|it| match it {
-                ListItem::Service { summary, .. } => Some(Selection::Service(summary.name.clone())),
+                ListItem::Operator { summary, .. } => Some(Selection::Operator(summary.name.clone())),
                 ListItem::Session { summary, .. } => Some(Selection::Session(summary.id.clone())),
                 ListItem::GroupHeader { group, .. } => Some(Selection::Group(group.id.clone())),
                 ListItem::ArchivedRow { .. } => None,
@@ -9775,9 +9775,9 @@ impl App {
             .unwrap_or(Selection::None);
     }
 
-    /// Rebuild project- and service-scoped histories from the daemon's fleet
+    /// Rebuild project- and operator-scoped histories from the daemon's fleet
     /// window. The session id on each sample supplies the missing filter;
-    /// current summaries supply project membership and service ancestry.
+    /// current summaries supply project membership and operator ancestry.
     fn seed_scoped_token_meters(
         &mut self,
         history: &construct_protocol::TokenHistoryResult,
@@ -9786,7 +9786,7 @@ impl App {
         type SeedSample = (i64, Option<String>, u64, u64);
 
         let mut project_samples: HashMap<String, Vec<SeedSample>> = HashMap::new();
-        let mut service_samples: HashMap<String, Vec<SeedSample>> = HashMap::new();
+        let mut operator_samples: HashMap<String, Vec<SeedSample>> = HashMap::new();
         for sample in &history.samples {
             let Some(session_id) = sample.session_id.as_deref() else {
                 // An older daemon can still seed the fleet meter, but its
@@ -9809,9 +9809,9 @@ impl App {
                     .or_default()
                     .push(seed.clone());
             }
-            if let Some(service_name) = self.routed_service_name(session) {
-                service_samples
-                    .entry(service_name.to_string())
+            if let Some(operator_name) = self.routed_operator_name(session) {
+                operator_samples
+                    .entry(operator_name.to_string())
                     .or_default()
                     .push(seed);
             }
@@ -9825,11 +9825,11 @@ impl App {
                 .token_meters
                 .insert(project_id, meter);
         }
-        for (service_name, samples) in service_samples {
+        for (operator_name, samples) in operator_samples {
             let mut meter = crate::token_meter::TokenMeter::new(now);
             meter.reserve_history(TOKEN_HISTORY_WINDOW_SECS as u64);
             meter.seed(samples);
-            self.service_token_meters.insert(service_name, meter);
+            self.operator_token_meters.insert(operator_name, meter);
         }
     }
 
@@ -9859,8 +9859,8 @@ impl App {
         let label = model
             .clone()
             .or_else(|| session.and_then(|s| s.model.clone()));
-        let service_name = session
-            .and_then(|session| self.routed_service_name(session))
+        let operator_name = session
+            .and_then(|session| self.routed_operator_name(session))
             .map(str::to_string);
         let now = Instant::now();
         self.token_meter
@@ -9876,9 +9876,9 @@ impl App {
                 now,
             );
         }
-        if let Some(service_name) = service_name {
-            self.service_token_meters
-                .entry(service_name)
+        if let Some(operator_name) = operator_name {
+            self.operator_token_meters
+                .entry(operator_name)
                 .or_insert_with(|| crate::token_meter::TokenMeter::new(now))
                 .observe(label.as_deref(), tokens, *tokens_cached, now);
         }
@@ -9913,11 +9913,11 @@ impl App {
             if let Some(previous) = previous {
                 let delta = busy.saturating_sub(previous);
                 if delta > 0 {
-                    let service_name = self.routed_service_name(session).map(str::to_string);
+                    let operator_name = self.routed_operator_name(session).map(str::to_string);
                     deltas.push((
                         Some(model),
                         session.group_id.clone(),
-                        service_name,
+                        operator_name,
                         delta,
                     ));
                 }
@@ -9926,7 +9926,7 @@ impl App {
         }
         let live: HashSet<String> = seen.into_iter().map(str::to_string).collect();
         self.token_meter_busy.retain(|id, _| live.contains(id));
-        for (model, project_id, service_name, delta) in deltas {
+        for (model, project_id, operator_name, delta) in deltas {
             self.token_meter.observe_busy(model.as_deref(), delta, now);
             if let Some(project_id) = project_id {
                 self.project_dashboard.observe_busy(
@@ -9936,9 +9936,9 @@ impl App {
                     now,
                 );
             }
-            if let Some(service_name) = service_name {
-                self.service_token_meters
-                    .entry(service_name)
+            if let Some(operator_name) = operator_name {
+                self.operator_token_meters
+                    .entry(operator_name)
                     .or_insert_with(|| crate::token_meter::TokenMeter::new(now))
                     .observe_busy(model.as_deref(), delta, now);
             }
@@ -9946,9 +9946,9 @@ impl App {
     }
 
     /// True when the session is currently rendered somewhere on screen:
-    /// a pane of the active window (including splits), or the orchestrator
+    /// a pane of the active window (including splits), or the minibuffer
     /// panel. Used to decide whether a background `Pty` chunk needs an
-    /// immediate full-frame repaint. Conservative — treats the orchestrator
+    /// immediate full-frame repaint. Conservative — treats the minibuffer
     /// as always-visible so the gate never drops a needed redraw; the cost
     /// of an occasional extra paint is far cheaper than missing one.
     fn session_visible_on_screen(&self, id: &str) -> bool {
@@ -9960,7 +9960,7 @@ impl App {
         {
             return true;
         }
-        if self.orchestrator_id.as_deref() == Some(id) {
+        if self.minibuffer_id.as_deref() == Some(id) {
             return true;
         }
         false
@@ -10143,7 +10143,7 @@ impl App {
                         // the explicit `call_id` field (with a legacy
                         // fallback to the `tool` field for old
                         // transcripts). Tool events from the
-                        // orchestrator session also land here.
+                        // minibuffer session also land here.
                         if let SessionEvent::ToolUse { tool, args, .. } = &payload.event {
                             // The TUI-dispatch tool (`tui`) is a
                             // slash-command short-circuit, not a real
@@ -10253,14 +10253,14 @@ impl App {
                             // (`SessionSummary::last_message`), refreshed by
                             // the per-event State broadcast — no client-side
                             // message cache needed here.
-                            // Accumulate the orchestrator's streaming assistant
+                            // Accumulate the minibuffer's streaming assistant
                             // text; finalized into a typewriter monolog at turn
                             // end (the AgentStatus active=false handler below).
                             if matches!(kind, crate::pty_render::MessageKind::Assistant)
-                                && self.orchestrator_id.as_deref()
+                                && self.minibuffer_id.as_deref()
                                     == Some(payload.session_id.as_str())
                             {
-                                self.operator_utterance.push_str(&text);
+                                self.minibuffer_utterance.push_str(&text);
                             }
                         }
                         // Adapter editor state — drives the fixed
@@ -10313,7 +10313,7 @@ impl App {
                                         (payload.session_id.clone(), panel.id.clone()),
                                         until,
                                     );
-                                    if self.orchestrator_id.as_deref()
+                                    if self.minibuffer_id.as_deref()
                                         == Some(payload.session_id.as_str())
                                     {
                                         self.matrix_widget_hover = Some(MatrixWidgetHover {
@@ -10343,7 +10343,7 @@ impl App {
                                 if self.dynamic_ui_focused.as_ref() == Some(&key) {
                                     self.dynamic_ui_focused = None;
                                 }
-                                if self.orchestrator_id.as_deref()
+                                if self.minibuffer_id.as_deref()
                                     == Some(payload.session_id.as_str())
                                 {
                                     if self.matrix_widget_pinned.as_deref() == Some(id.as_str()) {
@@ -10361,7 +10361,7 @@ impl App {
                             _ => {}
                         }
                         if let SessionEvent::AgentStatus(status) = &payload.event {
-                            let is_orchestrator = self.orchestrator_id.as_deref()
+                            let is_minibuffer = self.minibuffer_id.as_deref()
                                 == Some(payload.session_id.as_str());
                             if status.active {
                                 // NOTE: `active=true` fires on *every* delta (a
@@ -10377,16 +10377,16 @@ impl App {
                                 self.agent_statuses.remove(&payload.session_id);
                                 // Turn end — consolidate the accumulated text into
                                 // a single typewriter monolog over the matrix rain.
-                                if is_orchestrator {
+                                if is_minibuffer {
                                     if let Some(text) =
-                                        operator_monolog_text(&self.operator_utterance)
+                                        minibuffer_monolog_text(&self.minibuffer_utterance)
                                     {
-                                        self.operator_monolog = Some(OperatorMonolog {
+                                        self.minibuffer_monolog = Some(MinibufferMonolog {
                                             text,
                                             started_at: Instant::now(),
                                         });
                                     }
-                                    self.operator_utterance.clear();
+                                    self.minibuffer_utterance.clear();
                                 }
                                 if let Some(bytes) = agent_status_history_line(status) {
                                     let history = self
@@ -10398,12 +10398,12 @@ impl App {
                             }
                             return;
                         }
-                        // Orchestrator session events: PTY bytes flow
+                        // Minibuffer session events: PTY bytes flow
                         // through the regular PTY branch above (into
                         // `terminals[id]`). Non-PTY events (Message,
                         // ToolUse, ToolResult, ...) just record into
                         // the transcript like any other session — the
-                        // orchestrator is filtered from the *list*
+                        // minibuffer is filtered from the *list*
                         // view, but its events are still useful for
                         // CLI / MCP introspection and don't hurt the
                         // TUI (the panel renders the PTY screen, not
@@ -10459,7 +10459,7 @@ impl App {
                         {
                             self.report_seen(&id);
                         }
-                        self.refresh_orchestrator_id();
+                        self.refresh_minibuffer_id();
                     }
                 }
             }
@@ -10835,12 +10835,12 @@ impl App {
     /// by another client, so a lingering prompt would be stale.
     fn dismiss_approval_prompt(&mut self, session_id: &str, call_id: &str) {
         let is_match = matches!(
-            self.minibuffer.as_ref().map(|mb| &mb.intent),
-            Some(MinibufferIntent::ApproveTool { session_id: s, call_id: c, .. })
+            self.prompt.as_ref().map(|mb| &mb.intent),
+            Some(PromptIntent::ApproveTool { session_id: s, call_id: c, .. })
                 if s == session_id && c == call_id
         );
         if is_match {
-            self.minibuffer = None;
+            self.prompt = None;
         }
     }
 
@@ -10854,30 +10854,30 @@ impl App {
         }
     }
 
-    pub fn operator_has_pending_approval(&self) -> bool {
-        let Some(orchestrator_id) = self.orchestrator_id.as_deref() else {
+    pub fn minibuffer_has_pending_approval(&self) -> bool {
+        let Some(minibuffer_id) = self.minibuffer_id.as_deref() else {
             return false;
         };
         self.pending_tool_approvals
-            .get(orchestrator_id)
+            .get(minibuffer_id)
             .is_some_and(|pending| !pending.is_empty())
     }
 
-    pub fn operator_loop_disabled(&self) -> bool {
-        let Some(id) = self.orchestrator_id.as_deref() else {
+    pub fn minibuffer_loop_disabled(&self) -> bool {
+        let Some(id) = self.minibuffer_id.as_deref() else {
             return false;
         };
         self.sessions
             .iter()
             .find(|s| s.id == id)
-            .is_some_and(|s| s.operator_loop_disabled)
+            .is_some_and(|s| s.minibuffer_loop_disabled)
     }
 
-    fn toggle_orchestrator_panel(&mut self) {
-        if self.is_orchestrator_panel_open() {
-            self.minibuffer = None;
+    fn toggle_minibuffer_panel(&mut self) {
+        if self.is_minibuffer_panel_open() {
+            self.prompt = None;
         } else {
-            self.open_minibuffer_for_command();
+            self.open_prompt_for_command();
         }
     }
 
@@ -10897,16 +10897,16 @@ impl App {
         if self.session_renders_approval_inline(&session_id) {
             return;
         }
-        // Only surface the global minibuffer prompt for the session the
+        // Only surface the global approval prompt for the session the
         // user is currently looking at. Background sessions still render
         // their approval request inline in their own terminal/transcript.
         if self.selection.session_id() != Some(session_id.as_str()) {
             return;
         }
-        // Otherwise: any non-orchestrator minibuffer is shorter-lived
+        // Otherwise: any non-minibuffer prompt intent is shorter-lived
         // and shouldn't be clobbered by an unrelated approval. Skip
         // when busy.
-        if self.minibuffer.is_some() {
+        if self.prompt.is_some() {
             return;
         }
         let risk_label = match risk {
@@ -10919,11 +10919,11 @@ impl App {
         // separately as clickable spans (spec 0075), built from
         // `allow_auto_review` on the intent itself.
         let prompt = format!("approve [{risk_label}] {tool}({}) ▸ ", short_args);
-        self.minibuffer = Some(Minibuffer {
+        self.prompt = Some(Prompt {
             prompt,
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::ApproveTool {
+            intent: PromptIntent::ApproveTool {
                 session_id,
                 call_id,
                 tool,
@@ -10936,7 +10936,7 @@ impl App {
     }
 
     fn session_renders_approval_inline(&self, session_id: &str) -> bool {
-        self.orchestrator_id.as_deref() == Some(session_id)
+        self.minibuffer_id.as_deref() == Some(session_id)
             || self
                 .sessions
                 .iter()
@@ -11020,11 +11020,11 @@ impl App {
         self.playbook_projection_pending.remove(id);
         self.playbook_collaborators
             .retain(|_, cursor| cursor.session_id != id);
-        // Orchestrator session went away → palette fallback after the
-        // re-derive below. The orchestrator's PTY parser in
+        // Minibuffer session went away → palette fallback after the
+        // re-derive below. The minibuffer's PTY parser in
         // `terminals[id]` was already removed by the generic cleanup
         // above.
-        self.refresh_orchestrator_id();
+        self.refresh_minibuffer_id();
         self.ensure_selection_valid();
         // Deletion is dispatched off the event loop on purpose (see
         // `spawn_session_delete`), and reacting to it must be too: the
@@ -11304,7 +11304,7 @@ impl App {
             // underneath instead of the menu.
             && self.route_menu.is_none()
             && self.resizing_list.is_none()
-            && self.resizing_orchestrator_panel.is_none()
+            && self.resizing_minibuffer_panel.is_none()
             && self.resizing_matrix_rain.is_none()
             && self.resizing_main_window.is_none()
             && self.resizing_playbook_popup.is_none()
@@ -11352,7 +11352,7 @@ impl App {
             // sees it — the menu looks dead while rendering perfectly.
             && self.route_menu.is_none()
             && self.resizing_list.is_none()
-            && self.resizing_orchestrator_panel.is_none()
+            && self.resizing_minibuffer_panel.is_none()
             && self.resizing_matrix_rain.is_none()
             && self.resizing_main_window.is_none()
             && self.resizing_lineage.is_none()
@@ -11416,7 +11416,7 @@ impl App {
                     }
                 } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, -LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, -LIST_STEP)
-                    && !self.scroll_service_view_at(ev.column, ev.row, scrollback_step)
+                    && !self.scroll_operator_view_at(ev.column, ev.row, scrollback_step)
                 {
                     self.adjust_mouse_scrollback(ev.column, ev.row, scrollback_step);
                 }
@@ -11441,7 +11441,7 @@ impl App {
                     }
                 } else if !self.adjust_mouse_dynamic_ui_scroll(ev.column, ev.row, LIST_STEP)
                     && !self.adjust_mouse_list_scroll(ev.column, ev.row, LIST_STEP)
-                    && !self.scroll_service_view_at(ev.column, ev.row, -scrollback_step)
+                    && !self.scroll_operator_view_at(ev.column, ev.row, -scrollback_step)
                 {
                     self.adjust_mouse_scrollback(ev.column, ev.row, -scrollback_step);
                 }
@@ -11575,14 +11575,14 @@ impl App {
                         return;
                     }
                 }
-                // Operator/minibuffer panel: the top border is the panel's title
+                // Prompt/minibuffer panel: the top border is the panel's title
                 // area and acts as a vertical resize handle.
-                if self.is_on_orchestrator_panel_divider(ev.column, ev.row) {
-                    let cur_h = self.layout.minibuffer_area.map(|a| a.height).unwrap_or(
-                        self.orchestrator_panel_h
+                if self.is_on_minibuffer_panel_divider(ev.column, ev.row) {
+                    let cur_h = self.layout.prompt_area.map(|a| a.height).unwrap_or(
+                        self.minibuffer_panel_h
                             .unwrap_or(MINIBUFFER_PANEL_H_DEFAULT),
                     );
-                    self.resizing_orchestrator_panel = Some((ev.row, cur_h));
+                    self.resizing_minibuffer_panel = Some((ev.row, cur_h));
                     return;
                 }
                 if self.begin_terminal_scrollbar_drag_or_jump(ev.column, ev.row) {
@@ -11597,9 +11597,9 @@ impl App {
                 if self.is_over_dynamic_ui_overlay(ev.column, ev.row) {
                     return;
                 }
-                // Lineage section header: like the operator panel's title
+                // Lineage section header: like the minibuffer panel's title
                 // bar, dragging it adjusts the section height (the section
-                // is bottom-anchored above the operator panel, so dragging
+                // is bottom-anchored above the minibuffer panel, so dragging
                 // the header up grows it). The header's own buttons (collapse,
                 // mode toggle) are excluded so their clicks stay clicks.
                 if self.is_on_lineage_header_bar(ev.column, ev.row) {
@@ -11650,7 +11650,7 @@ impl App {
                         .max(LIST_PANEL_W_MIN as i32)
                         .min(u16::MAX as i32) as u16;
                     self.list_panel_w = want;
-                } else if let Some((anchor_row, anchor_h)) = self.resizing_orchestrator_panel {
+                } else if let Some((anchor_row, anchor_h)) = self.resizing_minibuffer_panel {
                     // Dragging the top border UP grows the panel; dragging it
                     // DOWN shrinks it. The render path still clamps to the
                     // available terminal height.
@@ -11658,7 +11658,7 @@ impl App {
                     let want = (anchor_h as i32 + delta)
                         .max(MINIBUFFER_PANEL_H_MIN as i32)
                         .min(MINIBUFFER_PANEL_H_MAX as i32) as u16;
-                    self.orchestrator_panel_h = Some(want);
+                    self.minibuffer_panel_h = Some(want);
                 } else if let Some((anchor_row, anchor_h)) = self.resizing_lineage {
                     // Dragging the header UP grows the section; DOWN
                     // shrinks it. Clamped to the sidebar's caps at render.
@@ -11710,7 +11710,7 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 let was_resizing = self.resizing_list.is_some()
-                    || self.resizing_orchestrator_panel.is_some()
+                    || self.resizing_minibuffer_panel.is_some()
                     || self.dragging_terminal_scrollbar.is_some()
                     || self.dragging_list_scrollbar.is_some()
                     || self.dragging_lineage_scrollbar.is_some()
@@ -11719,7 +11719,7 @@ impl App {
                     || self.resizing_lineage.is_some()
                     || self.resizing_playbook_attachment.is_some();
                 self.resizing_list = None;
-                self.resizing_orchestrator_panel = None;
+                self.resizing_minibuffer_panel = None;
                 self.dragging_terminal_scrollbar = None;
                 self.dragging_list_scrollbar = None;
                 self.dragging_lineage_scrollbar = None;
@@ -11784,15 +11784,15 @@ impl App {
         fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
             c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
         }
-        if let Some(menu) = self.service_title_menu.clone() {
+        if let Some(menu) = self.operator_title_menu.clone() {
             if let Some(action) = menu.item_at(col, row) {
-                self.run_service_title_menu_action(menu.name, action).await;
+                self.run_operator_title_menu_action(menu.name, action).await;
                 return;
             }
             if menu.contains(col, row) {
                 return;
             }
-            self.service_title_menu = None;
+            self.operator_title_menu = None;
         }
         // Project dashboard member/activity rows open the target session.
         if self.activate_project_dashboard_hit(col, row) {
@@ -11926,13 +11926,13 @@ impl App {
                 self.dismiss_modal();
                 return;
             } else {
-                if let Some(dialog) = self.service_dialog.as_mut() {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
                     // The definition rows start immediately inside the
                     // one-cell border. Clicking a row selects it; keyboard
                     // typing/cycling then edits that field.
                     let field = row.saturating_sub(modal.y.saturating_add(1)) as usize;
-                    if field < SERVICE_FIELD_COUNT {
-                        dialog.focus = ServiceDialogFocus::Field(field);
+                    if field < OPERATOR_FIELD_COUNT {
+                        dialog.focus = OperatorDialogFocus::Field(field);
                     }
                     return;
                 }
@@ -12017,16 +12017,16 @@ impl App {
                 return;
             }
         }
-        if let Some(mb_area) = self.layout.minibuffer_area {
+        if let Some(mb_area) = self.layout.prompt_area {
             if contains(mb_area, col, row) {
-                // Orchestrator panel: click on a tool block toggles
-                // its expand state. The orchestrator's render area
+                // Minibuffer panel: click on a tool block toggles
+                // its expand state. The minibuffer's render area
                 // is the minibuffer rect minus the 1-row top border.
                 if matches!(
-                    self.minibuffer.as_ref().map(|m| &m.intent),
-                    Some(MinibufferIntent::Orchestrator)
+                    self.prompt.as_ref().map(|m| &m.intent),
+                    Some(PromptIntent::Minibuffer)
                 ) {
-                    if let Some(orch_id) = self.orchestrator_id.clone() {
+                    if let Some(orch_id) = self.minibuffer_id.clone() {
                         let inner = ratatui::layout::Rect {
                             x: mb_area.x,
                             y: mb_area.y + 1,
@@ -12038,7 +12038,7 @@ impl App {
                         }
                     }
                 }
-                self.click_minibuffer(mb_area, col, row).await;
+                self.click_prompt(mb_area, col, row).await;
                 return;
             }
         }
@@ -12107,30 +12107,30 @@ impl App {
                     return;
                 }
                 if row == close_y && col >= close_x_start && col < close_x_end {
-                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
-                        self.open_service_title_menu(name, view);
+                    if let Some(name) = self.selection.operator_name().map(str::to_owned) {
+                        self.open_operator_title_menu(name, view);
                         return;
                     }
                 }
                 if self
                     .layout
-                    .service_channel_back_hit
+                    .operator_channel_back_hit
                     .is_some_and(|area| Self::rect_contains(area, col, row))
                 {
-                    if let Some(dialog) = self.service_dialog.as_mut() {
+                    if let Some(dialog) = self.operator_dialog.as_mut() {
                         dialog.channel_editor = None;
                     }
                     return;
                 }
                 if let Some(hit) = self
                     .layout
-                    .service_channel_action_hits
+                    .operator_channel_action_hits
                     .iter()
                     .find(|hit| hit.contains(col, row))
                     .cloned()
                 {
-                    self.run_service_channel_action(
-                        &hit.service_name,
+                    self.run_operator_channel_action(
+                        &hit.operator_name,
                         hit.channel_index,
                         hit.action,
                     )
@@ -12139,7 +12139,7 @@ impl App {
                 }
                 if let Some(hit) = self
                     .layout
-                    .service_session_hits
+                    .operator_session_hits
                     .iter()
                     .find(|hit| hit.contains(col, row))
                     .cloned()
@@ -12147,27 +12147,27 @@ impl App {
                     self.select_session(hit.session_id);
                     return;
                 }
-                if self.selection.service_name().is_some() {
-                    // Clicking a service pane focuses it, and a focused
-                    // service view is its editor (spec 0175).
-                    self.collapse_orchestrator_panel_on_focus_change();
+                if self.selection.operator_name().is_some() {
+                    // Clicking a operator pane focuses it, and a focused
+                    // operator view is its editor (spec 0175).
+                    self.collapse_minibuffer_panel_on_focus_change();
                     self.focus = PaneFocus::View;
-                    self.sync_service_editor_with_selection();
+                    self.sync_operator_editor_with_selection();
                     // Channel rows scroll, so their positions come from the
                     // frame that painted them rather than a fixed offset.
                     if let Some(hit) = self
                         .layout
-                        .service_channel_row_hits
+                        .operator_channel_row_hits
                         .iter()
                         .find(|hit| hit.contains(col, row))
                         .cloned()
                     {
-                        if let Some(dialog) = self.service_dialog.as_mut() {
-                            dialog.focus = ServiceDialogFocus::Channel(hit.channel_index);
+                        if let Some(dialog) = self.operator_dialog.as_mut() {
+                            dialog.focus = OperatorDialogFocus::Channel(hit.channel_index);
                         }
-                        // A no-op for a channel this service does not own —
+                        // A no-op for a channel this operator does not own —
                         // the click still selects the row.
-                        self.open_edit_service_channel(hit.channel_index);
+                        self.open_edit_operator_channel(hit.channel_index);
                     }
                     return;
                 }
@@ -12195,7 +12195,7 @@ impl App {
                         return;
                     }
                 }
-                self.collapse_orchestrator_panel_on_focus_change();
+                self.collapse_minibuffer_panel_on_focus_change();
                 self.focus = PaneFocus::View;
                 return;
             }
@@ -12203,7 +12203,7 @@ impl App {
     }
 
     fn dismiss_modal(&mut self) {
-        // The service editor is deliberately absent here: it is the service
+        // The operator editor is deliberately absent here: it is the operator
         // view itself, not a modal over it, and Esc inside it reverts edits
         // rather than closing anything (spec 0175).
         if self.configure_popup.take().is_some() {
@@ -12231,20 +12231,20 @@ impl App {
         self.url_hit_at(col, row)
     }
 
-    /// Collapse the orchestrator panel (close the
-    /// `MinibufferIntent::Orchestrator` minibuffer) if it's
+    /// Collapse the minibuffer panel (close the
+    /// `PromptIntent::Minibuffer` minibuffer) if it's
     /// currently open. Called from every code path that moves
     /// focus to a different pane — clicking list / view / pin
     /// strip, the `SwitchFocus` and `FocusView` actions, the
     /// session-create completion handler. No-op when the panel
     /// isn't open or a different intent (palette, send-input,
     /// rename, etc.) is active.
-    fn collapse_orchestrator_panel_on_focus_change(&mut self) {
+    fn collapse_minibuffer_panel_on_focus_change(&mut self) {
         if matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::Orchestrator)
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::Minibuffer)
         ) {
-            self.minibuffer = None;
+            self.prompt = None;
         }
     }
 
@@ -12355,8 +12355,8 @@ impl App {
     /// view is on a PTY-backed session in terminal mode. vt100 clamps the
     /// offset to its actual buffer size internally on `set_scrollback`.
     fn adjust_scrollback(&mut self, delta: i32) {
-        if self.is_orchestrator_panel_open() {
-            self.orchestrator_scrollback = adjusted_scrollback(self.orchestrator_scrollback, delta);
+        if self.is_minibuffer_panel_open() {
+            self.minibuffer_scrollback = adjusted_scrollback(self.minibuffer_scrollback, delta);
             return;
         }
         if self.view != ViewMode::Terminal || !self.in_pty_session() {
@@ -12406,7 +12406,7 @@ impl App {
 
     /// A list item's display height under the current view mode: full-mode
     /// session cards take three rows, full-mode rows that head a subtree
-    /// (project headers, services) take two, and everything else (archived
+    /// (project headers, operators) take two, and everything else (archived
     /// disclosure rows, every compact-mode row) takes one. A project header
     /// also carries its leading margin (see
     /// [`Self::list_project_margin_rows`]), so the rows above it belong to
@@ -12417,11 +12417,11 @@ impl App {
         }
         match &items[idx] {
             ListItem::Session { .. } => 3,
-            // A project header or a service heads a subtree, so full mode
+            // A project header or a operator heads a subtree, so full mode
             // gives it the same closing rail/breathing row a session card
             // gets. Archived-disclosure rows head nothing and stay flat.
             ListItem::GroupHeader { .. } => 2 + self.list_project_margin_rows(items, idx),
-            ListItem::Service { .. } => 2,
+            ListItem::Operator { .. } => 2,
             ListItem::ArchivedRow { .. } => 1,
         }
     }
@@ -12432,7 +12432,7 @@ impl App {
     /// The gap is NORMALIZED, not additive: rows already trailing the item
     /// above count toward it, so every project sits under the same amount of
     /// air no matter what precedes it. A session card, a project header and a
-    /// service each end in one blank/rail row and so need one more; an
+    /// operator each end in one blank/rail row and so need one more; an
     /// archived-disclosure row ends in nothing and needs the full gap. A
     /// project opening the list needs none — there is nothing above to be set
     /// apart from.
@@ -12448,7 +12448,7 @@ impl App {
         let trailing_blank = match prev {
             ListItem::Session { .. }
             | ListItem::GroupHeader { .. }
-            | ListItem::Service { .. } => 1,
+            | ListItem::Operator { .. } => 1,
             ListItem::ArchivedRow { .. } => 0,
         };
         PROJECT_MARGIN_ROWS.saturating_sub(trailing_blank)
@@ -12509,15 +12509,15 @@ impl App {
         offset
     }
 
-    pub(crate) fn is_orchestrator_panel_open(&self) -> bool {
+    pub(crate) fn is_minibuffer_panel_open(&self) -> bool {
         matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::Orchestrator)
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::Minibuffer)
         )
     }
 
     fn can_scroll_pty_history(&self) -> bool {
-        self.is_orchestrator_panel_open()
+        self.is_minibuffer_panel_open()
             || (self.view == ViewMode::Terminal && self.in_pty_session())
     }
 
@@ -12836,9 +12836,9 @@ impl App {
         // The playbook captures keystrokes only while it is the topmost input
         // surface *and* the view pane holds focus. If a minibuffer/palette
         // overlay is open over it (e.g. `C-x x` opened the command palette or
-        // the operator input), that overlay must capture input instead —
+        // the user input), that overlay must capture input instead —
         // otherwise typed keys leak into the playbook buffer and the
-        // palette/operator is unusable. The `C-x` chord that *opens* an overlay
+        // palette/minibuffer is unusable. The `C-x` chord that *opens* an overlay
         // still reaches the playbook global handler because no minibuffer exists
         // yet at that point; once the overlay is open the minibuffer block below
         // takes over.
@@ -12853,7 +12853,7 @@ impl App {
             .playbook_popup
             .as_ref()
             .is_some_and(|popup| !popup.terminal_focus)
-            && self.minibuffer.is_none()
+            && self.prompt.is_none()
             && self.focus == PaneFocus::View
         {
             if self.handle_playbook_global_key(key).await {
@@ -12869,44 +12869,44 @@ impl App {
             self.handle_remote_control_key(key).await;
             return;
         }
-        // Minibuffer captures all input when open — with one exception:
-        // the orchestrator intent is just a focus marker for a
-        // PTY-backed panel, so keys go to the orchestrator session's
+        // Prompt captures all input when open — with one exception:
+        // the minibuffer intent is just a focus marker for a
+        // PTY-backed panel, so keys go to the minibuffer session's
         // PTY (with the standard `C-x` chord escape) rather than into
         // the minibuffer's text input.
-        if let Some(mb) = &self.minibuffer {
-            if matches!(mb.intent, MinibufferIntent::Orchestrator) {
-                self.handle_orchestrator_key(key).await;
+        if let Some(mb) = &self.prompt {
+            if matches!(mb.intent, PromptIntent::Minibuffer) {
+                self.handle_minibuffer_key(key).await;
                 return;
             }
-            self.handle_minibuffer_key(key).await;
+            self.handle_prompt_key(key).await;
             return;
         }
-        // Service-view commands are a normal pane-level fast path, but they
+        // Operator-view commands are a normal pane-level fast path, but they
         // must run only after every transient keyboard surface above has had
-        // first claim. Otherwise a service's default `return` path consumes
+        // first claim. Otherwise a operator's default `return` path consumes
         // keys from an already-open remote-control dialog or minibuffer.
-        if self.focus == PaneFocus::View && self.selection.service_name().is_some() {
-            // A focused service view is its editor (spec 0175), so the editor
+        if self.focus == PaneFocus::View && self.selection.operator_name().is_some() {
+            // A focused operator view is its editor (spec 0175), so the editor
             // owns text and navigation here. It stands aside for `C-x` chords,
             // and Esc can hand focus back to the list without closing it —
             // from there these keys drive the list instead.
-            if self.service_dialog.is_some() && self.handle_service_dialog_key(key).await {
+            if self.operator_dialog.is_some() && self.handle_operator_dialog_key(key).await {
                 return;
             }
-            // Reached only when the selected service has no definition to edit
+            // Reached only when the selected operator has no definition to edit
             // (deleted underneath the pane, or not yet loaded).
             match key.code {
                 KeyCode::Char('e') | KeyCode::Enter => {
-                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
-                        self.open_edit_service_view(&name);
+                    if let Some(name) = self.selection.operator_name().map(str::to_owned) {
+                        self.open_edit_operator_view(&name);
                     }
                     return;
                 }
                 KeyCode::Char('a') => {
-                    if let Some(name) = self.selection.service_name().map(str::to_owned) {
-                        if self.open_edit_service_view(&name) {
-                            self.open_new_service_channel();
+                    if let Some(name) = self.selection.operator_name().map(str::to_owned) {
+                        if self.open_edit_operator_view(&name) {
+                            self.open_new_operator_channel();
                         }
                     }
                     return;
@@ -12916,9 +12916,9 @@ impl App {
             let is_ctrl_x = matches!(key.code, KeyCode::Char('x'))
                 && key.modifiers.contains(KeyModifiers::CONTROL);
             // Once C-x has started a chord, let its continuation reach the
-            // global keymap. Without this guard the service-view fast path
+            // global keymap. Without this guard the operator-view fast path
             // returns on the second key, so bindings such as C-x . appear to
-            // do nothing while a service is focused.
+            // do nothing while a operator is focused.
             if !is_ctrl_x && self.chord_state.is_empty() {
                 return;
             }
@@ -12939,7 +12939,7 @@ impl App {
         }
 
         if self.should_autofocus_view_from_list(key) {
-            self.collapse_orchestrator_panel_on_focus_change();
+            self.collapse_minibuffer_panel_on_focus_change();
             self.focus = PaneFocus::View;
         }
 
@@ -13170,7 +13170,7 @@ impl App {
         F: FnOnce(&str) -> Result<ClipboardCopyOutcome>,
     {
         let Some((noun, value)) = self.selection.fleet_identity() else {
-            self.set_status("copy id: select a session, project, or service".to_string());
+            self.set_status("copy id: select a session, project, or operator".to_string());
             return;
         };
         let value = value.to_string();
@@ -13212,15 +13212,15 @@ impl App {
                 self.refresh_selected_transcript().await;
             }
             EnterInsert => {
-                self.collapse_orchestrator_panel_on_focus_change();
+                self.collapse_minibuffer_panel_on_focus_change();
                 self.focus = PaneFocus::View;
                 if !self.set_vim_insert_if_captured() {
                     if let Some(id) = self.selected_id() {
-                        self.minibuffer = Some(Minibuffer {
+                        self.prompt = Some(Prompt {
                             prompt: format!("Send to {}: ", short_id(&id)),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::SendInput { session_id: id },
+                            intent: PromptIntent::SendInput { session_id: id },
                             error: None,
                         });
                     } else {
@@ -13230,11 +13230,11 @@ impl App {
             }
             OpenSendInput => {
                 if let Some(id) = self.selected_id() {
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Send to {}: ", short_id(&id)),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::SendInput { session_id: id },
+                        intent: PromptIntent::SendInput { session_id: id },
                         error: None,
                     });
                 } else {
@@ -13247,11 +13247,11 @@ impl App {
                 }
                 self.harness_picker_selected = 0;
                 self.harness_picker_filter_active = true;
-                self.minibuffer = Some(Minibuffer {
+                self.prompt = Some(Prompt {
                     prompt: "New session: ".to_string(),
                     input: String::new(),
                     cursor: 0,
-                    intent: MinibufferIntent::NewSessionHarness,
+                    intent: PromptIntent::NewSessionHarness,
                     error: None,
                 });
             }
@@ -13275,11 +13275,11 @@ impl App {
                 self.turn_picker_entries = vec![turn_picker_now_row()];
                 self.turn_picker_selected = 0;
                 self.turn_picker_loading = true;
-                self.minibuffer = Some(Minibuffer {
+                self.prompt = Some(Prompt {
                     prompt: "Fork session: ".to_string(),
                     input: String::new(),
                     cursor: 0,
-                    intent: MinibufferIntent::ForkTurnPick {
+                    intent: PromptIntent::ForkTurnPick {
                         source_session_id: id.clone(),
                     },
                     error: None,
@@ -13324,11 +13324,11 @@ impl App {
                     };
                     let current = s.title.clone().unwrap_or_default();
                     let cursor = current.chars().count();
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Rename {} to: ", short_id(&id)),
                         input: current,
                         cursor,
-                        intent: MinibufferIntent::Rename { session_id: id },
+                        intent: PromptIntent::Rename { session_id: id },
                         error: None,
                     });
                 }
@@ -13338,15 +13338,15 @@ impl App {
                     };
                     let current = g.name.clone();
                     let cursor = current.chars().count();
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: "Rename project to: ".to_string(),
                         input: current,
                         cursor,
-                        intent: MinibufferIntent::GroupRename { group_id: id },
+                        intent: PromptIntent::GroupRename { group_id: id },
                         error: None,
                     });
                 }
-                Selection::Service(_) => self.set_status("edit the service view directly".into()),
+                Selection::Operator(_) => self.set_status("edit the operator view directly".into()),
                 Selection::None => self.set_status("nothing selected".into()),
                 // The "N archived" disclosure row has no name to rename.
                 Selection::ArchivedRow(_) => {}
@@ -13356,18 +13356,18 @@ impl App {
                 Selection::Session(id) => {
                     // The `[d]`/`[a]`/`[m]`/`[N]` choice cluster and its
                     // descriptions render as clickable spans (spec 0075,
-                    // see `ui::minibuffer_choice_suffix`) — this prompt only
+                    // see `ui::prompt_choice_suffix`) — this prompt only
                     // carries the data-dependent question prefix. Forks get
                     // an extra `[m] merge and archive` option.
                     let is_fork = self
                         .sessions
                         .iter()
                         .any(|s| s.id == id && s.forked_from.is_some());
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Session {}: ", short_id(&id)),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::DeleteConfirm {
+                        intent: PromptIntent::DeleteConfirm {
                             session_id: id,
                             is_fork,
                         },
@@ -13381,33 +13381,33 @@ impl App {
                         .find(|g| g.id == id)
                         .map(|g| g.name.clone())
                         .unwrap_or_default();
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Delete project '{}'? ", name),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::GroupDeleteConfirm { group_id: id },
+                        intent: PromptIntent::GroupDeleteConfirm { group_id: id },
                         error: None,
                     });
                 }
-                Selection::Service(name) => {
+                Selection::Operator(name) => {
                     // An unsaved create draft is not on the daemon yet — kill
                     // is discard, the same as Esc in create mode.
-                    if self.service_dialog.as_ref().is_some_and(|dialog| {
-                        dialog.mode == ServiceDialogMode::Create
-                            && dialog.service.name == name
+                    if self.operator_dialog.as_ref().is_some_and(|dialog| {
+                        dialog.mode == OperatorDialogMode::Create
+                            && dialog.operator.name == name
                     }) {
-                        self.escape_service_dialog();
+                        self.escape_operator_dialog();
                         return;
                     }
-                    if !self.services.iter().any(|service| service.name == name) {
-                        self.set_status(format!("service {name} not found"));
+                    if !self.operators.iter().any(|operator| operator.name == name) {
+                        self.set_status(format!("operator {name} not found"));
                         return;
                     }
-                    self.minibuffer = Some(Minibuffer {
-                        prompt: format!("Delete service {name}? "),
+                    self.prompt = Some(Prompt {
+                        prompt: format!("Delete operator {name}? "),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::ServiceDeleteConfirm { name },
+                        intent: PromptIntent::OperatorDeleteConfirm { name },
                         error: None,
                     });
                 }
@@ -13433,7 +13433,7 @@ impl App {
                         } else {
                             format!(", skips {native_mirrors} native mirror(s)")
                         };
-                        self.minibuffer = Some(Minibuffer {
+                        self.prompt = Some(Prompt {
                             prompt: format!(
                                 "Delete all {} managed archived session(s) in {}{}? (drops transcript + worktree) ",
                                 ids.len(),
@@ -13442,7 +13442,7 @@ impl App {
                             ),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::ArchivedDeleteConfirm { section },
+                            intent: PromptIntent::ArchivedDeleteConfirm { section },
                             error: None,
                         });
                     }
@@ -13495,9 +13495,9 @@ impl App {
                 self.toggle_playbook_terminal_focus();
             }
             OpenSuggestions => {
-                if self.selection.service_name().is_some() {
+                if self.selection.operator_name().is_some() {
                     self.set_status(
-                        "prompt suggestions are available in session views, not service views"
+                        "prompt suggestions are available in session views, not operator views"
                             .to_string(),
                     );
                 } else {
@@ -13528,7 +13528,7 @@ impl App {
                 }
             }
             OpenCommandPalette => {
-                self.open_minibuffer_for_command();
+                self.open_prompt_for_command();
             }
             OpenSwitchSession => {
                 self.open_session_picker(SessionPickerPurpose::Switch);
@@ -13544,7 +13544,7 @@ impl App {
                     if matches!(self.zoom, ZoomMode::List) {
                         self.zoom = ZoomMode::View;
                     }
-                    self.collapse_orchestrator_panel_on_focus_change();
+                    self.collapse_minibuffer_panel_on_focus_change();
                     self.focus = PaneFocus::View;
                     self.set_vim_insert_if_captured();
                     self.set_status("focus: view".into());
@@ -13562,7 +13562,7 @@ impl App {
                     return;
                 }
                 // Project dashboard: Enter from the list focuses the pane so
-                // the operator can move the member cursor; Enter again (view
+                // the user can move the member cursor; Enter again (view
                 // already focused) opens the highlighted member.
                 if let Some(project_id) = self.selection.group_id().map(str::to_owned) {
                     if self.focus == PaneFocus::View {
@@ -13573,7 +13573,7 @@ impl App {
                         ZoomMode::List => self.zoom = ZoomMode::View,
                         ZoomMode::View | ZoomMode::None => {}
                     }
-                    self.collapse_orchestrator_panel_on_focus_change();
+                    self.collapse_minibuffer_panel_on_focus_change();
                     self.focus = PaneFocus::View;
                     return;
                 }
@@ -13592,11 +13592,11 @@ impl App {
                     if s.state.is_terminal() {
                         let session_id = s.id.clone();
                         let short = short_id(&session_id).to_string();
-                        self.minibuffer = Some(Minibuffer {
+                        self.prompt = Some(Prompt {
                             prompt: format!("Restart session {short}? "),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::RestartConfirm { session_id },
+                            intent: PromptIntent::RestartConfirm { session_id },
                             error: None,
                         });
                         return;
@@ -13612,7 +13612,7 @@ impl App {
                     }
                     ZoomMode::View | ZoomMode::None => {}
                 }
-                self.collapse_orchestrator_panel_on_focus_change();
+                self.collapse_minibuffer_panel_on_focus_change();
                 self.focus = PaneFocus::View;
                 self.set_vim_insert_if_captured();
             }
@@ -13621,7 +13621,7 @@ impl App {
                 // zoomed (and focused). In normal layout it cycles
                 // list plus all visible main windows.
                 self.reset_vim_mode();
-                self.collapse_orchestrator_panel_on_focus_change();
+                self.collapse_minibuffer_panel_on_focus_change();
                 match self.zoom {
                     ZoomMode::List => {
                         self.zoom = ZoomMode::View;
@@ -13733,7 +13733,7 @@ impl App {
                     if let Err(e) = self.client.set_project_collapsed(&id, false).await {
                         self.set_status(format!("expand failed: {e}"));
                     }
-                } else if let Some(key) = self.selected_service_children_key() {
+                } else if let Some(key) = self.selected_operator_children_key() {
                     self.children_collapsed.remove(&key);
                 } else if self.focus == PaneFocus::List {
                     if let Some(id) = self.selected_session_has_children() {
@@ -13749,7 +13749,7 @@ impl App {
                     if let Err(e) = self.client.set_project_collapsed(&id, true).await {
                         self.set_status(format!("collapse failed: {e}"));
                     }
-                } else if let Some(key) = self.selected_service_children_key() {
+                } else if let Some(key) = self.selected_operator_children_key() {
                     self.children_collapsed.insert(key);
                 } else if self.focus == PaneFocus::List {
                     if let Some(id) = self.selected_session_has_children() {
@@ -13815,8 +13815,8 @@ impl App {
             }
             ScrollTop => {
                 if self.can_scroll_pty_history() {
-                    if self.is_orchestrator_panel_open() {
-                        self.orchestrator_scrollback = SCROLLBACK_MAX;
+                    if self.is_minibuffer_panel_open() {
+                        self.minibuffer_scrollback = SCROLLBACK_MAX;
                     } else {
                         let active_window = Some(self.active_window_id);
                         self.set_scrollback_for_window(active_window, SCROLLBACK_MAX);
@@ -13828,8 +13828,8 @@ impl App {
             }
             ScrollBottom => {
                 if self.can_scroll_pty_history() {
-                    if self.is_orchestrator_panel_open() {
-                        self.orchestrator_scrollback = 0;
+                    if self.is_minibuffer_panel_open() {
+                        self.minibuffer_scrollback = 0;
                     } else {
                         let active_window = Some(self.active_window_id);
                         self.set_scrollback_for_window(active_window, 0);
@@ -13864,36 +13864,36 @@ impl App {
                 self.open_configure_popup().await;
             }
             OpenRestartDaemonConfirm => {
-                self.minibuffer = Some(Minibuffer {
+                self.prompt = Some(Prompt {
                     prompt: "Restart daemon? ".to_string(),
                     input: String::new(),
                     cursor: 0,
-                    intent: MinibufferIntent::RestartDaemonConfirm,
+                    intent: PromptIntent::RestartDaemonConfirm,
                     error: None,
                 });
             }
             OpenConfigRestartConfirm => {
-                // Name the waiting fields in the prompt: the operator is being
+                // Name the waiting fields in the prompt: the user is being
                 // asked to drop every attached client, and "Restart daemon?"
                 // alone does not say what they get for it.
-                self.minibuffer = Some(Minibuffer {
+                self.prompt = Some(Prompt {
                     prompt: format!(
                         "Restart daemon to apply {}? ",
                         self.config_restart_required.join(", ")
                     ),
                     input: String::new(),
                     cursor: 0,
-                    intent: MinibufferIntent::RestartDaemonConfirm,
+                    intent: PromptIntent::RestartDaemonConfirm,
                     error: None,
                 });
             }
             OpenUpgradeConfirm => {
                 if let Some(version) = self.latest_version.clone() {
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Upgrade to {version} and restart the daemon? "),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::UpgradeConfirm { version },
+                        intent: PromptIntent::UpgradeConfirm { version },
                         error: None,
                     });
                 }
@@ -13928,15 +13928,15 @@ impl App {
         }
     }
 
-    /// Key handler for the orchestrator panel: same shape as the main
+    /// Key handler for the minibuffer panel: same shape as the main
     /// view's PTY mode (C-x chord escape, `C-x C-x` to forward a
     /// literal C-x byte). `Esc` closes the panel; the next `C-x x`
     /// reopens it. All non-chord keys are encoded to PTY bytes and
-    /// forwarded to the orchestrator session.
-    async fn handle_orchestrator_key(&mut self, key: KeyEvent) {
-        let Some(orch_id) = self.orchestrator_id.clone() else {
-            // Orchestrator went away — fall back to palette mode.
-            self.minibuffer = None;
+    /// forwarded to the minibuffer session.
+    async fn handle_minibuffer_key(&mut self, key: KeyEvent) {
+        let Some(orch_id) = self.minibuffer_id.clone() else {
+            // Prompt went away — fall back to palette mode.
+            self.prompt = None;
             return;
         };
         let is_ctrl_x =
@@ -13946,7 +13946,7 @@ impl App {
         if !self.chord_state.is_empty() && is_ctrl_x {
             self.chord_state = ChordState::default();
             self.chord_label.clear();
-            self.queue_pty_input(orch_id, vec![0x18], "orchestrator pty_input");
+            self.queue_pty_input(orch_id, vec![0x18], "minibuffer pty_input");
             return;
         }
         // Start of a chord or continuation: dispatch through the keymap.
@@ -13962,15 +13962,15 @@ impl App {
         }
         // Esc closes the panel without sending anything to the PTY.
         if matches!(key.code, KeyCode::Esc) {
-            self.minibuffer = None;
+            self.prompt = None;
             return;
         }
-        // Everything else goes to the orchestrator's PTY.
+        // Everything else goes to the minibuffer's PTY.
         if let Some(bytes) = encode_key_to_bytes(key) {
-            // Typing into operator snaps back to live output, matching the main
+            // Typing into minibuffer snaps back to live output, matching the main
             // PTY pane's behavior.
-            self.orchestrator_scrollback = 0;
-            self.queue_pty_input(orch_id, bytes, "orchestrator pty_input");
+            self.minibuffer_scrollback = 0;
+            self.queue_pty_input(orch_id, bytes, "minibuffer pty_input");
         }
     }
     /// Report the active theme's painted background to the daemon (spec
@@ -14310,9 +14310,9 @@ impl App {
     /// the event was queued for the child; `false` falls back to construct's
     /// own scrollback.
     fn forward_op_xy_scroll_to_child(&mut self, down: bool) -> bool {
-        // The orchestrator panel keeps its own scrollback semantics — the
+        // The minibuffer panel keeps its own scrollback semantics — the
         // encoder scrolls the panel, mirroring `adjust_scrollback`.
-        if self.is_orchestrator_panel_open() {
+        if self.is_minibuffer_panel_open() {
             return false;
         }
         if self.view != ViewMode::Terminal || !self.in_pty_session() {
@@ -14420,9 +14420,9 @@ impl App {
     }
 
     /// Execute a slash-style command (`zoom`, `new`, `quit`, ...) with
-    /// no LLM involvement. Used both by the orchestrator panel (when
+    /// no LLM involvement. Used both by the minibuffer panel (when
     /// input starts with `/`) and by the static palette (fallback when
-    /// no orchestrator is present).
+    /// no minibuffer is present).
     pub(super) async fn run_slash_command(&mut self, cmd: &str) {
         let cmd = cmd.trim();
         // Split into verb + remaining args. Commands that don't
@@ -14534,87 +14534,89 @@ impl App {
                     .split_whitespace()
                     .next()
                     .filter(|value| !value.is_empty())
-                    .unwrap_or("service")
+                    .unwrap_or("operator")
                     .to_string();
-                self.open_new_service_view(suggested);
+                self.open_new_operator_view(suggested);
             }
-            "services" => {
-                self.refresh_services().await;
-                if self.services.is_empty() {
-                    self.set_status("services: none — run /serve to create one".to_string())
+            // `/services` accepted as a pre-rename alias.
+            "operators" | "services" => {
+                self.refresh_operators().await;
+                if self.operators.is_empty() {
+                    self.set_status("operators: none — run /serve to create one".to_string())
                 } else {
                     self.set_status(format!(
-                        "services: {}",
-                        self.services
+                        "operators: {}",
+                        self.operators
                             .iter()
-                            .map(|service| format!(
+                            .map(|operator| format!(
                                 "{}{}",
-                                service.name,
-                                if service.paused { " (paused)" } else { "" }
+                                operator.name,
+                                if operator.paused { " (paused)" } else { "" }
                             ))
                             .collect::<Vec<_>>()
                             .join(", ")
                     ));
                 }
             }
-            "service" => {
+            // `/service` accepted as a pre-rename alias.
+            "operator" | "service" => {
                 let mut words = arg.split_whitespace();
                 let action = words.next().unwrap_or("");
                 let name = words.next().unwrap_or("");
                 let requested_channel = words.next().map(str::to_string);
-                self.refresh_services().await;
+                self.refresh_operators().await;
                 let found = self
-                    .services
+                    .operators
                     .iter()
-                    .find(|service| service.name == name)
+                    .find(|operator| operator.name == name)
                     .cloned();
                 match (action, found) {
-                    ("edit", Some(service)) => {
-                        self.open_edit_service_view(&service.name);
+                    ("edit", Some(operator)) => {
+                        self.open_edit_operator_view(&operator.name);
                     }
-                    ("pause" | "resume", Some(mut service)) => {
-                        service.paused = action == "pause";
+                    ("pause" | "resume", Some(mut operator)) => {
+                        operator.paused = action == "pause";
                         match self
                             .client
-                            .put_service(construct_protocol::ServicePutParams { service })
+                            .put_operator(construct_protocol::OperatorPutParams { operator })
                             .await
                         {
                             Ok(result) => {
-                                self.refresh_services().await;
+                                self.refresh_operators().await;
                                 self.set_status(format!(
                                     "{} {}",
-                                    result.service.name,
+                                    result.operator.name,
                                     result.applied.summary()
                                 ));
                             }
                             Err(error) => {
-                                self.set_status(format!("service update failed: {error}"))
+                                self.set_status(format!("operator update failed: {error}"))
                             }
                         }
                     }
-                    ("rotate-token", Some(service)) => {
-                        let channel_id = service
+                    ("rotate-token", Some(operator)) => {
+                        let channel_id = operator
                             .channels
                             .iter()
                             .find(|channel| channel.kind == "http")
                             .map(|channel| channel.id.clone());
                         let Some(channel_id) = channel_id else {
                             self.set_status(format!(
-                                "service {} has no HTTP channel",
-                                service.name
+                                "operator {} has no HTTP channel",
+                                operator.name
                             ));
                             return;
                         };
                         match self
                             .client
-                            .rotate_service_channel_secret(&service.name, &channel_id)
+                            .rotate_operator_channel_secret(&operator.name, &channel_id)
                             .await
                         {
                             Ok(result) => {
-                                self.refresh_services().await;
+                                self.refresh_operators().await;
                                 self.set_status(format!(
                                     "new credential for {} / {}: {} (shown once; restart to apply)",
-                                    service.name,
+                                    operator.name,
                                     result.channel.id,
                                     result.new_secret.unwrap_or_default()
                                 ));
@@ -14624,9 +14626,9 @@ impl App {
                             }
                         }
                     }
-                    ("publish" | "unpublish", Some(service)) => {
+                    ("publish" | "unpublish", Some(operator)) => {
                         let channel_id = requested_channel.or_else(|| {
-                            service
+                            operator
                                 .channels
                                 .iter()
                                 .find(|channel| channel.enabled)
@@ -14634,16 +14636,16 @@ impl App {
                         });
                         let Some(channel_id) = channel_id else {
                             self.set_status(format!(
-                                "service {} has no enabled channel",
-                                service.name
+                                "operator {} has no enabled channel",
+                                operator.name
                             ));
                             return;
                         };
                         if action == "publish" {
                             match self
                                 .client
-                                .publish_service_channel(
-                                    &service.name,
+                                .publish_operator_channel(
+                                    &operator.name,
                                     &channel_id,
                                     "construct",
                                 )
@@ -14651,7 +14653,7 @@ impl App {
                             {
                                 Ok(publication) => self.set_status(format!(
                                     "publishing {}/{} via {} ({:?})",
-                                    service.name,
+                                    operator.name,
                                     channel_id,
                                     publication.provider,
                                     publication.phase
@@ -14663,12 +14665,12 @@ impl App {
                         } else {
                             match self
                                 .client
-                                .unpublish_service_channel(&service.name, &channel_id)
+                                .unpublish_operator_channel(&operator.name, &channel_id)
                                 .await
                             {
                                 Ok(_) => self.set_status(format!(
                                     "{}/{} is loopback-only",
-                                    service.name, channel_id
+                                    operator.name, channel_id
                                 )),
                                 Err(error) => {
                                     self.set_status(format!("channel unpublish failed: {error}"))
@@ -14676,19 +14678,19 @@ impl App {
                             }
                         }
                     }
-                    ("delete", Some(service)) => {
-                        self.minibuffer = Some(Minibuffer {
-                            prompt: format!("Delete service {}? ", service.name),
+                    ("delete", Some(operator)) => {
+                        self.prompt = Some(Prompt {
+                            prompt: format!("Delete operator {}? ", operator.name),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::ServiceDeleteConfirm {
-                                name: service.name,
+                            intent: PromptIntent::OperatorDeleteConfirm {
+                                name: operator.name,
                             },
                             error: None,
                         });
                     }
                     _ => self.set_status(
-                        "service: use edit|pause|resume|publish|unpublish|rotate-token|delete <name> [channel]".to_string(),
+                        "operator: use edit|pause|resume|publish|unpublish|rotate-token|delete <name> [channel]".to_string(),
                     ),
                 }
             }
@@ -14853,7 +14855,7 @@ impl App {
     /// re-opens to refresh. Click handlers in the popup itself can
     /// issue `tool_action(kill)` to terminate running tasks.
     pub async fn open_tasks_popup(&mut self) {
-        let Some(id) = self.selected_id().or_else(|| self.orchestrator_id.clone()) else {
+        let Some(id) = self.selected_id().or_else(|| self.minibuffer_id.clone()) else {
             self.set_status("no session selected".into());
             return;
         };
@@ -15211,17 +15213,17 @@ impl App {
         self.show_remote_chooser(None).await;
     }
 
-    /// Dismiss the dialog, and with it the orchestrator panel it was
+    /// Dismiss the dialog, and with it the minibuffer panel it was
     /// launched from — so a single Esc puts the user back in whichever
     /// session they had focused before typing the slash, instead of
     /// leaving the panel eating their keystrokes.
     fn close_remote_control_popup(&mut self) {
         self.remote_control_popup = None;
         if matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::Orchestrator)
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::Minibuffer)
         ) {
-            self.minibuffer = None;
+            self.prompt = None;
         }
     }
 
@@ -16923,9 +16925,9 @@ mod tests {
                 "project",
             ),
             (
-                Selection::Service("service-name".into()),
-                "service-name",
-                "service",
+                Selection::Operator("operator-name".into()),
+                "operator-name",
+                "operator",
             ),
         ] {
             app.selection = selection;
@@ -16947,19 +16949,19 @@ mod tests {
         app.copy_selected_id_with(|_| panic!("no selection must not touch the clipboard"));
         assert_eq!(
             app.status.as_ref().map(|(message, _)| message.as_str()),
-            Some("copy id: select a session, project, or service")
+            Some("copy id: select a session, project, or operator")
         );
         server.abort();
     }
 
     #[test]
-    fn operator_monolog_text_filters_noise() {
-        assert_eq!(operator_monolog_text(""), None);
-        assert_eq!(operator_monolog_text("   "), None);
-        assert_eq!(operator_monolog_text("noted"), None);
-        assert_eq!(operator_monolog_text("  Noted.  "), None);
+    fn minibuffer_monolog_text_filters_noise() {
+        assert_eq!(minibuffer_monolog_text(""), None);
+        assert_eq!(minibuffer_monolog_text("   "), None);
+        assert_eq!(minibuffer_monolog_text("noted"), None);
+        assert_eq!(minibuffer_monolog_text("  Noted.  "), None);
         assert_eq!(
-            operator_monolog_text("  'run using smith' is waiting at the trust prompt.  ")
+            minibuffer_monolog_text("  'run using smith' is waiting at the trust prompt.  ")
                 .as_deref(),
             Some("'run using smith' is waiting at the trust prompt.")
         );
@@ -16968,7 +16970,7 @@ mod tests {
     /// Regression guard for the input-priority optimization (#2).
     ///
     /// Under heavy background PTY output `notifications.recv()` is
-    /// almost always ready, so an unbiased `select!` services that
+    /// almost always ready, so an unbiased `select!` operators that
     /// feed work about as often as input — adding keystroke→render
     /// latency in the focused session (the "cursor hangs then jumps
     /// 3-5 chars" report). The fix biases the loop toward input:
@@ -17113,7 +17115,7 @@ mod tests {
             }],
             main_window_dividers: Vec::new(),
             matrix_rain_area: None,
-            minibuffer_area: Some(Rect::new(0, 29, 100, 4)),
+            prompt_area: Some(Rect::new(0, 29, 100, 4)),
             last_chat_areas: std::collections::HashMap::new(),
             modeline_approval_mode_hit: None,
             modeline_model_hit: None,
@@ -17133,9 +17135,9 @@ mod tests {
             list_scrollbar: None,
             shortcut_hints: Vec::new(),
             tutorial_card_area: None,
-            minibuffer_harness_hits: Vec::new(),
-            minibuffer_turn_hits: Vec::new(),
-            minibuffer_choice_hits: Vec::new(),
+            prompt_harness_hits: Vec::new(),
+            prompt_turn_hits: Vec::new(),
+            prompt_choice_hits: Vec::new(),
             modal_area: None,
             remote_control_hits: Vec::new(),
             session_title_name_hits: Vec::new(),
@@ -17150,11 +17152,11 @@ mod tests {
             lineage_vscrollbar: None,
             lineage_hscrollbar: None,
             lineage_box_hits: Vec::new(),
-            service_session_hits: Vec::new(),
-            service_channel_row_hits: Vec::new(),
-            service_channel_action_hits: Vec::new(),
-            service_channel_back_hit: None,
-            service_token_graphs: Vec::new(),
+            operator_session_hits: Vec::new(),
+            operator_channel_row_hits: Vec::new(),
+            operator_channel_action_hits: Vec::new(),
+            operator_channel_back_hit: None,
+            operator_token_graphs: Vec::new(),
             lineage_subagent_toggle_hits: Vec::new(),
             lineage_segment_tooltip: None,
             playbook_title_run_hit: None,
@@ -17183,10 +17185,10 @@ mod tests {
             dynamic_ui_widget_hits: Vec::new(),
             dynamic_ui_panel_close_hits: Vec::new(),
             dynamic_ui_inline_hit: None,
-            matrix_operator_loop_hit: None,
+            matrix_minibuffer_loop_hit: None,
             matrix_panel_mode_hit: None,
             matrix_token_graph_area: None,
-            matrix_operator_title_hit: None,
+            matrix_minibuffer_title_hit: None,
             matrix_theme_hit: None,
             list_title_tally_hits: Vec::new(),
             matrix_widget_hits: Vec::new(),
@@ -17223,8 +17225,8 @@ mod tests {
     }
 
     #[test]
-    fn shared_round_trip_preserves_service_panes() {
-        let tree = MainWindowTree::single(1, Selection::Service("assistant".into()));
+    fn shared_round_trip_preserves_operator_panes() {
+        let tree = MainWindowTree::single(1, Selection::Operator("assistant".into()));
         let back = MainWindowTree::from_shared(&tree.to_shared());
         assert_eq!(back, tree);
     }
@@ -17260,7 +17262,7 @@ mod tests {
         let incoming = construct_protocol::LayoutNode::Leaf {
             id: 1,
             session_id: None,
-            service_name: None,
+            operator_name: None,
         };
         assert_eq!(
             local.merge_shared(&incoming),
@@ -17277,12 +17279,12 @@ mod tests {
             first: Box::new(construct_protocol::LayoutNode::Leaf {
                 id: 1,
                 session_id: Some("a".into()),
-                service_name: None,
+                operator_name: None,
             }),
             second: Box::new(construct_protocol::LayoutNode::Leaf {
                 id: 2,
                 session_id: Some("b".into()),
-                service_name: None,
+                operator_name: None,
             }),
         };
         let merged = local.merge_shared(&incoming);
@@ -17298,8 +17300,8 @@ mod tests {
             last_reported_view: None,
             sessions,
             groups: Vec::new(),
-            services: Vec::new(),
-            service_channel_catalog: Vec::new(),
+            operators: Vec::new(),
+            operator_channel_catalog: Vec::new(),
             selection: Selection::Session("s1".into()),
             focus: PaneFocus::View,
             main_windows: MainWindowTree::single(1, Selection::Session("s1".into())),
@@ -17314,19 +17316,19 @@ mod tests {
             transcript_session: None,
             transcript_scroll: 0,
             chat_lines_cache: ui::ChatLinesCache::default(),
-            minibuffer: None,
+            prompt: None,
             harness_picker_selected: 0,
             harness_picker_filter_active: false,
             turn_picker_entries: Vec::new(),
             turn_picker_selected: 0,
             turn_picker_loading: false,
             selected_load_generation: 0,
-            minibuffer_hint_offset: 0,
-            minibuffer_hint_rotated_at: None,
-            minibuffer_hint_context: None,
+            prompt_hint_offset: 0,
+            prompt_hint_rotated_at: None,
+            prompt_hint_context: None,
             harnesses: Vec::new(),
             features: Vec::new(),
-            service_route_catalog: Vec::new(),
+            operator_route_catalog: Vec::new(),
             features_degradation_observed: false,
             plugin_actions: Vec::new(),
             playbook_templates: Vec::new(),
@@ -17375,7 +17377,7 @@ mod tests {
             block_hits: HashMap::new(),
             turn_mark_hits: HashMap::new(),
             matrix_reveal_hits: Vec::new(),
-            orchestrator_desired_size: None,
+            minibuffer_desired_size: None,
             terminal_pane_size: (80, 24),
             window_pane_sizes: HashMap::new(),
             zoom: ZoomMode::None,
@@ -17385,16 +17387,16 @@ mod tests {
             window_scrollback: HashMap::new(),
             window_views: HashMap::new(),
             terminal_scrollbar_visible_until: HashMap::new(),
-            service_view_scroll: 0,
+            operator_view_scroll: 0,
             skip_redraw_after_event: false,
             tick_redraw_requested: Cell::new(false),
             notification_dirtied_view: true,
             hydrating_sessions: HashSet::new(),
-            orchestrator_scrollback: 0,
-            operator_monolog: None,
-            operator_utterance: String::new(),
-            orchestrator_panel_h: None,
-            resizing_orchestrator_panel: None,
+            minibuffer_scrollback: 0,
+            minibuffer_monolog: None,
+            minibuffer_utterance: String::new(),
+            minibuffer_panel_h: None,
+            resizing_minibuffer_panel: None,
             main_slide: MainSlideState::default(),
             dragging_terminal_scrollbar: None,
             dragging_list_scrollbar: None,
@@ -17403,7 +17405,7 @@ mod tests {
             start_instant: now,
             layout: LayoutSnapshot::default(),
             session_title_menu: None,
-            service_title_menu: None,
+            operator_title_menu: None,
             fleet_panel: None,
             list_scroll_target: None,
             route_menu: None,
@@ -17417,7 +17419,7 @@ mod tests {
             saw_mouse_motion: false,
             mouse_capture_enabled: true,
             last_playbook_clip_click: None,
-            orchestrator_id: None,
+            minibuffer_id: None,
             list_panel_w: LIST_PANEL_W_DEFAULT,
             resizing_list: None,
             matrix_rain_h: None,
@@ -17439,7 +17441,7 @@ mod tests {
             lineage_follow_selection: false,
             lineage_subagents_expanded: HashSet::new(),
             configure_popup: None,
-            service_dialog: None,
+            operator_dialog: None,
             session_picker: None,
             playbook_popup: None,
             playbook_popups: HashMap::new(),
@@ -17483,7 +17485,7 @@ mod tests {
             matrix_panel_mode: MatrixPanelMode::default(),
             token_meter: crate::token_meter::TokenMeter::new(now),
             token_meter_busy: HashMap::new(),
-            service_token_meters: HashMap::new(),
+            operator_token_meters: HashMap::new(),
             project_dashboard: crate::project_dashboard::ProjectDashboard::default(),
             show_archived_ungrouped: false,
             show_archived_groups: HashSet::new(),
@@ -17673,7 +17675,7 @@ mod tests {
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind,
             archived: false,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
             merge: None,
@@ -18319,14 +18321,14 @@ mod tests {
     }
 
     #[test]
-    fn persisted_service_collapse_names_are_pruned_to_live_services() {
-        let services = vec![
-            service_summary_for_test("assistant"),
-            service_summary_for_test("reviewer"),
+    fn persisted_operator_collapse_names_are_pruned_to_live_operators() {
+        let operators = vec![
+            operator_summary_for_test("assistant"),
+            operator_summary_for_test("reviewer"),
         ];
 
-        let restored = valid_collapsed_service_names(
-            &services,
+        let restored = valid_collapsed_operator_names(
+            &operators,
             ["assistant", "stale", "reviewer", "assistant"]
                 .into_iter()
                 .map(str::to_string),
@@ -18941,14 +18943,14 @@ mod tests {
         assert!(out.contains("kimi-k3"), "{out}");
     }
 
-    /// A routed session's measured compute time feeds the same service scope
-    /// as its Cost events, so the service graph reports throughput rather than
+    /// A routed session's measured compute time feeds the same operator scope
+    /// as its Cost events, so the operator graph reports throughput rather than
     /// an idle token total.
     #[tokio::test]
-    async fn service_view_meter_tracks_routed_session_compute_time() {
+    async fn operator_view_meter_tracks_routed_session_compute_time() {
         let (mut app, _dir, _server) = token_meter_app(&[]).await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.sessions[0].title = Some("service:assistant:http:conversation".into());
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.sessions[0].title = Some("operator:assistant:http:conversation".into());
         app.sessions[0].model = Some("opus".into());
         app.observe_cost_for_meter(
             "s1",
@@ -18967,23 +18969,23 @@ mod tests {
         app.sample_compute_time(now);
 
         let meter = app
-            .service_token_meters
+            .operator_token_meters
             .get("assistant")
-            .expect("the service meter should receive routed activity");
+            .expect("the operator meter should receive routed activity");
         assert_eq!(meter.window_total(64), 100_000);
         assert_eq!(meter.recent_fleet_rate(), Some(5_000.0));
     }
 
     /// A fresh TUI rebuilds scoped graph buckets from the daemon's durable
     /// fleet window. Session identity is what lets the same samples be
-    /// filtered without leaking unrelated project or service activity.
+    /// filtered without leaking unrelated project or operator activity.
     #[tokio::test]
     async fn scoped_token_meters_seed_from_daemon_history_after_restart() {
         let (mut app, _dir, _server) = token_meter_app(&[]).await;
-        app.services.push(service_summary_for_test("assistant"));
+        app.operators.push(operator_summary_for_test("assistant"));
 
         app.sessions[0].id = "routed-root".into();
-        app.sessions[0].title = Some("service:assistant:http:conversation".into());
+        app.sessions[0].title = Some("operator:assistant:http:conversation".into());
         app.sessions[0].group_id = Some("project-a".into());
 
         let mut descendant = summary_with_kind(construct_protocol::SessionKind::User);
@@ -19026,9 +19028,9 @@ mod tests {
             400
         );
         assert_eq!(
-            app.service_token_meters["assistant"].window_total(64),
+            app.operator_token_meters["assistant"].window_total(64),
             300,
-            "the routed root and descendant seed the service, unrelated history does not"
+            "the routed root and descendant seed the operator, unrelated history does not"
         );
     }
 
@@ -19631,8 +19633,8 @@ mod tests {
             .await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::CommandPalette)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::CommandPalette)
             ),
             "C-x x must close the dialog AND open the command palette"
         );
@@ -20545,7 +20547,7 @@ mod tests {
     /// Clicking a clip that points at a session with no navigable list row —
     /// the canonical case being a subagent, which renders only as a child of
     /// its parent (and never at all when the parent is the hidden
-    /// orchestrator) — must switch to it *persistently*. Two prior bugs made
+    /// minibuffer) — must switch to it *persistently*. Two prior bugs made
     /// it flicker back to the playbook: (1) the click never synced the active
     /// window pane, so the main view kept rendering the old session, and
     /// (2) the next `refresh_sessions → ensure_selection_valid` reverted the
@@ -20556,15 +20558,15 @@ mod tests {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         let s1 = summary_with_kind(construct_protocol::SessionKind::User);
-        // The orchestrator (the fleet dispatcher whose playbook holds the clips)
+        // The minibuffer (the fleet dispatcher whose playbook holds the clips)
         // is hidden from the list, so its subagent children never get a row.
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch".into();
         let mut sub = summary_with_kind(construct_protocol::SessionKind::Subagent);
         sub.id = "sub1".into();
         sub.parent_session_id = Some("orch".into());
         app.sessions = vec![s1, orch, sub];
-        app.orchestrator_id = Some("orch".into());
+        app.minibuffer_id = Some("orch".into());
         // The playbook-owner session is selected and its playbook is open; the
         // active window pane points at it (test_app's initial leaf is s1).
         app.selection = Selection::Session("s1".into());
@@ -22655,8 +22657,8 @@ mod tests {
     #[tokio::test]
     async fn playbook_open_command_palette_captures_typed_chars() {
         let (mut app, _dir, server) = empty_app().await;
-        // No orchestrator session → `C-x x` opens the M-x command palette.
-        app.orchestrator_id = None;
+        // No minibuffer session → `C-x x` opens the M-x command palette.
+        app.minibuffer_id = None;
         app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
 
         // `C-x x` while the playbook is focused opens the command palette.
@@ -22666,8 +22668,8 @@ mod tests {
             .await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::CommandPalette)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::CommandPalette)
             ),
             "C-x x must open the command palette over the playbook"
         );
@@ -22679,7 +22681,7 @@ mod tests {
             .await;
 
         assert_eq!(
-            app.minibuffer.as_ref().map(|m| m.input.as_str()),
+            app.prompt.as_ref().map(|m| m.input.as_str()),
             Some("hi"),
             "typing must fill the command palette input"
         );
@@ -22692,14 +22694,14 @@ mod tests {
         server.abort();
     }
 
-    /// Same routing precedence for the operator/orchestrator panel: when
-    /// `C-x x` opens the persistent orchestrator input over a focused
-    /// playbook, keys must go to the orchestrator (its PTY), not the playbook.
+    /// Same routing precedence for the user/minibuffer panel: when
+    /// `C-x x` opens the persistent minibuffer input over a focused
+    /// playbook, keys must go to the minibuffer (its PTY), not the playbook.
     #[tokio::test]
-    async fn playbook_open_orchestrator_panel_captures_typed_chars() {
+    async fn playbook_open_minibuffer_panel_captures_typed_chars() {
         let (mut app, _dir, server) = empty_app().await;
-        // An orchestrator session → `C-x x` opens the operator input panel.
-        app.orchestrator_id = Some("orch".to_string());
+        // An minibuffer session → `C-x x` opens the user input panel.
+        app.minibuffer_id = Some("orch".to_string());
         app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
@@ -22708,26 +22710,26 @@ mod tests {
             .await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::Orchestrator)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::Minibuffer)
             ),
-            "C-x x must open the orchestrator panel over the playbook"
+            "C-x x must open the minibuffer panel over the playbook"
         );
 
-        // A plain keystroke is forwarded to the orchestrator's PTY, which
+        // A plain keystroke is forwarded to the minibuffer's PTY, which
         // snaps its scrollback back to live — an observable side effect of
-        // the orchestrator path running instead of the playbook path.
-        app.orchestrator_scrollback = 7;
+        // the minibuffer path running instead of the playbook path.
+        app.minibuffer_scrollback = 7;
         app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.orchestrator_scrollback, 0,
-            "typing must route to the orchestrator PTY (snaps scrollback to live)"
+            app.minibuffer_scrollback, 0,
+            "typing must route to the minibuffer PTY (snaps scrollback to live)"
         );
         assert_eq!(
             app.playbook_popup.as_ref().unwrap().buffer,
             "draft",
-            "typing into the orchestrator must not insert into the playbook"
+            "typing into the minibuffer must not insert into the playbook"
         );
         server.abort();
     }
@@ -22738,7 +22740,7 @@ mod tests {
     async fn playbook_typing_with_no_overlay_still_inserts() {
         let (mut app, _dir, server) = empty_app().await;
         app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 5));
-        assert!(app.minibuffer.is_none(), "precondition: no overlay open");
+        assert!(app.prompt.is_none(), "precondition: no overlay open");
 
         app.on_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
             .await;
@@ -22748,7 +22750,7 @@ mod tests {
             "draft!",
             "with no overlay, a typed char inserts into the playbook"
         );
-        assert!(app.minibuffer.is_none());
+        assert!(app.prompt.is_none());
         server.abort();
     }
 
@@ -25662,7 +25664,7 @@ mod tests {
             hovered.contains("1 session needs you"),
             "hovering the wants-you tally should name it in words: {hovered}"
         );
-        // And the panel lists the very row it counted, so the operator can
+        // And the panel lists the very row it counted, so the user can
         // reach it rather than hunt the list for the dot.
         let panel = app.fleet_panel.as_ref().expect("hover opens the panel");
         assert_eq!(
@@ -25854,7 +25856,7 @@ mod tests {
 
     /// A group header has no run state of its own — it stands in for flagged
     /// members hidden inside it. Clicking it lands on the group, where the
-    /// operator still has to expand to find the session, so its mark has to
+    /// minibuffer still has to expand to find the session, so its mark has to
     /// warn that it is a way in rather than a destination.
     #[test]
     fn a_group_panel_row_wears_its_disclosure_not_a_state_glyph() {
@@ -26065,7 +26067,7 @@ mod tests {
         server.abort();
     }
 
-    /// Esc is the universal dismissal, but only for a panel the operator
+    /// Esc is the universal dismissal, but only for a panel the user
     /// deliberately pinned — a panel merely following the pointer must not
     /// swallow Esc from a focused PTY.
     #[tokio::test]
@@ -26088,7 +26090,7 @@ mod tests {
     }
 
     /// Clicking a row is the whole point: it selects the session the tally
-    /// counted and hands the keyboard to the list, so the operator lands
+    /// counted and hands the keyboard to the list, so the user lands
     /// where they can act.
     #[tokio::test]
     async fn clicking_a_fleet_panel_row_selects_it_and_focuses_the_list() {
@@ -26201,7 +26203,7 @@ mod tests {
 
     /// The tally is a summary of the rows the list paints. A daemon-internal
     /// probe is hidden from every list by design, so counting it advertises
-    /// work against a row the operator can never find.
+    /// work against a row the user can never find.
     #[tokio::test]
     async fn fleet_tally_excludes_sessions_the_list_never_renders() {
         let (mut app, _dir, server) = empty_app().await;
@@ -28151,23 +28153,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playbook_run_for_orchestrator_does_not_panic_and_submit_does_not_clear_other_shimmers()
+    async fn playbook_run_for_minibuffer_does_not_panic_and_submit_does_not_clear_other_shimmers()
     {
         // TDD for the reported panic (screenshot 2026-06-27 9.43.19),
         // "Playbook click 'run' on smith session does type the prompt, but not submit",
         // and "On smith session playbook, when submit the prompt, all shimmer animation clears".
-        // Orchestrator (smith minibuffer) sessions must not participate in normal
+        // Prompt (smith minibuffer) sessions must not participate in normal
         // playbook run shimmer, and activity on them must not wipe User/Subagent shimmers.
         let (mut app, _dir, server) = empty_app().await;
 
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch1".into();
         let mut user = summary_with_kind(construct_protocol::SessionKind::User);
         user.id = "user1".into();
         app.sessions = vec![orch.clone(), user.clone()];
         app.selection = Selection::Session("orch1".into());
 
-        // Exercise the run start path that could panic or set bad state for orchestrator.
+        // Exercise the run start path that could panic or set bad state for minibuffer.
         let body = "# do the task\nImplement the thing".to_string();
         app.start_playbook_run("orch1", &body, false, "");
 
@@ -28178,17 +28180,17 @@ mod tests {
             "user playbook run must be tracked"
         );
 
-        // Simulate orchestrator submit / state update clearing only its own entry
+        // Simulate minibuffer submit / state update clearing only its own entry
         // (the unconditional removes in on_playbook_state / result paths).
         app.playbook_runs.remove("orch1");
         assert!(
             app.playbook_runs.contains_key("user1"),
-            "user shimmer must survive orchestrator activity/submit"
+            "user shimmer must survive minibuffer activity/submit"
         );
 
-        // Orchestrator should not have left a popup in normal flows.
+        // Prompt should not have left a popup in normal flows.
         if let Some(p) = app.playbook_popup.as_ref() {
-            assert_ne!(p.saved_markdown, "should not be here for orchestrator");
+            assert_ne!(p.saved_markdown, "should not be here for minibuffer");
         }
 
         server.abort();
@@ -31995,7 +31997,7 @@ mod tests {
     #[tokio::test]
     async fn playbook_referenced_sessions_need_hydration_for_hover_preview() {
         // A playbook shown in a main-window leaf references a worker session that
-        // is neither selected, pinned, nor the orchestrator. Its PTY history
+        // is neither selected, pinned, nor the minibuffer. Its PTY history
         // must be hydrated so the playbook hover preview (spec 0060) can paint a
         // live terminal tail instead of degrading to the bare text tooltip.
         let (mut app, _dir, server) = empty_app().await;
@@ -32242,8 +32244,8 @@ mod tests {
             Some(&SessionTitleMenuAction::CopyId)
         );
         assert_eq!(
-            ServiceTitleMenuAction::ALL.last(),
-            Some(&ServiceTitleMenuAction::CopyId)
+            OperatorTitleMenuAction::ALL.last(),
+            Some(&OperatorTitleMenuAction::CopyId)
         );
     }
 
@@ -33734,7 +33736,7 @@ mod tests {
     }
 
     /// A row already on screen must not move the viewport. The panel selects
-    /// as much as it scrolls, and jerking the list for a row the operator can
+    /// as much as it scrolls, and jerking the list for a row the user can
     /// already see loses their place for nothing.
     #[tokio::test]
     async fn list_scroll_offset_for_visible_leaves_an_already_visible_row_alone() {
@@ -35129,10 +35131,10 @@ mod tests {
         );
 
         assert!(matches!(
-            app.minibuffer.as_ref().map(|mb| &mb.intent),
-            Some(MinibufferIntent::ApproveTool { session_id, allow_auto_review: true, .. }) if session_id == "s1"
+            app.prompt.as_ref().map(|mb| &mb.intent),
+            Some(PromptIntent::ApproveTool { session_id, allow_auto_review: true, .. }) if session_id == "s1"
         ));
-        let prompt = &app.minibuffer.as_ref().unwrap().prompt;
+        let prompt = &app.prompt.as_ref().unwrap().prompt;
         assert!(prompt.contains("approve [risky] shell(echo hi)"));
         // The `y=approve  n=deny  a=auto-review  f=always-approve` choice
         // cluster is no longer baked into the stored prompt text — it
@@ -35156,16 +35158,16 @@ mod tests {
         );
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "smith renders approval inline in the session PTY"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn approval_prompt_does_not_open_for_orchestrator_session() {
+    async fn approval_prompt_does_not_open_for_minibuffer_session() {
         let (mut app, _dir, server) = captured_app().await;
-        app.orchestrator_id = Some("s1".into());
+        app.minibuffer_id = Some("s1".into());
 
         app.maybe_open_approval_prompt(
             "s1".into(),
@@ -35177,8 +35179,8 @@ mod tests {
         );
 
         assert!(
-            app.minibuffer.is_none(),
-            "orchestrator renders approval inline in its PTY"
+            app.prompt.is_none(),
+            "minibuffer renders approval inline in its PTY"
         );
         server.abort();
     }
@@ -35197,8 +35199,8 @@ mod tests {
         );
 
         assert!(matches!(
-            app.minibuffer.as_ref().map(|mb| &mb.intent),
-            Some(MinibufferIntent::ApproveTool {
+            app.prompt.as_ref().map(|mb| &mb.intent),
+            Some(PromptIntent::ApproveTool {
                 allow_auto_review: false,
                 ..
             })
@@ -35224,7 +35226,7 @@ mod tests {
         );
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "background approval requests should not open the global minibuffer"
         );
         server.abort();
@@ -35316,14 +35318,14 @@ mod tests {
     }
 
     /// Render the current minibuffer into a scratch terminal so
-    /// `app.layout.minibuffer_choice_hits` (and `minibuffer_area`) reflect
+    /// `app.layout.prompt_choice_hits` (and `prompt_area`) reflect
     /// this frame, then return the minibuffer's rect.
-    fn render_minibuffer_for_test(app: &mut App) -> ratatui::layout::Rect {
+    fn render_prompt_for_test(app: &mut App) -> ratatui::layout::Rect {
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, app)).expect("render");
         app.layout
-            .minibuffer_area
+            .prompt_area
             .expect("minibuffer area registered")
     }
 
@@ -35335,21 +35337,21 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Restart session s1? ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::RestartConfirm {
+            intent: PromptIntent::RestartConfirm {
                 session_id: "s1".into(),
             },
             error: None,
         });
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
             .await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "confirming should close the prompt"
         );
         let calls = drain_calls(&mut calls);
@@ -35369,30 +35371,30 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Restart session s1? ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::RestartConfirm {
+            intent: PromptIntent::RestartConfirm {
                 session_id: "s1".into(),
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(h.action, MinibufferChoiceAction::Key('y')))
+            .find(|h| matches!(h.action, PromptChoiceAction::Key('y')))
             .cloned()
             .expect("y choice hit registered");
         assert_eq!(hit.y, mb_area.y);
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking the y choice should close the prompt, same as pressing y"
         );
         let calls = drain_calls(&mut calls);
@@ -35412,29 +35414,29 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Restart session s1? ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::RestartConfirm {
+            intent: PromptIntent::RestartConfirm {
                 session_id: "s1".into(),
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(h.action, MinibufferChoiceAction::Key('n')))
+            .find(|h| matches!(h.action, PromptChoiceAction::Key('n')))
             .cloned()
             .expect("N choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking N should close the prompt"
         );
         assert!(
@@ -35454,19 +35456,19 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Session s1: ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::DeleteConfirm {
+            intent: PromptIntent::DeleteConfirm {
                 session_id: "s1".into(),
                 is_fork: false,
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
-        let mut hits = app.layout.minibuffer_choice_hits.clone();
+        let mb_area = render_prompt_for_test(&mut app);
+        let mut hits = app.layout.prompt_choice_hits.clone();
         hits.sort_by_key(|h| h.x_start);
         assert_eq!(
             hits.len(),
@@ -35483,9 +35485,9 @@ mod tests {
                 "choice hits must not overlap: {hits:?}"
             );
         }
-        assert!(matches!(&hits[0].action, MinibufferChoiceAction::Submit(s) if s == "d"));
-        assert!(matches!(&hits[1].action, MinibufferChoiceAction::Submit(s) if s == "a"));
-        assert!(matches!(&hits[2].action, MinibufferChoiceAction::Submit(s) if s == "N"));
+        assert!(matches!(&hits[0].action, PromptChoiceAction::Submit(s) if s == "d"));
+        assert!(matches!(&hits[1].action, PromptChoiceAction::Submit(s) if s == "a"));
+        assert!(matches!(&hits[2].action, PromptChoiceAction::Submit(s) if s == "N"));
         server.abort();
     }
 
@@ -35495,45 +35497,45 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Session s1: ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::DeleteConfirm {
+            intent: PromptIntent::DeleteConfirm {
                 session_id: "s1".into(),
                 is_fork: true,
             },
             error: None,
         });
 
-        let _mb_area = render_minibuffer_for_test(&mut app);
-        let mut hits = app.layout.minibuffer_choice_hits.clone();
+        let _mb_area = render_prompt_for_test(&mut app);
+        let mut hits = app.layout.prompt_choice_hits.clone();
         hits.sort_by_key(|h| h.x_start);
         assert_eq!(
             hits.len(),
             4,
             "fork end-prompt should include merge and archive, got {hits:?}"
         );
-        assert!(matches!(&hits[0].action, MinibufferChoiceAction::Submit(s) if s == "d"));
-        assert!(matches!(&hits[1].action, MinibufferChoiceAction::Submit(s) if s == "a"));
-        assert!(matches!(&hits[2].action, MinibufferChoiceAction::Submit(s) if s == "m"));
-        assert!(matches!(&hits[3].action, MinibufferChoiceAction::Submit(s) if s == "N"));
+        assert!(matches!(&hits[0].action, PromptChoiceAction::Submit(s) if s == "d"));
+        assert!(matches!(&hits[1].action, PromptChoiceAction::Submit(s) if s == "a"));
+        assert!(matches!(&hits[2].action, PromptChoiceAction::Submit(s) if s == "m"));
+        assert!(matches!(&hits[3].action, PromptChoiceAction::Submit(s) if s == "N"));
         server.abort();
     }
 
     #[tokio::test]
     async fn delete_confirm_typed_submit_d_deletes_session_baseline() {
         // Baseline for the click-parity test below: typing "d" then Enter
-        // goes through `run_minibuffer_submit` (family B's keyboard path).
+        // goes through `run_prompt_submit` (family B's keyboard path).
         let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
             construct_protocol::SessionKind::User,
         )])
         .await;
-        let intent = MinibufferIntent::DeleteConfirm {
+        let intent = PromptIntent::DeleteConfirm {
             session_id: "s1".into(),
             is_fork: false,
         };
-        app.run_minibuffer_submit(intent, "d".to_string()).await;
+        app.run_prompt_submit(intent, "d".to_string()).await;
 
         let calls = vec![tokio::time::timeout(Duration::from_secs(1), calls.recv())
             .await
@@ -35555,30 +35557,30 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Session s1: ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::DeleteConfirm {
+            intent: PromptIntent::DeleteConfirm {
                 session_id: "s1".into(),
                 is_fork: false,
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(&h.action, MinibufferChoiceAction::Submit(s) if s == "d"))
+            .find(|h| matches!(&h.action, PromptChoiceAction::Submit(s) if s == "d"))
             .cloned()
             .expect("d choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking d should close the prompt"
         );
         let calls = vec![tokio::time::timeout(Duration::from_secs(1), calls.recv())
@@ -35601,30 +35603,30 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Session s1: ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::DeleteConfirm {
+            intent: PromptIntent::DeleteConfirm {
                 session_id: "s1".into(),
                 is_fork: false,
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(&h.action, MinibufferChoiceAction::Submit(s) if s == "N"))
+            .find(|h| matches!(&h.action, PromptChoiceAction::Submit(s) if s == "N"))
             .cloned()
             .expect("N choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking N should close the prompt"
         );
         assert!(
@@ -35638,12 +35640,12 @@ mod tests {
         server.abort();
     }
 
-    fn approve_tool_minibuffer(allow_auto_review: bool) -> Minibuffer {
-        Minibuffer {
+    fn approve_tool_prompt(allow_auto_review: bool) -> Prompt {
+        Prompt {
             prompt: "approve [risky] shell(echo hi) \u{25b8} ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::ApproveTool {
+            intent: PromptIntent::ApproveTool {
                 session_id: "s1".into(),
                 call_id: "call-1".into(),
                 tool: "shell".into(),
@@ -35661,10 +35663,10 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(approve_tool_minibuffer(true));
+        app.prompt = Some(approve_tool_prompt(true));
 
-        let mb_area = render_minibuffer_for_test(&mut app);
-        let hits = &app.layout.minibuffer_choice_hits;
+        let mb_area = render_prompt_for_test(&mut app);
+        let hits = &app.layout.prompt_choice_hits;
         assert_eq!(hits.len(), 4, "y/n/a/f should each get one choice hit");
         for h in hits {
             assert_eq!(h.y, mb_area.y);
@@ -35672,7 +35674,7 @@ mod tests {
         for expected in ['y', 'n', 'a', 'f'] {
             assert!(
                 hits.iter()
-                    .any(|h| matches!(h.action, MinibufferChoiceAction::Key(c) if c == expected)),
+                    .any(|h| matches!(h.action, PromptChoiceAction::Key(c) if c == expected)),
                 "missing choice hit for {expected}"
             );
         }
@@ -35685,10 +35687,10 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(approve_tool_minibuffer(false));
+        app.prompt = Some(approve_tool_prompt(false));
 
-        render_minibuffer_for_test(&mut app);
-        let hits = &app.layout.minibuffer_choice_hits;
+        render_prompt_for_test(&mut app);
+        let hits = &app.layout.prompt_choice_hits;
         assert_eq!(
             hits.len(),
             3,
@@ -35696,34 +35698,34 @@ mod tests {
         );
         assert!(!hits
             .iter()
-            .any(|h| matches!(h.action, MinibufferChoiceAction::Key('a'))));
+            .any(|h| matches!(h.action, PromptChoiceAction::Key('a'))));
         server.abort();
     }
 
     #[tokio::test]
     async fn approve_tool_click_n_denies_where_it_used_to_no_op() {
-        // Before spec 0075, `click_minibuffer` explicitly no-op'd on every
+        // Before spec 0075, `click_prompt` explicitly no-op'd on every
         // click while an `ApproveTool` prompt was open. Regression guard:
         // clicking "n=deny" must now actually deny the call.
         let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(approve_tool_minibuffer(true));
+        app.prompt = Some(approve_tool_prompt(true));
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(h.action, MinibufferChoiceAction::Key('n')))
+            .find(|h| matches!(h.action, PromptChoiceAction::Key('n')))
             .cloned()
             .expect("n=deny choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking a decision should close the prompt"
         );
         let calls = drain_calls(&mut calls);
@@ -35746,29 +35748,29 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Delete project 'demo'? ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::GroupDeleteConfirm {
+            intent: PromptIntent::GroupDeleteConfirm {
                 group_id: "g1".into(),
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(&h.action, MinibufferChoiceAction::Submit(s) if s == "all"))
+            .find(|h| matches!(&h.action, PromptChoiceAction::Submit(s) if s == "all"))
             .cloned()
             .expect("all choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking all should close the prompt"
         );
         let calls = drain_calls(&mut calls);
@@ -35792,29 +35794,29 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Archive session s1? ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::MenuArchiveConfirm {
+            intent: PromptIntent::MenuArchiveConfirm {
                 session_id: "s1".into(),
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(&h.action, MinibufferChoiceAction::Submit(s) if s == "y"))
+            .find(|h| matches!(&h.action, PromptChoiceAction::Submit(s) if s == "y"))
             .cloned()
             .expect("y choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking y should close the prompt"
         );
         let calls = drain_calls(&mut calls);
@@ -36538,11 +36540,11 @@ mod tests {
             .await;
 
         assert!(app.suggest_deck.is_none(), "accept closes the deck");
-        let mb = app.minibuffer.as_ref().expect("minibuffer prefilled");
+        let mb = app.prompt.as_ref().expect("minibuffer prefilled");
         assert_eq!(mb.input, "run the tests");
         assert!(matches!(
             mb.intent,
-            MinibufferIntent::SendInput { ref session_id } if session_id == "s1"
+            PromptIntent::SendInput { ref session_id } if session_id == "s1"
         ));
         assert!(
             app.suggestion_hands.contains_key("s1"),
@@ -36573,7 +36575,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.minibuffer.as_ref().map(|m| m.input.as_str()),
+            app.prompt.as_ref().map(|m| m.input.as_str()),
             Some("cargo build")
         );
         server.abort();
@@ -36917,11 +36919,11 @@ mod tests {
         );
     }
 
-    /// Spec 0112: opening the operator panel must not resize anything. The
+    /// Spec 0112: opening the minibuffer panel must not resize anything. The
     /// panes keep the geometry they had with a one-row footer; the block just
     /// slides up behind the panel.
     #[tokio::test]
-    async fn opening_the_operator_panel_slides_the_view_instead_of_resizing_it() {
+    async fn opening_the_minibuffer_panel_slides_the_view_instead_of_resizing_it() {
         let (mut app, _dir, _server) = two_session_app().await;
         let draw = |app: &mut App| {
             let backend = ratatui::backend::TestBackend::new(80, 40);
@@ -36935,15 +36937,15 @@ mod tests {
         let pane_sizes = app.window_pane_sizes.clone();
         let list_area = app.layout.list_area.expect("list pane rendered");
 
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: String::new(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::Orchestrator,
+            intent: PromptIntent::Minibuffer,
             error: None,
         });
         // Land the slide animation so the frame renders at the full offset.
-        let panel_h = crate::ui::compute_minibuffer_height(&app, 40);
+        let panel_h = crate::ui::compute_prompt_height(&app, 40);
         app.main_slide.retarget(
             panel_h - 1,
             Instant::now() - Duration::from_millis(MAIN_SLIDE_MS * 4),
@@ -37263,42 +37265,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_monolog_typewriter_renders_then_expires() {
+    async fn minibuffer_monolog_typewriter_renders_then_expires() {
         let (mut app, _dir, server) = empty_app().await;
         let backend = ratatui::backend::TestBackend::new(60, 12);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         let area = Rect::new(0, 0, 60, 12);
 
         // ~500ms in: several characters revealed, still showing.
-        app.operator_monolog = Some(OperatorMonolog {
+        app.minibuffer_monolog = Some(MinibufferMonolog {
             text: "session waiting at trust prompt".into(),
             started_at: Instant::now() - std::time::Duration::from_millis(500),
         });
         let mut showing = false;
         terminal
             .draw(|f| {
-                showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now())
+                showing = crate::ui::render_minibuffer_monolog(f, area, &mut app, Instant::now())
             })
             .expect("draw");
         assert!(showing, "monolog should be showing mid-cycle");
         let screen = rendered_text(terminal.backend().buffer());
         assert!(screen.contains("session"), "missing typed text:\n{screen}");
-        // No "operator ▸" label — the matrix panel title already says "operator".
+        // No "minibuffer ▸" label — the matrix panel title already says "minibuffer".
         assert!(!screen.contains("▸"), "label should be gone:\n{screen}");
 
         // Far past type+hold+fade: clears itself and yields the rain.
-        app.operator_monolog = Some(OperatorMonolog {
+        app.minibuffer_monolog = Some(MinibufferMonolog {
             text: "session waiting at trust prompt".into(),
             started_at: Instant::now() - std::time::Duration::from_secs(30),
         });
         terminal
             .draw(|f| {
-                showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now())
+                showing = crate::ui::render_minibuffer_monolog(f, area, &mut app, Instant::now())
             })
             .expect("draw");
         assert!(!showing, "monolog should have expired");
         assert!(
-            app.operator_monolog.is_none(),
+            app.minibuffer_monolog.is_none(),
             "expired monolog not cleared"
         );
 
@@ -37310,7 +37312,7 @@ mod tests {
         // The run loop reads `notification_dirtied_view` to skip a full-frame
         // repaint for background PTY chunks. Verify the gate: visible session
         // PTY -> dirties; off-screen session PTY -> does not; structural events
-        // and orchestrator sessions -> always dirty.
+        // and minibuffer sessions -> always dirty.
         let (mut app, _dir, server) = empty_app().await;
         let mut vis = summary_with_kind(construct_protocol::SessionKind::User);
         vis.id = "vis".into();
@@ -37375,26 +37377,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_monolog_skipped_while_orchestrator_panel_open() {
+    async fn minibuffer_monolog_skipped_while_minibuffer_panel_open() {
         let (mut app, _dir, server) = empty_app().await;
         let backend = ratatui::backend::TestBackend::new(60, 12);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         let area = Rect::new(0, 0, 60, 12);
-        app.operator_monolog = Some(OperatorMonolog {
+        app.minibuffer_monolog = Some(MinibufferMonolog {
             text: "session waiting at trust prompt".into(),
             started_at: Instant::now() - std::time::Duration::from_millis(500),
         });
-        // Orchestrator panel open → the text is visible below, so don't overlay.
-        app.minibuffer = Some(Minibuffer {
+        // Minibuffer panel open → the text is visible below, so don't overlay.
+        app.prompt = Some(Prompt {
             prompt: String::new(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::Orchestrator,
+            intent: PromptIntent::Minibuffer,
             error: None,
         });
         let mut drew = true;
         terminal
-            .draw(|f| drew = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now()))
+            .draw(|f| drew = crate::ui::render_minibuffer_monolog(f, area, &mut app, Instant::now()))
             .expect("draw");
         assert!(!drew, "monolog should be skipped while the panel is open");
         let screen = rendered_text(terminal.backend().buffer());
@@ -37406,12 +37408,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_monolog_accumulates_across_delta_heartbeats() {
+    async fn minibuffer_monolog_accumulates_across_delta_heartbeats() {
         // `AgentStatus active=true` fires on every delta (a per-token "Working"
         // heartbeat), so the utterance must accumulate across them, not reset —
         // otherwise only the final delta survives ("noted" → "ed").
         let (mut app, _dir, server) = empty_app().await;
-        app.orchestrator_id = Some("op".into());
+        app.minibuffer_id = Some("op".into());
 
         async fn feed(app: &mut App, event: SessionEvent, seq: u64) {
             let n = Notification {
@@ -37458,9 +37460,9 @@ mod tests {
         feed(&mut app, say("ed"), 4).await;
         feed(&mut app, worked(), 5).await;
         assert!(
-            app.operator_monolog.is_none(),
+            app.minibuffer_monolog.is_none(),
             "noted must be filtered, got {:?}",
-            app.operator_monolog.as_ref().map(|m| &m.text)
+            app.minibuffer_monolog.as_ref().map(|m| &m.text)
         );
 
         // A real finding across deltas → monolog gets the FULL text, not a tail.
@@ -37470,7 +37472,7 @@ mod tests {
         feed(&mut app, say("blocked"), 9).await;
         feed(&mut app, worked(), 10).await;
         assert_eq!(
-            app.operator_monolog.as_ref().map(|m| m.text.as_str()),
+            app.minibuffer_monolog.as_ref().map(|m| m.text.as_str()),
             Some("session blocked")
         );
 
@@ -37615,8 +37617,8 @@ mod tests {
         app.handle_left_click(hint.x_start, hint.y).await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::RestartDaemonConfirm)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::RestartDaemonConfirm)
             ),
             "clicking the daemon segment should open the restart-daemon confirm"
         );
@@ -37655,8 +37657,8 @@ mod tests {
         app.handle_left_click(hint.x_start, hint.y).await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::UpgradeConfirm { version }) if version == "9.9.9"
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::UpgradeConfirm { version }) if version == "9.9.9"
             ),
             "clicking the update-available segment should open the upgrade confirm"
         );
@@ -37710,8 +37712,8 @@ mod tests {
         app.handle_left_click(hit.x_start, hit.y).await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::RestartDaemonConfirm)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::RestartDaemonConfirm)
             ),
             "clicking the daemon segment must open the restart-daemon confirm"
         );
@@ -37758,7 +37760,7 @@ mod tests {
         // theme/remote controls renderable while still sweeping enough width
         // to move the empty-hint collision boundary.
         for width in [120u16, 124, 128, 132, 136, 140] {
-            app.minibuffer = None;
+            app.prompt = None;
             let backend = ratatui::backend::TestBackend::new(width, 36);
             let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
             terminal
@@ -37785,8 +37787,8 @@ mod tests {
             app.handle_left_click(hit.x_start, hit.y).await;
             assert!(
                 matches!(
-                    app.minibuffer.as_ref().map(|m| &m.intent),
-                    Some(MinibufferIntent::RestartDaemonConfirm)
+                    app.prompt.as_ref().map(|m| &m.intent),
+                    Some(PromptIntent::RestartDaemonConfirm)
                 ),
                 "daemon segment click hijacked at width {width}"
             );
@@ -37822,13 +37824,13 @@ mod tests {
         app.handle_left_click(hint.x_start, hint.y).await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::RestartDaemonConfirm)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::RestartDaemonConfirm)
             ),
             "clicking the config segment should open the restart confirm"
         );
         assert!(
-            app.minibuffer
+            app.prompt
                 .as_ref()
                 .is_some_and(|m| m.prompt.contains("[router] port")),
             "the prompt should name what the restart is for"
@@ -37874,7 +37876,7 @@ mod tests {
         app.config_restart_required = vec!["[router] port".to_string()];
 
         for width in [120u16, 124, 128, 132, 136, 140] {
-            app.minibuffer = None;
+            app.prompt = None;
             let backend = ratatui::backend::TestBackend::new(width, 36);
             let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
             terminal
@@ -37903,12 +37905,12 @@ mod tests {
                 let hit = *hit;
                 app.handle_left_click(hit.x_start, hit.y).await;
                 assert!(
-                    app.minibuffer
+                    app.prompt
                         .as_ref()
                         .is_some_and(|m| m.prompt.contains("[router] port")),
                     "config segment click hijacked at width {width}"
                 );
-                app.minibuffer = None;
+                app.prompt = None;
             }
             let hit = *hints
                 .iter()
@@ -37916,7 +37918,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("daemon zone missing at width {width}"));
             app.handle_left_click(hit.x_start, hit.y).await;
             assert_eq!(
-                app.minibuffer.as_ref().map(|m| m.prompt.as_str()),
+                app.prompt.as_ref().map(|m| m.prompt.as_str()),
                 Some("Restart daemon? "),
                 "daemon segment click hijacked at width {width}"
             );
@@ -38082,7 +38084,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("construct") && line.contains("theme:matrix"))
             .expect("theme label should live in the modeline/status bar");
-        let minibuffer_line = screen
+        let prompt_line = screen
             .lines()
             .last()
             .expect("screen should have a minibuffer row");
@@ -38095,19 +38097,19 @@ mod tests {
             "theme label should be right-aligned in status bar:\n{modeline}"
         );
         assert!(
-            !minibuffer_line.contains("theme:matrix"),
-            "theme label should not render in minibuffer body:\n{minibuffer_line}"
+            !prompt_line.contains("theme:matrix"),
+            "theme label should not render in minibuffer body:\n{prompt_line}"
         );
         assert!(
             app.layout.matrix_theme_hit.is_none(),
             "matrix rain header should not own theme click target"
         );
-        let minibuffer_y = app.layout.minibuffer_area.expect("minibuffer area").y;
+        let prompt_y = app.layout.prompt_area.expect("minibuffer area").y;
         assert!(app
             .layout
             .shortcut_hints
             .iter()
-            .any(|h| h.action == KeyAction::CycleTheme && h.y < minibuffer_y));
+            .any(|h| h.action == KeyAction::CycleTheme && h.y < prompt_y));
         let theme_hit = app
             .layout
             .modeline_theme_hit
@@ -38603,7 +38605,7 @@ mod tests {
         server.abort();
     }
 
-    /// The dialog is reached from the orchestrator, so it overlays the main
+    /// The dialog is reached from the minibuffer, so it overlays the main
     /// view — often a session running a full-screen, mouse-grabbing harness.
     /// A click on a dialog control must reach the dialog, not be forwarded down
     /// that child's PTY. Regression test for the modal guard on
@@ -38766,10 +38768,10 @@ mod tests {
         let (x, y) = click(&app, KeyAction::OpenCommandPalette);
         app.handle_left_click(x, y).await;
         assert!(matches!(
-            app.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::CommandPalette)
+            app.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::CommandPalette)
         ));
-        app.minibuffer = None;
+        app.prompt = None;
 
         let (x, y) = click(&app, KeyAction::ToggleHelp);
         app.handle_left_click(x, y).await;
@@ -38779,10 +38781,10 @@ mod tests {
         let (x, y) = click(&app, KeyAction::OpenNewSession);
         app.handle_left_click(x, y).await;
         assert!(matches!(
-            app.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::NewSessionHarness)
+            app.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::NewSessionHarness)
         ));
-        app.minibuffer = None;
+        app.prompt = None;
 
         let (x, y) = click(&app, KeyAction::Quit);
         app.handle_left_click(x, y).await;
@@ -38808,10 +38810,10 @@ mod tests {
         // The fork flow opens INSTANTLY on the turn stage: only the "now"
         // row (preselected, loading in the background) — never blocked on
         // the transcript fetch.
-        let minibuffer = app.minibuffer.as_ref().expect("turn picker");
+        let minibuffer = app.prompt.as_ref().expect("turn picker");
         assert!(matches!(
             &minibuffer.intent,
-            MinibufferIntent::ForkTurnPick { source_session_id } if source_session_id == "s1"
+            PromptIntent::ForkTurnPick { source_session_id } if source_session_id == "s1"
         ));
         assert!(app.turn_picker_loading);
         assert_eq!(app.turn_picker_entries.len(), 1);
@@ -38820,12 +38822,12 @@ mod tests {
 
         // Enter on "now" continues straight to the harness picker with the
         // source harness pre-filled — Enter-Enter is still the head fork.
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
-        let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
+        let minibuffer = app.prompt.as_ref().expect("fork harness picker");
         assert!(matches!(
             &minibuffer.intent,
-            MinibufferIntent::ForkSessionHarness {
+            PromptIntent::ForkSessionHarness {
                 source_session_id,
                 at_seq: None,
             } if source_session_id == "s1"
@@ -38845,11 +38847,11 @@ mod tests {
         app.turn_picker_entries = vec![turn_picker_now_row()];
         app.turn_picker_selected = 0;
         app.turn_picker_loading = true;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Fork session: ".to_string(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::ForkTurnPick {
+            intent: PromptIntent::ForkTurnPick {
                 source_session_id: "s1".to_string(),
             },
             error: None,
@@ -38886,7 +38888,7 @@ mod tests {
         assert_eq!(app.turn_picker_selected, 1, "now stays preselected");
 
         // After the picker closes, late results must not resurrect state.
-        app.minibuffer = None;
+        app.prompt = None;
         app.turn_picker_entries = Vec::new();
         app.apply_turn_entries_loaded(
             "s1",
@@ -38983,23 +38985,23 @@ mod tests {
             },
         ];
         app.turn_picker_selected = 1;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Fork from turn: ".to_string(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::ForkTurnPick {
+            intent: PromptIntent::ForkTurnPick {
                 source_session_id: "s1".to_string(),
             },
             error: None,
         });
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
 
-        let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
+        let minibuffer = app.prompt.as_ref().expect("fork harness picker");
         assert!(matches!(
             &minibuffer.intent,
-            MinibufferIntent::ForkSessionHarness {
+            PromptIntent::ForkSessionHarness {
                 source_session_id,
                 at_seq: Some(5),
             } if source_session_id == "s1"
@@ -39019,21 +39021,21 @@ mod tests {
             preview: "fork from the present".into(),
         }];
         app.turn_picker_selected = 0;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Fork session: ".to_string(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::ForkTurnPick {
+            intent: PromptIntent::ForkTurnPick {
                 source_session_id: "s1".to_string(),
             },
             error: None,
         });
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
-        let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
+        let minibuffer = app.prompt.as_ref().expect("fork harness picker");
         assert!(matches!(
             &minibuffer.intent,
-            MinibufferIntent::ForkSessionHarness {
+            PromptIntent::ForkSessionHarness {
                 source_session_id,
                 at_seq: None,
             } if source_session_id == "s1"
@@ -39074,11 +39076,11 @@ mod tests {
         assert!(screen.contains("Generic shell command runner"));
         assert!(screen.contains("OpenAI Codex"));
         assert!(screen.contains("unavailable"));
-        let unfiltered_picker_height = app.layout.minibuffer_area.expect("picker area").height;
+        let unfiltered_picker_height = app.layout.prompt_area.expect("picker area").height;
         assert!(unfiltered_picker_height > 1);
         assert_eq!(
             app.layout
-                .minibuffer_harness_hits
+                .prompt_harness_hits
                 .first()
                 .map(|hit| hit.name.as_str()),
             Some("project"),
@@ -39086,7 +39088,7 @@ mod tests {
         );
         let unavailable_hit = app
             .layout
-            .minibuffer_harness_hits
+            .prompt_harness_hits
             .iter()
             .find(|hit| hit.name == "codex")
             .cloned()
@@ -39098,11 +39100,11 @@ mod tests {
             Some("codex: `codex` CLI not found")
         );
         assert!(
-            app.minibuffer.is_some(),
+            app.prompt.is_some(),
             "unavailable click keeps picker open"
         );
 
-        let mb = app.minibuffer.as_mut().expect("picker");
+        let mb = app.prompt.as_mut().expect("picker");
         mb.input = "openai".to_string();
         mb.cursor = mb.input.len();
         app.harness_picker_filter_active = true;
@@ -39116,16 +39118,16 @@ mod tests {
         assert!(!filtered.contains("Generic shell command runner"));
         assert_eq!(
             app.layout
-                .minibuffer_area
+                .prompt_area
                 .expect("filtered picker area")
                 .height,
             unfiltered_picker_height,
             "filtering keeps the picker height stable"
         );
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
-        let error = app.minibuffer.as_ref().and_then(|mb| mb.error.as_deref());
+        let error = app.prompt.as_ref().and_then(|mb| mb.error.as_deref());
         assert_eq!(error, Some("`codex` CLI not found"));
         server.abort();
     }
@@ -39146,14 +39148,14 @@ mod tests {
             .collect();
         app.run_action(KeyAction::OpenFork).await;
 
-        let unfiltered_height = crate::ui::compute_minibuffer_height(&app, 30);
-        let mb = app.minibuffer.as_mut().expect("fork picker");
+        let unfiltered_height = crate::ui::compute_prompt_height(&app, 30);
+        let mb = app.prompt.as_mut().expect("fork picker");
         mb.input = "codex".to_string();
         mb.cursor = mb.input.len();
         app.harness_picker_filter_active = true;
 
         assert_eq!(
-            crate::ui::compute_minibuffer_height(&app, 30),
+            crate::ui::compute_prompt_height(&app, 30),
             unfiltered_height,
             "filtering keeps the fork picker height stable"
         );
@@ -39183,25 +39185,25 @@ mod tests {
         ];
         app.run_action(KeyAction::OpenNewSession).await;
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(app.harness_picker_selected, 1);
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(app.harness_picker_selected, 2);
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(app.harness_picker_selected, 1);
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
             .await;
         assert_eq!(app.harness_picker_selected, 0);
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(app.harness_picker_selected, 2);
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
 
-        let minibuffer = app.minibuffer.as_ref().expect("picker remains open");
+        let minibuffer = app.prompt.as_ref().expect("picker remains open");
         assert_eq!(minibuffer.input, "codex");
         assert_eq!(minibuffer.cursor, "codex".len());
         assert!(!app.harness_picker_filter_active);
@@ -39232,16 +39234,16 @@ mod tests {
         app.run_action(KeyAction::OpenNewSession).await;
 
         for c in ['c', 'o', 'd'] {
-            app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+            app.handle_prompt_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
                 .await;
         }
         assert!(app.harness_picker_filter_active);
         assert_eq!(app.harness_picker_selected, 0);
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
 
-        let minibuffer = app.minibuffer.as_ref().expect("picker remains open");
+        let minibuffer = app.prompt.as_ref().expect("picker remains open");
         assert_eq!(minibuffer.input, "codex");
         assert!(!app.harness_picker_filter_active);
         let entries = harness_picker_entries(&app.harnesses, false, "", false);
@@ -39253,10 +39255,10 @@ mod tests {
             "the full list highlight follows the Tab-completed harness"
         );
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "Enter after completing codex must submit codex, not open the project prompt"
         );
         server.abort();
@@ -39290,7 +39292,7 @@ mod tests {
         terminal
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw picker");
-        let area = app.layout.minibuffer_area.expect("picker area");
+        let area = app.layout.prompt_area.expect("picker area");
         let wheel = |kind| MouseEvent {
             kind,
             column: area.x,
@@ -39620,8 +39622,8 @@ mod tests {
             .await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::NewSessionHarness)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::NewSessionHarness)
             ),
             "C-x C-f should still open the new-session picker"
         );
@@ -40201,7 +40203,7 @@ mod tests {
         // `shortcut_hints` also carries unrelated hints from other panes
         // (e.g. the modeline's theme toggle) — isolate the placeholder's
         // own row.
-        let mb_row = app.layout.minibuffer_area.expect("minibuffer area").y;
+        let mb_row = app.layout.prompt_area.expect("minibuffer area").y;
         let placeholder_hints: Vec<_> = app
             .layout
             .shortcut_hints
@@ -40233,7 +40235,7 @@ mod tests {
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw");
 
-        let mb_row = app.layout.minibuffer_area.expect("minibuffer area").y;
+        let mb_row = app.layout.prompt_area.expect("minibuffer area").y;
         let hit = app
             .layout
             .shortcut_hints
@@ -40266,7 +40268,7 @@ mod tests {
         terminal
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw");
-        let mb_row = app.layout.minibuffer_area.expect("minibuffer area").y;
+        let mb_row = app.layout.prompt_area.expect("minibuffer area").y;
         let first: Vec<KeyAction> = app
             .layout
             .shortcut_hints
@@ -40276,7 +40278,7 @@ mod tests {
             .collect();
 
         // Force the rotation timer overdue without waiting on wall-clock time.
-        app.minibuffer_hint_rotated_at = Some(Instant::now() - Duration::from_secs(200));
+        app.prompt_hint_rotated_at = Some(Instant::now() - Duration::from_secs(200));
         terminal
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw");
@@ -40308,7 +40310,7 @@ mod tests {
         terminal
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw");
-        let mb_row = app.layout.minibuffer_area.expect("minibuffer area").y;
+        let mb_row = app.layout.prompt_area.expect("minibuffer area").y;
         let first: Vec<KeyAction> = app
             .layout
             .shortcut_hints
@@ -40316,7 +40318,7 @@ mod tests {
             .filter(|h| h.y == mb_row)
             .map(|h| h.action)
             .collect();
-        let rotated_at_before = app.minibuffer_hint_rotated_at;
+        let rotated_at_before = app.prompt_hint_rotated_at;
 
         // Well under the 180s timer — only the zoom (context) change should
         // trigger a rotation here.
@@ -40337,7 +40339,7 @@ mod tests {
             "a zoom change should rotate the window immediately, without waiting for the timer"
         );
         assert_ne!(
-            app.minibuffer_hint_rotated_at, rotated_at_before,
+            app.prompt_hint_rotated_at, rotated_at_before,
             "a context-triggered rotation should also reset the timer"
         );
         server.abort();
@@ -40962,7 +40964,7 @@ mod tests {
             .await;
         assert_eq!(app.focus, PaneFocus::View);
         assert_eq!(app.vim_mode, VimMode::Insert);
-        assert!(app.minibuffer.is_none());
+        assert!(app.prompt.is_none());
 
         app.reset_vim_mode();
         app.focus = PaneFocus::List;
@@ -40970,7 +40972,7 @@ mod tests {
             .await;
         assert_eq!(app.focus, PaneFocus::View);
         assert_eq!(app.vim_mode, VimMode::Insert);
-        assert!(app.minibuffer.is_none());
+        assert!(app.prompt.is_none());
         server.abort();
     }
 
@@ -40992,8 +40994,8 @@ mod tests {
 
         assert_eq!(app.vim_mode, VimMode::Normal);
         assert!(matches!(
-            app.minibuffer.as_ref().map(|mb| &mb.intent),
-            Some(MinibufferIntent::SendInput { session_id }) if session_id == "s1"
+            app.prompt.as_ref().map(|mb| &mb.intent),
+            Some(PromptIntent::SendInput { session_id }) if session_id == "s1"
         ));
         server.abort();
     }
@@ -41241,39 +41243,39 @@ mod tests {
         );
     }
 
-    /// The orchestrator/operator panel ("the minibuffer is just another
+    /// The minibuffer/minibuffer panel ("the minibuffer is just another
     /// session") has its own copy of the escape hatch: `C-x C-x` inside the
     /// panel cancels the chord and forwards a literal C-x (0x18) to the
-    /// orchestrator's PTY, matching the main-view behavior.
+    /// minibuffer's PTY, matching the main-view behavior.
     #[tokio::test]
-    async fn orchestrator_panel_ctrl_x_ctrl_x_forwards_literal_ctrl_x() {
+    async fn minibuffer_panel_ctrl_x_ctrl_x_forwards_literal_ctrl_x() {
         let (mut app, _dir, server) = empty_app().await;
-        // An orchestrator session → `C-x x` opens the operator input panel.
-        app.orchestrator_id = Some("orch".to_string());
+        // An minibuffer session → `C-x x` opens the user input panel.
+        app.minibuffer_id = Some("orch".to_string());
 
         // Swap in a channel we own so the forwarded bytes are observable.
         let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
         app.pty_input_tx = tx;
 
-        // Open the orchestrator panel (`C-x x`) — this routes later keys
-        // through `handle_orchestrator_key` and forwards no PTY bytes itself.
+        // Open the minibuffer panel (`C-x x`) — this routes later keys
+        // through `handle_minibuffer_key` and forwards no PTY bytes itself.
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::Orchestrator)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::Minibuffer)
             ),
-            "precondition: the orchestrator panel must be open"
+            "precondition: the minibuffer panel must be open"
         );
         assert!(
             rx.try_recv().is_err(),
             "opening the panel must not forward any PTY bytes"
         );
 
-        // C-x C-x inside the panel forwards a literal C-x to the orchestrator.
+        // C-x C-x inside the panel forwards a literal C-x to the minibuffer.
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
@@ -41281,15 +41283,15 @@ mod tests {
 
         let job = rx
             .try_recv()
-            .expect("C-x C-x must forward a byte to the orchestrator PTY");
+            .expect("C-x C-x must forward a byte to the minibuffer PTY");
         assert_eq!(
             job.session_id, "orch",
-            "the byte must target the orchestrator session"
+            "the byte must target the minibuffer session"
         );
         assert_eq!(
             job.bytes,
             vec![0x18],
-            "C-x C-x forwards a literal C-x (0x18) to the orchestrator"
+            "C-x C-x forwards a literal C-x (0x18) to the minibuffer"
         );
         assert!(
             app.chord_state.is_empty(),
@@ -41557,20 +41559,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orchestrator_hydration_loads_existing_sticky_widgets() {
+    async fn minibuffer_hydration_loads_existing_sticky_widgets() {
         use construct_protocol::{UiPanel, UiPlacement};
 
         let (mut app, _dir, server) = captured_app().await;
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch".into();
         orch.has_pty = true;
         app.sessions.push(orch);
-        app.refresh_orchestrator_id();
+        app.refresh_minibuffer_id();
 
         assert_eq!(
-            app.orchestrator_session_needing_hydration().as_deref(),
+            app.minibuffer_session_needing_hydration().as_deref(),
             Some("orch"),
-            "a freshly launched TUI should hydrate the hidden orchestrator before live widget events arrive"
+            "a freshly launched TUI should hydrate the hidden minibuffer before live widget events arrive"
         );
 
         app.apply_hydration_state(
@@ -41598,9 +41600,9 @@ mod tests {
         )
         .await;
 
-        assert!(app.orchestrator_session_needing_hydration().is_none());
-        assert_eq!(app.orchestrator_widget_panels().len(), 1);
-        assert_eq!(app.orchestrator_widget_panels()[0].id, "fleet-pulse");
+        assert!(app.minibuffer_session_needing_hydration().is_none());
+        assert_eq!(app.minibuffer_widget_panels().len(), 1);
+        assert_eq!(app.minibuffer_widget_panels()[0].id, "fleet-pulse");
         server.abort();
     }
 
@@ -41608,14 +41610,14 @@ mod tests {
     // behind the matrix rain (half-block `▀` cells), and vanishes when
     // the preview is gone — in lock-step with the terminal-view overlay.
     #[tokio::test]
-    async fn operator_matrix_widgets_render_without_unbounded_padding() {
+    async fn minibuffer_matrix_widgets_render_without_unbounded_padding() {
         use construct_protocol::{UiPanel, UiPlacement};
 
         let (mut app, _dir, server) = captured_app().await;
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch".into();
         app.sessions.push(orch);
-        app.refresh_orchestrator_id();
+        app.refresh_minibuffer_id();
         app.matrix_rain_hidden = false;
         app.matrix_widget_pinned = Some("fleet-pulse".into());
         app.ui_panels.insert(
@@ -41629,7 +41631,7 @@ mod tests {
                         title: Some("Ambient note".into()),
                         created_at_ms: 1,
                         placement: UiPlacement::Sticky,
-                        markdown: "# Ambient note\n\nOperator widgets are sticky.".into(),
+                        markdown: "# Ambient note\n\nMinibuffer widgets are sticky.".into(),
                     },
                 ),
                 (
@@ -41640,7 +41642,7 @@ mod tests {
                         title: Some("Fleet pulse".into()),
                         created_at_ms: 2,
                         placement: UiPlacement::Sticky,
-                        markdown: "# Fleet pulse\n\n:::timeline\n- [x] Demo widget visible\n- [~] Operator can surface fleet status here\n- [ ] Hover/click square indicators\n:::".into(),
+                        markdown: "# Fleet pulse\n\n:::timeline\n- [x] Demo widget visible\n- [~] User can surface fleet status here\n- [ ] Hover/click square indicators\n:::".into(),
                     },
                 ),
                 (
@@ -41660,10 +41662,10 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("operator widget render should not panic");
+            .expect("minibuffer widget render should not panic");
         assert_eq!(app.layout.matrix_widget_hits.len(), 3);
         let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("operator ─"));
+        assert!(text.contains("minibuffer ─"));
         assert!(
             text.contains("■"),
             "selected widget indicator should be filled"
@@ -41681,10 +41683,10 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let (mut app, _dir, server) = captured_app().await;
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch".into();
         app.sessions.push(orch);
-        app.refresh_orchestrator_id();
+        app.refresh_minibuffer_id();
         let panel = |id: &str, at: u64| {
             (
                 id.to_string(),
@@ -41738,10 +41740,10 @@ mod tests {
         use construct_protocol::{UiPanel, UiPlacement};
 
         let (mut app, _dir, server) = captured_app().await;
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch".into();
         app.sessions.push(orch);
-        app.refresh_orchestrator_id();
+        app.refresh_minibuffer_id();
         app.matrix_rain_hidden = false;
         app.ui_panels.insert(
             "orch".into(),
@@ -41761,7 +41763,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("operator widget title indicator should render");
+            .expect("minibuffer widget title indicator should render");
         let hit = app
             .layout
             .matrix_widget_hits
@@ -41771,14 +41773,14 @@ mod tests {
 
         app.mouse_pos = Some((hit.start_col, hit.row));
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("hovered operator widget title indicator should render");
+            .expect("hovered minibuffer widget title indicator should render");
         assert_eq!(
             term.backend()
                 .buffer()
                 .cell((hit.start_col, hit.row))
                 .map(|cell| cell.symbol()),
             Some("□"),
-            "hover preview should keep the operator widget title icon outlined"
+            "hover preview should keep the minibuffer widget title icon outlined"
         );
         assert_eq!(
             app.matrix_widget_hover
@@ -41789,14 +41791,14 @@ mod tests {
 
         app.toggle_matrix_widget_panel("alpha".into());
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("pinned operator widget title indicator should render");
+            .expect("pinned minibuffer widget title indicator should render");
         assert_eq!(
             term.backend()
                 .buffer()
                 .cell((hit.start_col, hit.row))
                 .map(|cell| cell.symbol()),
             Some("■"),
-            "clicked/pinned operator widget title icon should be filled"
+            "clicked/pinned minibuffer widget title icon should be filled"
         );
         server.abort();
     }
@@ -41844,7 +41846,7 @@ mod tests {
             .expect("collapsed rain title bar should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
-            text.contains("operator"),
+            text.contains("minibuffer"),
             "collapsed panel should keep its title bar: {text:?}"
         );
 
@@ -41883,15 +41885,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_title_marks_pending_approval_and_toggles_panel_on_click() {
+    async fn minibuffer_title_marks_pending_approval_and_toggles_panel_on_click() {
         use construct_protocol::SessionKind;
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
         let (mut app, _dir, server) = captured_app().await;
-        let mut orch = summary_with_kind(SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(SessionKind::Minibuffer);
         orch.id = "orch".into();
         app.sessions.push(orch);
-        app.refresh_orchestrator_id();
+        app.refresh_minibuffer_id();
         app.matrix_rain_hidden = false;
         app.pending_tool_approvals.insert(
             "orch".into(),
@@ -41906,13 +41908,13 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("operator approval title should render");
+            .expect("minibuffer approval title should render");
         let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("operator !"));
+        assert!(text.contains("minibuffer !"));
         let (x_start, _x_end, y) = app
             .layout
-            .matrix_operator_title_hit
-            .expect("operator title hitbox");
+            .matrix_minibuffer_title_hit
+            .expect("minibuffer title hitbox");
 
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -41928,7 +41930,7 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         })
         .await;
-        assert!(app.is_orchestrator_panel_open());
+        assert!(app.is_minibuffer_panel_open());
 
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -41944,7 +41946,7 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         })
         .await;
-        assert!(!app.is_orchestrator_panel_open());
+        assert!(!app.is_minibuffer_panel_open());
         server.abort();
     }
 
@@ -42193,8 +42195,8 @@ mod tests {
         server.abort();
     }
 
-    fn service_summary_for_test(name: &str) -> construct_protocol::ServiceSummary {
-        construct_protocol::ServiceSummary {
+    fn operator_summary_for_test(name: &str) -> construct_protocol::OperatorSummary {
+        construct_protocol::OperatorSummary {
             name: name.to_string(),
             position: 0,
             placement: None,
@@ -42205,7 +42207,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             routing: "session-key".to_string(),
             paused: false,
-            channels: vec![construct_protocol::ServiceChannelSummary {
+            channels: vec![construct_protocol::OperatorChannelSummary {
                 id: "http".to_string(),
                 kind: "http".to_string(),
                 enabled: true,
@@ -42227,17 +42229,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn services_render_as_distinct_rows_in_the_session_list() {
+    async fn operators_render_as_distinct_rows_in_the_session_list() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
-        app.services.push(service_summary_for_test("assistant"));
+        app.operators.push(operator_summary_for_test("assistant"));
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
 
         assert!(matches!(
             app.list_items().first(),
-            Some(ListItem::Service { summary, .. }) if summary.name == "assistant"
+            Some(ListItem::Operator { summary, .. }) if summary.name == "assistant"
         ));
         let rendered = term
             .backend()
@@ -42252,58 +42254,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn services_render_in_persisted_position_order() {
+    async fn operators_render_in_persisted_position_order() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
-        let mut later = service_summary_for_test("alpha");
+        let mut later = operator_summary_for_test("alpha");
         later.position = 2;
-        let mut earlier = service_summary_for_test("zulu");
+        let mut earlier = operator_summary_for_test("zulu");
         earlier.position = 1;
-        app.services = vec![later, earlier];
+        app.operators = vec![later, earlier];
 
         let items = app.list_items();
         assert!(matches!(
             &items[0],
-            ListItem::Service { summary, .. } if summary.name == "zulu"
+            ListItem::Operator { summary, .. } if summary.name == "zulu"
         ));
         assert!(matches!(
             &items[1],
-            ListItem::Service { summary, .. } if summary.name == "alpha"
+            ListItem::Operator { summary, .. } if summary.name == "alpha"
         ));
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_view_title_bar_includes_the_service_glyph() {
+    async fn operator_view_title_bar_includes_the_operator_glyph() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.select_service("assistant".into());
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.select_operator("assistant".into());
         app.session_transitions.clear();
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("service view title should render");
+            .expect("operator view title should render");
 
-        let view = app.layout.view_area.expect("service view");
+        let view = app.layout.view_area.expect("operator view");
         let title_row = (view.x..view.right())
             .filter_map(|x| term.backend().buffer().cell((x, view.y)))
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            title_row.contains("⛓︎ service: assistant"),
-            "service pane title should include its glyph: {title_row:?}"
+            title_row.contains("⛓︎ operator: assistant"),
+            "operator pane title should include its glyph: {title_row:?}"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_view_highlights_the_serving_state() {
+    async fn operator_view_highlights_the_serving_state() {
         use ratatui::style::Modifier;
 
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.select_service("assistant".into());
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(0);
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.select_operator("assistant".into());
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Field(0);
         app.session_transitions.clear();
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
@@ -42311,7 +42313,7 @@ mod tests {
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
 
         let state = "serving";
-        let view = app.layout.view_area.expect("service view");
+        let view = app.layout.view_area.expect("operator view");
         let buffer = term.backend().buffer();
         let serving_row = (view.y..view.bottom())
             .find(|&y| {
@@ -42321,7 +42323,7 @@ mod tests {
                     .collect::<String>();
                 row.contains(state)
             })
-            .expect("service view should render its state");
+            .expect("operator view should render its state");
         let serving_x = (view.x..view.right())
             .find(|&x| {
                 (0..state.len() as u16).all(|offset| {
@@ -42335,7 +42337,7 @@ mod tests {
                         })
                 })
             })
-            .expect("service view should render the serving value");
+            .expect("operator view should render the serving value");
 
         for offset in 0..state.len() as u16 {
             let cell = buffer
@@ -42354,7 +42356,7 @@ mod tests {
     async fn bare_tab_follows_sidebar_visual_order() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         app.select_session("s1".to_string());
-        app.services.push(service_summary_for_test("assistant"));
+        app.operators.push(operator_summary_for_test("assistant"));
         app.focus = PaneFocus::List;
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -42372,9 +42374,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_list_row_opens_service_view_and_serve_starts_creation() {
+    async fn operator_list_row_opens_operator_view_and_serve_starts_creation() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
+        app.operators.push(operator_summary_for_test("assistant"));
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
@@ -42382,55 +42384,55 @@ mod tests {
         let row = app.layout.list_items_area.expect("session list");
         app.click_list(app.layout.list_area.expect("list"), row.x + 1, row.y)
             .await;
-        // Selecting a service is edit mode: there is no separate view-only
-        // state the operator has to step out of first (spec 0175).
+        // Selecting a operator is edit mode: there is no separate view-only
+        // state the user has to step out of first (spec 0175).
         assert!(matches!(
-            app.service_dialog.as_ref().map(|dialog| dialog.mode),
-            Some(ServiceDialogMode::Edit)
+            app.operator_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(OperatorDialogMode::Edit)
         ));
-        assert_eq!(app.selection, Selection::Service("assistant".into()));
+        assert_eq!(app.selection, Selection::Operator("assistant".into()));
         // Like a session-row click, the sidebar keeps keyboard focus (and the
         // focused selection highlight); the prepared editor is one Tab away.
         assert_eq!(app.focus, PaneFocus::List);
         assert_eq!(
-            app.service_dialog.as_ref().map(|dialog| dialog.focus),
-            Some(ServiceDialogFocus::Field(1))
+            app.operator_dialog.as_ref().map(|dialog| dialog.focus),
+            Some(OperatorDialogFocus::Field(1))
         );
 
-        app.open_new_service_view("service");
+        app.open_new_operator_view("operator");
         assert!(matches!(
-            app.service_dialog.as_ref().map(|dialog| dialog.mode),
-            Some(ServiceDialogMode::Create)
+            app.operator_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(OperatorDialogMode::Create)
         ));
-        assert_eq!(app.selection, Selection::Service("service".into()));
+        assert_eq!(app.selection, Selection::Operator("operator".into()));
         assert_eq!(app.focus, PaneFocus::View);
         server.abort();
     }
 
     #[tokio::test]
-    async fn serve_leaves_the_new_service_view_focused_and_editing() {
+    async fn serve_leaves_the_new_operator_view_focused_and_editing() {
         let (mut app, _dir, server) = captured_app().await;
-        // `/serve` is normally typed into the orchestrator panel, which used
+        // `/serve` is normally typed into the minibuffer panel, which used
         // to stay open and swallow every keystroke aimed at the new view.
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: String::new(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::Orchestrator,
+            intent: PromptIntent::Minibuffer,
             error: None,
         });
 
         app.run_slash_command("serve demo").await;
 
         assert!(
-            app.minibuffer.is_none(),
-            "the orchestrator panel must not keep keyboard focus over the new service view"
+            app.prompt.is_none(),
+            "the minibuffer panel must not keep keyboard focus over the new operator view"
         );
-        assert_eq!(app.selection, Selection::Service("demo".into()));
+        assert_eq!(app.selection, Selection::Operator("demo".into()));
         assert_eq!(app.focus, PaneFocus::View);
         assert!(matches!(
-            app.service_dialog.as_ref().map(|dialog| dialog.mode),
-            Some(ServiceDialogMode::Create)
+            app.operator_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(OperatorDialogMode::Create)
         ));
 
         // Typing lands in the editor's Name field, not anywhere else, and the
@@ -42438,18 +42440,18 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog
+            app.operator_dialog
                 .as_ref()
-                .map(|dialog| dialog.service.name.as_str()),
+                .map(|dialog| dialog.operator.name.as_str()),
             Some("demo2")
         );
-        assert_eq!(app.selection, Selection::Service("demo2".into()));
+        assert_eq!(app.selection, Selection::Operator("demo2".into()));
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         app.session_transitions.clear();
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("service: demo2*"), "{text}");
+        assert!(text.contains("operator: demo2*"), "{text}");
         assert!(
             !text.contains("no longer available"),
             "renaming a draft must not orphan its pane: {text}"
@@ -42458,10 +42460,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_view_title_marks_unsaved_edits() {
+    async fn operator_view_title_marks_unsaved_edits() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.select_service("assistant".to_string());
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.select_operator("assistant".to_string());
         app.session_transitions.clear();
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -42474,23 +42476,23 @@ mod tests {
         }
 
         let text = draw(&mut app, &mut term);
-        assert!(text.contains("service: assistant "), "{text}");
-        assert!(!text.contains("assistant*"), "a saved service is unmarked");
+        assert!(text.contains("operator: assistant "), "{text}");
+        assert!(!text.contains("assistant*"), "a saved operator is unmarked");
 
         app.on_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
             .await;
         let text = draw(&mut app, &mut term);
         assert!(
-            text.contains("service: assistant*"),
+            text.contains("operator: assistant*"),
             "an edited definition is marked unsaved: {text}"
         );
 
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog
+            app.operator_dialog
                 .as_ref()
-                .map(|dialog| dialog.service.instruction.as_str()),
+                .map(|dialog| dialog.operator.instruction.as_str()),
             Some("Answer briefly."),
             "Esc reverts to the saved definition"
         );
@@ -42502,63 +42504,63 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .await;
         assert_eq!(app.focus, PaneFocus::List);
-        assert!(app.service_dialog.is_some());
+        assert!(app.operator_dialog.is_some());
 
-        // A service that has never been saved is unsaved by definition.
-        app.open_new_service_view("fresh");
+        // A operator that has never been saved is unsaved by definition.
+        app.open_new_operator_view("fresh");
         let text = draw(&mut app, &mut term);
-        assert!(text.contains("service: fresh*"), "{text}");
+        assert!(text.contains("operator: fresh*"), "{text}");
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_editor_down_walks_state_then_channels_then_sessions() {
+    async fn operator_editor_down_walks_state_then_channels_then_sessions() {
         let (mut app, _dir, server) = captured_app().await;
         let mut routed = summary_with_kind(construct_protocol::SessionKind::User);
-        routed.id = "service-session".into();
-        routed.title = Some("service:assistant:http:demo".into());
+        routed.id = "operator-session".into();
+        routed.title = Some("operator:assistant:http:demo".into());
         app.sessions.push(routed);
-        app.services.push(service_summary_for_test("assistant"));
-        app.service_channel_catalog = app.services[0].channels.clone();
-        app.select_service("assistant".to_string());
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(0);
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = app.operators[0].channels.clone();
+        app.select_operator("assistant".to_string());
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Field(0);
 
-        let focus = |app: &App| app.service_dialog.as_ref().unwrap().focus;
+        let focus = |app: &App| app.operator_dialog.as_ref().unwrap().focus;
         // Channels is no longer one of the definition rows; the last one is State.
-        assert_eq!(SERVICE_FIELD_COUNT, 8);
+        assert_eq!(OPERATOR_FIELD_COUNT, 8);
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().field_value(7),
+            app.operator_dialog.as_ref().unwrap().field_value(7),
             "serving"
         );
 
-        for field in 1..SERVICE_FIELD_COUNT {
+        for field in 1..OPERATOR_FIELD_COUNT {
             app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
                 .await;
-            assert_eq!(focus(&app), ServiceDialogFocus::Field(field));
+            assert_eq!(focus(&app), OperatorDialogFocus::Field(field));
         }
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
         assert_eq!(
             focus(&app),
-            ServiceDialogFocus::Channel(0),
+            OperatorDialogFocus::Channel(0),
             "Down from State descends into the channel catalog"
         );
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
         assert_eq!(
             focus(&app),
-            ServiceDialogFocus::Session(0),
+            OperatorDialogFocus::Session(0),
             "Down past the last channel descends into the routed sessions"
         );
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
-        assert_eq!(focus(&app), ServiceDialogFocus::Field(0), "and then wraps");
+        assert_eq!(focus(&app), OperatorDialogFocus::Field(0), "and then wraps");
 
         // Up mirrors the same order.
         for expected in [
-            ServiceDialogFocus::Session(0),
-            ServiceDialogFocus::Channel(0),
-            ServiceDialogFocus::Field(SERVICE_FIELD_COUNT - 1),
+            OperatorDialogFocus::Session(0),
+            OperatorDialogFocus::Channel(0),
+            OperatorDialogFocus::Field(OPERATOR_FIELD_COUNT - 1),
         ] {
             app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
                 .await;
@@ -42567,13 +42569,13 @@ mod tests {
         // C-n follows the same order rather than cycling fields on their own.
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
-        assert_eq!(focus(&app), ServiceDialogFocus::Channel(0));
+        assert_eq!(focus(&app), OperatorDialogFocus::Channel(0));
 
         // Channel-row actions still apply to the selected row.
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog
+            app.operator_dialog
                 .as_ref()
                 .and_then(|dialog| dialog.channel_editor.as_ref())
                 .map(|editor| editor.channel.id.as_str()),
@@ -42583,21 +42585,21 @@ mod tests {
             .await;
 
         // Enter on a routed session row jumps to that session, like clicking it.
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Session(0);
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Session(0);
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
-        assert_eq!(app.selection, Selection::Session("service-session".into()));
+        assert_eq!(app.selection, Selection::Session("operator-session".into()));
         assert!(
-            app.service_dialog.is_none(),
-            "leaving the service view closes its editor"
+            app.operator_dialog.is_none(),
+            "leaving the operator view closes its editor"
         );
         server.abort();
     }
 
-    /// A catalog long enough to overflow the service view's lower section.
-    fn long_channel_catalog(count: usize) -> Vec<construct_protocol::ServiceChannelSummary> {
+    /// A catalog long enough to overflow the operator view's lower section.
+    fn long_channel_catalog(count: usize) -> Vec<construct_protocol::OperatorChannelSummary> {
         (0..count)
-            .map(|index| construct_protocol::ServiceChannelSummary {
+            .map(|index| construct_protocol::OperatorChannelSummary {
                 id: format!("chan-{index:02}"),
                 kind: "http".to_string(),
                 enabled: true,
@@ -42621,14 +42623,14 @@ mod tests {
     /// Arrow toward `target` until the editor's cursor lands on it, redrawing
     /// after each step so the render pass resolves the scroll offset the way
     /// it does in the running TUI.
-    async fn walk_service_focus_to(
+    async fn walk_operator_focus_to(
         app: &mut App,
         term: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
         key: KeyCode,
-        target: ServiceDialogFocus,
+        target: OperatorDialogFocus,
     ) {
         for _ in 0..256 {
-            if app.service_dialog.as_ref().map(|dialog| dialog.focus) == Some(target) {
+            if app.operator_dialog.as_ref().map(|dialog| dialog.focus) == Some(target) {
                 return;
             }
             app.on_key(KeyEvent::new(key, KeyModifiers::NONE)).await;
@@ -42637,38 +42639,38 @@ mod tests {
         panic!("never reached {target:?}");
     }
 
-    async fn service_view_with_long_catalog(
+    async fn operator_view_with_long_catalog(
         channels: usize,
     ) -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
         let (mut app, dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.service_channel_catalog = long_channel_catalog(channels);
-        app.select_service("assistant".to_string());
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = long_channel_catalog(channels);
+        app.select_operator("assistant".to_string());
         app.session_transitions.clear();
         (app, dir, server)
     }
 
     #[tokio::test]
-    async fn service_view_scrolls_the_focused_row_into_view() {
-        let (mut app, _dir, server) = service_view_with_long_catalog(60).await;
+    async fn operator_view_scrolls_the_focused_row_into_view() {
+        let (mut app, _dir, server) = operator_view_with_long_catalog(60).await;
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        assert_eq!(app.service_view_scroll, 0, "the section opens at the top");
+        assert_eq!(app.operator_view_scroll, 0, "the section opens at the top");
         assert!(
             !rendered_text(term.backend().buffer()).contains("chan-59"),
             "the tail of a long catalog starts below the fold"
         );
 
         // Walk from the definition fields all the way to the last channel row.
-        walk_service_focus_to(
+        walk_operator_focus_to(
             &mut app,
             &mut term,
             KeyCode::Down,
-            ServiceDialogFocus::Channel(59),
+            OperatorDialogFocus::Channel(59),
         )
         .await;
-        let at_bottom = app.service_view_scroll;
+        let at_bottom = app.operator_view_scroll;
         assert!(at_bottom > 0, "arrowing past the fold scrolls the section");
         assert!(
             rendered_text(term.backend().buffer()).contains("chan-59"),
@@ -42676,21 +42678,21 @@ mod tests {
         );
 
         // Up is symmetric: the section scrolls back the other way.
-        walk_service_focus_to(
+        walk_operator_focus_to(
             &mut app,
             &mut term,
             KeyCode::Up,
-            ServiceDialogFocus::Channel(0),
+            OperatorDialogFocus::Channel(0),
         )
         .await;
-        assert!(app.service_view_scroll < at_bottom);
+        assert!(app.operator_view_scroll < at_bottom);
         assert!(rendered_text(term.backend().buffer()).contains("chan-00"));
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_view_scrollbar_appears_only_when_the_section_overflows() {
-        let (mut app, _dir, server) = service_view_with_long_catalog(24).await;
+    async fn operator_view_scrollbar_appears_only_when_the_section_overflows() {
+        let (mut app, _dir, server) = operator_view_with_long_catalog(24).await;
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
@@ -42706,7 +42708,7 @@ mod tests {
             .layout
             .terminal_scrollbar
             .expect("navigating reveals the scrollbar");
-        let view = app.layout.view_area.expect("service view");
+        let view = app.layout.view_area.expect("operator view");
         assert_eq!(hit.area.width, 2, "same two-column bar as the session view");
         assert_eq!(
             hit.area.x + hit.area.width,
@@ -42732,7 +42734,7 @@ mod tests {
         );
 
         // Nothing to scroll → no bar at all, however recent the activity.
-        let (mut app, _dir2, server2) = service_view_with_long_catalog(1).await;
+        let (mut app, _dir2, server2) = operator_view_with_long_catalog(1).await;
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
@@ -42742,14 +42744,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_view_wheel_and_drag_scroll_the_section() {
+    async fn operator_view_wheel_and_drag_scroll_the_section() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
-        let (mut app, _dir, server) = service_view_with_long_catalog(24).await;
+        let (mut app, _dir, server) = operator_view_with_long_catalog(24).await;
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let view = app.layout.view_area.expect("service view");
+        let view = app.layout.view_area.expect("operator view");
 
         let wheel = |kind| MouseEvent {
             kind,
@@ -42759,12 +42761,12 @@ mod tests {
         };
         app.on_mouse(wheel(MouseEventKind::ScrollDown)).await;
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let scrolled = app.service_view_scroll;
-        assert!(scrolled > 0, "the wheel scrolls the service view");
+        let scrolled = app.operator_view_scroll;
+        assert!(scrolled > 0, "the wheel scrolls the operator view");
         app.on_mouse(wheel(MouseEventKind::ScrollUp)).await;
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         assert!(
-            app.service_view_scroll < scrolled,
+            app.operator_view_scroll < scrolled,
             "and scrolls back the other way"
         );
 
@@ -42785,7 +42787,7 @@ mod tests {
         .await;
         assert!(app.dragging_terminal_scrollbar.is_some());
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let at_end = app.service_view_scroll;
+        let at_end = app.operator_view_scroll;
         assert!(at_end > 0);
         assert!(
             rendered_text(term.backend().buffer()).contains("chan-23"),
@@ -42801,33 +42803,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_view_row_hits_follow_the_scroll() {
+    async fn operator_view_row_hits_follow_the_scroll() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
-        let (mut app, _dir, server) = service_view_with_long_catalog(24).await;
+        let (mut app, _dir, server) = operator_view_with_long_catalog(24).await;
         let mut routed = summary_with_kind(construct_protocol::SessionKind::User);
-        routed.id = "service-session".into();
-        routed.title = Some("service:assistant:http:acme-support".into());
+        routed.id = "operator-session".into();
+        routed.title = Some("operator:assistant:http:acme-support".into());
         app.sessions.push(routed);
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         assert!(
-            app.layout.service_session_hits.is_empty(),
+            app.layout.operator_session_hits.is_empty(),
             "a routed session below the fold has no clickable row"
         );
 
         // Walk to the routed session row: it scrolls in, and so does its hit.
-        walk_service_focus_to(
+        walk_operator_focus_to(
             &mut app,
             &mut term,
             KeyCode::Down,
-            ServiceDialogFocus::Session(0),
+            OperatorDialogFocus::Session(0),
         )
         .await;
         let hit = app
             .layout
-            .service_session_hits
+            .operator_session_hits
             .first()
             .cloned()
             .expect("the scrolled-in session row is clickable");
@@ -42847,16 +42849,16 @@ mod tests {
             .await;
         app.on_mouse(click(MouseEventKind::Up(MouseButton::Left)))
             .await;
-        assert_eq!(app.selection, Selection::Session("service-session".into()));
+        assert_eq!(app.selection, Selection::Session("operator-session".into()));
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_view_renders_definition_help_channels_and_sessions() {
+    async fn operator_view_renders_definition_help_channels_and_sessions() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.select_service("assistant".to_string());
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(0);
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.select_operator("assistant".to_string());
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Field(0);
         app.session_transitions.clear();
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -42868,14 +42870,14 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(text.contains("service: assistant"));
+        assert!(text.contains("operator: assistant"));
         assert!(
             text.contains("☰"),
-            "service view should expose title actions"
+            "operator view should expose title actions"
         );
         assert!(text.contains("Instruction"));
-        assert!(text.contains("Service name"));
-        assert!(text.contains("no token usage reported yet for this service"));
+        assert!(text.contains("Operator name"));
+        assert!(text.contains("no token usage reported yet for this operator"));
         assert!(text.contains("Channels"));
         assert!(text.contains("Sessions"));
         assert!(!text.contains("Activity"));
@@ -42884,15 +42886,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_view_honors_pane_side_border_toggle() {
+    async fn operator_view_honors_pane_side_border_toggle() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.select_service("assistant".to_string());
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.select_operator("assistant".to_string());
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
 
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
-        let view = app.layout.view_area.expect("service view");
+        let view = app.layout.view_area.expect("operator view");
         assert_eq!(
             term.backend()
                 .buffer()
@@ -42900,7 +42902,7 @@ mod tests {
                 .expect("left side border cell")
                 .symbol(),
             " ",
-            "service side borders should start hidden like session side borders"
+            "operator side borders should start hidden like session side borders"
         );
 
         app.run_slash_command("border").await;
@@ -42912,23 +42914,23 @@ mod tests {
                 .expect("left side border cell")
                 .symbol(),
             "│",
-            "service side borders should appear when enabled"
+            "operator side borders should appear when enabled"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_view_renders_typed_public_channel_endpoint() {
+    async fn operator_view_renders_typed_public_channel_endpoint() {
         let (mut app, _dir, server) = captured_app().await;
-        let service = service_summary_for_test("assistant");
-        app.service_channel_catalog = service.channels.clone();
-        app.services.push(service);
-        app.select_service("assistant".to_string());
+        let operator = operator_summary_for_test("assistant");
+        app.operator_channel_catalog = operator.channels.clone();
+        app.operators.push(operator);
+        app.select_operator("assistant".to_string());
         app.apply_channel_publication(construct_protocol::ChannelPublicationNotificationPayload {
-            service_name: "assistant".into(),
+            operator_name: "assistant".into(),
             channel_id: "http".into(),
             publication: Some(construct_protocol::ChannelPublicationSummary {
-                service_name: "assistant".into(),
+                operator_name: "assistant".into(),
                 channel_id: "http".into(),
                 provider: "construct".into(),
                 phase: construct_protocol::ChannelPublicationPhase::Ready,
@@ -42939,17 +42941,17 @@ mod tests {
                 error: None,
             }),
         });
-        app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
+        app.open_edit_operator_view("assistant");
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Channel(0);
         app.session_transitions.clear();
 
         let actions = app
-            .selected_service_channel_actions("assistant")
+            .selected_operator_channel_actions("assistant")
             .expect("selected ingress channel actions");
         assert!(actions.published);
         assert_eq!(
             actions.address,
-            Some(ServiceChannelActionAddress::PublicUrl(
+            Some(OperatorChannelActionAddress::PublicUrl(
                 "https://alerts.example.test/".into()
             ))
         );
@@ -42974,16 +42976,16 @@ mod tests {
         assert!(text.contains("[y Copy]"), "{text}");
         let rendered_actions: HashSet<_> = app
             .layout
-            .service_channel_action_hits
+            .operator_channel_action_hits
             .iter()
             .map(|hit| hit.action)
             .collect();
         assert_eq!(
             rendered_actions,
             HashSet::from([
-                ServiceChannelAction::TogglePublication,
-                ServiceChannelAction::OpenAddress,
-                ServiceChannelAction::CopyAddress,
+                OperatorChannelAction::TogglePublication,
+                OperatorChannelAction::OpenAddress,
+                OperatorChannelAction::CopyAddress,
             ])
         );
 
@@ -42998,17 +43000,17 @@ mod tests {
         assert!(narrow_text.contains("[y Copy]"), "{narrow_text}");
         let toggle_y = app
             .layout
-            .service_channel_action_hits
+            .operator_channel_action_hits
             .iter()
-            .find(|hit| hit.action == ServiceChannelAction::TogglePublication)
+            .find(|hit| hit.action == OperatorChannelAction::TogglePublication)
             .expect("narrow withdraw hit")
             .area
             .y;
         let copy_y = app
             .layout
-            .service_channel_action_hits
+            .operator_channel_action_hits
             .iter()
-            .find(|hit| hit.action == ServiceChannelAction::CopyAddress)
+            .find(|hit| hit.action == OperatorChannelAction::CopyAddress)
             .expect("narrow copy hit")
             .area
             .y;
@@ -43017,14 +43019,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_view_makes_loopback_publish_action_visible() {
+    async fn operator_view_makes_loopback_publish_action_visible() {
         let (mut app, _dir, server) = captured_app().await;
-        let service = service_summary_for_test("assistant");
-        app.service_channel_catalog = service.channels.clone();
-        app.services.push(service);
-        app.select_service("assistant".into());
-        app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
+        let operator = operator_summary_for_test("assistant");
+        app.operator_channel_catalog = operator.channels.clone();
+        app.operators.push(operator);
+        app.select_operator("assistant".into());
+        app.open_edit_operator_view("assistant");
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Channel(0);
         app.session_transitions.clear();
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
@@ -43035,20 +43037,20 @@ mod tests {
         assert!(text.contains("[p Publish]"), "{text}");
         assert!(!text.contains("[o Open]"), "{text}");
         assert!(!text.contains("[y Copy]"), "{text}");
-        assert_eq!(app.layout.service_channel_action_hits.len(), 1);
+        assert_eq!(app.layout.operator_channel_action_hits.len(), 1);
         assert_eq!(
-            app.layout.service_channel_action_hits[0].action,
-            ServiceChannelAction::TogglePublication
+            app.layout.operator_channel_action_hits[0].action,
+            OperatorChannelAction::TogglePublication
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_channel_actions_keep_socket_endpoints_copy_only_and_hide_outbound_channels() {
+    async fn operator_channel_actions_keep_socket_endpoints_copy_only_and_hide_outbound_channels() {
         let (mut app, _dir, server) = captured_app().await;
-        let mut service = service_summary_for_test("assistant");
-        service.channels[0].publication = Some(construct_protocol::ChannelPublicationSummary {
-            service_name: "assistant".into(),
+        let mut operator = operator_summary_for_test("assistant");
+        operator.channels[0].publication = Some(construct_protocol::ChannelPublicationSummary {
+            operator_name: "assistant".into(),
             channel_id: "http".into(),
             provider: "construct".into(),
             phase: construct_protocol::ChannelPublicationPhase::Ready,
@@ -43059,71 +43061,71 @@ mod tests {
             auth_url: None,
             error: None,
         });
-        let mut slack = service.channels[0].clone();
+        let mut slack = operator.channels[0].clone();
         slack.id = "slack".into();
         slack.kind = "slack".into();
         slack.port = None;
         slack.publication = None;
-        service.channels.push(slack.clone());
-        app.service_channel_catalog = service.channels.clone();
-        app.services.push(service);
-        app.select_service("assistant".into());
-        app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
+        operator.channels.push(slack.clone());
+        app.operator_channel_catalog = operator.channels.clone();
+        app.operators.push(operator);
+        app.select_operator("assistant".into());
+        app.open_edit_operator_view("assistant");
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Channel(0);
 
         let actions = app
-            .selected_service_channel_actions("assistant")
+            .selected_operator_channel_actions("assistant")
             .expect("socket publication actions");
         assert_eq!(
             actions.address,
-            Some(ServiceChannelActionAddress::PublicSocket(
+            Some(OperatorChannelActionAddress::PublicSocket(
                 "[2001:db8::1]:7443".into()
             ))
         );
         assert!(!actions.address.as_ref().unwrap().can_open());
 
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(1);
-        assert!(app.selected_service_channel_actions("assistant").is_none());
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Channel(1);
+        assert!(app.selected_operator_channel_actions("assistant").is_none());
 
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let text = rendered_text(term.backend().buffer());
         assert!(!text.contains("Actions slack"), "{text}");
-        assert!(app.layout.service_channel_action_hits.is_empty());
+        assert!(app.layout.operator_channel_action_hits.is_empty());
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_view_draws_scoped_token_graph_and_session_rows_are_clickable() {
+    async fn operator_view_draws_scoped_token_graph_and_session_rows_are_clickable() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
         let (mut app, _dir, server) = captured_app().await;
         let mut routed = summary_with_kind(construct_protocol::SessionKind::User);
-        routed.id = "service-session".into();
-        routed.title = Some("service:assistant:http:demo-conversation".into());
+        routed.id = "operator-session".into();
+        routed.title = Some("operator:assistant:http:demo-conversation".into());
         routed.state = construct_protocol::SessionState::AwaitingInput;
         app.sessions.push(routed);
         let mut second = summary_with_kind(construct_protocol::SessionKind::User);
-        second.id = "second-service-session".into();
-        second.title = Some("service:assistant:http:another-conversation".into());
+        second.id = "second-operator-session".into();
+        second.title = Some("operator:assistant:http:another-conversation".into());
         app.sessions.push(second);
         let mut child = summary_with_kind(construct_protocol::SessionKind::User);
-        child.id = "service-child".into();
+        child.id = "operator-child".into();
         child.title = Some("native helper".into());
-        child.parent_session_id = Some("service-session".into());
+        child.parent_session_id = Some("operator-session".into());
         app.sessions.push(child);
-        let mut other_service = summary_with_kind(construct_protocol::SessionKind::User);
-        other_service.id = "other-service-session".into();
-        other_service.title = Some("service:reviewer:http:review".into());
-        app.sessions.push(other_service);
-        app.services.push(service_summary_for_test("assistant"));
-        app.services.push(service_summary_for_test("reviewer"));
+        let mut other_operator = summary_with_kind(construct_protocol::SessionKind::User);
+        other_operator.id = "other-operator-session".into();
+        other_operator.title = Some("operator:reviewer:http:review".into());
+        app.sessions.push(other_operator);
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operators.push(operator_summary_for_test("reviewer"));
         for (session_id, input, output, cached, model) in [
-            ("service-session", 120_000, 10_000, 80_000, "opus"),
-            ("second-service-session", 30_000, 3_000, 20_000, "gpt"),
-            ("service-child", 7_000, 0, 0, "helper-model"),
-            ("other-service-session", 1_000_000, 0, 0, "reviewer-model"),
+            ("operator-session", 120_000, 10_000, 80_000, "opus"),
+            ("second-operator-session", 30_000, 3_000, 20_000, "gpt"),
+            ("operator-child", 7_000, 0, 0, "helper-model"),
+            ("other-operator-session", 1_000_000, 0, 0, "reviewer-model"),
         ] {
             app.observe_cost_for_meter(
                 session_id,
@@ -43136,7 +43138,7 @@ mod tests {
                 },
             );
         }
-        app.select_service("assistant".into());
+        app.select_operator("assistant".into());
         app.session_transitions.clear();
 
         let backend = ratatui::backend::TestBackend::new(120, 60);
@@ -43151,38 +43153,38 @@ mod tests {
             .collect::<String>();
         assert!(
             text.contains("channel: http"),
-            "rendered service view:\n{text}"
+            "rendered operator view:\n{text}"
         );
         assert!(text.contains("demo-conversation"));
         assert!(
             text.contains("opus") && text.contains("gpt") && text.contains("helper-model"),
-            "the graph legend should name every model used by this service:\n{text}"
+            "the graph legend should name every model used by this operator:\n{text}"
         );
-        assert!(!text.contains("reviewer-model"), "another service leaked in:\n{text}");
-        let (meter_service, graph) = app
+        assert!(!text.contains("reviewer-model"), "another operator leaked in:\n{text}");
+        let (meter_operator, graph) = app
             .layout
-            .service_token_graphs
+            .operator_token_graphs
             .first()
             .cloned()
-            .expect("the service view should paint a token graph");
-        assert_eq!(meter_service, "assistant");
+            .expect("the operator view should paint a token graph");
+        assert_eq!(meter_operator, "assistant");
         assert_eq!(
             graph.height,
             crate::project_dashboard::METER_HEIGHT - 1,
-            "the service graph should use the full scoped meter height"
+            "the operator graph should use the full scoped meter height"
         );
-        let meter = app.service_token_meters.get("assistant").unwrap();
+        let meter = app.operator_token_meters.get("assistant").unwrap();
         let entries = meter.legend(graph.width as usize);
         let legend_y = graph.y + graph.height;
         assert_eq!(
             buffer[(graph.x, legend_y)].fg,
             entries[0].dot_color,
-            "the service legend dot should use the operator legend's cache tone"
+            "the operator legend dot should use the minibuffer legend's cache tone"
         );
         assert_eq!(
             buffer[(graph.x + 2, legend_y)].fg,
             entries[0].color,
-            "the service legend text should use the operator legend's model color"
+            "the operator legend text should use the minibuffer legend's model color"
         );
         let painted = (graph.y..graph.y + graph.height)
             .flat_map(|y| (graph.x..graph.x + graph.width).map(move |x| (x, y)))
@@ -43190,7 +43192,7 @@ mod tests {
                 let cell = &buffer[(x, y)];
                 cell.bg != ratatui::style::Color::Reset || "▁▂▃▄▅▆▇".contains(cell.symbol())
             });
-        assert!(painted, "the service meter has no painted bars:\n{text}");
+        assert!(painted, "the operator meter has no painted bars:\n{text}");
 
         app.mouse_pos = Some((graph.x + graph.width - 1, graph.y));
         term.draw(|f| crate::ui::render(f, &mut app))
@@ -43198,15 +43200,15 @@ mod tests {
         let hover_text = rendered_text(term.backend().buffer());
         assert!(
             hover_text.contains("80k cached"),
-            "the service graph should share exact per-column hover detail:\n{hover_text}"
+            "the operator graph should share exact per-column hover detail:\n{hover_text}"
         );
 
         let hit = app
             .layout
-            .service_session_hits
+            .operator_session_hits
             .first()
             .cloned()
-            .expect("routed service session row hit");
+            .expect("routed operator session row hit");
         let event = |kind| MouseEvent {
             kind,
             column: hit.area.x + 1,
@@ -43217,21 +43219,21 @@ mod tests {
             .await;
         app.on_mouse(event(MouseEventKind::Up(MouseButton::Left)))
             .await;
-        assert_eq!(app.selection, Selection::Session("service-session".into()));
+        assert_eq!(app.selection, Selection::Session("operator-session".into()));
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_view_title_menu_shows_only_pane_actions() {
+    async fn operator_view_title_menu_shows_only_pane_actions() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.select_service("assistant".to_string());
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.select_operator("assistant".to_string());
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
 
-        let view = app.layout.view_area.expect("service view");
+        let view = app.layout.view_area.expect("operator view");
         let (button_x, _, button_y) = crate::ui::view_close_button_range(view);
         let click = |kind| MouseEvent {
             kind,
@@ -43243,9 +43245,9 @@ mod tests {
             .await;
         app.on_mouse(click(MouseEventKind::Up(MouseButton::Left)))
             .await;
-        app.service_title_menu
+        app.operator_title_menu
             .as_ref()
-            .expect("service actions menu should open");
+            .expect("operator actions menu should open");
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("draw menu");
         let menu_text = term
@@ -43256,65 +43258,65 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         for removed_item in [
-            "edit service",
+            "edit operator",
             "rotate HTTP token",
-            "pause service",
-            "resume service",
+            "pause operator",
+            "resume operator",
         ] {
             assert!(
                 !menu_text.contains(removed_item),
                 "unexpected menu item: {removed_item}"
             );
         }
-        for action in ServiceTitleMenuAction::ALL {
+        for action in OperatorTitleMenuAction::ALL {
             assert!(menu_text.contains(action.label()));
         }
         assert!(
             menu_text.contains("copy id (assistant)"),
-            "service action should preview the exact id: {menu_text}"
+            "operator action should preview the exact id: {menu_text}"
         );
         assert!(
             menu_text.contains("C-x k"),
-            "service delete should advertise the global kill chord: {menu_text}"
+            "operator delete should advertise the global kill chord: {menu_text}"
         );
         assert!(
             !menu_text.contains("C-d"),
-            "service delete must not advertise retired C-d: {menu_text}"
+            "operator delete must not advertise retired C-d: {menu_text}"
         );
-        assert!(app.service_title_menu.is_some());
+        assert!(app.operator_title_menu.is_some());
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_open_delete_confirm_uses_global_kill_chord() {
+    async fn operator_open_delete_confirm_uses_global_kill_chord() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.select_service("assistant".into());
-        assert!(app.service_dialog.is_some());
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.select_operator("assistant".into());
+        assert!(app.operator_dialog.is_some());
 
         // Retired form-local delete: C-d no longer arms an in-view confirm.
         app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
             .await;
-        assert!(app.minibuffer.is_none());
+        assert!(app.prompt.is_none());
         assert!(
             !app
-                .service_dialog
+                .operator_dialog
                 .as_ref()
                 .and_then(|dialog| dialog.note.as_deref())
-                .is_some_and(|note| note.contains("Delete this service")),
-            "C-d must not open the old inline service-delete confirm"
+                .is_some_and(|note| note.contains("Delete this operator")),
+            "C-d must not open the old inline operator-delete confirm"
         );
 
         // Global kill chord (C-x k / dd / OpenDeleteConfirm) opens the
         // same minibuffer confirm sessions and projects use.
         app.run_action(KeyAction::OpenDeleteConfirm).await;
-        let mb = app.minibuffer.as_ref().expect("delete confirm minibuffer");
+        let mb = app.prompt.as_ref().expect("delete confirm minibuffer");
         assert!(
             matches!(
                 &mb.intent,
-                MinibufferIntent::ServiceDeleteConfirm { name } if name == "assistant"
+                PromptIntent::OperatorDeleteConfirm { name } if name == "assistant"
             ),
-            "expected ServiceDeleteConfirm, got {:?}",
+            "expected OperatorDeleteConfirm, got {:?}",
             mb.intent
         );
         assert!(mb.prompt.contains("assistant"));
@@ -43322,12 +43324,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_view_yields_keys_to_open_transient_surfaces() {
+    async fn operator_view_yields_keys_to_open_transient_surfaces() {
         use construct_protocol::{RemoteProviderInfo, TunnelProvider};
 
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.select_service("assistant".into());
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.select_operator("assistant".into());
 
         app.remote_control_popup = Some(RemoteControlPopup::Choose(RemoteControlChoose {
             base: remote_ok_fixture(false),
@@ -43356,7 +43358,7 @@ mod tests {
                     _ => None,
                 }),
             Some(1),
-            "an open remote-control dialog must own keys over the service view"
+            "an open remote-control dialog must own keys over the operator view"
         );
 
         app.remote_control_popup = None;
@@ -43372,26 +43374,26 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.minibuffer
+            app.prompt
                 .as_ref()
                 .map(|minibuffer| minibuffer.input.as_str()),
             Some("s"),
-            "an open minibuffer must own keys over the service view"
+            "an open minibuffer must own keys over the operator view"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn clicking_service_view_starts_editing() {
+    async fn clicking_operator_view_starts_editing() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.select_service("assistant".to_string());
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.select_operator("assistant".to_string());
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
 
-        let view = app.layout.view_area.expect("service view");
+        let view = app.layout.view_area.expect("operator view");
         let click = |kind| MouseEvent {
             kind,
             column: view.x + 8,
@@ -43404,40 +43406,40 @@ mod tests {
             .await;
 
         assert!(matches!(
-            app.service_dialog.as_ref().map(|dialog| dialog.mode),
-            Some(ServiceDialogMode::Edit)
+            app.operator_dialog.as_ref().map(|dialog| dialog.mode),
+            Some(OperatorDialogMode::Edit)
         ));
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_editor_ctrl_n_and_ctrl_p_navigate_fields() {
+    async fn operator_editor_ctrl_n_and_ctrl_p_navigate_fields() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.open_edit_service_view("assistant");
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.open_edit_operator_view("assistant");
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().focus,
-            ServiceDialogFocus::Field(1)
+            app.operator_dialog.as_ref().unwrap().focus,
+            OperatorDialogFocus::Field(1)
         );
 
         let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
         app.on_key(ctrl('n')).await;
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().focus,
-            ServiceDialogFocus::Field(2)
+            app.operator_dialog.as_ref().unwrap().focus,
+            OperatorDialogFocus::Field(2)
         );
         app.on_key(ctrl('p')).await;
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().focus,
-            ServiceDialogFocus::Field(1)
+            app.operator_dialog.as_ref().unwrap().focus,
+            OperatorDialogFocus::Field(1)
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_editor_harness_and_model_use_pickers() {
+    async fn operator_editor_harness_and_model_use_pickers() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
+        app.operators.push(operator_summary_for_test("assistant"));
         app.harnesses = vec![
             construct_protocol::HarnessInfo {
                 name: "smith".to_string(),
@@ -43459,15 +43461,15 @@ mod tests {
                 },
             },
         ];
-        app.open_edit_service_view("assistant");
+        app.open_edit_operator_view("assistant");
 
         let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
         app.on_key(ctrl('n')).await;
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().picker,
-            Some(ServiceDialogPickerKind::Harness)
+            app.operator_dialog.as_ref().unwrap().picker,
+            Some(OperatorDialogPickerKind::Harness)
         );
         app.session_transitions.clear();
         let backend = ratatui::backend::TestBackend::new(120, 40);
@@ -43487,28 +43489,28 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().service.harness,
+            app.operator_dialog.as_ref().unwrap().operator.harness,
             "shell"
         );
 
-        if let Some(dialog) = app.service_dialog.as_mut() {
-            dialog.focus = ServiceDialogFocus::Field(3);
-            dialog.service.model = None;
+        if let Some(dialog) = app.operator_dialog.as_mut() {
+            dialog.focus = OperatorDialogFocus::Field(3);
+            dialog.operator.model = None;
         }
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().picker,
-            Some(ServiceDialogPickerKind::Model)
+            app.operator_dialog.as_ref().unwrap().picker,
+            Some(OperatorDialogPickerKind::Model)
         );
         app.on_key(ctrl('n')).await;
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog
+            app.operator_dialog
                 .as_ref()
                 .unwrap()
-                .service
+                .operator
                 .model
                 .as_deref(),
             Some("gpt-5")
@@ -43517,36 +43519,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_editor_harness_and_model_ignore_typed_or_pasted_text() {
+    async fn operator_editor_harness_and_model_ignore_typed_or_pasted_text() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.open_edit_service_view("assistant");
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.open_edit_operator_view("assistant");
 
-        if let Some(dialog) = app.service_dialog.as_mut() {
-            dialog.focus = ServiceDialogFocus::Field(2);
+        if let Some(dialog) = app.operator_dialog.as_mut() {
+            dialog.focus = OperatorDialogFocus::Field(2);
         }
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .await;
         app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().service.harness,
+            app.operator_dialog.as_ref().unwrap().operator.harness,
             "smith",
             "harness is changed only through its picker"
         );
 
-        if let Some(dialog) = app.service_dialog.as_mut() {
-            dialog.focus = ServiceDialogFocus::Field(3);
-            dialog.service.model = Some("gpt-5".to_string());
+        if let Some(dialog) = app.operator_dialog.as_mut() {
+            dialog.focus = OperatorDialogFocus::Field(3);
+            dialog.operator.model = Some("gpt-5".to_string());
         }
-        assert!(app.insert_service_dialog_text("-typed"));
+        assert!(app.insert_operator_dialog_text("-typed"));
         app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog
+            app.operator_dialog
                 .as_ref()
                 .unwrap()
-                .service
+                .operator
                 .model
                 .as_deref(),
             Some("gpt-5"),
@@ -43556,31 +43558,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_editor_selects_interactive_mode_only_for_codex_or_claude() {
+    async fn operator_editor_selects_interactive_mode_only_for_codex_or_claude() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.open_edit_service_view("assistant");
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.open_edit_operator_view("assistant");
         let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
 
         {
-            let dialog = app.service_dialog.as_mut().unwrap();
-            dialog.focus = ServiceDialogFocus::Field(4);
-            dialog.service.harness = "smith".into();
+            let dialog = app.operator_dialog.as_mut().unwrap();
+            dialog.focus = OperatorDialogFocus::Field(4);
+            dialog.operator.harness = "smith".into();
         }
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
-        let options = app.service_dialog.as_ref().unwrap().picker_options(&app);
+        let options = app.operator_dialog.as_ref().unwrap().picker_options(&app);
         assert_eq!(options[1].value, "interactive");
         assert!(!options[1].available);
         app.on_key(ctrl_n).await;
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().service.session_mode,
+            app.operator_dialog.as_ref().unwrap().operator.session_mode,
             "headless"
         );
         assert!(app
-            .service_dialog
+            .operator_dialog
             .as_ref()
             .unwrap()
             .note
@@ -43588,11 +43590,11 @@ mod tests {
             .is_some_and(|note| note.contains("codex or claude")));
 
         {
-            let dialog = app.service_dialog.as_mut().unwrap();
+            let dialog = app.operator_dialog.as_mut().unwrap();
             dialog.picker = None;
             dialog.picker_selected = 0;
             dialog.note = None;
-            dialog.service.harness = "codex".into();
+            dialog.operator.harness = "codex".into();
         }
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
@@ -43600,34 +43602,34 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().service.session_mode,
+            app.operator_dialog.as_ref().unwrap().operator.session_mode,
             "interactive"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_channel_editor_supports_multiple_http_channels() {
+    async fn operator_channel_editor_supports_multiple_http_channels() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.service_channel_catalog = app.services[0].channels.clone();
-        app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = app.operators[0].channels.clone();
+        app.open_edit_operator_view("assistant");
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Channel(0);
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         let editor = app
-            .service_dialog
+            .operator_dialog
             .as_ref()
             .and_then(|dialog| dialog.channel_editor.as_ref())
             .expect("channel editor opens from the Channels field");
-        assert_eq!(editor.mode, ServiceChannelDialogMode::Edit);
+        assert_eq!(editor.mode, OperatorChannelDialogMode::Edit);
         assert_eq!(editor.channel.id, "http");
         assert_eq!(editor.channel.port, Some(8787));
 
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
-            app.service_dialog
+            app.operator_dialog
                 .as_ref()
                 .unwrap()
                 .channel_editor
@@ -43639,7 +43641,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
-            app.service_dialog
+            app.operator_dialog
                 .as_ref()
                 .unwrap()
                 .channel_editor
@@ -43651,21 +43653,21 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
             .await;
         assert!(app
-            .service_dialog
+            .operator_dialog
             .as_ref()
             .unwrap()
             .channel_editor
             .is_none());
 
-        app.open_new_service_channel();
+        app.open_new_operator_channel();
         let editor = app
-            .service_dialog
+            .operator_dialog
             .as_ref()
             .unwrap()
             .channel_editor
             .as_ref()
             .unwrap();
-        assert_eq!(editor.mode, ServiceChannelDialogMode::Create);
+        assert_eq!(editor.mode, OperatorChannelDialogMode::Create);
         assert_eq!(editor.channel.id, "http-2");
         assert_eq!(editor.channel.port, Some(8788));
 
@@ -43673,14 +43675,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_channel_editor_shows_clickable_back_affordance() {
+    async fn operator_channel_editor_shows_clickable_back_affordance() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.service_channel_catalog = app.services[0].channels.clone();
-        app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = app.operators[0].channels.clone();
+        app.open_edit_operator_view("assistant");
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Channel(0);
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
 
@@ -43691,7 +43693,7 @@ mod tests {
         assert!(text.contains("< back"), "{text}");
         let hit = app
             .layout
-            .service_channel_back_hit
+            .operator_channel_back_hit
             .expect("back label should be clickable");
 
         let click = |kind| MouseEvent {
@@ -43706,24 +43708,24 @@ mod tests {
             .await;
 
         assert!(
-            app.service_dialog
+            app.operator_dialog
                 .as_ref()
                 .unwrap()
                 .channel_editor
                 .is_none(),
-            "clicking back should return to the service overview"
+            "clicking back should return to the operator overview"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_channel_editor_configures_slack_without_rendering_tokens() {
+    async fn operator_channel_editor_configures_slack_without_rendering_tokens() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.service_channel_catalog = app.services[0].channels.clone();
-        app.open_edit_service_view("assistant");
-        app.open_new_service_channel();
-        app.service_dialog
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = app.operators[0].channels.clone();
+        app.open_edit_operator_view("assistant");
+        app.open_new_operator_channel();
+        app.operator_dialog
             .as_mut()
             .unwrap()
             .channel_editor
@@ -43733,7 +43735,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .await;
         let editor = app
-            .service_dialog
+            .operator_dialog
             .as_ref()
             .unwrap()
             .channel_editor
@@ -43744,9 +43746,9 @@ mod tests {
 
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
-        assert!(app.insert_service_dialog_text("xapp-super-secret"));
+        assert!(app.insert_operator_dialog_text("xapp-super-secret"));
         assert_eq!(
-            app.service_dialog
+            app.operator_dialog
                 .as_ref()
                 .unwrap()
                 .channel_editor
@@ -43762,11 +43764,11 @@ mod tests {
     /// options come seeded with the defaults a definition would get.
     async fn slack_channel_editor() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
         let (mut app, dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.service_channel_catalog = app.services[0].channels.clone();
-        app.open_edit_service_view("assistant");
-        app.open_new_service_channel();
-        app.service_dialog
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = app.operators[0].channels.clone();
+        app.open_edit_operator_view("assistant");
+        app.open_new_operator_channel();
+        app.operator_dialog
             .as_mut()
             .unwrap()
             .channel_editor
@@ -43778,8 +43780,8 @@ mod tests {
         (app, dir, server)
     }
 
-    fn channel_editor(app: &App) -> &crate::app::ServiceChannelDialog {
-        app.service_dialog
+    fn channel_editor(app: &App) -> &crate::app::OperatorChannelDialog {
+        app.operator_dialog
             .as_ref()
             .unwrap()
             .channel_editor
@@ -43789,7 +43791,7 @@ mod tests {
 
     #[tokio::test]
     async fn slack_channel_editor_cycles_the_behavior_options() {
-        use crate::app::service_dialog::{
+        use crate::app::operator_dialog::{
             SLACK_FIELD_FOLLOW_UP, SLACK_FIELD_PROGRESS, SLACK_FIELD_STATE,
         };
 
@@ -43811,7 +43813,7 @@ mod tests {
 
         // The options sit below the allowlists and above State, so a Slack
         // channel has ten fields and Ctrl+N wraps from the last back to the ID.
-        app.service_dialog
+        app.operator_dialog
             .as_mut()
             .unwrap()
             .channel_editor
@@ -43823,7 +43825,7 @@ mod tests {
         assert_eq!(channel_editor(&app).selected_field, 0);
 
         // Space walks the published order and wraps; ← steps the other way.
-        app.service_dialog
+        app.operator_dialog
             .as_mut()
             .unwrap()
             .channel_editor
@@ -43868,7 +43870,7 @@ mod tests {
             "← steps back one, wrapping at the start"
         );
 
-        app.service_dialog
+        app.operator_dialog
             .as_mut()
             .unwrap()
             .channel_editor
@@ -43890,7 +43892,7 @@ mod tests {
 
         // Cycling never reaches the state toggle, and the toggle never reaches
         // the options.
-        app.service_dialog
+        app.operator_dialog
             .as_mut()
             .unwrap()
             .channel_editor
@@ -43908,10 +43910,10 @@ mod tests {
 
     #[tokio::test]
     async fn slack_channel_editor_takes_a_typed_thread_context() {
-        use crate::app::service_dialog::SLACK_FIELD_THREAD_CONTEXT;
+        use crate::app::operator_dialog::SLACK_FIELD_THREAD_CONTEXT;
 
         let (mut app, _dir, server) = slack_channel_editor().await;
-        app.service_dialog
+        app.operator_dialog
             .as_mut()
             .unwrap()
             .channel_editor
@@ -43920,7 +43922,7 @@ mod tests {
             .selected_field = SLACK_FIELD_THREAD_CONTEXT;
 
         // Backspacing the seeded default all the way out reads as none rather
-        // than as "leave it alone" — 0 is a setting an operator chooses.
+        // than as "leave it alone" — 0 is a setting a user chooses.
         for _ in 0..8 {
             app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
                 .await;
@@ -43934,7 +43936,7 @@ mod tests {
         assert_eq!(channel_editor(&app).channel.thread_context, Some(120));
 
         // Past Slack's own page limit the field holds at the cap instead of
-        // letting the operator save a number the daemon would refuse.
+        // letting the user save a number the daemon would refuse.
         for ch in "000".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
                 .await;
@@ -43949,7 +43951,7 @@ mod tests {
 
     #[tokio::test]
     async fn slack_channel_editor_renders_the_behavior_options() {
-        use crate::app::service_dialog::SLACK_FIELD_THREAD_CONTEXT;
+        use crate::app::operator_dialog::SLACK_FIELD_THREAD_CONTEXT;
 
         let (mut app, _dir, server) = slack_channel_editor().await;
         let backend = ratatui::backend::TestBackend::new(160, 24);
@@ -43960,7 +43962,7 @@ mod tests {
         let mut draw = |app: &mut App| {
             let editor = channel_editor(app).clone();
             term.draw(|f| {
-                crate::ui::render_service_channel_editor(f, f.area(), app, &editor);
+                crate::ui::render_operator_channel_editor(f, f.area(), app, &editor);
             })
             .expect("draw");
             rendered_text(term.backend().buffer())
@@ -43982,7 +43984,7 @@ mod tests {
 
         // Selecting the field explains what it needs from the Slack app, and
         // what admitting other people's text into a session costs.
-        app.service_dialog
+        app.operator_dialog
             .as_mut()
             .unwrap()
             .channel_editor
@@ -43993,7 +43995,7 @@ mod tests {
         assert!(text.contains("channels:history"), "{text}");
 
         // Zero is a setting, not an empty field, and says so.
-        app.service_dialog
+        app.operator_dialog
             .as_mut()
             .unwrap()
             .channel_editor
@@ -44005,7 +44007,7 @@ mod tests {
         assert!(text.contains("0 · none"), "{text}");
 
         // An HTTP channel has no such options and is not asked about them.
-        app.open_new_service_channel();
+        app.open_new_operator_channel();
         let text = draw(&mut app);
         assert_eq!(channel_editor(&app).channel.kind, "http");
         assert!(!text.contains("Follow-up"), "{text}");
@@ -44015,12 +44017,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_view_lists_available_and_owned_catalog_channels() {
+    async fn operator_view_lists_available_and_owned_catalog_channels() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.service_channel_catalog = vec![
-            app.services[0].channels[0].clone(),
-            construct_protocol::ServiceChannelSummary {
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = vec![
+            app.operators[0].channels[0].clone(),
+            construct_protocol::OperatorChannelSummary {
                 id: "shared".to_string(),
                 kind: "http".to_string(),
                 enabled: true,
@@ -44038,7 +44040,7 @@ mod tests {
                 attached_to: None,
                 publication: None,
             },
-            construct_protocol::ServiceChannelSummary {
+            construct_protocol::OperatorChannelSummary {
                 id: "busy".to_string(),
                 kind: "http".to_string(),
                 enabled: true,
@@ -44053,11 +44055,11 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                attached_to: Some("other-service".to_string()),
+                attached_to: Some("other-operator".to_string()),
                 publication: None,
             },
         ];
-        app.select_service("assistant".to_string());
+        app.select_operator("assistant".to_string());
         app.session_transitions.clear();
         let backend = ratatui::backend::TestBackend::new(160, 50);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
@@ -44074,7 +44076,7 @@ mod tests {
         assert!(text.contains("http"));
         assert!(text.contains("shared"));
         assert!(text.contains("busy"));
-        assert!(text.contains("attached to other-service"));
+        assert!(text.contains("attached to other-operator"));
         assert!(text.contains("Sessions"));
         server.abort();
     }
@@ -44082,26 +44084,26 @@ mod tests {
     #[tokio::test]
     async fn unattached_catalog_channels_can_be_deleted_but_owned_ones_cannot() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        let mut available = app.services[0].channels[0].clone();
+        app.operators.push(operator_summary_for_test("assistant"));
+        let mut available = app.operators[0].channels[0].clone();
         available.id = "shared".to_string();
         available.attached_to = None;
-        let mut owned_elsewhere = app.services[0].channels[0].clone();
+        let mut owned_elsewhere = app.operators[0].channels[0].clone();
         owned_elsewhere.id = "busy".to_string();
-        owned_elsewhere.attached_to = Some("other-service".to_string());
-        app.service_channel_catalog = vec![
-            app.services[0].channels[0].clone(),
+        owned_elsewhere.attached_to = Some("other-operator".to_string());
+        app.operator_channel_catalog = vec![
+            app.operators[0].channels[0].clone(),
             available,
             owned_elsewhere,
         ];
-        app.open_edit_service_view("assistant");
+        app.open_edit_operator_view("assistant");
 
         // An available catalog row arms the delete confirmation.
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(1);
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Channel(1);
         app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
             .await;
         let editor = app
-            .service_dialog
+            .operator_dialog
             .as_ref()
             .unwrap()
             .channel_editor
@@ -44111,31 +44113,31 @@ mod tests {
         assert_eq!(editor.channel.id, "shared");
         assert!(editor.note.as_deref().unwrap().contains("unattached"));
 
-        // A channel owned by another service is refused with an explanation.
+        // A channel owned by another operator is refused with an explanation.
         {
-            let dialog = app.service_dialog.as_mut().unwrap();
+            let dialog = app.operator_dialog.as_mut().unwrap();
             dialog.channel_editor = None;
-            dialog.focus = ServiceDialogFocus::Channel(2);
+            dialog.focus = OperatorDialogFocus::Channel(2);
         }
         app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
             .await;
-        let dialog = app.service_dialog.as_ref().unwrap();
+        let dialog = app.operator_dialog.as_ref().unwrap();
         assert!(dialog.channel_editor.is_none());
         assert!(dialog
             .note
             .as_deref()
             .unwrap()
-            .contains("already attached to service `other-service`"));
+            .contains("already attached to operator `other-operator`"));
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_model_picker_preserves_the_native_catalog_route() {
+    async fn operator_model_picker_preserves_the_native_catalog_route() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.services[0].harness = "codex".into();
-        app.services[0].model = None;
-        app.service_route_catalog = vec![
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operators[0].harness = "codex".into();
+        app.operators[0].model = None;
+        app.operator_route_catalog = vec![
             construct_protocol::RouteOption {
                 name: "openai".to_string(),
                 dialect: "openai".to_string(),
@@ -44157,20 +44159,20 @@ mod tests {
                 login_command: None,
             },
         ];
-        app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(3);
+        app.open_edit_operator_view("assistant");
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Field(3);
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().picker,
-            Some(ServiceDialogPickerKind::Model)
+            app.operator_dialog.as_ref().unwrap().picker,
+            Some(OperatorDialogPickerKind::Model)
         );
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().focus,
-            ServiceDialogFocus::Field(3)
+            app.operator_dialog.as_ref().unwrap().focus,
+            OperatorDialogFocus::Field(3)
         );
 
-        let dialog = app.service_dialog.as_ref().unwrap();
+        let dialog = app.operator_dialog.as_ref().unwrap();
         let options = dialog.picker_options(&app);
         assert_eq!(options[0].label, "Default");
         assert!(options
@@ -44188,11 +44190,11 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().picker_selected,
+            app.operator_dialog.as_ref().unwrap().picker_selected,
             1,
             "C-n should advance the model picker"
         );
-        let selected = app.service_dialog.as_ref().unwrap().clone();
+        let selected = app.operator_dialog.as_ref().unwrap().clone();
         assert_eq!(
             selected.picker_options(&app)[selected.picker_selected].value,
             "construct-openai/gpt-5"
@@ -44200,35 +44202,35 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.service_dialog
+            app.operator_dialog
                 .as_ref()
                 .unwrap()
-                .service
+                .operator
                 .model
                 .as_deref(),
             Some("construct-openai/gpt-5")
         );
         assert_eq!(
-            app.service_dialog.as_ref().unwrap().field_value(3),
+            app.operator_dialog.as_ref().unwrap().field_value(3),
             "gpt-5 · openai"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_rows_group_and_toggle_routed_sessions() {
+    async fn operator_rows_group_and_toggle_routed_sessions() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
         let mut routed = summary_with_kind(construct_protocol::SessionKind::User);
-        routed.id = "service-session".into();
-        routed.title = Some("service:assistant:demo".into());
+        routed.id = "operator-session".into();
+        routed.title = Some("operator:assistant:demo".into());
         routed.position = 0;
         app.sessions.push(routed);
-        app.services.push(service_summary_for_test("assistant"));
+        app.operators.push(operator_summary_for_test("assistant"));
 
         let items = app.list_items();
         assert!(matches!(
             &items[0],
-            ListItem::Service {
+            ListItem::Operator {
                 summary,
                 session_count: 1,
                 sessions_expanded: true,
@@ -44237,26 +44239,26 @@ mod tests {
         assert!(matches!(
             &items[1],
             ListItem::Session { summary, nesting_depth: 1, .. }
-                if summary.id == "service-session"
+                if summary.id == "operator-session"
         ));
         assert_eq!(
             items
                 .iter()
                 .filter(|item| matches!(
                     item,
-                    ListItem::Session { summary, .. } if summary.id == "service-session"
+                    ListItem::Session { summary, .. } if summary.id == "operator-session"
                 ))
                 .count(),
             1,
-            "service sessions must not also appear in the ungrouped list"
+            "operator sessions must not also appear in the ungrouped list"
         );
 
-        app.selection = Selection::Service("assistant".into());
+        app.selection = Selection::Operator("assistant".into());
         app.focus = PaneFocus::List;
         app.run_action(KeyAction::CollapseGroup).await;
         assert!(matches!(
             &app.list_items()[0],
-            ListItem::Service {
+            ListItem::Operator {
                 session_count: 1,
                 sessions_expanded: false,
                 ..
@@ -44265,12 +44267,12 @@ mod tests {
         assert!(!app
             .list_items()
             .iter()
-            .any(|item| matches!(item, ListItem::Session { summary, .. } if summary.id == "service-session")));
+            .any(|item| matches!(item, ListItem::Session { summary, .. } if summary.id == "operator-session")));
 
         app.run_action(KeyAction::ExpandGroup).await;
         assert!(matches!(
             &app.list_items()[0],
-            ListItem::Service {
+            ListItem::Operator {
                 session_count: 1,
                 sessions_expanded: true,
                 ..
@@ -44285,7 +44287,7 @@ mod tests {
         app.click_list(list, list.x + 1, rows.y).await;
         assert!(matches!(
             &app.list_items()[0],
-            ListItem::Service {
+            ListItem::Operator {
                 sessions_expanded: false,
                 ..
             }
@@ -44294,17 +44296,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_navigation_through_service_keeps_list_focus() {
+    async fn list_navigation_through_operator_keeps_list_focus() {
         let (mut app, _dir, server) = test_app_with_lineage().await;
-        app.services.push(service_summary_for_test("assistant"));
+        app.operators.push(operator_summary_for_test("assistant"));
         app.select_session("s1".into());
         app.focus = PaneFocus::List;
 
         app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
             .await;
-        assert_eq!(app.selection, Selection::Service("assistant".into()));
+        assert_eq!(app.selection, Selection::Operator("assistant".into()));
         assert_eq!(app.focus, PaneFocus::List);
-        assert!(app.service_dialog.is_some(), "the service view is ready");
+        assert!(app.operator_dialog.is_some(), "the operator view is ready");
 
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
@@ -44313,7 +44315,7 @@ mod tests {
 
         app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
-        assert_eq!(app.selection, Selection::Service("assistant".into()));
+        assert_eq!(app.selection, Selection::Operator("assistant".into()));
         assert_eq!(app.focus, PaneFocus::List);
 
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
@@ -44324,7 +44326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn placed_services_interleave_with_sessions_and_projects() {
+    async fn placed_operators_interleave_with_sessions_and_projects() {
         let (mut app, _dir, server) = captured_app().await;
         let mut s1 = summary_with_kind(construct_protocol::SessionKind::User);
         s1.id = "s1".into();
@@ -44349,34 +44351,34 @@ mod tests {
                 collapsed: true,
             },
         ];
-        let mut alpha = service_summary_for_test("alpha");
+        let mut alpha = operator_summary_for_test("alpha");
         alpha.position = 0;
-        let mut bravo = service_summary_for_test("bravo");
+        let mut bravo = operator_summary_for_test("bravo");
         bravo.position = 1;
-        bravo.placement = Some(construct_protocol::ServicePlacement {
-            region: construct_protocol::ServicePlacementRegion::Sessions,
+        bravo.placement = Some(construct_protocol::OperatorPlacement {
+            region: construct_protocol::OperatorPlacementRegion::Sessions,
             position: 10,
         });
-        let mut charlie = service_summary_for_test("charlie");
+        let mut charlie = operator_summary_for_test("charlie");
         charlie.position = 2;
-        charlie.placement = Some(construct_protocol::ServicePlacement {
-            region: construct_protocol::ServicePlacementRegion::Projects,
+        charlie.placement = Some(construct_protocol::OperatorPlacement {
+            region: construct_protocol::OperatorPlacementRegion::Projects,
             position: 5,
         });
-        app.services = vec![alpha, bravo, charlie];
+        app.operators = vec![alpha, bravo, charlie];
 
         let labels: Vec<String> = app
             .list_items()
             .iter()
             .map(|item| match item {
-                ListItem::Service { summary, .. } => format!("svc:{}", summary.name),
+                ListItem::Operator { summary, .. } => format!("svc:{}", summary.name),
                 ListItem::Session { summary, .. } => summary.id.clone(),
                 ListItem::GroupHeader { group, .. } => format!("proj:{}", group.id),
                 ListItem::ArchivedRow { .. } => "archived".into(),
             })
             .collect();
-        // The unplaced service leads; a service pinned at a session's
-        // position renders right after that session; a service pinned at a
+        // The unplaced operator leads; a operator pinned at a session's
+        // position renders right after that session; a operator pinned at a
         // project's position renders after that whole project block.
         assert_eq!(
             labels,
@@ -44386,10 +44388,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_view_cx_dot_explains_suggestions_are_session_only() {
+    async fn operator_view_cx_dot_explains_suggestions_are_session_only() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.select_service("assistant".to_string());
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.select_operator("assistant".to_string());
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
@@ -44398,30 +44400,30 @@ mod tests {
 
         assert_eq!(
             app.status.as_ref().map(|(text, _)| text.as_str()),
-            Some("prompt suggestions are available in session views, not service views")
+            Some("prompt suggestions are available in session views, not operator views")
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn service_view_is_padded_and_describes_the_focused_field() {
+    async fn operator_view_is_padded_and_describes_the_focused_field() {
         let (mut app, _dir, server) = captured_app().await;
-        app.services.push(service_summary_for_test("assistant"));
-        app.open_edit_service_view("assistant");
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Channel(0);
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.open_edit_operator_view("assistant");
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Channel(0);
         app.session_transitions.clear();
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
 
-        let view = app.layout.view_area.expect("service view");
+        let view = app.layout.view_area.expect("operator view");
         let field_y = view.y + 2;
         let buffer = term.backend().buffer();
         for x in view.x + 1..view.x + 3 {
             assert_eq!(
                 buffer.cell((x, field_y)).map(|cell| cell.symbol()),
                 Some(" "),
-                "service fields keep a padded inset inside the pane"
+                "operator fields keep a padded inset inside the pane"
             );
         }
         assert_eq!(
@@ -44461,7 +44463,7 @@ mod tests {
         let note_row = view_rows
             .iter()
             .position(|row| row.contains("Saved edits apply live"))
-            .expect("service propagation note is visible");
+            .expect("operator propagation note is visible");
         assert!(
             note_row > 0 && view_rows[note_row - 1].trim().is_empty(),
             "propagation note has a spacer above it"
@@ -44469,13 +44471,13 @@ mod tests {
         let footer_row = view_rows
             .iter()
             .position(|row| row.contains("Enter/C-s save · Space attach"))
-            .expect("service editor footer is visible");
+            .expect("operator editor footer is visible");
         assert!(
             footer_row > 0 && view_rows[footer_row - 1].trim().is_empty(),
-            "service editor footer has a spacer above it"
+            "operator editor footer has a spacer above it"
         );
 
-        app.service_dialog.as_mut().unwrap().focus = ServiceDialogFocus::Field(6);
+        app.operator_dialog.as_mut().unwrap().focus = OperatorDialogFocus::Field(6);
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let view_text = term
             .backend()
@@ -44508,7 +44510,7 @@ mod tests {
             if rain.height > 0 {
                 assert!(
                     area.y + area.height <= rain.y,
-                    "the section sits above the operator panel: {area:?} vs {rain:?}"
+                    "the section sits above the minibuffer panel: {area:?} vs {rain:?}"
                 );
             }
         }
@@ -44588,7 +44590,7 @@ mod tests {
         let before = app.layout.lineage_area.expect("area").height;
 
         // Grab the bare bar (left edge — away from the buttons) and drag
-        // it up two rows: the section grows, like the operator panel.
+        // it up two rows: the section grows, like the minibuffer panel.
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: header.x,
@@ -45083,7 +45085,7 @@ mod tests {
         let header = row_text(area.y);
         assert!(
             header.contains("⑂ lineage") && header.contains("──"),
-            "the header is a ─ rule carrying the label, like the operator \
+            "the header is a ─ rule carrying the label, like the user \
              panel's title bar: {header:?}"
         );
         assert!(
@@ -45940,7 +45942,7 @@ mod tests {
             construct_protocol::SessionKind::User
         )));
         assert!(!is_user_list_session(&summary_with_kind(
-            construct_protocol::SessionKind::Orchestrator
+            construct_protocol::SessionKind::Minibuffer
         )));
         assert!(!is_user_list_session(&summary_with_kind(
             construct_protocol::SessionKind::Subagent
@@ -46764,13 +46766,13 @@ mod tests {
         // from, so it carries no margin and stands at its bare two rows.
         assert_eq!(app.list_project_margin_rows(&items, 0), 0);
         assert_eq!(app.list_item_display_height(&items, 0), 2);
-        // Services head a depth-1 subtree the same way and earn the same row.
-        let service_only = vec![ListItem::Service {
-            summary: service_summary_for_test("svc"),
+        // Operators head a depth-1 subtree the same way and earn the same row.
+        let operator_only = vec![ListItem::Operator {
+            summary: operator_summary_for_test("svc"),
             session_count: 1,
             sessions_expanded: true,
         }];
-        assert_eq!(app.list_item_display_height(&service_only, 0), 2);
+        assert_eq!(app.list_item_display_height(&operator_only, 0), 2);
         term.draw(|frame| crate::ui::render(frame, &mut app))
             .expect("render full");
         let top = app.layout.list_items_area.expect("list rows").y;
@@ -46818,8 +46820,8 @@ mod tests {
             expanded: false,
             nesting_depth: 1,
         };
-        let service = || ListItem::Service {
-            summary: service_summary_for_test("svc"),
+        let operator = || ListItem::Operator {
+            summary: operator_summary_for_test("svc"),
             session_count: 1,
             sessions_expanded: true,
         };
@@ -46830,8 +46832,8 @@ mod tests {
             header("b"),  // 2: after a session card
             archived(),   // 3
             header("c"),  // 4: after an archived disclosure
-            service(),    // 5
-            header("d"),  // 6: after a service header
+            operator(),    // 5
+            header("d"),  // 6: after a operator header
             header("e"),  // 7: after another project
         ];
 
@@ -46839,7 +46841,7 @@ mod tests {
         // A project that opens the list has nothing to be set apart from.
         assert_eq!(app.list_project_margin_rows(&items, 0), 0);
         assert_eq!(app.list_item_display_height(&items, 0), 2);
-        // Cards, service headers, and project headers all end in one blank
+        // Cards, operator headers, and project headers all end in one blank
         // row, so one more row tops the gap up to two.
         for idx in [2usize, 6, 7] {
             assert_eq!(
@@ -47040,7 +47042,7 @@ mod tests {
         // previously wrote warnings over the alternate-screen TUI).
         app.selection = Selection::ArchivedRow(ArchiveSection::Children("native_owner".into()));
         app.run_action(KeyAction::OpenDeleteConfirm).await;
-        assert!(app.minibuffer.is_none());
+        assert!(app.prompt.is_none());
         assert!(
             app.status.as_ref().is_some_and(
                 |(message, _)| message.contains("native harness subagents are read-only")
@@ -47202,11 +47204,11 @@ mod tests {
             client,
             vec![summary_with_kind(construct_protocol::SessionKind::User)],
         );
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Input: ".into(),
             input: "see ".into(),
             cursor: 4,
-            intent: MinibufferIntent::SendInput {
+            intent: PromptIntent::SendInput {
                 session_id: "s1".into(),
             },
             error: None,
@@ -47227,7 +47229,7 @@ mod tests {
             .expect("decode attachment");
         assert_eq!(decoded, paste.as_bytes());
         assert_eq!(
-            app.minibuffer.as_ref().map(|mb| mb.input.as_str()),
+            app.prompt.as_ref().map(|mb| mb.input.as_str()),
             Some("see [#file:/tmp/clipboard.txt]")
         );
 
@@ -48201,14 +48203,14 @@ mod tests {
     }
 
     #[test]
-    fn selection_bounds_use_minibuffer_line_for_operator_area() {
+    fn selection_bounds_use_minibuffer_line_for_minibuffer_area() {
         let bounds = selection_bounds_for_layout(&test_layout(), false, 0, 29);
 
         assert_eq!(bounds, Some(Rect::new(0, 29, 100, 4)));
     }
 
     #[test]
-    fn selection_bounds_exclude_orchestrator_panel_top_border() {
+    fn selection_bounds_exclude_minibuffer_panel_top_border() {
         assert_eq!(
             selection_bounds_for_layout(&test_layout(), true, 0, 29),
             None

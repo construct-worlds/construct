@@ -577,7 +577,7 @@ fn word_for_event(event: &SessionEvent) -> Option<(&'static str, FlashTone, u8)>
         | SessionEvent::Pty { .. }
         | SessionEvent::PtyResize { .. }
         | SessionEvent::ApprovalModeChanged { .. }
-        | SessionEvent::OperatorLoopChanged { .. }
+        | SessionEvent::MinibufferLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
         | SessionEvent::EffortChanged { .. }
         | SessionEvent::EditorState { .. }
@@ -707,7 +707,7 @@ mod tests {
     fn pty_activity_tags_reveal_with_session() {
         let mut rain = MatrixRain::default();
         let now = Instant::now();
-        rain.observe_pty_activity("sess-xyz", b"deploying service modules", now, 1.0);
+        rain.observe_pty_activity("sess-xyz", b"deploying operator modules", now, 1.0);
         let w = rain.active_reveal(now).expect("reveal word");
         assert_eq!(w.session_id(), Some("sess-xyz"));
     }

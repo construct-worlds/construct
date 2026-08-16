@@ -158,7 +158,7 @@ impl App {
     }
 
     /// `Enter` — or any click outside the name field — commits via
-    /// `set_title`, matching `MinibufferIntent::Rename` (empty buffer clears
+    /// `set_title`, matching `PromptIntent::Rename` (empty buffer clears
     /// the title). A no-op when no rename is in progress.
     pub(super) async fn commit_session_title_rename(&mut self) {
         let Some(rename) = self.session_title_rename.take() else {

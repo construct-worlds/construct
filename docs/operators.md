@@ -1,8 +1,8 @@
-# Services and channels
+# Operators and channels
 
-A service turns authenticated external deliveries into ordinary headless
+A operator turns authenticated external deliveries into ordinary headless
 Construct sessions. Run `/serve <name>` in the TUI to create one, then attach
-or create an HTTP channel in its service view.
+or create an HTTP channel in its operator view.
 
 Each HTTP channel owns a loopback port and a bearer credential. The credential
 is shown only when the channel is created or explicitly rotated. Submit work
@@ -94,7 +94,7 @@ was granted. Construct logs a refusal rather than failing the turn when a scope
 is missing, so a silent capability gap usually means a pending reinstall.
 
 Both tokens are credentials for your workspace. Configure them where the rest of
-the channel is configured (the service view's channel editor, or the config file
+the channel is configured (the operator view's channel editor, or the config file
 below), not in a shared repository.
 
 ### What each permission buys
@@ -133,7 +133,7 @@ thread_context = 50        # earlier thread messages to read on joining; 0 = non
 ```
 
 The last three are also editable where the channel is. Select a Slack channel
-in the service view and press `e`: the editor lists **Progress**, **Follow-up**,
+in the operator view and press `e`: the editor lists **Progress**, **Follow-up**,
 and **Thread context** below the allowlists, with what each one needs from your
 Slack app in the help column. Space or `→` steps an option forward and `←` back;
 thread context is typed. The web client offers the same fields. Saving any of
@@ -194,7 +194,7 @@ channel shows while it works. Nothing appears for a turn that answers promptly
 | `off` | Says nothing until the answer is ready. |
 
 If the turn stops at a tool approval, the affordance says so and names the
-tool — that turn will not resume until an operator acts in the TUI, and the
+tool — that turn will not resume until a user acts in the TUI, and the
 person waiting in Slack cannot see that prompt. A turn that ends without an
 answer now reports that in the thread instead of only in the daemon log.
 
@@ -209,12 +209,12 @@ Select an attached ingress channel. Its TUI action bar shows **Publish**; press
 command is:
 
 ```text
-/service publish <service> [channel]
+/operator publish <operator> [channel]
 ```
 
 Construct opens the first-party owner-authorization flow and reports the
 public endpoint only after its reverse route is ready. The public HTTPS URL
-includes the same service request path as the loopback endpoint. Callers keep
+includes the same operator request path as the loopback endpoint. Callers keep
 using the channel's bearer credential; tunnel authorization is for the owner
 publishing the route and never replaces channel authentication.
 
@@ -222,7 +222,7 @@ While publication is active, the TUI action changes to **Withdraw**. Press `p`,
 click it, use **unpublish** in the web client, or run:
 
 ```text
-/service unpublish <service> [channel]
+/operator unpublish <operator> [channel]
 ```
 
 to withdraw only that channel's public route. Remote control is independent.

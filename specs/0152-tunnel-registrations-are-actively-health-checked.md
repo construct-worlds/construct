@@ -17,12 +17,12 @@ not re-open a login browser as part of the health-triggered cycle itself.
 
 ## Reason
 
-The gateway keeps active routes in memory only; a service deploy or host
+The gateway keeps active routes in memory only; a operator deploy or host
 restart silently discards every registration. The tunnel transport reconnects
 on its own and reports nothing, so without an active probe the daemon keeps
 advertising a public URL that serves visitors an offline page until the
 capability-expiry refresh, roughly a day later. A user-visible outage of that
-length after every routine service deploy is not acceptable for a feature
+length after every routine operator deploy is not acceptable for a feature
 whose whole point is unattended remote access.
 
 ## Consequences

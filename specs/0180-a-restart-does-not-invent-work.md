@@ -15,7 +15,7 @@ When the daemon reattaches to an adapter process that survived the restart, the 
 
 A surviving adapter did not change across the restart. It is blocked in the same place it was blocked before, and an adapter waiting for input has no reason to announce anything: its next status arrives when a turn ends, which is to say never, until someone starts one.
 
-That makes an optimistic "running" unfalsifiable. The daemon's only correction for harnesses that do not self-report is the idle sweep over PTY silence, and silence is only measurable against output. A session whose child emits nothing until its next turn — every headless one — therefore stays wrongly running until a client happens to open it and the attach repaints its child. Until then the fleet paints a working indicator over an idle session, the operator cannot tell which of their sessions are actually busy, and the session banks compute time it never spent.
+That makes an optimistic "running" unfalsifiable. The daemon's only correction for harnesses that do not self-report is the idle sweep over PTY silence, and silence is only measurable against output. A session whose child emits nothing until its next turn — every headless one — therefore stays wrongly running until a client happens to open it and the attach repaints its child. Until then the fleet paints a working indicator over an idle session, the user cannot tell which of their sessions are actually busy, and the session banks compute time it never spent.
 
 The cost of the honest default is bounded in the other direction: if a reattached session really was mid-turn, its state says so, because that is what was persisted.
 

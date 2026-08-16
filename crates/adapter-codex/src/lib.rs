@@ -1553,7 +1553,7 @@ where
 /// then name *both* the refusal and the policy that refused: unrelated
 /// `codex_core` errors borrow the same verbs ("request rejected by server", a
 /// path that happens to contain `blocked/`) and reporting those as permissions
-/// problems would send the operator to the wrong knob. A refusal worded outside
+/// problems would send the user to the wrong knob. A refusal worded outside
 /// this vocabulary is missed instead, which degrades to silence — the safe
 /// direction for a signal read out of a tool's log.
 fn blocked_write_reason_from_log(line: &str) -> Option<String> {
@@ -1839,7 +1839,7 @@ tokens used
 
     #[test]
     fn core_errors_that_merely_borrow_the_refusal_vocabulary_are_not_classified() {
-        // Each of these would reach an operator as "your sandbox or approval
+        // Each of these would reach a user as "your sandbox or approval
         // policy refused this", sending them to a setting that is not the
         // problem. Refusal verbs alone are not enough.
         for line in [
@@ -1894,7 +1894,7 @@ tokens used
     async fn spawn_headless_stderr_ignores_a_command_that_merely_failed() {
         // Verbatim from a run whose command was denied by the sandbox but was
         // never refused by codex: it ran, and exited non-zero like any other
-        // failing command. Nothing here is an approval problem the operator
+        // failing command. Nothing here is an approval problem the user
         // can fix by changing permissions.
         const OUTPUT: &str = "codex\nI'll run the exact command.\nexec\n/bin/zsh -lc 'mkdir /private/tmp/cxrE/newdir'\n exited 1 in 0ms:\nmkdir: /private/tmp/cxrE/newdir: Operation not permitted\n";
         let (emit, _rx) = EventEmitter::channel("session");

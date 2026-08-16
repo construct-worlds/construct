@@ -12,7 +12,7 @@ use std::sync::Arc;
 mod browser;
 
 const CONTEXT_TOOL_NAME: &str = "construct_context";
-const SERVICE_REPLY_TOOL_NAME: &str = "construct_service_reply";
+const OPERATOR_REPLY_TOOL_NAME: &str = "construct_operator_reply";
 const DEFAULT_PTY_BYTES: usize = 64 * 1024;
 const MAX_MCP_PTY_BYTES: usize = 512 * 1024;
 const DEFAULT_TRANSCRIPT_EVENTS: usize = 50;
@@ -143,20 +143,20 @@ pub type ContextServeState = std::sync::Mutex<agent_context::ContextServeState>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolAccess {
-    service_reply: bool,
+    operator_reply: bool,
     reply_only: bool,
 }
 
 impl ToolAccess {
     pub fn from_env() -> Self {
-        let reply_only = std::env::var(construct_protocol::adapter::SERVICE_REPLY_ONLY_MCP_ENV)
+        let reply_only = std::env::var(construct_protocol::adapter::OPERATOR_REPLY_ONLY_MCP_ENV)
             .as_deref()
             == Ok("1");
-        let service_reply = reply_only
-            || std::env::var(construct_protocol::adapter::SERVICE_REPLY_TOOL_ENV).as_deref()
+        let operator_reply = reply_only
+            || std::env::var(construct_protocol::adapter::OPERATOR_REPLY_TOOL_ENV).as_deref()
                 == Ok("1");
         Self {
-            service_reply,
+            operator_reply,
             reply_only,
         }
     }
@@ -164,7 +164,7 @@ impl ToolAccess {
     #[cfg(test)]
     fn full() -> Self {
         Self {
-            service_reply: false,
+            operator_reply: false,
             reply_only: false,
         }
     }
@@ -172,7 +172,7 @@ impl ToolAccess {
     #[cfg(test)]
     fn full_with_reply() -> Self {
         Self {
-            service_reply: true,
+            operator_reply: true,
             reply_only: false,
         }
     }
@@ -180,7 +180,7 @@ impl ToolAccess {
     #[cfg(test)]
     fn reply_only() -> Self {
         Self {
-            service_reply: true,
+            operator_reply: true,
             reply_only: true,
         }
     }
@@ -211,7 +211,7 @@ pub fn catalog() -> Vec<Value> {
 
 pub fn catalog_for(access: ToolAccess) -> Vec<Value> {
     if access.reply_only {
-        return vec![service_reply_tool()];
+        return vec![operator_reply_tool()];
     }
     let mut tools = vec![
         // ----- Read -----
@@ -680,8 +680,8 @@ pub fn catalog_for(access: ToolAccess) -> Vec<Value> {
         ),
     ];
     tools.extend(browser::catalog());
-    if access.service_reply {
-        tools.push(service_reply_tool());
+    if access.operator_reply {
+        tools.push(operator_reply_tool());
     }
     // Dev-only: hot-reload the daemon's web UI from a worktree's assets.
     // Only advertised in debug builds so it never appears in production.
@@ -701,10 +701,10 @@ pub fn catalog_for(access: ToolAccess) -> Vec<Value> {
     tools
 }
 
-fn service_reply_tool() -> Value {
+fn operator_reply_tool() -> Value {
     tool(
-        SERVICE_REPLY_TOOL_NAME,
-        "Send the final caller-facing response for one Construct service delivery. Use the exact opaque delivery_id included in the incoming prompt. The daemon binds the destination and credentials; this tool cannot choose a workspace, channel, recipient, or thread.",
+        OPERATOR_REPLY_TOOL_NAME,
+        "Send the final caller-facing response for one Construct operator delivery. Use the exact opaque delivery_id included in the incoming prompt. The daemon binds the destination and credentials; this tool cannot choose a workspace, channel, recipient, or thread.",
         json!({
             "type": "object",
             "properties": {
@@ -756,20 +756,20 @@ pub async fn call(
         .to_string();
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    if tool_access.reply_only && name != SERVICE_REPLY_TOOL_NAME {
+    if tool_access.reply_only && name != OPERATOR_REPLY_TOOL_NAME {
         return Err(anyhow!(
-            "tool is unavailable in a service-reply-only session"
+            "tool is unavailable in a operator-reply-only session"
         ));
     }
-    if name == SERVICE_REPLY_TOOL_NAME {
-        if !tool_access.service_reply {
-            return Err(anyhow!("service reply tool is unavailable in this session"));
+    if name == OPERATOR_REPLY_TOOL_NAME {
+        if !tool_access.operator_reply {
+            return Err(anyhow!("operator reply tool is unavailable in this session"));
         }
         let session_id = require_session_id(session_id)?;
         let delivery_id = arg_str(&args, "delivery_id")?;
         let text = arg_str(&args, "text")?;
         client
-            .service_reply(construct_protocol::ServiceReplyParams {
+            .operator_reply(construct_protocol::OperatorReplyParams {
                 session_id,
                 delivery_id,
                 text,
@@ -1893,17 +1893,17 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_catalog_does_not_expose_service_reply() {
+    fn ordinary_catalog_does_not_expose_operator_reply() {
         assert!(catalog().iter().all(|tool| {
-            tool.get("name").and_then(Value::as_str) != Some(SERVICE_REPLY_TOOL_NAME)
+            tool.get("name").and_then(Value::as_str) != Some(OPERATOR_REPLY_TOOL_NAME)
         }));
     }
 
     #[test]
-    fn full_service_catalog_adds_the_reply_tool() {
+    fn full_operator_catalog_adds_the_reply_tool() {
         let tools = catalog_for(ToolAccess::full_with_reply());
         assert!(tools.iter().any(|tool| {
-            tool.get("name").and_then(Value::as_str) == Some(SERVICE_REPLY_TOOL_NAME)
+            tool.get("name").and_then(Value::as_str) == Some(OPERATOR_REPLY_TOOL_NAME)
         }));
         assert!(tools
             .iter()
@@ -1916,7 +1916,7 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(
             tools[0].get("name").and_then(Value::as_str),
-            Some(SERVICE_REPLY_TOOL_NAME)
+            Some(OPERATOR_REPLY_TOOL_NAME)
         );
         assert!(tools[0]
             .pointer("/inputSchema/properties/delivery_id")
@@ -2381,7 +2381,7 @@ mod tests {
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: SessionKind::Subagent,
             archived: false,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
             merge: None,

@@ -194,10 +194,10 @@ pub struct ToolRegistry {
 /// daemon-control surface and smith-owned subagents.
 ///
 /// Denied by setting `CONSTRUCT_SMITH_FLEET_TOOLS=off`. A session whose
-/// prompts come from an untrusted third party (a service endpoint) runs with
+/// prompts come from an untrusted third party (a operator endpoint) runs with
 /// these withheld, so a request body cannot talk the agent into enumerating,
 /// driving, or destroying the rest of the fleet. Every other session keeps
-/// them: the orchestrator in particular *is* the fleet dispatcher.
+/// them: the minibuffer in particular *is* the fleet dispatcher.
 fn fleet_tools_enabled() -> bool {
     std::env::var("CONSTRUCT_SMITH_FLEET_TOOLS").as_deref() != Ok("off")
 }

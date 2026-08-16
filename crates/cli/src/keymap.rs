@@ -20,7 +20,7 @@ pub enum KeyAction {
     OpenDeleteConfirm,
     OpenRename,
     /// Copy the selected fleet item's stable identity: session id, project id,
-    /// or service name. Intentionally unbound; invoked by `/copy-id` and the
+    /// or operator name. Intentionally unbound; invoked by `/copy-id` and the
     /// pane action menus.
     CopySelectedId,
     /// Open the fork flow for the selected session. When the session has

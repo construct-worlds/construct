@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-08-02
 Area: ux
-Scope: When a service channel treats a message as addressed to it, and what surrounding conversation it may read.
+Scope: When a operator channel treats a message as addressed to it, and what surrounding conversation it may read.
 
 ## Decision
 
@@ -12,7 +12,7 @@ a channel has been addressed, it may keep answering in the conversation it was
 addressed in, and it may read that conversation's earlier messages so it
 understands what it was pulled into.
 
-Both are bounded, and the operator sets the bounds per channel.
+Both are bounded, and the user sets the bounds per channel.
 
 **Engagement is derived, never stored.** A channel is engaged in a conversation
 exactly when it already routes a session for that conversation. There is no
@@ -49,7 +49,7 @@ before it.
 But widening who can put text in front of an agent that holds tools is a real
 change in exposure. Before this, only the person who addressed the bot supplied
 input. After it, everyone in the conversation does — so the boundary has to be
-explicit, the scope has to be narrow, and the operator has to be able to turn it
+explicit, the scope has to be narrow, and the user has to be able to turn it
 off. Marking untrusted text is not a guarantee against injection; it is the
 minimum owed, and the narrow scope is what limits the damage.
 
@@ -68,7 +68,7 @@ minimum owed, and the narrow scope is what limits the damage.
 ## Non-Goals
 
 - Following a conversation the bot was never addressed in.
-- Treating history as authoritative over the operator's own instruction.
+- Treating history as authoritative over the user's own instruction.
 - Expiring engagement on a timer; the conversation's own lifetime bounds it.
 
 ## Examples
@@ -76,6 +76,6 @@ minimum owed, and the narrow scope is what limits the damage.
 Someone mentions the bot in a thread that already has ten messages. The bot
 reads those ten as marked-untrusted background, answers, and answers subsequent
 replies in that thread without being mentioned again. A message in a different
-thread of the same channel is ignored unless the operator widened the channel's
+thread of the same channel is ignored unless the user widened the channel's
 follow-up, and a message in a channel the bot has never been addressed in is
 always ignored.

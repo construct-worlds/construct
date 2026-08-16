@@ -31,8 +31,8 @@ mod remote;
 mod remote_supervisor;
 mod router;
 mod server;
-mod service;
-mod service_supervisor;
+mod operator;
+mod operator_supervisor;
 mod session;
 mod storage;
 mod tunnel;
@@ -103,6 +103,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     std::fs::create_dir_all(&paths.data_dir).ok();
     std::fs::create_dir_all(&paths.runtime_dir).ok();
     std::fs::create_dir_all(&paths.config_dir).ok();
+    migrate_legacy_service_dirs(&paths);
     config::write_template(&paths);
 
     // Resolve the socket path early so the single-instance lock can key off
@@ -194,7 +195,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             remote_supervisor::run(mgr, remote_rx).await;
         });
     }
-    // Resume + orchestrator bootstrap in the BACKGROUND so the IPC
+    // Resume + minibuffer bootstrap in the BACKGROUND so the IPC
     // socket (`server::serve` below) binds immediately, before any of
     // this slow, network/subprocess-bound work runs.
     //
@@ -202,21 +203,21 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     // / respawn is bounded but slow — `connect_with_retry` waits up to
     // 5s for the adapter to re-bind its socket and `initialize()` waits
     // up to 60s for the handshake — and resume runs them sequentially.
-    // A fresh orchestrator spawn (when the prior smith session was
+    // A fresh minibuffer spawn (when the prior smith session was
     // terminal) adds another such round-trip. If even one adapter is
     // wedged, awaiting all of this before binding the socket leaves the
     // daemon unreachable for tens of seconds (worst case minutes), and
     // a TUI/web client that dropped on the restart `exec()` just spins
     // in "reconnecting…" the whole time — indistinguishable from a
     // hang. Binding first means the client reconnects within a poll
-    // cycle; sessions and the orchestrator panel then populate as they
-    // resume (each reattach broadcasts its State, and the orchestrator
+    // cycle; sessions and the minibuffer panel then populate as they
+    // resume (each reattach broadcasts its State, and the minibuffer
     // appears via the same event). `resume` stays first so an existing
-    // orchestrator is reattached before `ensure_orchestrator` checks
+    // minibuffer is reattached before `ensure_minibuffer` checks
     // for a live one (no duplicate spawn).
     //
     // Both steps are best-effort and log-only on failure: resume marks
-    // un-resumable sessions Errored; a failed orchestrator spawn just
+    // un-resumable sessions Errored; a failed minibuffer spawn just
     // leaves clients in palette mode.
     // Bind the router's listener BEFORE resume: sessions spawned by a
     // previous daemon were told this port at spawn and outlive us, so it
@@ -240,7 +241,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
         let mgr = manager.clone();
         tokio::spawn(async move {
             mgr.clone().resume_running_sessions().await;
-            mgr.ensure_orchestrator().await;
+            mgr.ensure_minibuffer().await;
         });
     }
     manager.spawn_widget_watcher();
@@ -258,9 +259,9 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             Some(manager.clone()),
         ));
     }
-    // Service endpoints are deliberately a separate, loopback-only ingress
-    // surface.  They do not reuse the remote-control listener: a service's
-    // bearer credential is scoped to that service, while remote control
+    // Operator endpoints are deliberately a separate, loopback-only ingress
+    // surface.  They do not reuse the remote-control listener: a operator's
+    // bearer credential is scoped to that operator, while remote control
     // remains protected by its owner-login boundary.
     //
     // The supervisor owns every listener and is the only thing that binds one,
@@ -269,19 +270,19 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     // rather than rediscovering them, so it and the IPC handlers can never
     // disagree about which directory holds the definitions.
     {
-        let (service_handle, service_rx) = service_supervisor::channel();
-        manager.set_service_supervisor(service_handle.clone());
-        tokio::spawn(service_supervisor::run(
+        let (operator_handle, operator_rx) = operator_supervisor::channel();
+        manager.set_operator_supervisor(operator_handle.clone());
+        tokio::spawn(operator_supervisor::run(
             manager.clone(),
             paths.clone(),
-            service_handle.clone(),
-            service_rx,
+            operator_handle.clone(),
+            operator_rx,
         ));
-        service_handle.reload_detached(service_supervisor::ReloadReason::Boot);
-        service_supervisor::spawn_watcher(paths.clone(), service_handle);
+        operator_handle.reload_detached(operator_supervisor::ReloadReason::Boot);
+        operator_supervisor::spawn_watcher(paths.clone(), operator_handle);
     }
     // Config reloads (spec 0190). `config.toml` is hand-edited in the same
-    // directory as the service definitions above, so it applies on the same
+    // directory as the operator definitions above, so it applies on the same
     // terms: the supervisor re-derives the running configuration from disk
     // and swaps it in, and the watcher notices an edit made in an editor.
     //
@@ -362,7 +363,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
                     // Env-var boot path uses the auto-generated
                     // password; nobody is at the TUI to type one.
                     // The password lands in the info log so it's
-                    // visible to the operator running the daemon.
+                    // visible to the user running the daemon.
                     let params = construct_protocol::RemoteStartParams {
                         provider: boot_tunnel_provider(),
                         password: None,
@@ -488,7 +489,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             //
             // Returns only on error — successful exec doesn't
             // return. Surface the error as the daemon's exit
-            // status so the operator sees why the restart failed.
+            // status so the user sees why the restart failed.
             use std::os::unix::process::CommandExt;
             let err = std::process::Command::new(&cmd.exe).args(&cmd.args).exec();
             Err(anyhow::anyhow!("exec({}) failed: {err}", cmd.exe.display()))
@@ -652,7 +653,7 @@ async fn bind_local_webui(paths: &Paths) -> anyhow::Result<(tokio::net::TcpListe
 
     let bound = listener.local_addr()?.port();
     let mut persisted = false;
-    // Persist only for the auto-selected path. An env pin is operator
+    // Persist only for the auto-selected path. An env pin is minibuffer
     // intent and must not clobber a previous home's recorded port; the
     // next unpinned start of this home should still reclaim whatever it
     // last auto-bound.
@@ -667,6 +668,25 @@ async fn bind_local_webui(paths: &Paths) -> anyhow::Result<(tokio::net::TcpListe
         }
     }
     Ok((listener, bound, persisted))
+}
+
+/// One-shot, idempotent migration for the service→operator rename:
+/// definitions move from `<config>/services/` to `<config>/operators/` and
+/// per-operator routing state from `<data>/services/` to `<data>/operators/`.
+/// Only runs when the old directory exists and the new one does not, so a
+/// half-migrated or already-migrated layout is never touched.
+fn migrate_legacy_service_dirs(paths: &Paths) {
+    for (old, new) in [
+        (paths.config_dir.join("services"), paths.operators_dir()),
+        (paths.data_dir.join("services"), paths.data_dir.join("operators")),
+    ] {
+        if old.is_dir() && !new.exists() {
+            match std::fs::rename(&old, &new) {
+                Ok(()) => tracing::info!(from = %old.display(), to = %new.display(), "migrated legacy services directory"),
+                Err(error) => tracing::warn!(%error, from = %old.display(), "failed to migrate legacy services directory"),
+            }
+        }
+    }
 }
 
 fn warn_legacy_paths(current: &Paths) {

@@ -32,7 +32,7 @@ Exposure past the LAN is a distinct decision from being reachable on the LAN, an
 - **No auth bypass exists on the remote listener.** The displayed local address belongs to a separate loopback-only listener. LAN destinations and tunnel hostnames remain behind their provider-appropriate authentication even when a local tunnel process reaches the remote listener from loopback.
 - **The separate always-on local web UI has no auth and must remain loopback-only.** It must not inherit this listener's reasoning.
 - **Providers must publish only when serving.** A URL shown before the tunnel is live sends the user to a dead address, which reads as "the feature is broken" rather than "wait a moment".
-- **Foreground children, not background registration.** A provider that registers itself with a persistent local service and exits would outlive a crashed daemon, leaving the machine exposed with nothing left to withdraw it. Providers must die with the process the daemon holds a PID for.
+- **Foreground children, not background registration.** A provider that registers itself with a persistent local operator and exits would outlive a crashed daemon, leaving the machine exposed with nothing left to withdraw it. Providers must die with the process the daemon holds a PID for.
 - **A restart resumes through the same provider it was using.** Restarting must not rotate the user's URL or silently switch how the machine is exposed.
 - **Adding a provider is a matter of a preflight and a spawn.** Preflight failures are user-facing prose, not log lines: they are what the dialog paints under a disabled button.
 

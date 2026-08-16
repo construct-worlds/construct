@@ -18,7 +18,7 @@ before a click toggles it:
 
 This applies only to full-row toggles. Dedicated hit targets that occupy a
 specific column — a session's disclosure marker for its nested children, a
-service's children marker — keep toggling on the first click, because aiming
+operator's children marker — keep toggling on the first click, because aiming
 at them is already an unambiguous statement of intent.
 
 Keyboard toggles are unaffected: arrow/collapse-expand actions operate on the
@@ -45,7 +45,7 @@ while costing one extra click only the first time.
 
 ## Non-Goals
 
-- Does not change what a click does on ordinary session or service rows,
+- Does not change what a click does on ordinary session or operator rows,
   which only ever select.
 - Does not introduce double-click semantics: the two clicks are independent
   and unconstrained by timing.

@@ -216,7 +216,7 @@ verbatim."
 - A harness's built-in default probe command is a best guess at what that
   harness's interactive command set actually supports; it is not
   guaranteed correct for every harness version. The config override exists
-  specifically so an operator can correct a wrong or missing default
+  specifically so a user can correct a wrong or missing default
   without waiting on a code change.
 - Because the cache is in-memory and per-daemon-process, callers must not
   assume a captured snapshot survives a daemon restart, nor that it is
@@ -239,12 +239,12 @@ verbatim."
 
 ## Examples
 
-- An operator sets a harness's usage-probe field to an empty string in
+- A user sets a harness's usage-probe field to an empty string in
   config to disable probing for that harness entirely (e.g. because its
   usage command is slow or the harness doesn't support one usefully) —
   the daemon never spins up a session for it, and a query for it reports
   "not enabled" without attempting anything.
-- An operator overrides a harness's usage-probe command to pass extra
+- A user overrides a harness's usage-probe command to pass extra
   flags the harness's CLI supports — the probe sends that exact string
   instead of the built-in default.
 - Two callers ask for the same harness's usage snapshot within a few

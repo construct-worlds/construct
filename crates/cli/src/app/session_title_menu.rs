@@ -67,11 +67,11 @@ impl App {
                     .find(|s| s.id == session_id)
                     .is_some_and(|s| s.archived)
                 {
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Unarchive session {}? ", short_id(&session_id)),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::MenuUnarchiveConfirm { session_id },
+                        intent: PromptIntent::MenuUnarchiveConfirm { session_id },
                         error: None,
                     });
                 } else {

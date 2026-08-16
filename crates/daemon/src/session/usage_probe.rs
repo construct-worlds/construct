@@ -743,7 +743,7 @@ fn remove_dir_outcome(path: Option<PathBuf>) -> UnlinkOutcome {
 /// *a* writable directory to start in, not any particular project.
 ///
 /// Deliberately the daemon's own process cwd (same choice
-/// `ensure_orchestrator` makes for the minibuffer session), NOT the user's
+/// `ensure_minibuffer` makes for the minibuffer session), NOT the user's
 /// home directory: several wrapper harnesses gate a directory they haven't
 /// seen before behind a first-run interactive trust prompt (confirmed for
 /// claude — `$HOME` is very often untrusted since users rarely start a real
@@ -773,7 +773,7 @@ fn read_native_id_file(path: &Path) -> Option<String> {
 }
 
 /// First whitespace-delimited token of a probe `command` (e.g. `"/usage"`
-/// from `"/usage show"` or from an operator override like `"/usage
+/// from `"/usage show"` or from a user override like `"/usage
 /// --verbose-test-override"`). [`capture_shows_command_ran`] checks for
 /// only this token, not the whole command string, because a harness
 /// commonly renders a command keyword and its trailing arguments as

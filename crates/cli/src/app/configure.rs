@@ -168,9 +168,9 @@ pub fn feature_guidance(id: &str) -> &'static str {
              generate via smith; other harnesses use their own model. Fix: configure a smith \
              credential in the Smith auth tab (←)"
         }
-        "operator" => {
+        "minibuffer" => {
             "the fleet-dispatcher session behind the bottom input strip. Runs on the \
-             orchestrator harness (smith by default); without a smith credential it still \
+             minibuffer harness (smith by default); without a smith credential it still \
              handles slash commands but cannot act on its own. Fix: configure a smith \
              credential in the Smith auth tab (←)"
         }

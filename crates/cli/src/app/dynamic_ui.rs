@@ -441,11 +441,11 @@ impl App {
         None
     }
 
-    pub fn orchestrator_widget_panels(&self) -> Vec<construct_protocol::UiPanel> {
-        let Some(orchestrator_id) = self.orchestrator_id.as_deref() else {
+    pub fn minibuffer_widget_panels(&self) -> Vec<construct_protocol::UiPanel> {
+        let Some(minibuffer_id) = self.minibuffer_id.as_deref() else {
             return Vec::new();
         };
-        let Some(panels) = self.ui_panels.get(orchestrator_id) else {
+        let Some(panels) = self.ui_panels.get(minibuffer_id) else {
             return Vec::new();
         };
         let mut panels: Vec<_> = panels
@@ -461,11 +461,11 @@ impl App {
         panels
     }
 
-    /// Whether the operator widget viewport should render this frame.
+    /// Whether the minibuffer widget viewport should render this frame.
     /// Side effect: expires a lapsed hover preview and clears all widget state
-    /// when there's no orchestrator / no panels to show.
+    /// when there's no minibuffer / no panels to show.
     pub fn matrix_widget_visible(&mut self, now: Instant) -> bool {
-        if self.orchestrator_id.is_none() || self.orchestrator_widget_panels().is_empty() {
+        if self.minibuffer_id.is_none() || self.minibuffer_widget_panels().is_empty() {
             self.matrix_widget_pinned = None;
             self.matrix_widget_hover = None;
             return false;
@@ -480,7 +480,7 @@ impl App {
         self.matrix_widget_hover.is_some() || self.matrix_widget_pinned.is_some()
     }
 
-    /// The operator widget to render in the rain viewport: a live hover preview
+    /// The minibuffer widget to render in the rain viewport: a live hover preview
     /// takes precedence over the pinned widget; with neither, nothing shows.
     pub fn matrix_widget_shown(&self, now: Instant) -> Option<String> {
         if let Some(h) = self.matrix_widget_hover.as_ref() {
@@ -492,7 +492,7 @@ impl App {
     }
 
     pub fn toggle_matrix_widget_panel(&mut self, panel_id: String) {
-        let panels = self.orchestrator_widget_panels();
+        let panels = self.minibuffer_widget_panels();
         if !panels.iter().any(|panel| panel.id == panel_id) {
             self.matrix_widget_pinned = None;
             self.matrix_widget_hover = None;

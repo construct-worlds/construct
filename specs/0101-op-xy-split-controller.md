@@ -57,7 +57,7 @@ Scene and transport feedback default to using the same session eligibility rule
 as Matrix Rain intensity: every non-archived user session. A configurable
 mapped scope instead aggregates only the eight sessions resolved into
 `[1]`–`[8]` hardware slots independently of TUI focus. Subagents and
-orchestrator/system sessions never contribute. Unassigned sessions contribute
+minibuffer/system sessions never contribute. Unassigned sessions contribute
 only in the all-session scope. Mixer and synth feedback remain mapped to
 hardware slots regardless of aggregate scope. Scene encodes attention:
 Scene 2 is selected when any included session needs attention, otherwise Scene

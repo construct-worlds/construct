@@ -847,7 +847,7 @@ impl App {
 
     /// Change the pinned clip through the size-ownership protocol (spec
     /// 0090). A session pinned while visible nowhere else on screen (no main
-    /// window, not the orchestrator) gets its PTY
+    /// window, not the minibuffer) gets its PTY
     /// resized to the card's content dims, so the harness reflows to fit —
     /// full fidelity, no crop — and is resized back to the standard pane
     /// size the moment the pin releases (unpin, switch, dismiss, popup

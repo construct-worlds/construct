@@ -231,7 +231,7 @@ For an optimized build, use `cargo build --workspace --release` and replace
   convention.
 - [Remote control](docs/remote-control.md) — phone/browser access, QR setup,
   LAN binding, authentication, public tunnel providers, and local debug mode.
-- [Services and channels](docs/services.md) — authenticated headless session
+- [Operators and channels](docs/operators.md) — authenticated headless session
   ingress, routing, and explicit per-channel publication.
 - [Contributing](CONTRIBUTING.md) — building from source and the dev loop:
   run your changes as an isolated instance with

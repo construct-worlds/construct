@@ -56,7 +56,7 @@ directly removes the most common reason the route picker is empty: a
 machine with working subscriptions and no API keys had nothing to select.
 
 The refusal to refresh is the load-bearing decision. Every OAuth client for
-these services writes the refreshed token *back* to the shared store. A
+these operators writes the refreshed token *back* to the shared store. A
 second refresher racing the owning CLI can invalidate a token that CLI is
 mid-turn on, and the resulting failure is intermittent, affects a tool the
 user did not think they were changing, and gets attributed to the wrong
@@ -111,8 +111,8 @@ failure than a corrupted credential store.
   required headers and required prompt text — the same evidentiary standard
   as adding a routable harness. None of it may be guessed.
 - Reading another application's stored credential and presenting it to that
-  application's backend has terms-of-service implications that belong to
-  the operator, not to Construct. Automatic discovery is scoped to
+  application's backend has terms-of-operator implications that belong to
+  the user, not to Construct. Automatic discovery is scoped to
   harnesses deliberately launched through Construct, is read-only until a
   published route is selected, and has an explicit opt-out.
 

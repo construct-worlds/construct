@@ -14,7 +14,7 @@ restarts. The contract:
 - **User voice only.** An entry is recorded for every user message on a
   user-kind session, wherever it entered (composer input, a creation
   prompt, a prompt typed directly into the harness's terminal).
-  Machine-written prompts — orchestrator observations, subagent briefs,
+  Machine-written prompts — minibuffer observations, subagent briefs,
   hidden probe prompts, and any `MessageRole::User` text that carries
   the `OBSERVATION:` prefix (background tool completion, ambient ticks,
   fleet events, widget `ui.action` clicks) — are never recorded. Slash

@@ -3,12 +3,12 @@
 Status: accepted
 Date: 2026-08-03
 Area: architecture
-Scope: When an edit to the daemon's configuration file reaches the running daemon, and how the part that cannot be applied is told to the operator.
+Scope: When an edit to the daemon's configuration file reaches the running daemon, and how the part that cannot be applied is told to the user.
 
 ## Decision
 
 A configuration edit is applied to the running daemon when it is saved, on the
-same terms a service definition is. No restart is involved, and no command is
+same terms a operator definition is. No restart is involved, and no command is
 run.
 
 Each part of the configuration has one propagation class, and the class is a
@@ -18,7 +18,7 @@ property of where the daemon reads that field:
 |---|---|
 | Adding or removing a harness, its description, the template directory, suggestion generation | immediately |
 | A model profile, a published model list, a usage probe command | on the next request |
-| A harness binary, its arguments, its environment, the daemon environment, the default worktree setting, the orchestrator harness | on new sessions |
+| A harness binary, its arguments, its environment, the daemon environment, the default worktree setting, the minibuffer harness | on new sessions |
 | The router's port; switching off a router that is already listening | on restart |
 
 The classes are published as data that both the daemon and its clients read, so
@@ -27,7 +27,7 @@ to the configuration means giving it a class.
 
 **Nothing is re-applied to a running conversation.** A session keeps the harness
 binary, arguments, and environment it was created with, for its whole life, for
-the same reason a service-backed conversation keeps its instruction: a harness
+the same reason a operator-backed conversation keeps its instruction: a harness
 assembles its world when it starts, and there is no point at which a changed
 binary path could be delivered to a process already running from the old one.
 A session created while an edit is being applied is created from one
@@ -48,7 +48,7 @@ nothing is depending on its absence.
 
 **The residue is reported, once, where the restart is.** An edit that changes
 something in the restart class is saved and read like any other, and the
-operator is told which field is waiting and given the restart in one gesture.
+minibuffer is told which field is waiting and given the restart in one gesture.
 The report names the field, not the file: "the router port is waiting" is
 actionable, "the configuration changed" is not.
 
@@ -61,9 +61,9 @@ add a harness but cannot know to take one away.
 
 ## Reason
 
-The configuration file sits in the same directory as the service definitions
+The configuration file sits in the same directory as the operator definitions
 beside it, and those already apply when saved. That a file needs a process
-restart while its neighbour does not is not a distinction an operator can be
+restart while its neighbour does not is not a distinction a user can be
 expected to hold, and nothing announced it: an edit simply had no effect, which
 is indistinguishable from an edit that was wrong.
 
@@ -111,12 +111,12 @@ exception, and only the exception, is what lets the rest be believed.
 - Moving a bound port out from under the sessions that were given it. A port
   the daemon is serving is kept until the daemon is replaced.
 - Editing the configuration from a client. This is about reading what the
-  operator wrote, not about providing another place to write it.
+  minibuffer wrote, not about providing another place to write it.
 - Applying a partially written file. A file that does not parse is not an edit.
 
 ## Examples
 
-- An operator adds a harness to the configuration and saves. Within a couple of
+- A user adds a harness to the configuration and saves. Within a couple of
   seconds it appears in the harness list and a session can be created on it. No
   restart, no signal, no command.
 - A model profile is added. The next route resolution finds it; sessions already
@@ -125,7 +125,7 @@ exception, and only the exception, is what lets the rest be believed.
   becomes available as a route target without the daemon being restarted, which
   previously required exporting it into the shell that launched the daemon.
 - The router port is changed. The edit is read, everything else in it applies,
-  and the operator is told the port is waiting on a restart — with the restart
+  and the user is told the port is waiting on a restart — with the restart
   one keystroke away. The daemon keeps serving the port it already bound.
 - A plugin is disabled. On the next reload the harnesses it contributed are no
   longer offered.
