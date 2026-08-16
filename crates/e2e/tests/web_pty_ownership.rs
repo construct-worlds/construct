@@ -119,7 +119,7 @@ async fn claude_mouse_hover_does_not_reclaim_pty_after_tui_handoff() {
               });
             }, { capture: true });
           }
-          h.term._core.coreOperator.onUserInput(() => {
+          h.term._core.coreService.onUserInput(() => {
             window.__ptyOwnershipTrace.push({
               kind: "xterm-user-input",
               at: performance.now(),

@@ -12193,10 +12193,10 @@ function installTerminalInputOwnershipTracking(host, handle, term) {
   // so use the bundled version's core signal to preserve the distinction.
   // Fall back to the historical behavior if a future xterm update moves the
   // internal signal: explicit input must keep working even before adaptation.
-  const coreOperator = term && term._core && term._core.coreOperator;
-  if (coreOperator && typeof coreOperator.onUserInput === "function") {
+  const coreService = term && term._core && term._core.coreService;
+  if (coreService && typeof coreService.onUserInput === "function") {
     handle.xtermUserInputSignalAvailable = true;
-    coreOperator.onUserInput(() => {
+    coreService.onUserInput(() => {
       handle.xtermUserInputPending = true;
     });
   }
