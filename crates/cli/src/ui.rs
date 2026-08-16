@@ -299,6 +299,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.modeline_model_hit = None;
     app.layout.modeline_context_gauge_hit = None;
     app.layout.modeline_theme_hit = None;
+    app.layout.modeline_brand_hit = None;
     app.layout.suggest_affordance_hits.clear();
     app.layout.suggest_deck_area = None;
     app.layout.suggest_deck_hits.clear();
@@ -478,6 +479,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_modeline_version_notice_tooltip(f, app);
     render_modeline_remote_tooltip(f, app);
     render_modeline_theme_tooltip(f, app);
+    render_modeline_brand_tooltip(f, app);
 
     finish_frame(f, app);
 }
@@ -12417,6 +12419,13 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(para, area);
 }
 
+/// The wordmark at the head of the modeline, and the pad the format string
+/// puts in front of it. Kept as constants because the hit rect, the hover
+/// span and the emitted text are all derived from them — deriving each
+/// independently is how a clickable region drifts off the word it labels.
+const MODELINE_BRAND: &str = "construct";
+const MODELINE_BRAND_PAD: u16 = 1;
+
 /// The modeline's compact model segment — no `"model:"` label (unlike the
 /// harness-hover tooltip), just the bare value(s): `"-"` when nothing is
 /// known, the model alone, or `"model (effort)"` when both are known.
@@ -12558,7 +12567,7 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             &[]
         };
     let modeline_before_context_gauge = format!(
-        " construct  {vim_mode}focus:{focus}  {sel}  {model}",
+        " {MODELINE_BRAND}  {vim_mode}focus:{focus}  {sel}  {model}",
         vim_mode = vim_mode_label,
         focus = focus_label,
         sel = match s {
@@ -12593,6 +12602,23 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
             .min(area.x.saturating_add(area.width));
         if end_col > start_col {
             app.layout.modeline_model_hit = Some(crate::app::ModelineModelHit {
+                row: area.y,
+                start_col,
+                end_col,
+            });
+        }
+    }
+    // The `construct` wordmark's own cells, so a click there opens the
+    // minibuffer (spec 0200). Registered unconditionally — unlike the model
+    // indicator it does not depend on a selected session, and the minibuffer
+    // is exactly what a user with no sessions yet needs to reach.
+    {
+        let start_col = area.x.saturating_add(MODELINE_BRAND_PAD);
+        let end_col = start_col
+            .saturating_add(UnicodeWidthStr::width(MODELINE_BRAND) as u16)
+            .min(area.x.saturating_add(area.width));
+        if end_col > start_col {
+            app.layout.modeline_brand_hit = Some(crate::app::ModelineBrandHit {
                 row: area.y,
                 start_col,
                 end_col,
@@ -12731,7 +12757,31 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
         .mouse_pos
         .zip(app.layout.modeline_model_hit)
         .is_some_and(|((col, row), hit)| hit.contains(col, row));
-    match modeline_before_context_gauge
+    // Same reasoning for the wordmark, which opens the minibuffer. The two
+    // regions never overlap, so at most one of these splits fires per frame.
+    let brand_hovered = app
+        .mouse_pos
+        .zip(app.layout.modeline_brand_hit)
+        .is_some_and(|((col, row), hit)| hit.contains(col, row));
+    let left_group = match modeline_before_context_gauge
+        .strip_prefix(' ')
+        .and_then(|rest| rest.strip_prefix(MODELINE_BRAND))
+        .filter(|_| brand_hovered)
+    {
+        Some(rest) => {
+            spans.push(Span::raw(" ".repeat(MODELINE_BRAND_PAD as usize)));
+            spans.push(Span::styled(
+                MODELINE_BRAND.to_string(),
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::UNDERLINED)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            rest.to_string()
+        }
+        None => modeline_before_context_gauge,
+    };
+    match left_group
         .strip_suffix(&model_text)
         .filter(|_| model_hovered)
     {
@@ -12745,7 +12795,7 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        None => spans.push(Span::raw(modeline_before_context_gauge)),
+        None => spans.push(Span::raw(left_group)),
     }
     if let Some((gauge, filled_cells)) = context_gauge {
         let hovered = app
@@ -13350,6 +13400,33 @@ fn render_modeline_remote_tooltip(f: &mut Frame, app: &App) {
         " Remote control is off. Click to set up ".to_string()
     };
     render_button_tooltip(f, &app.theme, &label, hit.x_start, hit.y.saturating_sub(2));
+}
+
+/// Hover tooltip for the `construct` wordmark. Names the minibuffer and the
+/// keybinding, so the pointer affordance teaches the keyboard one rather than
+/// competing with it.
+fn render_modeline_brand_tooltip(f: &mut Frame, app: &App) {
+    let Some(hit) = app.layout.modeline_brand_hit else {
+        return;
+    };
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    if !hit.contains(mx, my) {
+        return;
+    }
+    let label = if app.is_minibuffer_panel_open() {
+        " Minibuffer — click to close "
+    } else {
+        " Minibuffer — click to open (C-x x) "
+    };
+    render_button_tooltip(
+        f,
+        &app.theme,
+        label,
+        hit.start_col,
+        hit.row.saturating_sub(2),
+    );
 }
 
 fn render_modeline_theme_tooltip(f: &mut Frame, app: &App) {
