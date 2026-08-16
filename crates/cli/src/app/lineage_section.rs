@@ -226,7 +226,7 @@ impl App {
         };
         // `lineage_focused` deliberately stays set: pane focus moves to the
         // view (making it dormant), and returning to the sidebar (`C-x Tab`,
-        // `C-x o`, `C-1`) lands back in the section you left.
+        // `C-x o`, `C-0` / `M-0`) lands back in the section you left.
         self.jump_to_lineage_session(&target_id);
     }
 
@@ -637,7 +637,7 @@ mod tests {
         assert_eq!(app.focus, PaneFocus::List);
         assert!(
             app.lineage_focused,
-            "C-x Tab / C-1 land back in the section that was focused last"
+            "C-x Tab / C-0 land back in the section that was focused last"
         );
 
         // Esc hands sub-focus to the rows; leaving and returning now lands

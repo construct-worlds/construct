@@ -14195,7 +14195,9 @@ emacs keymap (default; CONSTRUCT_KEYMAP=vim for vim profile)
 
   focus + view
     C-x o           other window (list → windows → list)
-    C-x Tab         toggle session list ⇄ split view (C-1..C-5: direct pane focus)
+    C-x Tab         toggle session list ⇄ split view
+    M-1..M-9        focus the split pane wearing that number (M-0: session list)
+    C-1..C-9 / C-0  same (needs a kitty-protocol terminal)
     Shift+arrow     focus the adjacent split window (in a split layout)
     C-x arrow       same — reliable alias where the terminal eats Shift+up/down
     RET (on list)   focus the selected session's view
@@ -14268,7 +14270,9 @@ vim keymap (CONSTRUCT_KEYMAP=vim; unset for emacs profile)
 
   focus + view
     C-x o / C-w w   other window (list → windows → list)
-    C-x Tab         toggle session list ⇄ split view (C-1..C-5: direct pane focus)
+    C-x Tab         toggle session list ⇄ split view
+    C-w 1..9 / C-w 0  focus the pane wearing that number / the session list
+    M-1..M-9, M-0   same, one keystroke (C-digit needs a kitty-protocol terminal)
     Shift+arrow     focus adjacent split (C-x arrow is reliable alias)
     C-w h/j/k/l     focus split window left/down/up/right
     i / a / RET     enter INSERT when the selected view is a live terminal

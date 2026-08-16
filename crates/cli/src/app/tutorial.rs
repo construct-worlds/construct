@@ -916,7 +916,8 @@ impl App {
                 KeyAction::FocusWindowUp
                 | KeyAction::FocusWindowDown
                 | KeyAction::FocusWindowLeft
-                | KeyAction::FocusWindowRight => {
+                | KeyAction::FocusWindowRight
+                | KeyAction::FocusPaneOrdinal(_) => {
                     t.hop_done = true;
                     t.touch_progress();
                 }

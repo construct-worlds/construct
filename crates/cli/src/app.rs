@@ -5728,7 +5728,8 @@ async fn run_with_socket_initial_selection(
     // Progressive enhancement: ask the terminal to disambiguate escape
     // codes (kitty keyboard protocol) so modified keys that legacy
     // encodings fold onto control characters — Ctrl+digit pane focus
-    // (`C-1`..`C-5`) chief among them — actually arrive as distinct key
+    // (`C-0` = session list, `C-N` = the pane wearing badge N) chief
+    // among them — actually arrive as distinct key
     // events. Terminals without support answer the query negatively and
     // keep the legacy encoding; the flag is popped at teardown.
     let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
@@ -9357,16 +9358,16 @@ impl App {
         out
     }
 
-    /// Focus the Nth pane (0-based) in the same `[list, …split windows]`
-    /// ordering that `C-x o` cycles through: index 0 is the session list,
-    /// index `k >= 1` is the `(k - 1)`th split window. Returns `false`
-    /// (a no-op) when the requested pane doesn't exist — e.g. `C-5` with
-    /// only two split windows open. Bound to `C-1`..`C-5` (`C-1` = the
-    /// session list, so `C-2`
-    /// focuses the first split window).
+    /// Focus the Nth pane in ordinal-badge numbering (spec 0199): index 0
+    /// is the session list, index `k >= 1` the pane wearing badge `k` —
+    /// the `(k - 1)`th split window in the same layout order `C-x o`
+    /// cycles through. Returns `false` (a no-op) when the requested pane
+    /// doesn't exist — e.g. `M-5` with only two split windows open.
+    /// Reached via the `M-digit` / `C-digit` accelerators, the vim
+    /// profile's `C-w digit` chords, and badge clicks.
     fn focus_pane_by_index(&mut self, index: usize) -> bool {
         if index == 0 {
-            // Pane 1 is the session list.
+            // Digit 0 is the session list.
             self.reset_vim_mode();
             self.collapse_minibuffer_panel_on_focus_change();
             if matches!(self.zoom, ZoomMode::View) {
@@ -13052,17 +13053,23 @@ impl App {
         // otherwise we fall through and the key keeps its normal meaning
         // (PTY input / list reorder / unbound).
         if self.chord_state.is_empty() {
-            // `C-1`..`C-5` focus a pane directly: `C-1` jumps to the
-            // session list from anywhere (including any split window),
-            // `C-2`..`C-5` to split windows 1..4. Terminals that don't
-            // deliver Ctrl+digit (legacy encodings fold it onto control
-            // chars) never reach here — which is why startup requests the
-            // kitty keyboard protocol's disambiguation when the terminal
-            // supports it.
-            if key.modifiers == KeyModifiers::CONTROL {
-                if let KeyCode::Char(c @ '1'..='5') = key.code {
-                    let pane_index = c as usize - '1' as usize; // '2' -> 1 … '5' -> 4
-                    if self.focus_pane_by_index(pane_index) {
+            // `M-0`..`M-9` / `C-0`..`C-9` focus a pane by its ordinal badge
+            // (spec 0199): digit N jumps to the pane wearing badge N, digit
+            // 0 to the session list — the number you see is the number you
+            // press. `M-digit` is the accelerator that works in every
+            // terminal (legacy encodings deliver Alt+digit as ESC-prefixed
+            // digits, matching the emacs winum convention); `C-digit` needs
+            // the kitty keyboard protocol's disambiguation, requested at
+            // startup. Digits 1..9 only fire while the layout actually
+            // shows badges (two or more panes), so a lone focused child PTY
+            // keeps its own Alt/Ctrl digit bindings — emacs prefix args
+            // chief among them; 0 is the always-available list jump.
+            if key.modifiers == KeyModifiers::CONTROL || key.modifiers == KeyModifiers::ALT {
+                if let KeyCode::Char(c @ '0'..='9') = key.code {
+                    let pane_index = c as usize - '0' as usize; // badge N -> Nth pane, 0 -> list
+                    if (pane_index == 0 || self.is_split_layout())
+                        && self.focus_pane_by_index(pane_index)
+                    {
                         self.chord_label.clear();
                         return;
                     }
@@ -13769,6 +13776,14 @@ impl App {
             FocusWindowDown => self.focus_window_in_dir(FocusDir::Down),
             FocusWindowLeft => self.focus_window_in_dir(FocusDir::Left),
             FocusWindowRight => self.focus_window_in_dir(FocusDir::Right),
+            // Same numbering rule as the `M-digit` / `C-digit` accelerators
+            // (spec 0199): pane digits only act while badges are on screen,
+            // 0 always jumps to the list.
+            FocusPaneOrdinal(n) => {
+                if n == 0 || self.is_split_layout() {
+                    self.focus_pane_by_index(n as usize);
+                }
+            }
             SplitWindowBelow => self.split_active_window(WindowSplitDirection::Below),
             SplitWindowRight => self.split_active_window(WindowSplitDirection::Right),
             DeleteWindow => self.delete_active_window(),
@@ -34322,7 +34337,8 @@ mod tests {
         app.main_windows = three_window_tree();
         app.focus = PaneFocus::List;
 
-        // C-2 -> first split window, C-3 -> second, C-4 -> third.
+        // Ordinal-badge numbering (spec 0199): index N is the pane wearing
+        // badge N in layout order.
         assert!(app.focus_pane_by_index(1));
         assert_eq!(app.focus, PaneFocus::View);
         assert_eq!(app.active_window_id, 1);
@@ -34333,7 +34349,7 @@ mod tests {
         assert!(app.focus_pane_by_index(3));
         assert_eq!(app.active_window_id, 3);
 
-        // C-5 with only three windows is a no-op — focus stays put.
+        // Digit 4 with only three windows is a no-op — focus stays put.
         assert!(!app.focus_pane_by_index(4));
         assert_eq!(app.active_window_id, 3);
         assert_eq!(app.focus, PaneFocus::View);
@@ -34354,25 +34370,166 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ctrl_1_keystroke_jumps_focus_to_the_session_list() {
+    async fn digit_0_keystroke_jumps_focus_to_the_session_list() {
         let (mut app, _dir, server) = captured_app().await;
         app.main_windows = three_window_tree();
         app.focus = PaneFocus::View;
         app.active_window_id = 2;
 
-        app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL))
+        // Digit 0 is the list jump in both accelerators (spec 0199).
+        app.on_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(
             app.focus,
             PaneFocus::List,
-            "C-1 jumps straight to the session list from any split window"
+            "C-0 jumps straight to the session list from any split window"
+        );
+
+        app.focus = PaneFocus::View;
+        app.active_window_id = 3;
+        app.on_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::ALT))
+            .await;
+        assert_eq!(
+            app.focus,
+            PaneFocus::List,
+            "M-0 is the same jump — the accelerator that works in every terminal"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn digit_keystroke_focuses_the_pane_wearing_that_badge() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.main_windows = three_window_tree();
+        app.focus = PaneFocus::List;
+
+        // The number you see is the number you press: C-1 / M-1 → badge 1.
+        app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.focus, PaneFocus::View);
+        assert_eq!(app.active_window_id, 1);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT))
+            .await;
+        assert_eq!(app.focus, PaneFocus::View);
+        assert_eq!(app.active_window_id, 2);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.active_window_id, 3);
+
+        // Out of range: fall through, focus stays put.
+        app.on_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::ALT))
+            .await;
+        assert_eq!(app.active_window_id, 3);
+        assert_eq!(app.focus, PaneFocus::View);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn pane_digits_fall_through_when_there_are_no_badges() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.focus = PaneFocus::View;
+        app.active_window_id = 1;
+        assert!(
+            !app.is_split_layout(),
+            "captured_app starts as a single pane"
+        );
+
+        // C-1 used to mean "session list". With badges, that mapping is
+        // off-by-one — and with a lone pane there is no badge 1, so the
+        // key must not steal focus from a child PTY.
+        app.on_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL))
+            .await;
+        assert_eq!(app.focus, PaneFocus::View);
+        assert_eq!(app.active_window_id, 1);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT))
+            .await;
+        assert_eq!(app.focus, PaneFocus::View);
+
+        // Digit 0 is the always-available list jump, even without a split.
+        app.on_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::ALT))
+            .await;
+        assert_eq!(app.focus, PaneFocus::List);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn vim_c_w_digit_focuses_the_matching_pane() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.profile = crate::keymap::Profile::Vim;
+        app.keymap = crate::keymap::default_for(app.profile);
+        app.main_windows = three_window_tree();
+        app.focus = PaneFocus::List;
+
+        app.run_action(KeyAction::FocusPaneOrdinal(2)).await;
+        assert_eq!(app.focus, PaneFocus::View);
+        assert_eq!(app.active_window_id, 2);
+
+        app.run_action(KeyAction::FocusPaneOrdinal(0)).await;
+        assert_eq!(app.focus, PaneFocus::List);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn clicking_a_list_row_badge_focuses_that_pane() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.focus = PaneFocus::List;
+
+        let backend = ratatui::backend::TestBackend::new(160, 45);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        let list = app.layout.list_area.expect("list pane");
+        let items_area = app.layout.list_items_area.expect("list rows");
+        let items = app.list_items();
+        let s2_idx = items
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    ListItem::Session { summary, .. } if summary.id == "s2"
+                )
+            })
+            .expect("s2 is in the list");
+        let row_offset = app
+            .layout
+            .list_visible_rows
+            .iter()
+            .position(|hit| hit.item_index == s2_idx && hit.first_line)
+            .expect("s2's badge row is visible");
+        let row = items_area.y + row_offset as u16;
+
+        app.click_list(list, list.x + 1, row).await;
+        assert_eq!(
+            app.focus,
+            PaneFocus::View,
+            "clicking the list badge focuses the pane, not the list"
+        );
+        assert_eq!(
+            app.active_window_id, 2,
+            "s2 wears badge 2, so the click focuses pane 2"
         );
         server.abort();
     }
 
     #[tokio::test]
     async fn c_x_tab_toggles_between_the_list_and_the_same_split_pane() {
-        // The works-in-every-terminal counterpart to C-1: a C-x chord
+        // The works-in-every-terminal counterpart to C-0 / M-0: a C-x chord
         // escapes PTY capture and needs no keyboard-protocol support.
         let (mut app, _dir, server) = captured_app().await;
         app.main_windows = three_window_tree();

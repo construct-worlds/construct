@@ -431,6 +431,20 @@ impl App {
         } = &items[idx]
         {
             if first_line {
+                // Pane-ordinal badge (spec 0199): the badge occupies the
+                // row's first cell, and clicking it focuses the pane wearing
+                // that number — what the badge visually promises. Checked
+                // before the disclosure toggle because the badge covers the
+                // disclosure while its session is split-visible.
+                if col == list.x + 1 {
+                    if let Some((ordinal, _)) =
+                        self.session_pane_ordinals().get(summary.id.as_str())
+                    {
+                        let ordinal = *ordinal;
+                        self.focus_pane_by_index(ordinal);
+                        return;
+                    }
+                }
                 let indent = list_session_indent_cells(*nesting_depth);
                 let disclosure_col = list.x + 1 + indent;
                 if *has_children && col == disclosure_col {
