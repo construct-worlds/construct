@@ -9119,11 +9119,14 @@ impl App {
         };
         match self.selection.clone() {
             Selection::Session(id) => {
-                let is_fork = self
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == id)
-                    .is_some_and(|s| s.forked_from.is_some());
+                let selected = self.sessions.iter().find(|s| s.id == id);
+                let is_fork = selected.is_some_and(|s| s.forked_from.is_some());
+                let is_routed = !is_fork
+                    && selected.is_some_and(|s| {
+                        self.operators
+                            .iter()
+                            .any(|operator| operator_session_matches(s, &operator.name))
+                    });
                 match self.client.move_session(&id, dir).await {
                     Ok(true) => {} // Daemon broadcasts will reconcile positions/groups.
                     Ok(false) => self.set_status(if is_fork {
@@ -9133,6 +9136,11 @@ impl App {
                         // otherwise — the row simply has no sibling fork
                         // left to swap with in that direction.
                         "no sibling fork to swap with".into()
+                    } else if is_routed {
+                        // Routed sessions reorder only among sessions of the
+                        // same operator; they can't be reordered out from
+                        // under its row.
+                        "no other session under this operator to swap with".into()
                     } else {
                         "nothing to reorder past".into()
                     }),

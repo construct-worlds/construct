@@ -242,6 +242,22 @@ fn is_user_session_kind(s: &SessionSummary) -> bool {
     matches!(s.kind, construct_protocol::SessionKind::User)
 }
 
+/// The operator this session is routed to, if any. Routing is a title
+/// convention — `operator:<name>` or `operator:<name>:...` — and only counts
+/// when `<name>` is an operator that actually exists: clients leave a session
+/// whose title merely looks routed in the flat list when no such operator is
+/// defined, and reordering must agree with them.
+fn routed_operator<'a>(s: &SessionSummary, operator_names: &'a [String]) -> Option<&'a str> {
+    let title = s.title.as_deref()?;
+    operator_names
+        .iter()
+        .map(String::as_str)
+        .find(|name| {
+            let prefix = format!("operator:{name}");
+            title == prefix || title.starts_with(&format!("{prefix}:"))
+        })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegionEdge {
     Top,
@@ -5761,6 +5777,26 @@ impl SessionManager {
     /// mistake for a bug (e.g. a fork stuck at the edge of its sibling
     /// forks, which renders at the same indent as its parent).
     pub async fn move_session(&self, id: &str, dir: MoveDirection) -> Result<bool> {
+        // Routed sessions are matched by title against the operators defined
+        // on disk — the same source every list client renders from. Loaded
+        // here (not cached) so a definition added or removed since the last
+        // reorder is already in force.
+        let operator_names = crate::operator::known_operator_names(
+            &construct_protocol::paths::Paths::discover().operators_dir(),
+        );
+        self.move_session_with_operator_names(id, dir, &operator_names)
+            .await
+    }
+
+    /// [`Self::move_session`] with the defined operator names injected, so
+    /// tests can exercise routed-session reordering without touching the
+    /// process-global `CONSTRUCT_CONFIG_DIR` discovery.
+    pub(crate) async fn move_session_with_operator_names(
+        &self,
+        id: &str,
+        dir: MoveDirection,
+        operator_names: &[String],
+    ) -> Result<bool> {
         let all_sessions: Vec<SessionSummary> = self.list().await;
         let all_groups: Vec<GroupSummary> = self.list_groups().await;
         let me = all_sessions
@@ -5813,6 +5849,48 @@ impl SessionManager {
             };
         }
 
+        if let Some(operator) = routed_operator(&me, operator_names) {
+            // A routed session keeps whatever `group_id` it has, but clients
+            // never render it in that flat region — it nests under its
+            // operator's row, ordered only among sessions routed to the same
+            // operator. Same shape as the fork case above: swapping with the
+            // flat-region neighbor wouldn't move the row the user sees, so
+            // scope the region to routed siblings instead, sorted the way
+            // the clients sort them. The archive partition still applies:
+            // operator rows list active sessions only.
+            let mut siblings: Vec<&SessionSummary> = all_sessions
+                .iter()
+                .filter(|s| {
+                    routed_operator(s, operator_names) == Some(operator)
+                        && is_user_session_kind(s)
+                        && s.archived == me.archived
+                        && s.forked_from.is_none()
+                })
+                .collect();
+            siblings.sort_by(|a, b| {
+                a.position
+                    .cmp(&b.position)
+                    .then_with(|| b.created_at.cmp(&a.created_at))
+            });
+            let pos_in_siblings = siblings.iter().position(|s| s.id == id).unwrap();
+            return match dir {
+                MoveDirection::Up if pos_in_siblings > 0 => {
+                    let other = siblings[pos_in_siblings - 1];
+                    self.swap_session_positions(&me.id, &other.id).await?;
+                    Ok(true)
+                }
+                MoveDirection::Down if pos_in_siblings + 1 < siblings.len() => {
+                    let other = siblings[pos_in_siblings + 1];
+                    self.swap_session_positions(&me.id, &other.id).await?;
+                    Ok(true)
+                }
+                // At the edge of the routed cluster: no-op. Routing follows
+                // the title, not `position`, so a routed session can't leave
+                // its operator's row by reordering.
+                _ => Ok(false),
+            };
+        }
+
         // Find neighbors in `me`'s visible reorder region (same group_id,
         // user sessions and archive partition only), sorted by position. The
         // daemon list includes hidden minibuffer/subagent records so clients
@@ -5831,6 +5909,12 @@ impl SessionManager {
         // them right after their parent by position, so without this filter a
         // session below a fork-parent needs 1 + #forks presses to cross it —
         // every press before the last swaps with an invisible fork row.
+        //
+        // Operator-routed sessions are hidden from the flat list for the same
+        // reason — they nest under their operator's row — and their fresh
+        // creation positions typically interleave with everyone else's, so
+        // without this filter a reorder near them burns one silent press per
+        // routed session before anything visible moves.
         let region: Vec<&SessionSummary> = all_sessions
             .iter()
             .filter(|s| {
@@ -5838,6 +5922,7 @@ impl SessionManager {
                     && is_user_session_kind(s)
                     && s.archived == me.archived
                     && s.forked_from.is_none()
+                    && routed_operator(s, operator_names).is_none()
             })
             .collect();
         let pos_in_region = region.iter().position(|s| s.id == id).unwrap();
@@ -9227,6 +9312,222 @@ mod tests {
         let fork = sessions.iter().find(|s| s.id == "gfork").unwrap();
         assert_eq!(parent.position, 10);
         assert_eq!(fork.position, 11);
+    }
+
+    /// A user-kind entry whose title marks it as routed to an operator's
+    /// channel, mirroring how operator ingress titles the sessions it opens.
+    async fn synthetic_routed_entry(id: &str, operator: &str, position: i64) -> Arc<SessionEntry> {
+        let entry = synthetic_entry(id, construct_protocol::SessionKind::User, position);
+        entry.summary.write().await.title = Some(format!("operator:{operator}:chan"));
+        entry
+    }
+
+    #[tokio::test]
+    async fn move_session_skips_operator_routed_sessions_in_flat_region() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        // Routed sessions share the flat region's group_id but render nested
+        // under their operator's row, never as flat rows. Moving `ruser-b` up
+        // must swap with the visible `ruser-a` in one press, not silently
+        // swap with the invisible routed session sitting between them.
+        mgr.sessions.write().await.insert(
+            "ruser-a".into(),
+            synthetic_entry("ruser-a", construct_protocol::SessionKind::User, 10),
+        );
+        mgr.sessions.write().await.insert(
+            "rrouted".into(),
+            synthetic_routed_entry("rrouted", "helpdesk", 20).await,
+        );
+        mgr.sessions.write().await.insert(
+            "ruser-b".into(),
+            synthetic_entry("ruser-b", construct_protocol::SessionKind::User, 30),
+        );
+
+        let moved = mgr
+            .move_session_with_operator_names(
+                "ruser-b",
+                construct_protocol::MoveDirection::Up,
+                &["helpdesk".to_string()],
+            )
+            .await
+            .expect("move up");
+        assert!(moved);
+
+        let sessions = mgr.list().await;
+        let a = sessions.iter().find(|s| s.id == "ruser-a").unwrap();
+        let b = sessions.iter().find(|s| s.id == "ruser-b").unwrap();
+        let routed = sessions.iter().find(|s| s.id == "rrouted").unwrap();
+        assert_eq!(b.position, 10, "one press crosses the hidden routed row");
+        assert_eq!(a.position, 30);
+        assert_eq!(routed.position, 20, "hidden routed session untouched");
+    }
+
+    #[tokio::test]
+    async fn move_session_reorders_routed_session_among_same_operator_siblings() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        // A routed session renders under its operator's row, ordered only
+        // among sessions routed to the same operator. Its flat-region
+        // neighbors by position — an unrelated top-level session and a
+        // session routed to a different operator — must not be its swap
+        // partners.
+        mgr.sessions.write().await.insert(
+            "qrouted-a".into(),
+            synthetic_routed_entry("qrouted-a", "helpdesk", 10).await,
+        );
+        mgr.sessions.write().await.insert(
+            "qflat".into(),
+            synthetic_entry("qflat", construct_protocol::SessionKind::User, 15),
+        );
+        mgr.sessions.write().await.insert(
+            "qother-op".into(),
+            synthetic_routed_entry("qother-op", "triage", 17).await,
+        );
+        mgr.sessions.write().await.insert(
+            "qrouted-b".into(),
+            synthetic_routed_entry("qrouted-b", "helpdesk", 20).await,
+        );
+
+        let names = vec!["helpdesk".to_string(), "triage".to_string()];
+        let moved = mgr
+            .move_session_with_operator_names(
+                "qrouted-b",
+                construct_protocol::MoveDirection::Up,
+                &names,
+            )
+            .await
+            .expect("move up");
+        assert!(moved, "swapping with a same-operator sibling is a real move");
+
+        let sessions = mgr.list().await;
+        let a = sessions.iter().find(|s| s.id == "qrouted-a").unwrap();
+        let b = sessions.iter().find(|s| s.id == "qrouted-b").unwrap();
+        let flat = sessions.iter().find(|s| s.id == "qflat").unwrap();
+        let other = sessions.iter().find(|s| s.id == "qother-op").unwrap();
+        assert_eq!(b.position, 10, "routed-b swaps with same-operator sibling");
+        assert_eq!(a.position, 20);
+        assert_eq!(flat.position, 15, "unrelated flat session untouched");
+        assert_eq!(other.position, 17, "other operator's session untouched");
+    }
+
+    #[tokio::test]
+    async fn move_session_routed_session_is_noop_at_sibling_edge() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        // The only session routed to its operator has no sibling to swap
+        // with. It must not fall back to swapping with a flat-region
+        // neighbor — routing follows the title, so the row can't leave its
+        // operator's cluster by reordering.
+        mgr.sessions.write().await.insert(
+            "euser-a".into(),
+            synthetic_entry("euser-a", construct_protocol::SessionKind::User, 10),
+        );
+        mgr.sessions.write().await.insert(
+            "erouted".into(),
+            synthetic_routed_entry("erouted", "helpdesk", 20).await,
+        );
+        mgr.sessions.write().await.insert(
+            "euser-b".into(),
+            synthetic_entry("euser-b", construct_protocol::SessionKind::User, 30),
+        );
+
+        for dir in [
+            construct_protocol::MoveDirection::Up,
+            construct_protocol::MoveDirection::Down,
+        ] {
+            let moved = mgr
+                .move_session_with_operator_names("erouted", dir, &["helpdesk".to_string()])
+                .await
+                .expect("move");
+            assert!(!moved, "no same-operator sibling — reports as a no-op");
+        }
+
+        let sessions = mgr.list().await;
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "euser-a").unwrap().position,
+            10
+        );
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "erouted").unwrap().position,
+            20
+        );
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "euser-b").unwrap().position,
+            30
+        );
+    }
+
+    #[tokio::test]
+    async fn move_session_treats_unmatched_operator_title_as_flat() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        // A title that merely looks routed ("operator:ghost:...") stays a
+        // flat row in every client when no operator named "ghost" exists, so
+        // reordering must treat it as an ordinary flat-region member.
+        mgr.sessions.write().await.insert(
+            "tuser-a".into(),
+            synthetic_entry("tuser-a", construct_protocol::SessionKind::User, 10),
+        );
+        mgr.sessions.write().await.insert(
+            "tghost".into(),
+            synthetic_routed_entry("tghost", "ghost", 20).await,
+        );
+
+        let moved = mgr
+            .move_session_with_operator_names(
+                "tghost",
+                construct_protocol::MoveDirection::Up,
+                &["helpdesk".to_string()],
+            )
+            .await
+            .expect("move up");
+        assert!(moved, "unmatched routed-looking title reorders as flat");
+
+        let sessions = mgr.list().await;
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "tghost").unwrap().position,
+            10
+        );
+        assert_eq!(
+            sessions.iter().find(|s| s.id == "tuser-a").unwrap().position,
+            20
+        );
     }
 
     #[tokio::test]
