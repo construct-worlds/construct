@@ -20276,6 +20276,78 @@ mod tests {
         );
     }
 
+    /// The selected list row and its pane-ordinal badge must not share a
+    /// background (spec 0199). Ratatui's `highlight_style` would otherwise
+    /// swallow the digit into the selection bar.
+    #[tokio::test]
+    async fn list_row_ordinal_badge_stays_distinct_from_the_selection_bar() {
+        let (mut app, _dir, _server) = two_session_app().await;
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+        app.focus = PaneFocus::List;
+
+        let backend = ratatui::backend::TestBackend::new(160, 45);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let buffer = term.backend().buffer().clone();
+
+        let items_area = app.layout.list_items_area.expect("list rows");
+        let items = app.list_items();
+        let s1_row = app
+            .layout
+            .list_visible_rows
+            .iter()
+            .position(|hit| {
+                hit.first_line
+                    && matches!(
+                        items.get(hit.item_index),
+                        Some(ListItem::Session { summary, .. }) if summary.id == "s1"
+                    )
+            })
+            .expect("s1 row is visible");
+        let y = items_area.y + s1_row as u16;
+        let badge = buffer
+            .cell((items_area.x, y))
+            .expect("badge cell");
+        assert_eq!(badge.symbol(), "1", "selected row still wears its ordinal");
+        assert_ne!(
+            badge.style().bg,
+            Some(app.theme.highlight_bg),
+            "the list-row badge must not use the selection-bar background"
+        );
+        assert_eq!(
+            badge.style().bg,
+            Some(app.theme.inactive_highlight_bg),
+            "selected-row badge wears a muted highlight chip, not an empty cell"
+        );
+        assert_eq!(
+            badge.style().fg,
+            Some(app.theme.text),
+            "the digit uses normal foreground, not the inverted selection ink"
+        );
+        // A cell further along the same row still wears the selection bar.
+        let title_cell = buffer
+            .cell((items_area.x + 4, y))
+            .expect("title cell");
+        assert_eq!(
+            title_cell.style().bg,
+            Some(app.theme.highlight_bg),
+            "the rest of the selected row keeps the selection highlight"
+        );
+    }
+
     // The active Playbook popup previously rendered with a hardcoded
     // active=true, so its border never dimmed when focus moved to the
     // session list. The border must dim like any other split pane while the

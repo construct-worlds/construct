@@ -32,6 +32,14 @@ The badge's background brightness tracks focus: the pane that last held
 focus (and its session's list badge) wears the selection colors; every other
 pane wears the inactive highlight.
 
+On a selected list row those selection colors are also the row highlight,
+which would make the badge vanish into the bar. The list-row badge then
+wears the inactive highlight as a quieter chip of the same family, with
+normal foreground text — the digit still sits on a pad, the row stays
+the brighter selection. Against
+any other colliding highlight the pair is inverted. The pane corner badge
+is unchanged — it does not sit on the list highlight.
+
 With a single pane there are no badges anywhere — a lone pane needs no
 locating aid.
 
@@ -60,6 +68,10 @@ collisions.
   expand must give the badge a different home.
 - Ordinals past 9 are not rendered (the row falls back to its plain
   lead-in) so the badge can never widen beyond one cell.
+- A selected list row's badge wears the inactive highlight (a quieter
+  chip) when the list is focused, so it never shares the selection-bar
+  background and never reads as an empty cell. The pane-corner badge is
+  unchanged.
 
 ## Selecting a pane by its badge
 
