@@ -881,6 +881,62 @@ fn session_row_marker(
     }
 }
 
+/// Style of the pane-ordinal badge (spec 0199): a digit over a highlight
+/// background so it reads as a marker, not as row text. The pane that last
+/// held focus wears the selection colors; every other pane wears the
+/// inactive highlight, so badge brightness also says where `C-x o` returns.
+fn pane_ordinal_style(theme: &Theme, in_active_pane: bool) -> Style {
+    if in_active_pane {
+        Style::default()
+            .bg(theme.highlight_bg)
+            .fg(theme.highlight_fg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .bg(theme.inactive_highlight_bg)
+            .fg(theme.text)
+    }
+}
+
+/// A session row's fixed-width lead-in: tree rails plus the reserved marker
+/// cell. When the session is on screen in a multi-pane split, the
+/// pane-ordinal badge takes the row's FIRST cell — replacing the marker on a
+/// depth-0 row, or the first rail/indent cell on a nested row — so every
+/// badge sits in the list's first column and the glyph/title columns never
+/// move (spec 0199).
+fn session_row_lead_spans(
+    theme: &Theme,
+    tree_prefix: String,
+    row_marker: &'static str,
+    marker_style: Style,
+    ordinal: Option<(usize, bool)>,
+) -> Vec<Span<'static>> {
+    // Ordinals past 9 would widen the badge and shove the row sideways; a
+    // ten-pane layout has bigger legibility problems than a missing badge.
+    let badge = ordinal.filter(|(n, _)| *n <= 9);
+    let Some((n, in_active_pane)) = badge else {
+        return vec![
+            Span::styled(tree_prefix, session_list_secondary_style(theme)),
+            Span::styled(row_marker.to_string(), marker_style),
+        ];
+    };
+    let badge_span = Span::styled(n.to_string(), pane_ordinal_style(theme, in_active_pane));
+    if tree_prefix.is_empty() {
+        // Depth 0: the badge takes the marker gutter cell. The disclosure /
+        // lineage mark yields while the session is split-visible — locating
+        // the pane is the affordance being asked for in that moment, and
+        // expand/collapse still works from the row itself.
+        vec![badge_span]
+    } else {
+        let rest: String = tree_prefix.chars().skip(1).collect();
+        vec![
+            badge_span,
+            Span::styled(rest, session_list_secondary_style(theme)),
+            Span::styled(row_marker.to_string(), marker_style),
+        ]
+    }
+}
+
 /// Hit zone for the `+` button on the session-list pane's title
 /// (`" + sessions "`). Returns `(x_start, x_end_exclusive, y)`.
 /// Anchored after the top-left border corner — cells `list.x + 1`
@@ -3201,6 +3257,10 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     let detail_cols = full_mode.then(|| compute_detail_columns(&app_items, detail_now_ms));
     // Tree rails are a full-mode affordance: see `list_tree_branch_prefix`.
     let tree_rails = full_mode;
+    // Pane-ordinal badges (spec 0199): with two or more split panes, each
+    // visible session's row leads with its pane number so the operator can
+    // map list rows to panes — and back — at a glance.
+    let pane_ordinals = app.session_pane_ordinals();
     let mut selected_idx: Option<usize> = None;
     let item_lines: Vec<Vec<Line>> = app_items
         .iter()
@@ -3338,10 +3398,13 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                     } else {
                         Style::default().fg(app.theme.info)
                     };
-                    let mut spans = vec![
-                        Span::styled(tree_prefix, session_list_secondary_style(&app.theme)),
-                        Span::styled(row_marker.to_string(), marker_style),
-                    ];
+                    let mut spans = session_row_lead_spans(
+                        &app.theme,
+                        tree_prefix,
+                        row_marker,
+                        marker_style,
+                        pane_ordinals.get(s.id.as_str()).copied(),
+                    );
                     spans.extend([
                         Span::styled(
                             format!(" {} ", session_status_glyph(app, s)),
@@ -6179,6 +6242,22 @@ fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
                 });
                 render_detail(f, area, app, Some(*id));
                 app.selection = old_selection;
+                // Pane-ordinal badge (spec 0199): painted over the border's
+                // top-left corner after the pane rendered, so every pane —
+                // session, service, project, empty, even the diff overlay —
+                // wears its number the same way, at the pane's geometric
+                // corner, without touching any title layout.
+                if let Some(n) = app.window_pane_ordinal(*id).filter(|n| *n <= 9) {
+                    if area.width >= 2 && area.height >= 1 {
+                        let in_active = *id == app.active_window_id;
+                        f.buffer_mut().set_string(
+                            area.x,
+                            area.y,
+                            n.to_string(),
+                            pane_ordinal_style(&app.theme, in_active),
+                        );
+                    }
+                }
             }
             MainWindowTree::Split {
                 direction,
@@ -25355,6 +25434,68 @@ mod tests {
         // The affordance outranks the identity mark when a row is somehow
         // both — the user can act on a disclosure.
         assert_eq!(session_row_marker(&fork, true, true), "▼");
+    }
+
+    /// Pane-ordinal badges take the row's first cell without moving any other
+    /// column (spec 0199): the lead-in width is identical with and without a
+    /// badge at every depth, the badge is always the first cell, and nested
+    /// rows keep their marker — only a depth-0 row yields its gutter cell.
+    #[test]
+    fn pane_ordinal_badge_replaces_the_first_cell_without_moving_columns() {
+        let theme = Theme::default();
+        let marker_style = Style::default();
+        let spans_width = |spans: &[Span]| -> usize {
+            spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum()
+        };
+        for prefix in ["", "  ", "├─", "│ └─"] {
+            let plain =
+                session_row_lead_spans(&theme, prefix.to_string(), "▶", marker_style, None);
+            let badged = session_row_lead_spans(
+                &theme,
+                prefix.to_string(),
+                "▶",
+                marker_style,
+                Some((2, false)),
+            );
+            assert_eq!(
+                spans_width(&plain),
+                spans_width(&badged),
+                "badge must not change the lead-in width for prefix {prefix:?}"
+            );
+            assert_eq!(
+                badged[0].content.as_ref(),
+                "2",
+                "badge sits in the first cell for prefix {prefix:?}"
+            );
+            let keeps_marker = badged.iter().any(|s| s.content.as_ref() == "▶");
+            assert_eq!(
+                keeps_marker,
+                !prefix.is_empty(),
+                "nested rows keep the marker; depth 0 yields the gutter cell"
+            );
+        }
+        // A ten-pane layout would need a two-cell badge; fall back to the
+        // plain lead-in rather than shoving the row sideways.
+        let over =
+            session_row_lead_spans(&theme, String::new(), "▶", marker_style, Some((10, false)));
+        assert_eq!(over.last().expect("marker span").content.as_ref(), "▶");
+    }
+
+    /// The badge's brightness says which pane holds focus: the active pane's
+    /// session wears the selection colors, every other visible session the
+    /// inactive highlight (spec 0199).
+    #[test]
+    fn pane_ordinal_badge_brightness_tracks_the_active_pane() {
+        let theme = Theme::default();
+        let active =
+            session_row_lead_spans(&theme, String::new(), " ", Style::default(), Some((1, true)));
+        let idle =
+            session_row_lead_spans(&theme, String::new(), " ", Style::default(), Some((1, false)));
+        assert_eq!(active[0].style.bg, Some(theme.highlight_bg));
+        assert_eq!(idle[0].style.bg, Some(theme.inactive_highlight_bg));
     }
 
     /// A fork's mark and an archived row's disclosure sit in the same column,
