@@ -38,7 +38,7 @@ use construct_protocol::{
     SessionState,
 };
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -632,26 +632,38 @@ fn spawn_interactive_transcript_watcher(
                         seq: None,
                     });
                     if matches!(state, SessionState::Done | SessionState::Errored) {
+                        background_tasks.mark_terminal(&id, state);
                         emit.emit(SessionEvent::NativeSubagentRemoved { id });
                     }
                 }
             }
-            let Some(dir) = subagents_dir.as_ref() else {
-                continue;
-            };
-            let entries = match std::fs::read_dir(dir) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    if last_snapshot.as_ref().is_some_and(|ids| !ids.is_empty()) {
-                        emit.emit(SessionEvent::NativeSubagentSnapshot { ids: Vec::new() });
-                        last_snapshot = Some(Vec::new());
-                    }
-                    continue;
+            // Stream background-command output files into their mirrors.
+            // Runs every tick — output keeps flowing between root
+            // transcript lines, and a task marked terminal above still
+            // needs its final flush in this same tick.
+            for event in background_tasks.drain_output_events() {
+                emit.emit(event);
+            }
+            // Live background tasks are retained native children too: the
+            // snapshot must include them or reconciliation would archive
+            // their running mirrors whenever the subagents dir changes.
+            let mut retained_native_ids: Vec<String> =
+                background_tasks.live_task_ids().cloned().collect();
+            let mut snapshot_authoritative = true;
+            let entries = subagents_dir.as_ref().map(std::fs::read_dir);
+            let entries = match entries {
+                Some(Ok(entries)) => Some(entries),
+                Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+                // A transient read failure is not an authoritative "no
+                // children" — skip snapshot emission rather than archive
+                // mirrors off bad data.
+                Some(Err(_)) => {
+                    snapshot_authoritative = false;
+                    None
                 }
-                Err(_) => continue,
+                None => None,
             };
-            let mut retained_native_ids = Vec::new();
-            for entry in entries.flatten() {
+            for entry in entries.into_iter().flatten().flatten() {
                 let child_path = entry.path();
                 let Some(native_id) = claude_subagent_id_from_path(&child_path) else {
                     continue;
@@ -717,7 +729,7 @@ fn spawn_interactive_transcript_watcher(
             }
             retained_native_ids.sort();
             retained_native_ids.dedup();
-            if last_snapshot.as_ref() != Some(&retained_native_ids) {
+            if snapshot_authoritative && last_snapshot.as_ref() != Some(&retained_native_ids) {
                 emit.emit(SessionEvent::NativeSubagentSnapshot {
                     ids: retained_native_ids.clone(),
                 });
@@ -871,10 +883,41 @@ fn claude_native_subagent_update(value: &Value) -> Option<(String, SessionState,
     Some((id, state, title))
 }
 
+/// Cap on output bytes projected into a background task's mirror per
+/// watcher tick. A faster writer is drained across consecutive ticks
+/// instead of producing one enormous transcript event.
+const BACKGROUND_OUTPUT_CHUNK_BYTES: usize = 256 * 1024;
+
+/// Follows one background command's output file so its content can be
+/// projected into the task's native mirror as transcript events.
+struct BackgroundTaskTail {
+    path: PathBuf,
+    /// Byte offset already consumed from the output file.
+    cursor: usize,
+    /// Output lines already projected. Line ordinals start at 1 in the
+    /// mirror's per-child sequence space; ordinal 0 is the launch command
+    /// message.
+    lines_projected: u64,
+    /// The launching Bash command, pending emission as the mirror's opening
+    /// message.
+    pending_command: Option<String>,
+    /// Terminal state reported by the root transcript. Once set, the drain
+    /// flushes any remaining output (including a trailing partial line) and
+    /// then drops the tail.
+    terminal: Option<SessionState>,
+}
+
 #[derive(Default)]
 struct ClaudeBackgroundTaskTracker {
     descriptions_by_tool_use: HashMap<String, String>,
+    commands_by_tool_use: HashMap<String, String>,
     titles_by_task_id: HashMap<String, String>,
+    /// Ids of background tasks launched this watcher lifetime that have not
+    /// reached a terminal notification — Claude's retained native children,
+    /// independent of whether an output file was discovered for them.
+    live_task_ids: HashSet<String>,
+    /// Output-file tails keyed by task id.
+    tails_by_task_id: HashMap<String, BackgroundTaskTail>,
 }
 
 impl ClaudeBackgroundTaskTracker {
@@ -899,6 +942,15 @@ impl ClaudeBackgroundTaskTracker {
             let Some(tool_use_id) = block.get("id").and_then(Value::as_str) else {
                 continue;
             };
+            if let Some(command) = block
+                .pointer("/input/command")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|command| !command.is_empty())
+            {
+                self.commands_by_tool_use
+                    .insert(tool_use_id.to_string(), command.to_string());
+            }
             let Some(description) = block
                 .pointer("/input/description")
                 .and_then(Value::as_str)
@@ -917,28 +969,178 @@ impl ClaudeBackgroundTaskTracker {
             .pointer("/toolUseResult/backgroundTaskId")
             .and_then(Value::as_str)
             .map(normalize_claude_agent_id)?;
-        let tool_use_id = value
+        let result_block = value
             .pointer("/message/content")
             .and_then(Value::as_array)
             .and_then(|blocks| {
-                blocks.iter().find_map(|block| {
-                    (block.get("type").and_then(Value::as_str) == Some("tool_result"))
-                        .then(|| block.get("tool_use_id").and_then(Value::as_str))
-                        .flatten()
-                })
+                blocks
+                    .iter()
+                    .find(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
             });
+        let tool_use_id = result_block.and_then(|block| {
+            block
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
         let title = tool_use_id
+            .as_deref()
             .and_then(|id| self.descriptions_by_tool_use.get(id))
             .cloned()
             .unwrap_or_else(|| format!("Background command {}", short_native_id(&native_id)));
         self.titles_by_task_id
             .insert(native_id.clone(), title.clone());
+        self.live_task_ids.insert(native_id.clone());
+        if let Some(path) = result_block
+            .and_then(tool_result_content_text)
+            .as_deref()
+            .and_then(background_output_path)
+        {
+            let pending_command = tool_use_id
+                .as_deref()
+                .and_then(|id| self.commands_by_tool_use.get(id))
+                .cloned();
+            self.tails_by_task_id
+                .entry(native_id.clone())
+                .or_insert(BackgroundTaskTail {
+                    path,
+                    cursor: 0,
+                    lines_projected: 0,
+                    pending_command,
+                    terminal: None,
+                });
+        }
         Some((native_id, SessionState::Running, Some(title)))
     }
 
     fn stable_title(&self, native_id: &str) -> Option<String> {
         self.titles_by_task_id.get(native_id).cloned()
     }
+
+    /// Record the root transcript's terminal notification for a background
+    /// task. No-op for ids that are not tracked background tasks (Task-tool
+    /// subagents share the notification format).
+    fn mark_terminal(&mut self, native_id: &str, state: SessionState) {
+        self.live_task_ids.remove(native_id);
+        if let Some(tail) = self.tails_by_task_id.get_mut(native_id) {
+            tail.terminal = Some(state);
+        }
+    }
+
+    fn live_task_ids(&self) -> impl Iterator<Item = &String> {
+        self.live_task_ids.iter()
+    }
+
+    /// Project new background-command output into each task's native
+    /// mirror. Returns ready-to-emit `NativeSubagent` events: the launch
+    /// command as an opening user message (ordinal 0), then output chunks
+    /// as tool messages whose ordinal is the 1-based index of the chunk's
+    /// last line — deterministic at line granularity, matching the ordinal
+    /// contract the daemon dedupes replays with. A live task's trailing
+    /// partial line is held back until its newline arrives; a terminal
+    /// task flushes everything and its tail is dropped once fully drained.
+    fn drain_output_events(&mut self) -> Vec<SessionEvent> {
+        let mut events = Vec::new();
+        let mut finished = Vec::new();
+        for (id, tail) in self.tails_by_task_id.iter_mut() {
+            let state = tail.terminal.unwrap_or(SessionState::Running);
+            if let Some(command) = tail.pending_command.take() {
+                events.push(SessionEvent::NativeSubagent {
+                    id: id.clone(),
+                    parent_id: None,
+                    title: None,
+                    state,
+                    event: Some(Box::new(SessionEvent::Message {
+                        role: MessageRole::User,
+                        text: command,
+                    })),
+                    seq: Some(0),
+                });
+            }
+            let bytes = std::fs::read(&tail.path).unwrap_or_default();
+            let mut chunk = bytes.get(tail.cursor..).unwrap_or(&[]);
+            if chunk.len() > BACKGROUND_OUTPUT_CHUNK_BYTES {
+                chunk = &chunk[..BACKGROUND_OUTPUT_CHUNK_BYTES];
+                // Prefer ending the capped chunk on a line boundary; a
+                // single line longer than the cap is split as-is.
+                if let Some(idx) = chunk.iter().rposition(|b| *b == b'\n') {
+                    chunk = &chunk[..=idx];
+                }
+            } else if tail.terminal.is_none() {
+                // Hold a trailing partial line until its newline arrives so
+                // one line is never split across two events.
+                match chunk.iter().rposition(|b| *b == b'\n') {
+                    Some(idx) => chunk = &chunk[..=idx],
+                    None => chunk = &[],
+                }
+            }
+            if !chunk.is_empty() {
+                let newline_count = chunk.iter().filter(|b| **b == b'\n').count() as u64;
+                let line_count = if chunk.ends_with(b"\n") {
+                    newline_count
+                } else {
+                    newline_count + 1
+                };
+                let text = String::from_utf8_lossy(chunk);
+                let text = text.strip_suffix('\n').unwrap_or(&text).to_string();
+                tail.lines_projected += line_count;
+                if !text.is_empty() {
+                    events.push(SessionEvent::NativeSubagent {
+                        id: id.clone(),
+                        parent_id: None,
+                        title: None,
+                        state,
+                        event: Some(Box::new(SessionEvent::Message {
+                            role: MessageRole::Tool,
+                            text,
+                        })),
+                        seq: Some(tail.lines_projected),
+                    });
+                }
+                tail.cursor += chunk.len();
+            }
+            if tail.terminal.is_some() && tail.cursor >= bytes.len() {
+                finished.push(id.clone());
+            }
+        }
+        for id in finished {
+            self.tails_by_task_id.remove(&id);
+        }
+        events
+    }
+}
+
+/// The concatenated text of a tool_result block's `content`, which Claude
+/// records either as a bare string or as an array of text parts.
+fn tool_result_content_text(block: &Value) -> Option<String> {
+    match block.get("content")? {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    out.push_str(text);
+                    out.push('\n');
+                }
+            }
+            (!out.is_empty()).then_some(out)
+        }
+        _ => None,
+    }
+}
+
+/// Extract the output-file path Claude announces in a background launch
+/// tool_result: "… Output is being written to: <path>. …".
+fn background_output_path(text: &str) -> Option<PathBuf> {
+    let marker = "Output is being written to: ";
+    let start = text.find(marker)? + marker.len();
+    let rest = &text[start..];
+    let end = rest
+        .find(". ")
+        .or_else(|| rest.find('\n'))
+        .unwrap_or(rest.len());
+    let path = rest[..end].trim().trim_end_matches('.');
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 fn claude_native_subagent_update_with_background_tasks(
@@ -1898,6 +2100,168 @@ mod tests {
                 Some("Background command task123".into())
             ))
         );
+    }
+
+    #[test]
+    fn background_output_path_parses_launch_announcement() {
+        let text = "Command running in background with ID: bijra9jvh. \
+                    Output is being written to: /tmp/claude/tasks/bijra9jvh.output. \
+                    You will be notified when it completes.";
+        assert_eq!(
+            background_output_path(text),
+            Some(PathBuf::from("/tmp/claude/tasks/bijra9jvh.output"))
+        );
+        // Announcement ending at the path (no follow-up sentence).
+        assert_eq!(
+            background_output_path("Output is being written to: /tmp/t/b1.output."),
+            Some(PathBuf::from("/tmp/t/b1.output"))
+        );
+        assert_eq!(background_output_path("Command running in background."), None);
+
+        let array_block = serde_json::json!({
+            "type": "tool_result",
+            "content": [{"type": "text", "text": "Output is being written to: /tmp/t/b2.output. Done."}]
+        });
+        assert_eq!(
+            tool_result_content_text(&array_block)
+                .as_deref()
+                .and_then(background_output_path),
+            Some(PathBuf::from("/tmp/t/b2.output"))
+        );
+    }
+
+    fn background_launch_fixture(output_path: &Path) -> (Value, Value) {
+        let request = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_tail",
+                    "name": "Bash",
+                    "input": {
+                        "command": "cargo build 2>&1",
+                        "description": "Build the workspace",
+                        "run_in_background": true
+                    }
+                }]
+            }
+        });
+        let launched = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "tool_use_id": "toolu_tail",
+                    "type": "tool_result",
+                    "content": format!(
+                        "Command running in background with ID: btask1. \
+                         Output is being written to: {}. \
+                         You will be notified when it completes.",
+                        output_path.display()
+                    )
+                }]
+            },
+            "toolUseResult": {"backgroundTaskId": "btask1"}
+        });
+        (request, launched)
+    }
+
+    fn native_child_message(event: &SessionEvent) -> (String, SessionState, MessageRole, String, u64) {
+        let SessionEvent::NativeSubagent {
+            id,
+            state,
+            event: Some(inner),
+            seq: Some(seq),
+            ..
+        } = event
+        else {
+            panic!("expected a projected native child event, got {event:?}");
+        };
+        let SessionEvent::Message { role, text } = inner.as_ref() else {
+            panic!("expected a message event, got {inner:?}");
+        };
+        (id.clone(), *state, *role, text.clone(), *seq)
+    }
+
+    #[test]
+    fn background_task_output_streams_into_mirror_events() {
+        let dir = std::env::temp_dir().join(format!("construct-claude-bg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output_path = dir.join("btask1.output");
+        let (request, launched) = background_launch_fixture(&output_path);
+
+        let mut tasks = ClaudeBackgroundTaskTracker::default();
+        claude_native_subagent_update_with_background_tasks(&request, &mut tasks);
+        claude_native_subagent_update_with_background_tasks(&launched, &mut tasks);
+        assert_eq!(tasks.live_task_ids().collect::<Vec<_>>(), vec!["btask1"]);
+
+        // Before the output file exists, only the launch command projects.
+        let events = tasks.drain_output_events();
+        assert_eq!(events.len(), 1);
+        let (id, state, role, text, seq) = native_child_message(&events[0]);
+        assert_eq!(
+            (id.as_str(), state, role, text.as_str(), seq),
+            (
+                "btask1",
+                SessionState::Running,
+                MessageRole::User,
+                "cargo build 2>&1",
+                0
+            )
+        );
+
+        // Complete lines stream; a trailing partial line is held back.
+        std::fs::write(&output_path, "Compiling foo\nCompiling bar\npart").unwrap();
+        let events = tasks.drain_output_events();
+        assert_eq!(events.len(), 1);
+        let (_, state, role, text, seq) = native_child_message(&events[0]);
+        assert_eq!(
+            (state, role, text.as_str(), seq),
+            (
+                SessionState::Running,
+                MessageRole::Tool,
+                "Compiling foo\nCompiling bar",
+                2
+            )
+        );
+        assert!(tasks.drain_output_events().is_empty(), "partial line held");
+
+        // Terminal state flushes the partial tail and drops the tail entry.
+        std::fs::write(&output_path, "Compiling foo\nCompiling bar\npartial done").unwrap();
+        tasks.mark_terminal("btask1", SessionState::Done);
+        assert!(tasks.live_task_ids().next().is_none());
+        let events = tasks.drain_output_events();
+        assert_eq!(events.len(), 1);
+        let (_, state, role, text, seq) = native_child_message(&events[0]);
+        assert_eq!(
+            (state, role, text.as_str(), seq),
+            (SessionState::Done, MessageRole::Tool, "partial done", 3)
+        );
+        assert!(tasks.drain_output_events().is_empty(), "tail dropped");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn background_task_without_output_file_still_tracks_liveness() {
+        let mut tasks = ClaudeBackgroundTaskTracker::default();
+        let launched = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "tool_use_id": "toolu_x",
+                    "type": "tool_result",
+                    "content": "Command running in background with ID: bplain."
+                }]
+            },
+            "toolUseResult": {"backgroundTaskId": "bplain"}
+        });
+        claude_native_subagent_update_with_background_tasks(&launched, &mut tasks);
+        assert_eq!(tasks.live_task_ids().collect::<Vec<_>>(), vec!["bplain"]);
+        assert!(tasks.drain_output_events().is_empty());
+        tasks.mark_terminal("bplain", SessionState::Done);
+        assert!(tasks.live_task_ids().next().is_none());
+        // Task-tool subagent ids pass through mark_terminal untouched.
+        tasks.mark_terminal("a418858d8a68e674f", SessionState::Done);
     }
 
     #[test]
