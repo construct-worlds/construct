@@ -1,7 +1,7 @@
 # 0186-webui-lineage-and-token-meter
 
 Status: accepted
-Date: 2026-08-02 (amended 2026-08-05)
+Date: 2026-08-02 (amended 2026-08-16)
 Area: webui
 Scope: The web UI sidebar and persistent header expose the fleet token meter alongside the selected-session lineage section.
 
@@ -9,7 +9,7 @@ Scope: The web UI sidebar and persistent header expose the fleet token meter alo
 
 The web client's left sidebar stacks the same durable regions the TUI
 does: session rows, then a collapsible **lineage** section, then a
-collapsible **minibuffer** ambient panel. Operators remain ordinary list
+collapsible **monitor** ambient panel. Operators remain ordinary list
 rows (as they already are on the web).
 
 ### Lineage section
@@ -36,7 +36,7 @@ subagent / reset-snapshot), and subagent-group collapse match the TUI;
 the presentation uses HTML tree rows so the section remains usable on
 touch and narrow viewports.
 
-### Minibuffer ambient panel
+### Monitor ambient panel
 
 The ambient panel sits at the bottom of the sidebar and hosts the same
 named body modes as the TUI (spec 0019):
@@ -89,7 +89,7 @@ the gap was client presentation.
 ## Consequences
 
 - Future web sidebar work must preserve the stack order: list → lineage
-  → minibuffer, and must not drop Cost events that arrive for unfocused
+  → monitor, and must not drop Cost events that arrive for unfocused
   sessions.
 - A collapse or expansion in the narrow mobile menu must not consume the
   corresponding wide-sidebar preference, or vice versa.

@@ -43,7 +43,7 @@ diagram glyph beneath them, while their full-cell tracks remain
 mouse-interactive.
 
 The section's header is a one-row horizontal rule carrying its label and
-controls — the same visual furniture as the minibuffer panel's title bar
+controls — the same visual furniture as the monitor panel's title bar
 lower in the sidebar: a `−`/`+` collapse button at the right end, the view-mode
 toggle beside it, and the bare rule doubling as a height drag handle (dragging
 up grows the section, within the same caps). The collapse state, the dragged
