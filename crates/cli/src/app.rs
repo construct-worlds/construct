@@ -3916,6 +3916,23 @@ impl ModelineThemeHit {
     }
 }
 
+/// Clickable `construct` wordmark at the head of the modeline. Toggles the
+/// minibuffer panel (spec 0200), giving the fleet's command surface a
+/// permanently visible pointer affordance next to the keybinding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelineBrandHit {
+    pub row: u16,
+    pub start_col: u16,
+    /// Exclusive end column.
+    pub end_col: u16,
+}
+
+impl ModelineBrandHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowPaneHit {
     pub id: u64,
@@ -4077,6 +4094,8 @@ pub struct LayoutSnapshot {
     pub frame_area: Option<ratatui::layout::Rect>,
     /// Clickable theme label in the modeline status bar.
     pub modeline_theme_hit: Option<ModelineThemeHit>,
+    /// Clickable `construct` wordmark at the head of the modeline status bar.
+    pub modeline_brand_hit: Option<ModelineBrandHit>,
     /// Number of rows of the list pane currently in use (so a click
     /// past the last row is a no-op rather than selecting an
     /// out-of-range item). Mirrors `app.list_items().len()`.
@@ -4570,6 +4589,7 @@ impl LayoutSnapshot {
             modeline_context_gauge_hit: _,
             modeline_model_hit: _,
             modeline_theme_hit: _,
+            modeline_brand_hit: _,
             suggest_affordance_hits: _,
             suggest_deck_area: _,
             suggest_deck_hits: _,
@@ -11985,6 +12005,18 @@ impl App {
             }
             return;
         }
+        // The `construct` wordmark opens the minibuffer (spec 0200). Toggling
+        // rather than re-opening matters: `open_prompt_for_command` rebuilds
+        // the prompt from scratch, so a second click on an already-open panel
+        // would silently discard whatever the user had typed into it.
+        if self
+            .layout
+            .modeline_brand_hit
+            .is_some_and(|hit| hit.contains(col, row))
+        {
+            self.toggle_minibuffer_panel();
+            return;
+        }
         // Matrix-rain horizontal reveal word: jump to the session that
         // produced it (issue #140). Checked before the pane hit-tests —
         // the rain panel is its own region, so this never shadows a real
@@ -17127,6 +17159,7 @@ mod tests {
             frame_area: None,
             modeline_context_gauge_hit: None,
             modeline_theme_hit: None,
+            modeline_brand_hit: None,
             list_row_count: 0,
             list_items_area: None,
             list_visible_rows: Vec::new(),
@@ -38123,6 +38156,72 @@ mod tests {
             hovered_modeline.contains("Theme: matrix. Click to cycle theme"),
             "theme tooltip should appear when hovering the label"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn modeline_wordmark_hovers_a_tooltip_and_toggles_the_minibuffer() {
+        use construct_protocol::SessionKind;
+
+        let (mut app, _dir, server) = captured_app().await;
+        let mut orch = summary_with_kind(SessionKind::Minibuffer);
+        orch.id = "orch".into();
+        app.sessions.push(orch);
+        app.refresh_minibuffer_id();
+
+        let backend = ratatui::backend::TestBackend::new(120, 36);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+
+        let hit = app
+            .layout
+            .modeline_brand_hit
+            .expect("wordmark should be a modeline click target");
+        // Assert against the painted row, not a recomputed offset — the whole
+        // point of the shared constants is that the rect lands on the word.
+        let screen = rendered_text(terminal.backend().buffer());
+        let modeline = screen
+            .lines()
+            .find(|line| line.contains("construct"))
+            .expect("modeline should carry the wordmark");
+        assert!(
+            modeline[hit.start_col as usize..].starts_with("construct"),
+            "hit rect must start on the wordmark:\n{modeline}"
+        );
+        assert_eq!(
+            hit.end_col - hit.start_col,
+            "construct".len() as u16,
+            "hit rect must cover exactly the wordmark"
+        );
+
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw with wordmark hover");
+        assert!(
+            rendered_text(terminal.backend().buffer())
+                .contains("Minibuffer — click to open (C-x x)"),
+            "hovering the wordmark should show its tooltip"
+        );
+
+        assert!(!app.is_minibuffer_panel_open());
+        app.handle_left_click(hit.start_col, hit.row).await;
+        assert!(
+            app.is_minibuffer_panel_open(),
+            "clicking the wordmark should open the minibuffer"
+        );
+
+        // Typed input must survive a second click: toggling closes the panel
+        // instead of rebuilding an empty prompt over the top of it.
+        app.prompt.as_mut().expect("prompt").input = "half a command".into();
+        app.handle_left_click(hit.start_col, hit.row).await;
+        assert!(
+            !app.is_minibuffer_panel_open(),
+            "a second click should close the minibuffer, not re-open it"
+        );
+
         server.abort();
     }
 
