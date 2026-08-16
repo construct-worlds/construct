@@ -1758,9 +1758,15 @@ mod tests {
     #[test]
     fn tab_completes_common_prefix() {
         let mut ed = editor();
-        ed.feed_bytes(b"/m");
+        ed.feed_bytes(b"/mo");
         ed.feed_bytes(&[0x09]); // Tab — only /model matches
         assert_eq!(ed.buf, "/model ");
+        let mut ed = editor();
+        // `/m` is ambiguous (/model, /minibuffer) and already at the common
+        // prefix — Tab is a no-op.
+        ed.feed_bytes(b"/m");
+        ed.feed_bytes(&[0x09]);
+        assert_eq!(ed.buf, "/m");
         let mut ed = editor();
         ed.feed_bytes(b"/model codex-oauth:gpt-5.");
         ed.feed_bytes(&[0x09]);

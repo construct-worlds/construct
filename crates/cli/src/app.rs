@@ -10897,13 +10897,13 @@ impl App {
         if self.session_renders_approval_inline(&session_id) {
             return;
         }
-        // Only surface the global minibuffer prompt for the session the
+        // Only surface the global approval prompt for the session the
         // user is currently looking at. Background sessions still render
         // their approval request inline in their own terminal/transcript.
         if self.selection.session_id() != Some(session_id.as_str()) {
             return;
         }
-        // Otherwise: any non-minibuffer minibuffer is shorter-lived
+        // Otherwise: any non-minibuffer prompt intent is shorter-lived
         // and shouldn't be clobbered by an unrelated approval. Skip
         // when busy.
         if self.prompt.is_some() {
