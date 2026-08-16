@@ -13,7 +13,7 @@ is an observation and hand-off surface, not a second session workspace.
 
 Its organizing principle: the sidebar list already answers *which* sessions
 exist and *that* something needs attention (glyph level). The wide pane's job
-is **content** — for each member, the one line the operator would otherwise
+is **content** — for each member, the one line the user would otherwise
 open the session to learn. There is no separate event feed and no preview
 strip: every member card carries its own content.
 
@@ -28,7 +28,7 @@ Top to bottom, dropping lower-priority regions when the pane is short:
 2. **Token meter** — project-scoped throughput history fed from the same
    `Cost` / busy-time path as the fleet meter, filtered to members of this
    project. Idle projects show a quiet empty line rather than a blank grid.
-   Its colored legend follows the operator meter's layout and rate formatting;
+   Its colored legend follows the user meter's layout and rate formatting;
    hovering a column details it exactly as the fleet meter's does (spec 0167).
 3. **Member cards** — a single full-width column, one card per member.
 
@@ -56,7 +56,7 @@ Top to bottom, dropping lower-priority regions when the pane is short:
     4. `now:` / `on:` — running: the latest streamed assistant text, or the
        user prompt being worked when the agent hasn't spoken this turn.
     5. `you:` / `last:` — idle: the most recent message, labeled by who
-       spoke it. Idle sessions the operator already saw stay at `last:` —
+       spoke it. Idle sessions the user already saw stay at `last:` —
        "asks" is reserved for unwatched stops.
     6. A soft placeholder when there is nothing to quote.
 
@@ -66,7 +66,7 @@ Member cards quote `SessionSummary`'s last-message / last-error snippets,
 which the daemon maintains as events persist and restores from the transcript
 at load. The pane is therefore fully populated immediately after a TUI or
 daemon restart — a client-local message cache (which starts empty exactly
-when the operator wants to catch up) is not an acceptable source for card
+when the user wants to catch up) is not an acceptable source for card
 content. Streaming assistant deltas accumulate into one snippet; the snippet
 is capped daemon-side so summary broadcasts stay small.
 
@@ -85,7 +85,7 @@ is capped daemon-side so summary broadcasts stay small.
   selection (rename, delete, create-inherits-project).
 - A chronological event/activity feed. One was tried and removed: a
   transition log duplicates the roster's sort/glyph signal without content,
-  and a client-local one is empty at exactly the moment the operator opens
+  and a client-local one is empty at exactly the moment the user opens
   the TUI to catch up. "What just happened" is answered per-member by the
   content line, not by a timeline.
 - Answering approval prompts or chatting from the dashboard itself; cards
@@ -95,11 +95,11 @@ is capped daemon-side so summary broadcasts stay small.
 
 ## Reason
 
-Operators who run several agents under one project need a ten-second answer
+Minibuffers who run several agents under one project need a ten-second answer
 to "what needs me, what just happened, and is this project still burning
 tokens?" without arrowing through every session. Glyphs alone can't complete
 a triage decision — "wants you" without the question, "errored" without the
-error, still forces the operator to open the session. Quoting the actual
+error, still forces the user to open the session. Quoting the actual
 question, error, or current work on each card lets most decisions finish in
 the pane. A two-column layout (roster | feed) was tried first and starved
 both columns of width while the feed re-encoded information the roster

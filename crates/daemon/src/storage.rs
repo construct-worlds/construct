@@ -215,7 +215,7 @@ const PROMPT_HISTORY_MAX_CHARS: usize = 4000;
 /// Spec 0155: only reusable user-typed prompts enter history.
 ///
 /// Rejects empty/whitespace, slash commands (UI verbs), and
-/// machine-written pseudo-user messages. Smith/orchestrator inject
+/// machine-written pseudo-user messages. Smith/minibuffer inject
 /// those as `MessageRole::User` so the agent can react — background
 /// tool completion, fleet events, ambient ticks, widget actions — but
 /// they always carry the `OBSERVATION:` prefix and are never the
@@ -841,7 +841,7 @@ impl Storage {
         let dir = self.playbook_templates_dir();
         // Migrate user templates from the former `canvas/templates` location.
         // Only for the default location — when an explicit override is set the
-        // operator owns that directory, so we never move files into it.
+        // minibuffer owns that directory, so we never move files into it.
         if self.overrides().playbook_templates_dir.is_none() {
             let legacy_dir = self.data_dir.join("canvas").join("templates");
             if legacy_dir.exists() && !dir.exists() {
@@ -1658,7 +1658,7 @@ impl Storage {
 
     /// Append raw PTY bytes to the session's `pty.log`. Best-effort; this
     /// gets called on every Pty event so it has to stay cheap. Append-only,
-    /// no rotation — operators can truncate / rotate externally if needed.
+    /// no rotation — minibuffers can truncate / rotate externally if needed.
     /// Truncate the session's `pty.log` to zero bytes. Called on
     /// session respawn so the new adapter's child can render into a
     /// clean PTY without bytes from the previous incarnation
@@ -2957,7 +2957,7 @@ mod search_tests {
             archived: false,
             forked_from: None,
             merge: None,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: false,
         }
     }

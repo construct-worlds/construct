@@ -18,14 +18,14 @@ therefore reveals recent activity even after the TUI or daemon restarts.
 The graph keeps the shared meter semantics: time buckets, stacked model bands,
 cache-served shading, and per-column hover detail. Its legend uses the same
 colored model names and dots, equal-width column layout, per-model rates,
-overflow count, and right-aligned summed rate as the operator-session graph.
+overflow count, and right-aligned summed rate as the minibuffer-session graph.
 Cached input remains a subset of input rather than an additional token count.
 When no usage has been observed, the meter region states that quietly. A short
 pane omits the graph to preserve usable room for service fields and rows.
 
 ## Reason
 
-Services can create and reuse many sessions without an operator opening each
+Services can create and reuse many sessions without a user opening each
 one. A scoped history graph answers whether a service is actively consuming
 tokens, how that activity changes over time, and which models contribute,
 without mixing in unrelated fleet or project work.

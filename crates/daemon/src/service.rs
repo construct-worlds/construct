@@ -44,7 +44,7 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub paused: bool,
     /// Seconds to hold a turn stopped at an approval before denying it on the
-    /// caller's behalf. `0` waits indefinitely, which keeps the operator as
+    /// caller's behalf. `0` waits indefinitely, which keeps the user as
     /// the only one who can decide.
     #[serde(default)]
     pub approval_timeout_secs: u64,
@@ -150,9 +150,9 @@ pub enum ServiceRouting {
 /// What a Slack channel shows while a turn it accepted is still running.
 ///
 /// A long turn is indistinguishable from a dropped one when the channel stays
-/// silent, so the operator picks how visible the wait should be. `Reaction`
+/// silent, so the user picks how visible the wait should be. `Reaction`
 /// and `Both` call `reactions.add`, which needs the `reactions:write` scope —
-/// an app the operator has not reinstalled since granting it will log the
+/// an app the user has not reinstalled since granting it will log the
 /// refusal and keep answering normally.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -201,7 +201,7 @@ impl SlackProgress {
 /// A bot that must be `@`-mentioned for every turn cannot hold a conversation:
 /// the person asking has to keep re-addressing an participant that is visibly
 /// already in the room. Once engaged, the bot behaves like a participant —
-/// within a boundary the operator sets, because "answers everything in this
+/// within a boundary the user sets, because "answers everything in this
 /// channel" is right for a dedicated channel and wrong for a busy shared one.
 ///
 /// Anything past `Off` needs the `message.channels` event subscription (plus
@@ -1627,7 +1627,7 @@ mod tests {
         write_definition(dir.path(), "svc", &config).unwrap();
 
         // An edit that never mentions the sandbox must not re-confine (or
-        // re-open) the service behind the operator's back.
+        // re-open) the service behind the user's back.
         put_definition(
             dir.path(),
             construct_protocol::ServicePutParams {
@@ -1724,7 +1724,7 @@ mod tests {
 
     #[test]
     fn approval_timeout_defaults_to_waiting_forever() {
-        // The operator stays the only one who can approve unless they opt into
+        // The user stays the only one who can approve unless they opt into
         // a bound; turning this on by default would deny work nobody refused.
         let raw = "instruction = \"x\"\nharness = \"smith\"\ncwd = \".\"\n";
         let config: ServiceConfig = toml::from_str(raw).unwrap();
@@ -1895,7 +1895,7 @@ mod tests {
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: construct_protocol::SessionKind::User,
             archived: false,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
             merge: None,
@@ -2497,7 +2497,7 @@ mod tests {
     fn an_omitted_option_keeps_the_value_the_channel_was_given() {
         // Absent means unchanged, never default: a client that does not offer
         // these fields must be able to save an allowlist without resetting an
-        // operator's choice behind their back.
+        // minibuffer's choice behind their back.
         let config = tempfile::tempdir().unwrap();
         let services = config.path().join("services");
         std::fs::create_dir_all(&services).unwrap();
@@ -2677,7 +2677,7 @@ mod tests {
     #[test]
     fn the_published_option_defaults_match_the_ones_a_definition_gets() {
         // Clients seed a new channel from the published defaults, so a drift
-        // here would show the operator a value the daemon would not store.
+        // here would show the user a value the daemon would not store.
         assert_eq!(
             SlackProgress::default().as_str(),
             construct_protocol::SLACK_PROGRESS_DEFAULT

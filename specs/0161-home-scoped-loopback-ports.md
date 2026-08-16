@@ -12,7 +12,7 @@ Each Construct home owns two small runtime files:
 - `runtime_dir/router.port` — last successfully bound model-router port
 - `runtime_dir/webui.port` — last successfully bound localhost web-UI port
 
-On bind, when the operator has **not** pinned a port:
+On bind, when the user has **not** pinned a port:
 
 1. Prefer the persisted value for this home, else the compiled default
    (`8917` router / `5746` web UI).
@@ -77,5 +77,5 @@ to `CONSTRUCT_HOME` / `CONSTRUCT_RUNTIME_DIR`.
   ports (e.g. `54321` / `54322`) and persists them under B's runtime dir.
 - Restart A: reads `8917` / `5746` from its files, reclaims them; B's
   live harnesses are unaffected.
-- Operator sets `[router] port = 9000` on A while 9000 is taken: bind
+- Minibuffer sets `[router] port = 9000` on A while 9000 is taken: bind
   fails loudly; A's `router.port` file is not rewritten.

@@ -34,7 +34,7 @@ All-or-nothing mixed-selection handling is the simplest behavior that stays corr
 
 ## Non-Goals
 
-- Not a scheduler or orchestrator. The daemon does not sequence dispatched items, does not decide what to delegate, and does not interpret playbook prose beyond recognizing the single-clip-item shape.
+- Not a scheduler or minibuffer. The daemon does not sequence dispatched items, does not decide what to delegate, and does not interpret playbook prose beyond recognizing the single-clip-item shape.
 - Does not change full-document Run behavior, the shimmer lifecycle (`0042`), block addressing (`0053`), or the shimmer tooltip contract (`0057`).
 - Does not add a new smart-clip type or change `@{harness:<name>}` clip syntax; it only recognizes an existing clip shape as a trigger for mechanical execution.
 - Does not settle a dispatched item when its subagent finishes; that remains external (agent or human) behavior.

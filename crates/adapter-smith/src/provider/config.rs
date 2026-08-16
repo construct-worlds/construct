@@ -58,7 +58,7 @@ pub struct ModelProfile {
 }
 
 /// Only the `[smith]` table is deserialized; every other top-level key in
-/// `config.toml` (`adapters`, `defaults`, `orchestrator`, …) is ignored by
+/// `config.toml` (`adapters`, `defaults`, `minibuffer`, …) is ignored by
 /// serde's default unknown-field handling.
 #[derive(Debug, Default, Deserialize)]
 struct Root {
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn ignores_unrelated_top_level_tables() {
-        // A real config.toml carries adapters/defaults/orchestrator — none
+        // A real config.toml carries adapters/defaults/minibuffer — none
         // of which should trip up the [smith.models.*] parse.
         let toml = r#"
             [adapters.smith]

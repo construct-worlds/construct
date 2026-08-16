@@ -12,7 +12,7 @@ Every adapter process receives its owning Construct session id as
 
 Smith's Codex OAuth provider sends that stable identity as the Responses API
 prompt-cache key. Its default transport is one reused Responses WebSocket per
-session. An operator may explicitly opt out of WebSocket transport by setting
+session. A user may explicitly opt out of WebSocket transport by setting
 `CONSTRUCT_SMITH_CODEX_WS=0`; connection or pre-stream failures fall back to
 HTTP for the rest of that adapter process.
 

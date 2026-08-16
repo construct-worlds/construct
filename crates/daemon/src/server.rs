@@ -1134,7 +1134,7 @@ fn parse_params<T: serde::de::DeserializeOwned>(
 /// happened.
 ///
 /// The write already succeeded by the time this runs, so a reload failure is
-/// reported rather than raised: the operator's edit is saved either way, and
+/// reported rather than raised: the user's edit is saved either way, and
 /// what they need to know is which part of it is not yet live.
 async fn apply_service_edit(
     manager: &Arc<SessionManager>,

@@ -20,7 +20,7 @@ foreground `run`:
   next `start` (or `run`) resumes them where they left off. Idempotent — a no-op
   success when no daemon is running.
 - **`stop --sessions`** is accepted as an explicit spelling of the default
-  `stop` behavior. It exists for operator clarity and symmetry with
+  `stop` behavior. It exists for minibuffer clarity and symmetry with
   `restart --sessions`; it does not archive or delete sessions.
 - **`restart`** restarts the running daemon **in place** (re-exec, PID
   preserved), or starts one if none is running. Sessions, their harness/adapter
@@ -36,7 +36,7 @@ session." No lifecycle subcommand archives or deletes sessions.
 
 ## Reason
 
-Operators and supervisors need conventional start/stop/restart verbs without
+Minibuffers and supervisors need conventional start/stop/restart verbs without
 having to know the internal IPC. The building blocks already existed (detached
 spawn for auto-start, in-place re-exec for upgrades, graceful adapter shutdown
 for SIGTERM); these subcommands surface them as first-class operations.

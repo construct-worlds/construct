@@ -1,23 +1,23 @@
 use super::*;
 
 impl App {
-    pub(super) async fn handle_minibuffer_key(&mut self, key: KeyEvent) {
+    pub(super) async fn handle_prompt_key(&mut self, key: KeyEvent) {
         // Snapshot the data we'll need without holding a borrow on
-        // self.minibuffer across the (possibly &self) lookups.
+        // self.prompt across the (possibly &self) lookups.
         let is_new_harness = matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::NewSessionHarness)
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::NewSessionHarness)
         );
         let is_fork_harness = matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::ForkSessionHarness { .. })
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::ForkSessionHarness { .. })
         );
         // Fork shares the new-session harness picker (completion + Enter
         // validation), but offers only real harnesses — no `project`/`group`.
         let is_harness_picker = is_new_harness || is_fork_harness;
         let picker_entries = if is_harness_picker {
             let query = self
-                .minibuffer
+                .prompt
                 .as_ref()
                 .map(|mb| mb.input.as_str())
                 .unwrap_or_default();
@@ -36,20 +36,20 @@ impl App {
         // move on, matching the way they invoked the prompt with a
         // single Enter on the Done session.
         let restart_intent = matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::RestartConfirm { .. })
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::RestartConfirm { .. })
         );
         if restart_intent {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             // Pull the session_id out so we can drop the minibuffer
             // borrow before we await the client call.
-            let session_id = match self.minibuffer.as_ref().map(|m| &m.intent) {
-                Some(MinibufferIntent::RestartConfirm { session_id }) => session_id.clone(),
+            let session_id = match self.prompt.as_ref().map(|m| &m.intent) {
+                Some(PromptIntent::RestartConfirm { session_id }) => session_id.clone(),
                 _ => return,
             };
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     match self.client.restart(&session_id).await {
                         Ok(()) => {
                             self.editor_states.remove(&session_id);
@@ -61,11 +61,11 @@ impl App {
                     }
                 }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.set_status("restart cancelled".to_string());
                 }
                 KeyCode::Char('g') if ctrl => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.set_status("restart cancelled".to_string());
                 }
                 _ => {
@@ -79,23 +79,23 @@ impl App {
         // Restart-daemon confirmation (clicked from the status-bar version
         // notice): same single-key dispatch as the per-session restart above.
         let restart_daemon_intent = matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::RestartDaemonConfirm)
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::RestartDaemonConfirm)
         );
         if restart_daemon_intent {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     let result = self.client.daemon_restart(None, false).await;
                     self.set_status(daemon_restart_status_message(result, "daemon restart"));
                 }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.set_status("daemon restart cancelled".to_string());
                 }
                 KeyCode::Char('g') if ctrl => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.set_status("daemon restart cancelled".to_string());
                 }
                 _ => {}
@@ -107,8 +107,8 @@ impl App {
         // while an ssh clipboard bridge is attached, spec 0098): same
         // single-key dispatch pattern. The explicit `y` is the security
         // boundary gating the bridge's read of the local file.
-        let upload_intent = match self.minibuffer.as_ref().map(|m| &m.intent) {
-            Some(MinibufferIntent::ConfirmLocalFileUpload {
+        let upload_intent = match self.prompt.as_ref().map(|m| &m.intent) {
+            Some(PromptIntent::ConfirmLocalFileUpload {
                 session_id,
                 path,
                 to_playbook,
@@ -119,15 +119,15 @@ impl App {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.upload_local_file(session_id, path, to_playbook).await;
                 }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.set_status("upload cancelled".to_string());
                 }
                 KeyCode::Char('g') if ctrl => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.set_status("upload cancelled".to_string());
                 }
                 _ => {}
@@ -137,23 +137,23 @@ impl App {
 
         // Upgrade confirmation (clicked from the status-bar "<version>
         // available" notice): same single-key dispatch pattern.
-        let upgrade_intent = match self.minibuffer.as_ref().map(|m| &m.intent) {
-            Some(MinibufferIntent::UpgradeConfirm { version }) => Some(version.clone()),
+        let upgrade_intent = match self.prompt.as_ref().map(|m| &m.intent) {
+            Some(PromptIntent::UpgradeConfirm { version }) => Some(version.clone()),
             _ => None,
         };
         if let Some(version) = upgrade_intent {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.start_upgrade(version);
                 }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.set_status("upgrade cancelled".to_string());
                 }
                 KeyCode::Char('g') if ctrl => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.set_status("upgrade cancelled".to_string());
                 }
                 _ => {}
@@ -164,16 +164,16 @@ impl App {
         // Approval prompt has single-key shortcuts; bypass the normal
         // editing path so the user can hit y/n/a without typing + Enter.
         let approve_intent = matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::ApproveTool { .. })
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::ApproveTool { .. })
         );
         if approve_intent {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let decision = match key.code {
                 KeyCode::Char('y') | KeyCode::Enter => Some("approve"),
                 KeyCode::Char('n') | KeyCode::Esc => Some("deny"),
-                KeyCode::Char('a') => match self.minibuffer.as_ref().map(|m| &m.intent) {
-                    Some(MinibufferIntent::ApproveTool {
+                KeyCode::Char('a') => match self.prompt.as_ref().map(|m| &m.intent) {
+                    Some(PromptIntent::ApproveTool {
                         allow_auto_review: true,
                         ..
                     }) => Some("auto_review"),
@@ -184,13 +184,13 @@ impl App {
                 _ => None,
             };
             if let Some(d) = decision {
-                if let Some(MinibufferIntent::ApproveTool {
+                if let Some(PromptIntent::ApproveTool {
                     session_id,
                     call_id,
                     ..
-                }) = self.minibuffer.as_ref().map(|m| m.intent.clone())
+                }) = self.prompt.as_ref().map(|m| m.intent.clone())
                 {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     match self.client.tool_decision(&session_id, call_id, d).await {
                         Ok(()) => {
                             self.matrix_rain.observe_tool_decision(
@@ -210,8 +210,8 @@ impl App {
         // Anchored fork's turn picker (spec 0163): pure selection, no text
         // editing — navigate, Enter locks the branch point and moves on to
         // the harness picker, Esc cancels.
-        let turn_pick_intent = match self.minibuffer.as_ref().map(|m| &m.intent) {
-            Some(MinibufferIntent::ForkTurnPick { source_session_id }) => {
+        let turn_pick_intent = match self.prompt.as_ref().map(|m| &m.intent) {
+            Some(PromptIntent::ForkTurnPick { source_session_id }) => {
                 Some(source_session_id.clone())
             }
             _ => None,
@@ -240,7 +240,7 @@ impl App {
                         .get(self.turn_picker_selected.min(len.saturating_sub(1)))
                         .cloned();
                     if let Some(entry) = picked {
-                        self.minibuffer = None;
+                        self.prompt = None;
                         self.turn_picker_entries = Vec::new();
                         self.turn_picker_loading = false;
                         self.open_fork_harness_picker(source_session_id, entry.anchor_seq)
@@ -248,12 +248,12 @@ impl App {
                     }
                 }
                 KeyCode::Esc => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.turn_picker_entries = Vec::new();
                     self.turn_picker_loading = false;
                 }
                 KeyCode::Char('g') if ctrl => {
-                    self.minibuffer = None;
+                    self.prompt = None;
                     self.turn_picker_entries = Vec::new();
                     self.turn_picker_loading = false;
                 }
@@ -262,7 +262,7 @@ impl App {
             return;
         }
 
-        let Some(mb) = self.minibuffer.as_mut() else {
+        let Some(mb) = self.prompt.as_mut() else {
             return;
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -271,11 +271,11 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                self.minibuffer = None;
+                self.prompt = None;
                 return;
             }
             KeyCode::Char('g') if ctrl => {
-                self.minibuffer = None;
+                self.prompt = None;
                 return;
             }
             KeyCode::Tab => {
@@ -331,14 +331,14 @@ impl App {
                         return;
                     }
                     let intent = mb.intent.clone();
-                    self.minibuffer = None;
-                    self.run_minibuffer_submit(intent, selected.name).await;
+                    self.prompt = None;
+                    self.run_prompt_submit(intent, selected.name).await;
                     return;
                 }
                 let intent = mb.intent.clone();
                 let input = std::mem::take(&mut mb.input);
-                self.minibuffer = None;
-                self.run_minibuffer_submit(intent, input).await;
+                self.prompt = None;
+                self.run_prompt_submit(intent, input).await;
                 return;
             }
             KeyCode::Backspace => {
@@ -410,7 +410,7 @@ impl App {
             // wasn't handled above so stray modifier combos don't pollute
             // the input.
             KeyCode::Char(c) if !ctrl && !alt => {
-                insert_minibuffer_text(mb, &c.to_string());
+                insert_prompt_text(mb, &c.to_string());
             }
             _ => {}
         }
@@ -421,14 +421,14 @@ impl App {
         }
     }
 
-    pub(super) async fn run_minibuffer_submit(&mut self, intent: MinibufferIntent, input: String) {
+    pub(super) async fn run_prompt_submit(&mut self, intent: PromptIntent, input: String) {
         // Tutorial hook — spec 0077 step 3 ("say something to it"): a
         // headless (non-PTY) session sends input through this exact submit
         // path, which never resolves to a `KeyAction` or a distinguishable
         // notification. Kept thin; logic lives in `app/tutorial.rs`.
         self.tutorial_observe_minibuffer_submit(&intent, &input);
         match intent {
-            MinibufferIntent::SendInput { session_id } => {
+            PromptIntent::SendInput { session_id } => {
                 if input.is_empty() {
                     return;
                 }
@@ -437,7 +437,7 @@ impl App {
                     Err(e) => self.set_status(format!("send failed: {e}")),
                 }
             }
-            MinibufferIntent::NewSessionHarness => {
+            PromptIntent::NewSessionHarness => {
                 let harness = input.trim().to_string();
                 if harness.is_empty() {
                     return;
@@ -446,11 +446,11 @@ impl App {
                 // redirects to the project-create flow. Keep `group` as a
                 // compatibility alias for muscle memory.
                 if harness == "project" || harness == "group" {
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: "Project name: ".to_string(),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::NewGroupName,
+                        intent: PromptIntent::NewGroupName,
                         error: None,
                     });
                     return;
@@ -515,7 +515,7 @@ impl App {
                     let _ = tx.send(event);
                 });
             }
-            MinibufferIntent::ForkSessionHarness {
+            PromptIntent::ForkSessionHarness {
                 source_session_id,
                 at_seq,
             } => {
@@ -565,8 +565,8 @@ impl App {
             // Selection-only prompt: submission happens through the
             // dedicated key handler (Enter on a row), never through the
             // text-input path.
-            MinibufferIntent::ForkTurnPick { .. } => {}
-            MinibufferIntent::GroupDeleteConfirm { group_id } => {
+            PromptIntent::ForkTurnPick { .. } => {}
+            PromptIntent::GroupDeleteConfirm { group_id } => {
                 let choice = parse_group_delete_choice(&input);
                 let delete_members = match choice {
                     GroupDeleteChoice::Cancel => {
@@ -588,7 +588,7 @@ impl App {
                     Err(e) => self.set_status(format!("project delete failed: {e}")),
                 }
             }
-            MinibufferIntent::GroupRename { group_id } => {
+            PromptIntent::GroupRename { group_id } => {
                 let trimmed = input.trim().to_string();
                 if trimmed.is_empty() {
                     self.set_status("project rename cancelled (empty)".into());
@@ -604,7 +604,7 @@ impl App {
                     Err(e) => self.set_status(format!("project rename failed: {e}")),
                 }
             }
-            MinibufferIntent::NewGroupName => {
+            PromptIntent::NewGroupName => {
                 let trimmed = input.trim().to_string();
                 if trimmed.is_empty() {
                     self.set_status("project name empty".into());
@@ -619,7 +619,7 @@ impl App {
                     Err(e) => self.set_status(format!("project create failed: {e}")),
                 }
             }
-            MinibufferIntent::Rename { session_id } => {
+            PromptIntent::Rename { session_id } => {
                 let trimmed = input.trim().to_string();
                 let new_title = if trimmed.is_empty() {
                     None
@@ -640,7 +640,7 @@ impl App {
                     Err(e) => self.set_status(format!("rename failed: {e}")),
                 }
             }
-            MinibufferIntent::DeleteConfirm {
+            PromptIntent::DeleteConfirm {
                 session_id,
                 is_fork,
             } => match parse_session_end_choice(&input) {
@@ -661,7 +661,7 @@ impl App {
                     self.set_status("cancelled".to_string());
                 }
             },
-            MinibufferIntent::ArchivedDeleteConfirm { section } => {
+            PromptIntent::ArchivedDeleteConfirm { section } => {
                 let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
                 if !yes {
                     self.set_status("archived delete cancelled".to_string());
@@ -710,7 +710,7 @@ impl App {
                     ));
                 }
             }
-            MinibufferIntent::MenuArchiveConfirm { session_id } => {
+            PromptIntent::MenuArchiveConfirm { session_id } => {
                 let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
                 if !yes {
                     self.set_status("archive cancelled".to_string());
@@ -721,7 +721,7 @@ impl App {
                     Err(e) => self.set_status(format!("archive failed: {e}")),
                 }
             }
-            MinibufferIntent::MenuUnarchiveConfirm { session_id } => {
+            PromptIntent::MenuUnarchiveConfirm { session_id } => {
                 let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
                 if !yes {
                     self.set_status("unarchive cancelled".to_string());
@@ -732,7 +732,7 @@ impl App {
                     Err(e) => self.set_status(format!("unarchive failed: {e}")),
                 }
             }
-            MinibufferIntent::RestartConfirm { session_id } => {
+            PromptIntent::RestartConfirm { session_id } => {
                 let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
                 if !yes {
                     self.set_status("restart cancelled".to_string());
@@ -757,7 +757,7 @@ impl App {
                     Err(e) => self.set_status(format!("restart failed: {e}")),
                 }
             }
-            MinibufferIntent::RestartDaemonConfirm => {
+            PromptIntent::RestartDaemonConfirm => {
                 // Reached only if the single-key fast path in
                 // `handle_minibuffer_key` fell through (defensive — should
                 // not happen in practice).
@@ -769,7 +769,7 @@ impl App {
                 let result = self.client.daemon_restart(None, false).await;
                 self.set_status(daemon_restart_status_message(result, "daemon restart"));
             }
-            MinibufferIntent::UpgradeConfirm { version } => {
+            PromptIntent::UpgradeConfirm { version } => {
                 // Defensive fallback, same as `RestartDaemonConfirm` above.
                 let yes = matches!(input.trim().to_lowercase().as_str(), "y" | "yes");
                 if !yes {
@@ -778,7 +778,7 @@ impl App {
                 }
                 self.start_upgrade(version);
             }
-            MinibufferIntent::ConfirmLocalFileUpload {
+            PromptIntent::ConfirmLocalFileUpload {
                 session_id,
                 path,
                 to_playbook,
@@ -791,25 +791,25 @@ impl App {
                 }
                 self.upload_local_file(session_id, path, to_playbook).await;
             }
-            MinibufferIntent::CommandPalette => {
+            PromptIntent::CommandPalette => {
                 let cmd = input.trim();
                 self.run_palette_command(cmd).await;
             }
-            MinibufferIntent::ServiceDeleteConfirm { name } => {
+            PromptIntent::ServiceDeleteConfirm { name } => {
                 if !matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
                     self.set_status("service delete cancelled".to_string());
                     return;
                 }
                 self.delete_service_by_name(name).await;
             }
-            MinibufferIntent::Orchestrator => {
-                // Unreachable in PTY-orchestrator mode — the
-                // orchestrator panel's keys are handled in
-                // handle_orchestrator_key and never reach the regular
+            PromptIntent::Minibuffer => {
+                // Unreachable in PTY-minibuffer mode — the
+                // minibuffer panel's keys are handled in
+                // handle_minibuffer_key and never reach the regular
                 // submit path. Kept as a defensive fallback.
                 let _ = input;
             }
-            MinibufferIntent::ApproveTool {
+            PromptIntent::ApproveTool {
                 session_id,
                 call_id,
                 ..
@@ -868,24 +868,24 @@ impl App {
 
     /// Open the right minibuffer mode for the user's main "command"
     /// keybind (`M-x` / `C-x x` / click on the prompt). Prefers the
-    /// orchestrator panel when an orchestrator session is available;
+    /// minibuffer panel when a minibuffer session is available;
     /// falls back to the static command palette.
-    pub fn open_minibuffer_for_command(&mut self) {
-        if self.orchestrator_id.is_some() {
-            self.orchestrator_scrollback = 0;
-            self.minibuffer = Some(Minibuffer {
+    pub fn open_prompt_for_command(&mut self) {
+        if self.minibuffer_id.is_some() {
+            self.minibuffer_scrollback = 0;
+            self.prompt = Some(Prompt {
                 prompt: "> ".to_string(),
                 input: String::new(),
                 cursor: 0,
-                intent: MinibufferIntent::Orchestrator,
+                intent: PromptIntent::Minibuffer,
                 error: None,
             });
         } else {
-            self.minibuffer = Some(Minibuffer {
+            self.prompt = Some(Prompt {
                 prompt: "M-x ".to_string(),
                 input: String::new(),
                 cursor: 0,
-                intent: MinibufferIntent::CommandPalette,
+                intent: PromptIntent::CommandPalette,
                 error: None,
             });
         }
@@ -988,11 +988,11 @@ impl App {
             Some(_) => "Fork from turn: ".to_string(),
             None => "Fork session: ".to_string(),
         };
-        self.minibuffer = Some(Minibuffer {
+        self.prompt = Some(Prompt {
             prompt,
             input,
             cursor,
-            intent: MinibufferIntent::ForkSessionHarness {
+            intent: PromptIntent::ForkSessionHarness {
                 source_session_id,
                 at_seq,
             },
@@ -1020,14 +1020,14 @@ mod fork_result_tests {
     }
 }
 
-pub(super) fn insert_minibuffer_text(mb: &mut Minibuffer, text: &str) {
+pub(super) fn insert_prompt_text(mb: &mut Prompt, text: &str) {
     let pos = byte_pos(&mb.input, mb.cursor);
     mb.input.insert_str(pos, text);
     mb.cursor += text.chars().count();
     mb.error = None;
 }
 
-fn delete_back_char(mb: &mut Minibuffer) {
+fn delete_back_char(mb: &mut Prompt) {
     if mb.cursor > 0 {
         let prev = mb.cursor - 1;
         let pos = byte_pos(&mb.input, prev);
@@ -1037,7 +1037,7 @@ fn delete_back_char(mb: &mut Minibuffer) {
     }
 }
 
-fn delete_forward_char(mb: &mut Minibuffer) {
+fn delete_forward_char(mb: &mut Prompt) {
     if mb.cursor < mb.input.chars().count() {
         let pos = byte_pos(&mb.input, mb.cursor);
         mb.input.remove(pos);
@@ -1069,7 +1069,7 @@ fn word_forward(s: &str, cursor: usize) -> usize {
     c
 }
 
-fn kill_word_back(mb: &mut Minibuffer) {
+fn kill_word_back(mb: &mut Prompt) {
     let start = word_back(&mb.input, mb.cursor);
     let start_b = byte_pos(&mb.input, start);
     let end_b = byte_pos(&mb.input, mb.cursor);
@@ -1078,7 +1078,7 @@ fn kill_word_back(mb: &mut Minibuffer) {
     mb.error = None;
 }
 
-fn kill_word_forward(mb: &mut Minibuffer) {
+fn kill_word_forward(mb: &mut Prompt) {
     let end = word_forward(&mb.input, mb.cursor);
     let start_b = byte_pos(&mb.input, mb.cursor);
     let end_b = byte_pos(&mb.input, end);

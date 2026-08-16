@@ -355,7 +355,7 @@ Dynamic session UI: when a task is long-running, multi-step, decision-heavy, or 
 
 Be concise. When you finish a turn, emit a short summary of what you did; the user will see your messages and tool calls in the transcript."#;
 
-pub(crate) const SYSTEM_PROMPT_ORCHESTRATOR: &str = r#"You are the agentd orchestrator — a default smith session created by agentd itself, surfaced in the user's TUI minibuffer. You are the always-available control surface for the user's session fleet.
+pub(crate) const SYSTEM_PROMPT_MINIBUFFER: &str = r#"You are the agentd minibuffer — a default smith session created by agentd itself, surfaced in the user's TUI minibuffer. You are the always-available control surface for the user's session fleet.
 
 Your job is to help the user run, inspect, and reason about *other* sessions in agentd. Prefer agentd-control tools (prefix `agentd_`) over editing files or running ad-hoc shell commands yourself:
 - `agentd_list_sessions` / `agentd_get_session` / `agentd_get_transcript` to inspect state.
@@ -379,7 +379,7 @@ For `OBSERVATION: ambient fleet monitor` findings, act as an ambient companion. 
 
 Dynamic session UI: when a session/task benefits from compact status/actions, call `agentd_context` to discover `session_widgets.dir`, `session_widgets.action_link_scheme`, and supported `markdown_extensions`, then create/update concise `.md` widget files there with normal file tools. Widget creation, updates, and cleanup are mostly automated system behavior: use best judgment and ask first only when normal safety/tool policy absolutely requires approval or the widget would make a significant product/user-facing decision. Use checklists, supported markdown_extensions (the shared construct Markdown dialect, including smart clips) from `agentd_context`, and action links such as `[Open checks](agentd:action/open-checks)` or `[Open checks](agentd:action/open-checks?key=o)` when a keyboard shortcut is desired. Treat `OBSERVATION: ui.action ...` as user intent; actions still go through normal tools and approvals.
 
-SURFACING — choose the channel by whether the user needs to respond. A short text reply is literally your *monolog*: it types out over your matrix animation, then fades, and the user has no way to reply to it. Use text ONLY for a low-stakes, transient FYI of what you noticed or did ("dogfood finished its build; fleet's quiet"). NEVER use a text monolog to ask a question, request a decision or action, or raise something important — the user may not be looking and cannot respond to it. Anything the user should act on, decide, or be reliably notified of MUST be a compact Operator widget instead — widgets persist and carry action links the user can act on (e.g. a session stuck at a trust prompt, an error needing a choice, "ready to merge?"). Reply exactly `noted` when nothing needs surfacing.
+SURFACING — choose the channel by whether the user needs to respond. A short text reply is literally your *monolog*: it types out over your matrix animation, then fades, and the user has no way to reply to it. Use text ONLY for a low-stakes, transient FYI of what you noticed or did ("dogfood finished its build; fleet's quiet"). NEVER use a text monolog to ask a question, request a decision or action, or raise something important — the user may not be looking and cannot respond to it. Anything the user should act on, decide, or be reliably notified of MUST be a compact Minibuffer widget instead — widgets persist and carry action links the user can act on (e.g. a session stuck at a trust prompt, an error needing a choice, "ready to merge?"). Reply exactly `noted` when nothing needs surfacing.
 
 Be concise. The minibuffer panel is small; aim for one to three short lines per turn, longer only when the user explicitly asks for detail. Risky tool calls (delete / kill / send) still gate through approval unless the session is in always-approve."#;
 
@@ -388,7 +388,7 @@ Be concise. The minibuffer panel is small; aim for one to three short lines per 
 /// callers keep working.
 pub(crate) fn system_prompt_for_env() -> &'static str {
     match std::env::var("CONSTRUCT_SESSION_KIND").as_deref() {
-        Ok("orchestrator") => SYSTEM_PROMPT_ORCHESTRATOR,
+        Ok("minibuffer") => SYSTEM_PROMPT_MINIBUFFER,
         _ => SYSTEM_PROMPT_USER,
     }
 }
@@ -2120,12 +2120,12 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_surfacing_guidance_is_current_and_unambiguous() {
-        let p = SYSTEM_PROMPT_ORCHESTRATOR;
+    fn minibuffer_surfacing_guidance_is_current_and_unambiguous() {
+        let p = SYSTEM_PROMPT_MINIBUFFER;
         // Stale observation string (renamed in #376) must not reappear — the
         // ambient guidance keyed on it would silently never fire.
         assert!(
-            !p.contains("ambient operator loop tick"),
+            !p.contains("ambient minibuffer loop tick"),
             "stale ambient observation string is back"
         );
         assert!(
@@ -2137,12 +2137,12 @@ mod tests {
         assert!(p.contains("SURFACING"), "missing surfacing guidance");
         assert!(p.contains("monolog"), "missing monolog description");
         assert!(
-            p.contains("MUST be a compact Operator widget"),
+            p.contains("MUST be a compact Minibuffer widget"),
             "widget-for-response rule weakened"
         );
         // The old blunt contradiction is gone.
         assert!(
-            !p.contains("Prefer updating/removing compact Operator widgets over chatting"),
+            !p.contains("Prefer updating/removing compact Minibuffer widgets over chatting"),
             "contradictory 'prefer widgets over chatting' line is back"
         );
     }

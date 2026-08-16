@@ -1319,7 +1319,7 @@ impl Client {
     /// Tell the adapter to act on a running tool call — `"kill"` to
     /// abort, `"background"` to detach and continue. Used by the
     /// TUI's `[bg]` / `[kill]` button click handlers; future
-    /// orchestrator slash commands will use it too.
+    /// minibuffer slash commands will use it too.
     pub async fn tool_action(
         &self,
         id: &str,

@@ -36,7 +36,7 @@ on the reclaimed port *in addition to* the stand-in, so neither the sessions
 that predate the fallback nor those spawned during it are cut off. New sessions
 are given the reclaimed port, so the home converges back to one.
 
-An operator-pinned port is exempt from all of this: it is intent, it never
+A user-pinned port is exempt from all of this: it is intent, it never
 falls back, and it is never rewritten.
 
 ## Reason
@@ -91,5 +91,5 @@ trying. When the other daemon exits, the port is taken back and served
 alongside the stand-in; sessions spawned before the collision start working
 again without being touched.
 
-An operator pins the port. A busy port is now a startup failure, not a
+A user pins the port. A busy port is now a startup failure, not a
 fallback, because the pin says the port matters more than booting.

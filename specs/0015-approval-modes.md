@@ -31,7 +31,7 @@ Interactive clients should keep the selected tool-gating session's current mode 
 
 One approval decision applies to the whole pending tool call (including every hunk of a batched edit). The prompt conveys this through the call summary rather than the action labels: for batched edit calls the summary should include affected file paths and edit-level hints rather than only aggregate counts. Action labels stay simple verbs (`approve` / `deny` / `auto-review`) — not `approve all` / `deny all`, which read as approving or denying all *future* calls (the role of `unsafe_auto`) rather than the parts of the current one.
 
-Fleet observers and operator/minibuffer surfaces should not duplicate inline approval prompts as proactive observations. The requesting session remains the canonical interaction surface for that approval.
+Fleet observers and minibuffer/minibuffer surfaces should not duplicate inline approval prompts as proactive observations. The requesting session remains the canonical interaction surface for that approval.
 
 ## Non-Goals
 

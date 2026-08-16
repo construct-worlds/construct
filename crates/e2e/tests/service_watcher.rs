@@ -147,7 +147,7 @@ async fn a_definition_that_does_not_parse_leaves_the_service_running() -> Result
     .await?;
 
     // A file that cannot be parsed must not disturb what is already running:
-    // the operator's mistake costs them the edit, not the service.
+    // the user's mistake costs them the edit, not the service.
     write_definition(&definition_path, "this is not valid toml [[[")?;
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert!(

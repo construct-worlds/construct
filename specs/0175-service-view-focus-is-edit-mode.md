@@ -10,7 +10,7 @@ Scope: Focusing a service view puts it in edit mode, and unsaved changes are mar
 A service view has exactly one interactive state: editing. Every path that
 focuses a service — creating one, opening one by name, clicking its pane, or
 moving pane focus onto it — leaves the editor open on that service. There is no
-read-only service view the operator must step out of before typing, and no
+read-only service view the user must step out of before typing, and no
 "press a key to start editing" step. Moving focus to something that is not a
 service closes the editor.
 
@@ -20,9 +20,9 @@ prepares its editor, but keeps focus in the list so Up/Down, C-p/C-n, and
 equivalent profile bindings continue traversing rows. An explicit drill-in
 action moves focus to the already-prepared service editor.
 
-A command that hands the operator a focused service view must also dismiss the
+A command that hands the user a focused service view must also dismiss the
 transient input surfaces that would otherwise keep swallowing keystrokes — in
-particular the minibuffer/orchestrator panel the command was typed into.
+particular the minibuffer/minibuffer panel the command was typed into.
 
 Because there is no view-only state to close back to, Escape means:
 
@@ -54,7 +54,7 @@ keystroke that had no visible prompt, and made keyboard focus ambiguous: a
 command could leave a service selected while the keystrokes still went to the
 panel it was typed in. Collapsing the two states removes both problems.
 
-Once focus alone implies editing, the operator needs two things the old model
+Once focus alone implies editing, the user needs two things the old model
 supplied implicitly: a way to tell whether what they see has been persisted,
 and a way to back out. The title marker answers the first at a glance from any
 pane; Escape's two-step meaning answers the second without reintroducing a

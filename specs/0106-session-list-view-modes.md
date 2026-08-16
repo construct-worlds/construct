@@ -97,7 +97,7 @@ Rules both modes must preserve:
   not it is used, so sibling rows share one left edge, a session gaining its
   first child never shifts its own title, and a child's status glyph lands
   under its parent's title. Where a session could claim the cell twice the
-  disclosure wins, because it is the affordance the operator can act on. Any
+  disclosure wins, because it is the affordance the user can act on. Any
   future row marker joins that column rather than reserving another.
 - The web UI's session list shows the same detail line with the same
   content and omission/fallback rules, but always on — it has no

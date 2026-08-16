@@ -124,7 +124,7 @@ impl Daemon {
     /// cloudflare.com` host anyway).
     ///
     /// Boot timeout is 15s — slow enough to absorb the
-    /// orchestrator-spawn timeout on hosts where the adapter
+    /// minibuffer-spawn timeout on hosts where the adapter
     /// binaries can't be located.
     pub async fn spawn() -> Result<Self> {
         Self::spawn_inner(false, &[]).await
@@ -182,18 +182,18 @@ impl Daemon {
         for d in [&runtime_dir, &state_dir, &data_dir, &config_dir] {
             std::fs::create_dir_all(d)?;
         }
-        // Disable the orchestrator session in e2e. Without this,
+        // Disable the minibuffer session in e2e. Without this,
         // CI runners (which have the smith adapter binary built
-        // and discoverable) auto-spawn an "operator" session whose
+        // and discoverable) auto-spawn an "minibuffer" session whose
         // panel grabs initial keyboard focus — keys then route
-        // to the orchestrator's editor instead of the global
+        // to the minibuffer's editor instead of the global
         // keymap, and chords like `Ctrl-x x` (palette) silently
         // type into the editor. Local dev environments where
         // the smith adapter isn't on PATH skip this naturally,
         // which is why the test passed locally but failed on CI.
         std::fs::write(
             config_dir.join("config.toml"),
-            "[orchestrator]\nenabled = false\n",
+            "[minibuffer]\nenabled = false\n",
         )
         .context("write e2e config.toml")?;
         let socket = runtime_dir.join("construct.sock");
@@ -202,7 +202,7 @@ impl Daemon {
         // the tempdir's `bin/`. Adapter binaries are resolved by
         // the daemon next to its own exe (`locate_sibling_binary`),
         // so copy those too — otherwise `session.create` in a
-        // relocated daemon couldn't find them. The orchestrator is
+        // relocated daemon couldn't find them. The minibuffer is
         // disabled, but a test might still create a shell session.
         let binary_path = if relocatable {
             let bin_dir = dir.path().join("bin");

@@ -223,7 +223,7 @@ struct PtySink<'a> {
     /// padding). ASCII-counted; CJK chars may misalign.
     col: usize,
     /// When true, deltas render into the session PTY. Off for quiet
-    /// ambient Operator ticks where the model should update widgets or
+    /// ambient Minibuffer ticks where the model should update widgets or
     /// say `noted` without adding visible minibuffer chatter.
     emit_pty: bool,
     /// When true, every delta also fires a `SessionEvent::Message` so
@@ -1194,7 +1194,7 @@ mod tests {
 
     #[test]
     fn default_monitor_spec_picks_cheap_same_provider_tier() {
-        // Frontier operator models → a cheaper same-provider model.
+        // Frontier minibuffer models → a cheaper same-provider model.
         assert_eq!(
             default_monitor_spec("codex-oauth", "gpt-5.5").as_deref(),
             Some("codex-oauth:gpt-5.4-mini")
@@ -1207,11 +1207,11 @@ mod tests {
             default_monitor_spec("anthropic", "claude-opus-4-8").as_deref(),
             Some("anthropic:claude-sonnet-4-5")
         );
-        // Already-small operator models → keep them (no downgrade).
+        // Already-small minibuffer models → keep them (no downgrade).
         assert_eq!(default_monitor_spec("openai", "gpt-5-mini"), None);
         assert_eq!(default_monitor_spec("anthropic", "claude-haiku-4-5"), None);
         assert_eq!(default_monitor_spec("anthropic", "claude-sonnet-4-5"), None);
-        // No confident cheap default → keep the operator's model.
+        // No confident cheap default → keep the minibuffer's model.
         assert_eq!(default_monitor_spec("ollama", "llama3"), None);
         assert_eq!(default_monitor_spec("gemini", "gemini-pro"), None);
     }
@@ -1219,7 +1219,7 @@ mod tests {
     #[test]
     fn observation_panel_echo_shows_trigger_without_boilerplate() {
         // Real user input echoes itself — no synthetic echo.
-        assert!(observation_panel_echo("hello operator").is_none());
+        assert!(observation_panel_echo("hello minibuffer").is_none());
         // Fleet event: shown (dim), with the internal marker stripped.
         let s = String::from_utf8(
             observation_panel_echo("OBSERVATION: session ab12 entered errored (boom)").unwrap(),
@@ -1229,7 +1229,7 @@ mod tests {
         assert!(!s.contains("OBSERVATION:"), "marker not stripped:\n{s}");
         // Ambient monitor: boilerplate stripped, findings kept under a label.
         let obs = "OBSERVATION: ambient fleet monitor flagged the following. Decide whether to \
-                   surface it to the user or update an Operator widget; reply exactly `noted` if \
+                   surface it to the user or update a Minibuffer widget; reply exactly `noted` if \
                    it's not worth it.\ns277 \"x\": blocked at prompt";
         let s = String::from_utf8(observation_panel_echo(obs).unwrap()).unwrap();
         assert!(s.contains("ambient monitor flagged:"), "{s}");
@@ -1303,7 +1303,7 @@ mod tests {
         );
         assert!(snap.summary.contains("baseline only"), "{}", snap.summary);
         // Preview priority: errored first, then idle; recently-active sessions
-        // (bbbb2222) are also previewable so the Operator sees live activity.
+        // (bbbb2222) are also previewable so the Minibuffer sees live activity.
         assert_eq!(snap.preview_targets[0].0, "cccc3333");
         assert!(snap.preview_targets.iter().any(|(id, _)| id == "aaaa1111"));
         assert!(snap.preview_targets.iter().any(|(id, _)| id == "bbbb2222"));
@@ -1812,7 +1812,7 @@ mod tests {
 
     // --- monitor_model_usable timeout regression ----------------------------
     //
-    // Regression: C-x x froze the TUI for ~60 s when the operator model had
+    // Regression: C-x x froze the TUI for ~60 s when the minibuffer model had
     // a broken OAuth token.  The freeze originated in monitor_model_usable,
     // which had no upper bound on the health-check call — a hanging provider
     // could keep the adapter unresponsive long enough for the daemon's
@@ -1861,7 +1861,7 @@ mod tests {
         );
     }
 
-    /// The orchestrator exception's stand-in provider (spec 0071) must fail
+    /// The minibuffer exception's stand-in provider (spec 0071) must fail
     /// clearly rather than panic if anything calls it before the main turn
     /// loop's lazy re-resolve runs — e.g. a background ambient tick firing
     /// before the user's first message.
@@ -1877,7 +1877,7 @@ mod tests {
     }
 }
 
-/// Stand-in `provider` for the orchestrator exception (spec 0071): used
+/// Stand-in `provider` for the minibuffer exception (spec 0071): used
 /// while no model has resolved yet, so `provider: Box<dyn LlmProvider>`
 /// never needs to become `Option`-typed through the many helpers that take
 /// it as a plain reference (`compact`, `handle_slash_loop`,
@@ -1915,7 +1915,7 @@ pub async fn run(
         emit,
         mut inbox,
     } = ctx;
-    // `spec` is `Err` only for the orchestrator exception (spec 0071): the
+    // `spec` is `Err` only for the minibuffer exception (spec 0071): the
     // caller (`lib.rs::run`) already emitted the curated startup error as a
     // visible `SessionEvent::Error` and still wants the REPL to come up so
     // slash commands keep working. `model_ready = false` means `provider`
@@ -2104,62 +2104,61 @@ pub async fn run(
     // paint before the first drive call (idle waiting for user input).
     emit_editor_state(&emit, &editor, &queue);
 
-    // Orchestrator-only: subscribe to other sessions' events so the
+    // Minibuffer-only: subscribe to other sessions' events so the
     // agent can react to fleet activity (sessions finishing, errors,
-    // approval requests) without the user polling. Non-orchestrator
+    // approval requests) without the user polling. Non-minibuffer
     // sessions get `None` here and skip the obs branch in the inner
     // select. Rate-limited so a burst of events can't fire a turn
     // per event.
-    let is_orchestrator = std::env::var("CONSTRUCT_SESSION_KIND").as_deref() == Ok("orchestrator");
-    let mut obs_rx = if is_orchestrator {
+    let is_minibuffer = std::env::var("CONSTRUCT_SESSION_KIND").as_deref() == Ok("minibuffer");
+    let mut obs_rx = if is_minibuffer {
         Some(crate::observe::spawn(self_id_for_obs))
     } else {
         None
     };
     let mut obs_limiter = crate::observe::RateLimiter::new(5, std::time::Duration::from_secs(60));
-    let ambient_loop = is_orchestrator.then(|| OperatorAmbientLoop {
-        interval: operator_ambient_loop_interval(),
+    let ambient_loop = is_minibuffer.then(|| MinibufferAmbientLoop {
+        interval: minibuffer_ambient_loop_interval(),
         self_id: session_id.clone(),
     });
-    // Runtime toggle: `/operator enable|disable` flips this without restart.
+    // Runtime toggle: `/minibuffer enable|disable` flips this without restart.
     // Seeded from the env var the daemon re-injects on respawn so the choice
     // survives daemon restarts.
     let mut ambient_loop_enabled =
-        is_orchestrator && std::env::var("CONSTRUCT_OPERATOR_LOOP_DISABLED").as_deref() != Ok("1");
-    // Operator's own id (to exclude from the ambient fleet snapshot) and the
+        is_minibuffer && minibuffer_env("LOOP_DISABLED").as_deref() != Some("1");
+    // Minibuffer's own id (to exclude from the ambient fleet snapshot) and the
     // prior-tick session states (for the per-tick delta).
     let self_id_for_ambient = session_id.clone();
     let mut prev_fleet: HashMap<String, construct_protocol::SessionState> = HashMap::new();
     // Ambient monitor model: the fleet scan + triage runs as a one-shot
-    // completion off the operator's own conversation, so the bulky snapshot /
-    // previews never accumulate in the operator's context and only escalations
-    // reach it. Configure a cheaper model via CONSTRUCT_OPERATOR_MONITOR_MODEL;
-    // otherwise it falls back to the operator's own model.
-    // Resolve the monitor model (orchestrator-only — that's the only session
+    // completion off the minibuffer's own conversation, so the bulky snapshot /
+    // previews never accumulate in the minibuffer's context and only escalations
+    // reach it. Configure a cheaper model via CONSTRUCT_MINIBUFFER_MONITOR_MODEL;
+    // otherwise it falls back to the minibuffer's own model.
+    // Resolve the monitor model (minibuffer-only — that's the only session
     // that ambient-ticks). The explicit override wins; otherwise default to a
     // cheaper same-provider tier (e.g. mini / sonnet) so the per-tick triage
-    // doesn't run on the operator's frontier model. A startup health-check
-    // falls back to the operator's own model when the chosen model can't be
+    // doesn't run on the minibuffer's frontier model. A startup health-check
+    // falls back to the minibuffer's own model when the chosen model can't be
     // resolved or doesn't actually answer.
-    let monitor_model = if is_orchestrator {
-        let candidate = std::env::var("CONSTRUCT_OPERATOR_MONITOR_MODEL")
-            .ok()
+    let monitor_model = if is_minibuffer {
+        let candidate = minibuffer_env("MONITOR_MODEL")
             .filter(|s| !s.is_empty())
             // Pass the display label: for a `@profile` it won't match any
-            // known wire name, so we keep the operator's own model rather
+            // known wire name, so we keep the minibuffer's own model rather
             // than swap in a cheap default that lives on a different
             // endpoint/billing path than the profile's.
             .or_else(|| default_monitor_spec(&display_name, &model))
             .and_then(|spec| crate::agent::resolve_model_from_spec(&spec).ok());
         match candidate {
             Some(m) if monitor_model_usable(&m).await => {
-                tracing::info!(model = %m.model, "operator ambient monitor model");
+                tracing::info!(model = %m.model, "minibuffer ambient monitor model");
                 Some(m)
             }
             Some(m) => {
                 tracing::warn!(
                     model = %m.model,
-                    "ambient monitor model unusable; falling back to operator model"
+                    "ambient monitor model unusable; falling back to minibuffer model"
                 );
                 None
             }
@@ -2210,7 +2209,7 @@ pub async fn run(
                     if !obs_limiter.try_consume() {
                         tracing::info!(
                             session = %obs.session_id,
-                            "orchestrator observation rate-limited; dropping"
+                            "minibuffer observation rate-limited; dropping"
                         );
                         continue 'outer;
                     }
@@ -2220,8 +2219,8 @@ pub async fn run(
                 }
                 ReadOutcome::AmbientTick => {
                     // Offload the fleet scan + triage to a cheap one-shot
-                    // monitor. Only a real finding becomes an operator turn;
-                    // quiet ticks never touch the operator's context.
+                    // monitor. Only a real finding becomes a minibuffer turn;
+                    // quiet ticks never touch the minibuffer's context.
                     let scan =
                         build_ambient_observation(&self_id_for_ambient, &mut prev_fleet).await;
                     let (mp, mm): (&dyn provider::LlmProvider, &str) = match &monitor_model {
@@ -2456,32 +2455,32 @@ pub async fn run(
                                 }
                             }
                         }
-                        CommandId::Operator => {
+                        CommandId::Minibuffer => {
                             if ambient_loop.is_none() {
-                                term.note("(/operator is only available in the operator session)");
+                                term.note("(/minibuffer is only available in the minibuffer session)");
                             } else {
                                 match args.as_deref().map(str::trim).unwrap_or("") {
                                     "enable" => {
                                         ambient_loop_enabled = true;
-                                        emit.emit(SessionEvent::OperatorLoopChanged {
+                                        emit.emit(SessionEvent::MinibufferLoopChanged {
                                             enabled: true,
                                         });
-                                        term.note("(operator loop enabled)");
+                                        term.note("(minibuffer loop enabled)");
                                     }
                                     "disable" => {
                                         ambient_loop_enabled = false;
-                                        emit.emit(SessionEvent::OperatorLoopChanged {
+                                        emit.emit(SessionEvent::MinibufferLoopChanged {
                                             enabled: false,
                                         });
-                                        term.note("(operator loop disabled)");
+                                        term.note("(minibuffer loop disabled)");
                                     }
                                     _ => {
-                                        term.note("(usage: /operator enable|disable)");
+                                        term.note("(usage: /minibuffer enable|disable)");
                                     }
                                 }
                             }
                         }
-                        // Routing::Adapter is only model/reset/compact/operator today;
+                        // Routing::Adapter is only model/reset/compact/minibuffer today;
                         // any other id here is a registry/handler mismatch.
                         other => {
                             tracing::warn!(?other, "adapter-routed slash command has no handler");
@@ -2547,14 +2546,14 @@ pub async fn run(
             continue;
         }
 
-        // Orchestrator exception (spec 0071): this text is a real turn, not
+        // Minibuffer exception (spec 0071): this text is a real turn, not
         // a slash command (those already `continue`d above without ever
         // reaching here), so it needs an actual model. If startup couldn't
         // resolve one, try again now — the user may have exported a key or
         // picked a method in `/configure` since the session started — and
         // fail this turn alone (not the whole session) if it still can't.
         // Ordinary sessions never see `model_ready == false`, since `lib.rs`
-        // only starts this REPL unresolved for the orchestrator.
+        // only starts this REPL unresolved for the minibuffer.
         if !model_ready {
             match crate::agent::resolve_model(&params) {
                 Ok(resolved) => {
@@ -3177,11 +3176,11 @@ pub async fn run(
 
 enum ReadOutcome {
     Line(String),
-    /// Orchestrator-only: an observation from another session arrived
+    /// Minibuffer-only: an observation from another session arrived
     /// while we were waiting for user input. The outer loop turns
     /// this into a pseudo-user message so the agent can react.
     Observation(crate::observe::Observation),
-    /// Ambient operator loop tick while the orchestrator is idle.
+    /// Ambient minibuffer loop tick while the minibuffer is idle.
     AmbientTick,
     /// A backgrounded tool just finished. The outer loop emits the
     /// real `ToolResult` event (so the transcript catches up) and
@@ -3193,14 +3192,22 @@ enum ReadOutcome {
 }
 
 #[derive(Clone)]
-struct OperatorAmbientLoop {
+struct MinibufferAmbientLoop {
     interval: Duration,
     self_id: String,
 }
 
-fn operator_ambient_loop_interval() -> Duration {
-    let secs = std::env::var("CONSTRUCT_OPERATOR_AMBIENT_LOOP_SECS")
+/// Read a `CONSTRUCT_MINIBUFFER_*` tuning env var, falling back to the
+/// pre-rename `CONSTRUCT_MINIBUFFER_*` spelling so existing setups keep
+/// working.
+fn minibuffer_env(suffix: &str) -> Option<String> {
+    std::env::var(format!("CONSTRUCT_MINIBUFFER_{suffix}"))
+        .or_else(|_| std::env::var(format!("CONSTRUCT_OPERATOR_{suffix}")))
         .ok()
+}
+
+fn minibuffer_ambient_loop_interval() -> Duration {
+    let secs = minibuffer_env("AMBIENT_LOOP_SECS")
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(60)
         .clamp(10, 86_400);
@@ -3208,9 +3215,9 @@ fn operator_ambient_loop_interval() -> Duration {
 }
 
 /// Bare ambient-tick prompt used when the daemon snapshot is unavailable.
-const AMBIENT_TICK_FALLBACK: &str = "OBSERVATION: ambient operator loop tick. Quietly inspect only if useful; update Operator widgets for helpful ambient status; reply exactly `noted` if nothing needs surfacing.";
+const AMBIENT_TICK_FALLBACK: &str = "OBSERVATION: ambient minibuffer loop tick. Quietly inspect only if useful; update Minibuffer widgets for helpful ambient status; reply exactly `noted` if nothing needs surfacing.";
 
-/// Dim PTY echo of an `OBSERVATION:` trigger so the operator panel shows what a
+/// Dim PTY echo of an `OBSERVATION:` trigger so the minibuffer panel shows what a
 /// response (e.g. a bare `noted`) is reacting to — an ambient monitor finding
 /// or a fleet event — instead of an answer with no visible question. Returns
 /// `None` for non-observation turns (real user input echoes itself). The
@@ -3242,27 +3249,24 @@ fn observation_panel_echo(user_text: &str) -> Option<Vec<u8>> {
 const IDLE_RUNNING_MINS: i64 = 10;
 
 fn ambient_active_window() -> Duration {
-    let secs = std::env::var("CONSTRUCT_OPERATOR_ACTIVE_WINDOW_SECS")
-        .ok()
+    let secs = minibuffer_env("ACTIVE_WINDOW_SECS")
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(IDLE_RUNNING_MINS as u64 * 60)
         .clamp(60, 86_400);
     Duration::from_secs(secs)
 }
 
-/// Max sessions previewed per tick. Override with `CONSTRUCT_OPERATOR_PREVIEW_SESSIONS`.
+/// Max sessions previewed per tick. Override with `CONSTRUCT_MINIBUFFER_PREVIEW_SESSIONS`.
 fn preview_session_cap() -> usize {
-    std::env::var("CONSTRUCT_OPERATOR_PREVIEW_SESSIONS")
-        .ok()
+    minibuffer_env("PREVIEW_SESSIONS")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(10)
         .min(50)
 }
-/// Per-session preview byte budget. Override with `CONSTRUCT_OPERATOR_PREVIEW_BYTES`.
+/// Per-session preview byte budget. Override with `CONSTRUCT_MINIBUFFER_PREVIEW_BYTES`.
 /// When the recent messages exceed it, the older part is truncated.
 fn preview_byte_cap() -> usize {
-    std::env::var("CONSTRUCT_OPERATOR_PREVIEW_BYTES")
-        .ok()
+    minibuffer_env("PREVIEW_BYTES")
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(800)
         .clamp(120, 8000)
@@ -3288,7 +3292,7 @@ struct AmbientSnapshot {
     preview_targets: Vec<(String, String)>,
 }
 
-async fn operator_fleet_has_active_session(self_id: &str) -> bool {
+async fn minibuffer_fleet_has_active_session(self_id: &str) -> bool {
     let socket = construct_protocol::paths::Paths::discover().socket();
     let Ok(client) = construct_client::Client::connect(&socket).await else {
         return false;
@@ -3330,7 +3334,7 @@ fn ambient_session_is_active(
 /// Build the ambient-tick observation text. Pulls a live fleet snapshot from
 /// the daemon, folds in what changed since the previous tick, and attaches a
 /// short recent-transcript preview for the few most notable sessions — so the
-/// Operator has concrete signal instead of a blank "go look".
+/// Minibuffer has concrete signal instead of a blank "go look".
 /// Falls back to [`AMBIENT_TICK_FALLBACK`] if the daemon can't be reached.
 async fn build_ambient_observation(
     self_id: &str,
@@ -3348,7 +3352,7 @@ async fn build_ambient_observation(
     // Attach a byte-bounded preview for the most relevant sessions (needs-
     // attention first, then recently-active). Bounded count + per-session byte
     // budget keep input context in check; the full session id in each heading
-    // lets the Operator drill in with agentd_get_transcript/output/diff.
+    // lets the Minibuffer drill in with agentd_get_transcript/output/diff.
     let bytes = preview_byte_cap();
     for (sid, label) in snap.preview_targets.iter().take(preview_session_cap()) {
         if let Some(preview) = fetch_session_preview(&client, sid, bytes).await {
@@ -3359,10 +3363,10 @@ async fn build_ambient_observation(
 }
 
 /// System prompt for the one-shot ambient fleet-monitor triage. It judges the
-/// snapshot + previews and returns only what's worth the operator's attention.
-const AMBIENT_MONITOR_SYSTEM: &str = "You are an ambient fleet monitor for an operator agent. \
+/// snapshot + previews and returns only what's worth the minibuffer's attention.
+const AMBIENT_MONITOR_SYSTEM: &str = "You are an ambient fleet monitor for a minibuffer agent. \
 You are given a current fleet snapshot plus recent-activity previews of notable sessions. \
-Identify ONLY things genuinely worth the operator's attention: a session that looks stuck or \
+Identify ONLY things genuinely worth the minibuffer's attention: a session that looks stuck or \
 blocked (e.g. waiting on a prompt like 'trust this folder?'), errored, finished with notable \
 output, or a clear opportunity to reduce user effort. Be conservative — routine activity and \
 normal idleness are NOT notable, and you have no broader context about what the user is doing. \
@@ -3370,14 +3374,14 @@ If anything qualifies, reply with at most 3 one-line findings, each: '<session i
 <what + why, with a short evidence snippet>'. If nothing qualifies, reply with exactly the single \
 word: nothing";
 
-/// Default monitor model when `CONSTRUCT_OPERATOR_MONITOR_MODEL` is unset: a
-/// cheaper tier on the **same provider** as the operator (so auth/keys are
+/// Default monitor model when `CONSTRUCT_MINIBUFFER_MONITOR_MODEL` is unset: a
+/// cheaper tier on the **same provider** as the minibuffer (so auth/keys are
 /// already present), using model names the codebase/provider is known to
-/// accept. Returns `None` — keep the operator's own model — when the operator
+/// accept. Returns `None` — keep the minibuffer's own model — when the minibuffer
 /// is already on a small model, or the provider has no obvious cheap default
 /// (gemini/ollama/unknown), so we never silently pick a non-existent model.
-fn default_monitor_spec(provider_name: &str, operator_model: &str) -> Option<String> {
-    let m = operator_model.to_ascii_lowercase();
+fn default_monitor_spec(provider_name: &str, minibuffer_model: &str) -> Option<String> {
+    let m = minibuffer_model.to_ascii_lowercase();
     if m.contains("mini") || m.contains("nano") || m.contains("haiku") {
         return None; // already a small/cheap model
     }
@@ -3388,7 +3392,7 @@ fn default_monitor_spec(provider_name: &str, operator_model: &str) -> Option<Str
         "codex-oauth" => Some("codex-oauth:gpt-5.4-mini".to_string()),
         "openai" => Some("openai:gpt-5-mini".to_string()),
         "anthropic" if !m.contains("sonnet") => Some("anthropic:claude-sonnet-4-5".to_string()),
-        // anthropic already on sonnet, or gemini/ollama/unknown → keep operator's.
+        // anthropic already on sonnet, or gemini/ollama/unknown → keep minibuffer's.
         _ => None,
     }
 }
@@ -3396,7 +3400,7 @@ fn default_monitor_spec(provider_name: &str, operator_model: &str) -> Option<Str
 /// One-shot liveness check for the chosen monitor model. A wrong model name
 /// resolves fine but 400s at call time, which would silently blind the monitor
 /// (every triage returns "nothing"). A tiny completion at startup lets us fall
-/// back to the operator's own model — which we know works — instead.
+/// back to the minibuffer's own model — which we know works — instead.
 ///
 /// Bounded to 5 seconds: the check is best-effort and must not hold up the
 /// adapter startup sequence (which blocks the TUI pty_resize path and freezes
@@ -3430,9 +3434,9 @@ impl TextSink for DiscardSink {
 }
 
 /// Run the ambient monitor: a one-shot completion (cheap model when configured)
-/// that triages the scan off the operator's context. Returns a compact
-/// operator-facing observation when there's a finding, or `None` to skip the
-/// operator turn entirely.
+/// that triages the scan off the minibuffer's context. Returns a compact
+/// minibuffer-facing observation when there's a finding, or `None` to skip the
+/// minibuffer turn entirely.
 async fn run_ambient_triage(
     scan: &str,
     provider: &dyn provider::LlmProvider,
@@ -3458,7 +3462,7 @@ async fn run_ambient_triage(
     parse_triage_finding(turn.text.as_deref().unwrap_or(""))
 }
 
-/// Turn the monitor's raw reply into an operator-facing observation, or `None`
+/// Turn the monitor's raw reply into a minibuffer-facing observation, or `None`
 /// when it found nothing worth surfacing.
 fn parse_triage_finding(reply: &str) -> Option<String> {
     let t = reply.trim().trim_end_matches('.');
@@ -3467,7 +3471,7 @@ fn parse_triage_finding(reply: &str) -> Option<String> {
     }
     Some(format!(
         "OBSERVATION: ambient fleet monitor flagged the following. Decide whether to surface it to \
-         the user or update an Operator widget; reply exactly `noted` if it's not worth it.\n{}",
+         the user or update a Minibuffer widget; reply exactly `noted` if it's not worth it.\n{}",
         reply.trim()
     ))
 }
@@ -3584,7 +3588,7 @@ fn compute_ambient_snapshot(
     let mut idle_list: Vec<(String, String)> = Vec::new();
     let mut awaiting_list: Vec<(String, String)> = Vec::new();
     // Running sessions with recent PTY output — previewed (not "needs
-    // attention") so the Operator can see what's actively happening.
+    // attention") so the Minibuffer can see what's actively happening.
     // (pty_idle_min, session_id, line); sorted most-recent-first below.
     let mut active_list: Vec<(i64, String, String)> = Vec::new();
     let mut changes: Vec<String> = Vec::new();
@@ -3734,7 +3738,7 @@ async fn read_one_line(
     pty_width: &mut usize,
     mut obs_rx: Option<&mut tokio::sync::mpsc::UnboundedReceiver<crate::observe::Observation>>,
     bg_completion_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::tasks::BackgroundCompletion>,
-    ambient_loop: Option<OperatorAmbientLoop>,
+    ambient_loop: Option<MinibufferAmbientLoop>,
 ) -> ReadOutcome {
     loop {
         let inbox_recv = inbox.recv();
@@ -3752,7 +3756,7 @@ async fn read_one_line(
             };
             loop {
                 tokio::time::sleep(config.interval).await;
-                if operator_fleet_has_active_session(&config.self_id).await {
+                if minibuffer_fleet_has_active_session(&config.self_id).await {
                     return;
                 }
             }

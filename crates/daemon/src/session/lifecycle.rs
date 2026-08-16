@@ -105,7 +105,7 @@ impl SessionManager {
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: params.kind,
             archived: false,
-            operator_loop_disabled: params.kind == construct_protocol::SessionKind::Orchestrator,
+            minibuffer_loop_disabled: params.kind == construct_protocol::SessionKind::Minibuffer,
             needs_attention: false,
             forked_from: params.forked_from.clone(),
             busy_ms: 0,
@@ -139,7 +139,7 @@ impl SessionManager {
         // the bug only surfaced on initial create.
         //
         // Precedence: `[adapters.<name>].env` is the per-harness
-        // baseline (operator-set default model, etc.), overridden
+        // baseline (minibuffer-set default model, etc.), overridden
         // by the per-session `params.env` (explicit `construct new
         // --env KEY=VAL`), overridden in turn by daemon-meta. So a
         // CLI flag always wins over config.toml, and daemon meta
@@ -205,7 +205,7 @@ impl SessionManager {
             "CONSTRUCT_SESSION_KIND".to_string(),
             match params.kind {
                 construct_protocol::SessionKind::User => "user",
-                construct_protocol::SessionKind::Orchestrator => "orchestrator",
+                construct_protocol::SessionKind::Minibuffer => "minibuffer",
                 construct_protocol::SessionKind::Subagent => "subagent",
                 construct_protocol::SessionKind::UsageProbe => "usage_probe",
             }
@@ -224,9 +224,9 @@ impl SessionManager {
             }
             None => false,
         };
-        if summary.operator_loop_disabled {
+        if summary.minibuffer_loop_disabled {
             env_with_meta.insert(
-                "CONSTRUCT_OPERATOR_LOOP_DISABLED".to_string(),
+                "CONSTRUCT_MINIBUFFER_LOOP_DISABLED".to_string(),
                 "1".to_string(),
             );
         }
@@ -341,28 +341,28 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Ensure the daemon-owned orchestrator session exists. Called once
+    /// Ensure the daemon-owned minibuffer session exists. Called once
     /// at startup, after `resume_running_sessions`. Three outcomes:
     ///
-    /// 1. Orchestrator disabled in config → no-op.
-    /// 2. Orchestrator session already exists (created on a previous
+    /// 1. Minibuffer disabled in config → no-op.
+    /// 2. Minibuffer session already exists (created on a previous
     ///    run and rehydrated) → no-op; `resume_running_sessions`
     ///    already brought it back online.
-    /// 3. No orchestrator session yet → create one with the configured
+    /// 3. No minibuffer session yet → create one with the configured
     ///    harness. Failures (binary missing, capability negotiation,
     ///    initial prompt rejected) are logged and the daemon proceeds
-    ///    without an orchestrator — clients see palette mode.
-    pub async fn ensure_orchestrator(self: Arc<Self>) {
-        let harness = match self.config().orchestrator.effective_harness() {
+    ///    without a minibuffer — clients see palette mode.
+    pub async fn ensure_minibuffer(self: Arc<Self>) {
+        let harness = match self.config().minibuffer.effective_harness() {
             Some(h) => h.to_string(),
             None => {
-                tracing::info!("orchestrator disabled in config");
+                tracing::info!("minibuffer disabled in config");
                 return;
             }
         };
         // Already have a *live* one? Persisted summaries with
-        // `kind: Orchestrator` in any non-terminal state are reused.
-        // Terminal orchestrators (Errored / Done — usually from a
+        // `kind: Minibuffer` in any non-terminal state are reused.
+        // Terminal minibuffers (Errored / Done — usually from a
         // previous run when no API key was set) are left in place
         // for forensics but a fresh one is created so the user gets
         // a working panel.
@@ -370,21 +370,21 @@ impl SessionManager {
             let guard = self.sessions.read().await;
             for entry in guard.values() {
                 let s = entry.summary.read().await;
-                if s.kind == construct_protocol::SessionKind::Orchestrator && !s.state.is_terminal()
+                if s.kind == construct_protocol::SessionKind::Minibuffer && !s.state.is_terminal()
                 {
                     tracing::info!(
                         id = %s.id,
                         harness = %s.harness,
                         state = ?s.state,
-                        "orchestrator session already exists"
+                        "minibuffer session already exists"
                     );
                     return;
                 }
             }
         }
-        // Create fresh. Use the daemon process cwd so the orchestrator's
+        // Create fresh. Use the daemon process cwd so the minibuffer's
         // shell tools resolve relative paths from wherever the user
-        // started agentd. Interactive mode gives the orchestrator a
+        // started agentd. Interactive mode gives the minibuffer a
         // PTY-backed REPL — the TUI renders it in the minibuffer panel
         // and gets the line-editor / queue / slash popup polish from
         // smith interactive for free. The initial 80×10 pty_size is
@@ -398,13 +398,13 @@ impl SessionManager {
             cwd,
             prompt: None,
             model: None,
-            title: Some("orchestrator".to_string()),
+            title: Some("minibuffer".to_string()),
             mode: Some("interactive".to_string()),
             pty_size: Some(construct_protocol::PtySize { cols: 80, rows: 10 }),
             worktree: false,
             env: Default::default(),
             args: Vec::new(),
-            kind: construct_protocol::SessionKind::Orchestrator,
+            kind: construct_protocol::SessionKind::Minibuffer,
             parent_session_id: None,
             group_id: None,
             position_after_session_id: None,
@@ -414,12 +414,12 @@ impl SessionManager {
             Ok(id) => tracing::info!(
                 id = %id,
                 harness = %harness,
-                "orchestrator session created"
+                "minibuffer session created"
             ),
             Err(e) => tracing::warn!(
                 harness = %harness,
                 error = %e,
-                "orchestrator session create failed; clients fall back to palette mode"
+                "minibuffer session create failed; clients fall back to palette mode"
             ),
         }
     }
@@ -523,12 +523,12 @@ impl SessionManager {
             "CONSTRUCT_SESSION_DATA_DIR".to_string(),
             self.storage.session_dir(id).to_string_lossy().to_string(),
         );
-        let (project_id, current_model, operator_loop_disabled) = {
+        let (project_id, current_model, minibuffer_loop_disabled) = {
             let s = entry.summary.read().await;
             (
                 s.group_id.clone(),
                 s.model.clone(),
-                s.operator_loop_disabled,
+                s.minibuffer_loop_disabled,
             )
         };
         // The summary's model is the live source of truth — it tracks any
@@ -538,15 +538,15 @@ impl SessionManager {
         if current_model.is_some() {
             start_params.model = current_model;
         }
-        // Re-inject the operator loop toggle so the resumed adapter starts
+        // Re-inject the minibuffer loop toggle so the resumed adapter starts
         // with the same enabled/disabled state the user left it in.
-        if operator_loop_disabled {
+        if minibuffer_loop_disabled {
             start_params.env.insert(
-                "CONSTRUCT_OPERATOR_LOOP_DISABLED".to_string(),
+                "CONSTRUCT_MINIBUFFER_LOOP_DISABLED".to_string(),
                 "1".to_string(),
             );
         } else {
-            start_params.env.remove("CONSTRUCT_OPERATOR_LOOP_DISABLED");
+            start_params.env.remove("CONSTRUCT_MINIBUFFER_LOOP_DISABLED");
         }
         self.install_memory_env(&mut start_params.env, project_id.as_deref());
         let widgets_dir = self.storage.ensure_widgets_dir(id).unwrap_or_else(|e| {
@@ -746,7 +746,7 @@ impl SessionManager {
 
         // Notify clients that this session is alive again. A resumed
         // `Errored` session must stop looking terminal immediately so startup
-        // code (notably orchestrator creation) does not treat it as dead while
+        // code (notably minibuffer creation) does not treat it as dead while
         // waiting for the adapter's first Status event.
         let snapshot = {
             let mut s = entry.summary.write().await;

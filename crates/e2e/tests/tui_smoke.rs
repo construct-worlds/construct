@@ -7,7 +7,7 @@
 //! - TUI connects to the daemon over IPC and renders the
 //!   modeline (so the IPC + render path is exercised).
 //! - Command palette opens on `:` (the default keymap binding
-//!   for non-orchestrator panels).
+//!   for non-minibuffer panels).
 //! - `:remote-control` submits, which goes through
 //!   `run_slash_command` → `Client::remote_start` → the
 //!   supervisor and back as a popup.

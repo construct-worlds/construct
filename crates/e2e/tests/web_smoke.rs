@@ -2824,9 +2824,9 @@ async fn web_client_loads_and_websocket_connects() {
     assert_eq!(list_resize["after"]["collapsed"], true);
     assert_eq!(list_resize["after"]["stored"], "1");
 
-    // The daemon-owned orchestrator session is user-facing as "operator" in
+    // The daemon-owned minibuffer session is user-facing as "minibuffer" in
     // the web list, matching the Matrix-inspired command surface language.
-    let operator_label: serde_json::Value = page
+    let minibuffer_label: serde_json::Value = page
         .evaluate(
             r#"
             (() => {
@@ -2836,7 +2836,7 @@ async fn web_client_loads_and_websocket_connects() {
                 groups: state.groups,
               };
               try {
-                state.currentId = 's-operator';
+                state.currentId = 's-minibuffer';
                 state.sessions = [
                   {
                     id: 's-user',
@@ -2847,17 +2847,17 @@ async fn web_client_loads_and_websocket_connects() {
                     position: 0,
                   },
                   {
-                    id: 's-operator',
-                    title: 'orchestrator',
+                    id: 's-minibuffer',
+                    title: 'minibuffer',
                     harness: 'smith',
                     state: 'running',
-                    kind: 'orchestrator',
+                    kind: 'minibuffer',
                     position: 99,
                   },
                 ];
                 state.groups = [];
                 renderSessions();
-                const row = document.querySelector('.item.is-operator');
+                const row = document.querySelector('.item.is-minibuffer');
                 return {
                   text: row ? row.innerText : '',
                   firstId: document.querySelector('.session-list .item')?.dataset.id || '',
@@ -2873,25 +2873,25 @@ async fn web_client_loads_and_websocket_connects() {
             "#,
         )
         .await
-        .expect("evaluate operator label")
+        .expect("evaluate minibuffer label")
         .into_value::<serde_json::Value>()
         .expect("json object");
     assert!(
-        operator_label["text"]
+        minibuffer_label["text"]
             .as_str()
             .unwrap_or_default()
-            .contains("operator"),
-        "orchestrator row should render as operator: {operator_label:?}"
+            .contains("minibuffer"),
+        "minibuffer row should render as minibuffer: {minibuffer_label:?}"
     );
     assert!(
-        !operator_label["text"]
+        !minibuffer_label["text"]
             .as_str()
             .unwrap_or_default()
             .contains("god"),
-        "orchestrator row should not render old god label: {operator_label:?}"
+        "minibuffer row should not render old god label: {minibuffer_label:?}"
     );
-    assert_eq!(operator_label["firstId"], "s-operator");
-    assert_eq!(operator_label["hasOldGodClass"], false);
+    assert_eq!(minibuffer_label["firstId"], "s-minibuffer");
+    assert_eq!(minibuffer_label["hasOldGodClass"], false);
 
     // Issue #132: the web UI exposes pin/unpin for the selected session
     // (as a session-menu item whose label flips) and marks pinned rows visibly.
@@ -3020,7 +3020,7 @@ async fn web_client_loads_and_websocket_connects() {
     assert_eq!(status_icons["sp"]["icon"], "○");
     assert_eq!(status_icons["sr"]["icon"], "●");
     // Same dot as running, matching the TUI: at-a-prompt is idle, not
-    // blocked on the operator (spec 0169).
+    // blocked on the user (spec 0169).
     assert_eq!(status_icons["sa"]["icon"], "●");
     assert_eq!(status_icons["sz"]["icon"], "⏸");
     assert_eq!(status_icons["sd"]["icon"], "✓");

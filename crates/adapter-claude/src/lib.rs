@@ -154,7 +154,7 @@ fn activate_model_catalog_with(
     env.insert("ANTHROPIC_BASE_URL".to_string(), catalog_url);
     env.entry(GATEWAY_DISCOVERY_ENV.to_string())
         .or_insert_with(|| "1".to_string());
-    // Claude Code blocks gateway discovery on loopback unless the operator
+    // Claude Code blocks gateway discovery on loopback unless the user
     // explicitly opts in. Construct's gateway is intentionally loopback-only
     // and its path carries a per-session capability token.
     env.entry(GATEWAY_ALLOW_LOOPBACK_ENV.to_string())

@@ -1,6 +1,6 @@
 use super::{
     harness_picker_entries, list_session_indent_cells, App, ListItem, MatrixWidgetHitKind,
-    MinibufferChoiceAction, MinibufferIntent, PaneFocus, SESSION_LIST_H_MIN,
+    PromptChoiceAction, PromptIntent, PaneFocus, SESSION_LIST_H_MIN,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
@@ -11,7 +11,7 @@ impl App {
             MouseEventKind::ScrollDown => 1,
             _ => return false,
         };
-        let Some(area) = self.layout.minibuffer_area else {
+        let Some(area) = self.layout.prompt_area else {
             return false;
         };
         if ev.column < area.x
@@ -21,14 +21,14 @@ impl App {
         {
             return false;
         }
-        let Some(mb) = self.minibuffer.as_ref() else {
+        let Some(mb) = self.prompt.as_ref() else {
             return false;
         };
         let is_fork = match &mb.intent {
-            MinibufferIntent::NewSessionHarness => false,
-            MinibufferIntent::ForkSessionHarness { .. } => true,
+            PromptIntent::NewSessionHarness => false,
+            PromptIntent::ForkSessionHarness { .. } => true,
             // The turn picker wheels through its own selection.
-            MinibufferIntent::ForkTurnPick { .. } => {
+            PromptIntent::ForkTurnPick { .. } => {
                 let len = self.turn_picker_entries.len();
                 if len > 0 {
                     let selected = self.turn_picker_selected.min(len - 1);
@@ -84,12 +84,12 @@ impl App {
                 return false;
             }
         }
-        if let Some((xs, xe, y)) = self.layout.matrix_operator_title_hit {
+        if let Some((xs, xe, y)) = self.layout.matrix_minibuffer_title_hit {
             if row == y && col >= xs && col < xe {
                 return false;
             }
         }
-        if let Some((xs, xe, y)) = self.layout.matrix_operator_loop_hit {
+        if let Some((xs, xe, y)) = self.layout.matrix_minibuffer_loop_hit {
             if row == y && col >= xs && col < xe {
                 return false;
             }
@@ -119,13 +119,13 @@ impl App {
         Some(inner_h.saturating_sub(SESSION_LIST_H_MIN))
     }
 
-    pub(super) async fn click_minibuffer(
+    pub(super) async fn click_prompt(
         &mut self,
         mb_area: ratatui::layout::Rect,
         col: u16,
         row: u16,
     ) {
-        if let Some(mb) = self.minibuffer.as_mut() {
+        if let Some(mb) = self.prompt.as_mut() {
             // Harness picker: clicking an available name submits it
             // as if the user typed and pressed Enter. Unavailable
             // names are visually disabled (strikethrough); clicks
@@ -133,9 +133,9 @@ impl App {
             // the hover tooltip explains why.
             if matches!(
                 mb.intent,
-                MinibufferIntent::NewSessionHarness | MinibufferIntent::ForkSessionHarness { .. }
+                PromptIntent::NewSessionHarness | PromptIntent::ForkSessionHarness { .. }
             ) {
-                let hits = self.layout.minibuffer_harness_hits.clone();
+                let hits = self.layout.prompt_harness_hits.clone();
                 for hit in hits {
                     if hit.y == row && col >= hit.x_start && col < hit.x_end {
                         if !hit.available {
@@ -144,21 +144,21 @@ impl App {
                             return;
                         }
                         let intent = mb.intent.clone();
-                        self.minibuffer = None;
-                        self.run_minibuffer_submit(intent, hit.name).await;
+                        self.prompt = None;
+                        self.run_prompt_submit(intent, hit.name).await;
                         return;
                     }
                 }
             }
             // Turn picker (spec 0163): clicking a row selects that turn and
             // submits it, exactly as Enter on it would.
-            if matches!(mb.intent, MinibufferIntent::ForkTurnPick { .. }) {
-                let hits = self.layout.minibuffer_turn_hits.clone();
+            if matches!(mb.intent, PromptIntent::ForkTurnPick { .. }) {
+                let hits = self.layout.prompt_turn_hits.clone();
                 for hit in hits {
                     if hit.y == row && col >= hit.x_start && col < hit.x_end {
                         self.turn_picker_selected = hit.index;
                         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-                        self.handle_minibuffer_key(key).await;
+                        self.handle_prompt_key(key).await;
                         return;
                     }
                 }
@@ -172,18 +172,18 @@ impl App {
             // blanket no-op for `ApproveTool` with real per-choice
             // handling, and is the only place any of these intents gets
             // mouse support at all.
-            let choice_hits = self.layout.minibuffer_choice_hits.clone();
+            let choice_hits = self.layout.prompt_choice_hits.clone();
             for hit in choice_hits {
                 if hit.y == row && col >= hit.x_start && col < hit.x_end {
                     match hit.action {
-                        MinibufferChoiceAction::Key(c) => {
+                        PromptChoiceAction::Key(c) => {
                             let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
-                            self.handle_minibuffer_key(key).await;
+                            self.handle_prompt_key(key).await;
                         }
-                        MinibufferChoiceAction::Submit(choice) => {
+                        PromptChoiceAction::Submit(choice) => {
                             let intent = mb.intent.clone();
-                            self.minibuffer = None;
-                            self.run_minibuffer_submit(intent, choice).await;
+                            self.prompt = None;
+                            self.run_prompt_submit(intent, choice).await;
                         }
                     }
                     return;
@@ -208,7 +208,7 @@ impl App {
     }
 
     pub(super) async fn click_list(&mut self, list: ratatui::layout::Rect, col: u16, row: u16) {
-        // Matrix-rain title-bar controls are part of the Operator surface, not a
+        // Matrix-rain title-bar controls are part of the User surface, not a
         // request to focus the session list. The title bar stays visible even
         // when the panel is collapsed (only the bar shows), so handle its
         // controls regardless of collapsed state, before the generic focus path.
@@ -245,22 +245,22 @@ impl App {
                     return;
                 }
             }
-            if let Some((xs, xe, y)) = self.layout.matrix_operator_loop_hit {
+            if let Some((xs, xe, y)) = self.layout.matrix_minibuffer_loop_hit {
                 if row == y && col >= xs && col < xe {
-                    if let Some(id) = self.orchestrator_id.clone() {
-                        let cmd = if self.operator_loop_disabled() {
-                            "/operator enable"
+                    if let Some(id) = self.minibuffer_id.clone() {
+                        let cmd = if self.minibuffer_loop_disabled() {
+                            "/minibuffer enable"
                         } else {
-                            "/operator disable"
+                            "/minibuffer disable"
                         };
                         let _ = self.client.send_input(&id, cmd.to_string()).await;
                     }
                     return;
                 }
             }
-            if let Some((xs, xe, y)) = self.layout.matrix_operator_title_hit {
+            if let Some((xs, xe, y)) = self.layout.matrix_minibuffer_title_hit {
                 if row == y && col >= xs && col < xe {
-                    self.toggle_orchestrator_panel();
+                    self.toggle_minibuffer_panel();
                     return;
                 }
             }
@@ -328,7 +328,7 @@ impl App {
         // region also settles the sidebar's sub-focus back on the rows
         // (the lineage-section arms above returned before this point).
         self.lineage_focused = false;
-        self.collapse_orchestrator_panel_on_focus_change();
+        self.collapse_minibuffer_panel_on_focus_change();
         // Collapsed list pane: any click in the pane (border or
         // body) just re-expands. Don't try to interpret as a row /
         // button click — the geometry is meaningless at 3 cells.

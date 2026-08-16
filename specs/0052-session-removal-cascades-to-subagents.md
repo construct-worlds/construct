@@ -57,7 +57,7 @@ optional cascade for groups, made automatic for the tighter parent/subagent bond
 
 ## Examples
 
-- An orchestrator archives a finished parent session; its three review subagents
+- An minibuffer archives a finished parent session; its three review subagents
   are archived with it and disappear from the active list, transcripts intact and
   restartable.
 - A user deletes a session that spawned a subagent which itself spawned a nested

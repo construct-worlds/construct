@@ -31,7 +31,7 @@ impl App {
             }
         }
 
-        (self.is_on_orchestrator_panel_divider(col, row)
+        (self.is_on_minibuffer_panel_divider(col, row)
             || self.is_on_matrix_rain_title_bar(col, row)
             || self
                 .layout
@@ -47,21 +47,21 @@ impl App {
         .then_some("↕")
     }
     pub(super) fn selection_bounds_at(&self, col: u16, row: u16) -> Option<ratatui::layout::Rect> {
-        let is_orchestrator_panel = matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::Orchestrator)
+        let is_minibuffer_panel = matches!(
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::Minibuffer)
         );
-        selection_bounds_for_layout(&self.layout, is_orchestrator_panel, col, row)
+        selection_bounds_for_layout(&self.layout, is_minibuffer_panel, col, row)
     }
 
-    /// True if `(col, row)` sits on the orchestrator/operator panel's top border.
-    /// That border is the visible horizontal title line when operator is focused
+    /// True if `(col, row)` sits on the minibuffer/minibuffer panel's top border.
+    /// That border is the visible horizontal title line when minibuffer is focused
     /// and is used as a vertical resize handle.
-    pub(super) fn is_on_orchestrator_panel_divider(&self, col: u16, row: u16) -> bool {
-        if !self.is_orchestrator_panel_open() {
+    pub(super) fn is_on_minibuffer_panel_divider(&self, col: u16, row: u16) -> bool {
+        if !self.is_minibuffer_panel_open() {
             return false;
         }
-        let Some(area) = self.layout.minibuffer_area else {
+        let Some(area) = self.layout.prompt_area else {
             return false;
         };
         area.height > 1 && row == area.y && col >= area.x && col < area.x + area.width
@@ -125,10 +125,10 @@ impl App {
             }
         }
         if matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::Orchestrator)
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::Minibuffer)
         ) {
-            if let Some(area) = self.layout.minibuffer_area {
+            if let Some(area) = self.layout.prompt_area {
                 let inner = ratatui::layout::Rect {
                     x: area.x,
                     y: area.y.saturating_add(1),
@@ -454,15 +454,15 @@ impl App {
     }
 
     pub(super) fn adjust_mouse_scrollback(&mut self, col: u16, row: u16, delta: i32) {
-        if self.is_orchestrator_panel_open() {
-            if let Some(area) = self.layout.minibuffer_area {
+        if self.is_minibuffer_panel_open() {
+            if let Some(area) = self.layout.prompt_area {
                 if col >= area.x
                     && col < area.x + area.width
                     && row >= area.y
                     && row < area.y + area.height
                 {
-                    self.orchestrator_scrollback =
-                        adjusted_scrollback(self.orchestrator_scrollback, delta);
+                    self.minibuffer_scrollback =
+                        adjusted_scrollback(self.minibuffer_scrollback, delta);
                     return;
                 }
             }

@@ -457,7 +457,7 @@ impl ServiceIngress {
 
     /// Resolve the session currently serving a routing key, if one is alive.
     ///
-    /// A routing entry outlives the session it points at: an operator can
+    /// A routing entry outlives the session it points at: a user can
     /// delete a routed session at any time, from any client. A dangling entry
     /// is dropped here so the next delivery opens a fresh conversation —
     /// otherwise that key stays stuck, failing every delivery it ever receives
@@ -653,7 +653,7 @@ impl ServiceIngress {
             let waited = (chrono::Utc::now() - pending.since).num_seconds().max(0);
             let timeout = self.shared.config().approval_timeout_secs;
             if timeout > 0 && waited >= timeout as i64 {
-                // Nobody answered in the window the operator allowed, so stop
+                // Nobody answered in the window the user allowed, so stop
                 // holding the caller: deny, let the turn resume, and report the
                 // refusal rather than reporting "still working" forever.
                 let _ = self
@@ -679,7 +679,7 @@ impl ServiceIngress {
                     tool: pending.tool,
                     summary: Some(pending.summary),
                     waited_seconds: waited,
-                    outcome: "awaiting_operator",
+                    outcome: "awaiting_minibuffer",
                 });
             }
         }
@@ -1035,7 +1035,7 @@ fn publish_progress(
     }
 }
 
-/// A tool call this session is stopped at, waiting for the operator.
+/// A tool call this session is stopped at, waiting for the user.
 pub(super) struct PendingApproval {
     pub(super) call_id: String,
     pub(super) tool: String,
@@ -1047,7 +1047,7 @@ pub(super) struct PendingApproval {
 ///
 /// Resolutions are not recorded in the transcript, so a pending approval is
 /// identified positionally: it is pending exactly when the request is the last
-/// thing of consequence in the transcript. Once the operator answers, the
+/// thing of consequence in the transcript. Once the user answers, the
 /// turn appends past it and the request stops trailing.
 pub(super) fn pending_approval(
     events: &[construct_protocol::TimestampedEvent],
@@ -1125,7 +1125,7 @@ pub(super) mod tests {
                 tool: "shell".into(),
                 summary: Some("run tests".into()),
                 waited_seconds: 9,
-                outcome: "awaiting_operator",
+                outcome: "awaiting_minibuffer",
             }),
         };
 
@@ -1142,7 +1142,7 @@ pub(super) mod tests {
                     "tool": "shell",
                     "summary": "run tests",
                     "waited_seconds": 9,
-                    "outcome": "awaiting_operator",
+                    "outcome": "awaiting_minibuffer",
                 },
             })
         );
@@ -1476,7 +1476,7 @@ pub(super) mod tests {
 
     /// Deleting a routed session must not brick its routing key.
     ///
-    /// Nothing prunes the routing map when a session is deleted — the operator
+    /// Nothing prunes the routing map when a session is deleted — the user
     /// can do that from any client, and the service never hears about it — so
     /// the delivery path has to tolerate an entry pointing at a session that is
     /// gone. Left unhandled, every later delivery on that key failed on the
@@ -1692,7 +1692,7 @@ pub(super) mod tests {
                 archived: false,
                 forked_from: None,
                 merge: None,
-                operator_loop_disabled: false,
+                minibuffer_loop_disabled: false,
                 needs_attention: false,
             },
             events: events
@@ -1810,7 +1810,7 @@ pub(super) mod tests {
     fn a_turn_stopped_at_an_approval_is_waiting_not_finished() {
         // An approval is the one kind of stop that is *supposed* to last: it
         // resolves when a human acts. Calling it a failure would replace a
-        // truthful "waiting for an operator" with a wrong "it broke".
+        // truthful "waiting for a user" with a wrong "it broke".
         let mut watch = TurnWatch::default();
         let start = tokio::time::Instant::now();
         watch.settled_without_answer(&watched(SessionState::Running, false, vec![]), start);

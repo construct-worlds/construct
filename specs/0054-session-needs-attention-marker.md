@@ -3,12 +3,12 @@
 Status: accepted
 Date: 2026-06-28
 Area: ux
-Scope: How the daemon detects that a session has stopped working and surfaces a sticky "needs you" marker the operator clears by looking.
+Scope: How the daemon detects that a session has stopped working and surfaces a sticky "needs you" marker the user clears by looking.
 
 ## Decision
 
 A session carries a persisted boolean "needs attention" marker, separate from
-its run state. It is the operator's fleet-inbox signal: "this session is waiting
+its run state. It is the user's fleet-inbox signal: "this session is waiting
 on you."
 
 - **It is not a new run state.** The existing run states (`Running`,
@@ -17,17 +17,17 @@ on you."
   persists after the transition that produced it.
 - **The daemon owns detection.** The marker is raised when a session leaves
   `Running` for a non-running state (`AwaitingInput`, `Done`, `Errored`) and
-  the session is not the one the operator is currently focused on. It is
-  cleared when the operator switches to (focuses) the session, and also when
+  the session is not the one the user is currently focused on. It is
+  cleared when the user switches to (focuses) the session, and also when
   the session returns to `Running` (it is no longer waiting).
-- **The stop must follow activity the operator hasn't seen.** A session going
+- **The stop must follow activity the user hasn't seen.** A session going
   non-running only flags if genuine session activity (output, messages, tool
   calls, a terminal event) arrived *while the session was not focused* since the
-  operator last looked. Activity in the focused session does not count — in
-  particular the operator's own keystrokes echoing at a prompt. Otherwise:
+  minibuffer last looked. Activity in the focused session does not count — in
+  particular the user's own keystrokes echoing at a prompt. Otherwise:
   focus an idle session, type and clear it without submitting, switch away, and
   the echo-then-idle would falsely flag it. This "unseen activity since seen"
-  signal is in-memory and reset whenever the operator views the session.
+  signal is in-memory and reset whenever the user views the session.
 - **Every harness must reach an accurate non-running state.** Harnesses that
   emit structured lifecycle events already do. Interactive PTY harnesses, which
   otherwise sit in `Running` forever, get daemon-side detection via a hybrid:
@@ -51,7 +51,7 @@ on you."
   broken by any silence long enough to have triggered quiescence. Shorter
   blips leave the session's state and markers completely untouched; without
   this rule every idle, unfocused session re-raises its marker on each
-  housekeeping repaint, showing the operator a dot with nothing new to see.
+  housekeeping repaint, showing the user a dot with nothing new to see.
 - **A resume repaint is not activity.** When the daemon respawns a session
   whose harness repaints itself on resume (and when the daemon then forces an
   additional redraw), the child redraws its *old* conversation — sustained
@@ -69,9 +69,9 @@ on you."
   daemon restart raises the marker on every backgrounded session — a fleet
   of dots with nothing new behind them.
 - **Harness-native mirrors never carry the marker.** A read-only projection of
-  a harness's own child is not a session the operator can drive — no input, no
+  a harness's own child is not a session the user can drive — no input, no
   resume, no approvals — so "waiting on you" would name an action that does not
-  exist; the owning harness is what drives the child, and the operator's lever
+  exist; the owning harness is what drives the child, and the user's lever
   is the owning session's own row. The daemon does not raise the marker on a
   mirror, mirrors do not contribute to a collapsed ancestor's rolled-up dot,
   and clients do not paint one for a mirror even if a stored marker says
@@ -90,12 +90,12 @@ on you."
 
 ## Reason
 
-Operators run many sessions in parallel and need to know which ones to attend
+Minibuffers run many sessions in parallel and need to know which ones to attend
 to. `AwaitingInput` alone is ambiguous — it conflates "finished, idle" with
 "blocked, needs a decision" — and an inferred "unread output" flag is passive
 (it says nobody looked, not that anybody must). A sticky marker driven off the
 stop transition is high-precision: idle-but-seen sessions stay quiet, freshly
-stopped ones light up, and the operator clears them simply by looking.
+stopped ones light up, and the user clears them simply by looking.
 
 Detection must live in the daemon because it is the single source of truth all
 clients read, and because the two interactive cases have genuinely different
@@ -138,13 +138,13 @@ daemon, which already tracks last-output time.
   eventually stops.
 - The "focused session" used to suppress the marker is global to the daemon
   (last switch wins). With multiple simultaneous viewers this is approximate;
-  single-operator use is exact. Don't build per-viewer marker state on top of
+  single-minibuffer use is exact. Don't build per-viewer marker state on top of
   this without revisiting the model.
 - The marker is orthogonal to run state and to pinning/archival. It must not be
   repurposed as a state variant, and clients must treat it as advisory display,
   not control flow.
 - Excluding mirrors means a native child that genuinely stalls waiting on
-  something raises no dot of its own. Accepted: the operator acts through the
+  something raises no dot of its own. Accepted: the user acts through the
   owning session, which flags normally when it stops. If a harness ever gains a
   real control contract for its children, revisit this alongside the rest of
   that contract rather than lighting a dot no action can clear.
@@ -160,14 +160,14 @@ daemon, which already tracks last-output time.
 ## Examples
 
 - A backgrounded coding session finishes its turn and goes idle → after it stops
-  producing output it is marked; the operator sees the dot, switches to it, and
+  producing output it is marked; the user sees the dot, switches to it, and
   the dot clears.
 - A shell session's long build finishes and it returns to the prompt → marked
   immediately (foreground group is the shell again).
-- The operator is actively viewing a session when it stops → no dot (the focused
+- The user is actively viewing a session when it stops → no dot (the focused
   session is suppressed).
 - The daemon restarts while three sessions were waiting → all three still show
-  the dot; the session the operator reopens clears as the viewer re-asserts
+  the dot; the session the user reopens clears as the viewer re-asserts
   focus.
 - The daemon restarts with ten idle, un-marked sessions → each respawned
   harness repaints its old screen over several seconds and goes quiet →

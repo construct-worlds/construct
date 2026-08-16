@@ -194,7 +194,7 @@ channel shows while it works. Nothing appears for a turn that answers promptly
 | `off` | Says nothing until the answer is ready. |
 
 If the turn stops at a tool approval, the affordance says so and names the
-tool — that turn will not resume until an operator acts in the TUI, and the
+tool — that turn will not resume until a user acts in the TUI, and the
 person waiting in Slack cannot see that prompt. A turn that ends without an
 answer now reports that in the thread instead of only in the daemon log.
 

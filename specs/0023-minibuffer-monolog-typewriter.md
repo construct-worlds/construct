@@ -1,0 +1,29 @@
+# 0023-minibuffer-monolog-typewriter
+
+Status: accepted
+Date: 2026-06-06
+Area: tui
+Scope: How the minibuffer (minibuffer) surfaces its spoken messages to the user.
+
+## Decision
+
+The minibuffer surfaces in two ways, and it chooses by *which event it emits*:
+
+- **Findings the user should act on or keep → a Minibuffer widget** (`UiPanel`), the existing mechanism rendered in the matrix area. Persistent.
+- **Monolog / "what I just did" narration → a typewriter line over the matrix rain.** When the minibuffer finishes a turn with substantive text, the matrix-rain body briefly becomes a monochrome terminal: the line types out, holds, fades, and the rain resumes. Ephemeral; nothing to open.
+
+The TUI consolidates the minibuffer's streaming assistant `Message` deltas across a turn into one finalized string at turn end (`AgentStatus active=false`), filters the internal `noted`/empty no-op token, and plays it once as the monolog. No new protocol event — `Message` (stream) vs `UiPanel` (widget) already distinguishes the two.
+
+**Channel principle (minibuffer prompt):** the monolog is literally the minibuffer's *monolog* — a low-stakes FYI that fades and the user cannot reply to. So text is for passing narration only; **anything that needs a user action/decision, or any important notification, MUST be a widget** (widgets persist and carry action links the user can act on). `noted` for nothing. A text monolog must never carry a question, a decision request, or something important — the user may not be looking and has no way to respond.
+
+## Reason
+
+The minibuffer's text replies landed only in the daemon-owned minibuffer panel, which is collapsed by default (`minibuffer_panel_h: None`) — so a genuinely useful line ("'run using smith' is waiting at the folder trust prompt — press Enter") was invisible unless the user opened the panel. The matrix area is the minibuffer's always-visible visual home, so surfacing its monolog there (without stealing focus or a panel) closes the gap. A typewriter over the rain is ambient: visible but not modal, and self-dismissing.
+
+## Consequences
+
+A short minibuffer reply now reaches the user with the panel closed; the panel remains the full-detail/scrollback view. Only substantive replies show (`noted`/empty are dropped). One monolog at a time — a newer utterance replaces an older one. The monolog rides the existing matrix animation tick, so it needs no extra redraw machinery; it renders only while the matrix rain is visible. Widgets still render on top of a monolog, so an open widget isn't hidden. The minibuffer system prompt was updated to tell the minibuffer its short text shows as a fading monolog and to use widgets for anything persistent/actionable.
+
+## Non-Goals
+
+Not a transient toast, OS notification, or auto-opening panel (considered, rejected as either missable or focus-stealing); not a new protocol/`SessionEvent` variant; does not change the minibuffer panel, the minibuffer title/status, or the widget rendering path; does not surface non-minibuffer sessions' messages this way.

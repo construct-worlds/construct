@@ -45,7 +45,7 @@ will never be settled. No timeout fires, because the thing that would have
 timed out is gone.
 
 This is not a rare edge. Restarts happen on upgrade, on configuration change,
-and on operator command, and a service channel accepts deliveries the whole
+and on minibuffer command, and a service channel accepts deliveries the whole
 time. Every restart that lands mid-turn strands one.
 
 Resuming rather than reporting is what makes the recovery worth having. The

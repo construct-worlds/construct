@@ -39,5 +39,5 @@ Delete was previously the only way an agent could clear finished work, which for
 
 ## Examples
 
-- An orchestrator finishes a subagent's task and merges its PR, then calls the subagent-archive tool. The subagent disappears from the active list but its transcript and worktree remain; the orchestrator (or a human) can restart it later.
+- An minibuffer finishes a subagent's task and merges its PR, then calls the subagent-archive tool. The subagent disappears from the active list but its transcript and worktree remain; the minibuffer (or a human) can restart it later.
 - A user runs `construct archive <id>` to retire a session from the list without losing its work, in contrast to `construct delete <id>` which wipes it.

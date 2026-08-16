@@ -128,7 +128,7 @@ breaking the rest of the list.
 
 ## MCP
 
-Agents (and the orchestrator) reach verbs through `construct_playbook_list_verbs`
+Agents (and the minibuffer) reach verbs through `construct_playbook_list_verbs`
 (returns each verb's `name`, `label`, `effect`, and `interaction`) and
 `construct_playbook_verb_execute` (`verb: <name>`, `selection: <markdown>`).
 

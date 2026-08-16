@@ -7,7 +7,7 @@ impl SessionManager {
         if entry.is_deleted() {
             return;
         }
-        // Operator-initiated shutdown: the adapter exiting may still
+        // Minibuffer-initiated shutdown: the adapter exiting may still
         // flush a `Done` / `Error` event (e.g. the shell adapter's
         // PTY emits `Done` when the wrapped process dies). Letting
         // those land would transition the session to terminal and
@@ -223,12 +223,12 @@ impl SessionManager {
             }
             return;
         }
-        if let SessionEvent::OperatorLoopChanged { enabled } = &event {
-            if let Err(e) = self.persist_operator_loop(entry, *enabled).await {
+        if let SessionEvent::MinibufferLoopChanged { enabled } = &event {
+            if let Err(e) = self.persist_minibuffer_loop(entry, *enabled).await {
                 tracing::warn!(
                     session = %entry.id,
                     error = ?e,
-                    "persist operator loop from adapter event failed"
+                    "persist minibuffer loop from adapter event failed"
                 );
             }
             return;
@@ -361,7 +361,7 @@ impl SessionManager {
                 // daemon restart lights the dot on all backgrounded
                 // sessions. The quiescence poll ends the window. See spec 0054.
                 let settling = entry.resume_settling_since_ms.load(Ordering::Relaxed) > 0;
-                // PTY output the operator isn't looking at is unseen activity — it's
+                // PTY output the user isn't looking at is unseen activity — it's
                 // what makes a later idle "need you". Output in the focused session
                 // (their own keystrokes echoing) must not count. See spec 0054.
                 if genuine && !settling && !is_focused {
@@ -534,7 +534,7 @@ impl SessionManager {
                 // Transient; handled by the broadcast-only fast path above.
                 | SessionEvent::ToolApprovalResolved { .. }
                 | SessionEvent::ApprovalModeChanged { .. }
-                | SessionEvent::OperatorLoopChanged { .. }
+                | SessionEvent::MinibufferLoopChanged { .. }
                 | SessionEvent::ModelChanged { .. }
                 | SessionEvent::NativeIdChanged { .. }
                 | SessionEvent::EffortChanged { .. }
@@ -559,18 +559,18 @@ impl SessionManager {
                 }
             }
             // Maintain the sticky "needs you" marker off state transitions:
-            // raise it when the session stops being Running (unless the operator
+            // raise it when the session stops being Running (unless the user
             // is already viewing it), clear it when it resumes. See spec 0054.
             if s.state != prev_state {
                 match s.state {
                     SessionState::Running => s.needs_attention = false,
                     SessionState::AwaitingInput | SessionState::Done | SessionState::Errored => {
-                        // Only flag if something happened while the operator
+                        // Only flag if something happened while the user
                         // wasn't looking — not their own input echo in a focused
                         // session they then switched away from. See spec 0054.
                         //
                         // A harness-native mirror never flags: it is a
-                        // read-only projection (spec 0079) the operator
+                        // read-only projection (spec 0079) the user
                         // cannot drive, so "waiting on you" would promise an
                         // action that does not exist — the owning harness is
                         // what drives the child. See spec 0054.
@@ -760,7 +760,7 @@ impl SessionManager {
                 approval_mode: owner_summary.approval_mode,
                 kind: construct_protocol::SessionKind::Subagent,
                 archived: false,
-                operator_loop_disabled: true,
+                minibuffer_loop_disabled: true,
                 needs_attention: false,
                 forked_from: None,
                 merge: None,
@@ -924,7 +924,7 @@ impl SessionManager {
     }
 }
 
-// Events that represent genuine session activity the operator would want to
+// Events that represent genuine session activity the user would want to
 // see, used to gate the `needs_attention` marker (spec 0054): a session going
 // idle only flags when one of these arrived while it wasn't the focused one.
 pub(super) fn event_is_unseen_activity(e: &SessionEvent) -> bool {

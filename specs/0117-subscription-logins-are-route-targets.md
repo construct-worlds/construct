@@ -112,7 +112,7 @@ failure than a corrupted credential store.
   as adding a routable harness. None of it may be guessed.
 - Reading another application's stored credential and presenting it to that
   application's backend has terms-of-service implications that belong to
-  the operator, not to Construct. Automatic discovery is scoped to
+  the user, not to Construct. Automatic discovery is scoped to
   harnesses deliberately launched through Construct, is read-only until a
   published route is selected, and has an explicit opt-out.
 

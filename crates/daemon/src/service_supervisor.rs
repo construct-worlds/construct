@@ -175,7 +175,7 @@ pub struct PortConflict {
 /// The channels that should be bound, given these definitions.
 ///
 /// Paused services and disabled channels contribute nothing, which is what
-/// lets an operator free a port by pausing. When two channels ask for the same
+/// lets a user free a port by pausing. When two channels ask for the same
 /// port the earlier key wins deterministically, so a hand-edited duplicate
 /// cannot take a port away from a service that is already serving.
 pub fn desired_listeners(
@@ -1128,7 +1128,7 @@ mod tests {
     #[test]
     fn every_editable_field_declares_when_it_applies() {
         use construct_protocol::{PropagationClass, ServiceField};
-        // The classes are what the UI promises an operator, so each one has to
+        // The classes are what the UI promises a user, so each one has to
         // match what this module actually does with the field.
         for field in ServiceField::ALL {
             let _ = field.propagation().label();

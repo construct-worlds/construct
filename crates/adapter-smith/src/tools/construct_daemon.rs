@@ -343,7 +343,7 @@ impl Tool for CreateSession {
             env: Default::default(),
             args: Vec::new(),
             // Sessions created via the agentd-control tool are always
-            // user sessions — the orchestrator is daemon-internal only.
+            // user sessions — the minibuffer is daemon-internal only.
             kind: construct_protocol::SessionKind::User,
             parent_session_id: None,
             group_id: input
@@ -829,7 +829,7 @@ impl Tool for PlaybookGet {
 }
 
 /// Native mirror of the MCP `construct_playbook_edit` tool, minus shimmer
-/// declaration. Exists so a smith session — the orchestrator included — can
+/// declaration. Exists so a smith session — the minibuffer included — can
 /// apply an anchored Playbook edit without an MCP connection; today the only
 /// caller is verb-drift escalation (spec 0089), where the daemon asks the
 /// Playbook-owning session to reconcile a subagent's result whose selection

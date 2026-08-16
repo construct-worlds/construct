@@ -11,7 +11,7 @@ When the session rows exceed their viewport, the TUI renders a vertical
 scrollbar over the rows' rightmost column only while the session rows have
 active keyboard focus or the pointer is over the session-list header or rows.
 The scrollbar hides when neither condition is true. Hovering the lineage or
-operator regions below the rows does not reveal the session-list scrollbar.
+minibuffer regions below the rows does not reveal the session-list scrollbar.
 
 Hover-reveal requires a terminal that reports pointer motion. Until the TUI
 has observed at least one genuine motion event in the current run, it must

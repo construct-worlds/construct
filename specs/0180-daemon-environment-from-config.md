@@ -47,7 +47,7 @@ a client, or by a service manager — where "the shell that launched it" is not
 a meaningful thing to point at.
 
 Keeping the real environment on top preserves every existing deployment: a
-machine that exports its keys behaves exactly as before, and an operator can
+machine that exports its keys behaves exactly as before, and a user can
 still override a declared value for one run.
 
 ## Consequences

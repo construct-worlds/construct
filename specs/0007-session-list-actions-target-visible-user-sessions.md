@@ -13,7 +13,7 @@ Session list actions should operate on visible user sessions, not hidden system 
 
 List actions should match the user's visible model. If a reorder or navigation command affects hidden rows, the result feels unpredictable and can appear broken.
 
-Hidden orchestrator sessions and collapsed project contents are implementation or organization details from the user's current point of view.
+Hidden minibuffer sessions and collapsed project contents are implementation or organization details from the user's current point of view.
 
 ## Consequences
 

@@ -811,7 +811,7 @@ impl App {
         let selectable = self
             .sessions
             .iter()
-            .filter(|s| s.kind != construct_protocol::SessionKind::Orchestrator && !s.archived)
+            .filter(|s| s.kind != construct_protocol::SessionKind::Minibuffer && !s.archived)
             .count();
         let subagent_listed = self
             .tutorial
@@ -1155,17 +1155,17 @@ impl App {
 
     /// Pragmatic addition beyond the three canonical hooks: headless
     /// sessions (no PTY) send input through the minibuffer's `SendInput`
-    /// intent, which is handled entirely inside `run_minibuffer_submit` and
+    /// intent, which is handled entirely inside `run_prompt_submit` and
     /// never resolves to a `KeyAction` or produces a distinguishable
     /// notification. Called from the top of that function.
-    pub fn tutorial_observe_minibuffer_submit(&mut self, intent: &MinibufferIntent, input: &str) {
+    pub fn tutorial_observe_minibuffer_submit(&mut self, intent: &PromptIntent, input: &str) {
         let Some(t) = self.tutorial.as_mut() else {
             return;
         };
         if t.completed || t.step != 3 || input.trim().is_empty() {
             return;
         }
-        if let MinibufferIntent::SendInput { session_id } = intent {
+        if let PromptIntent::SendInput { session_id } = intent {
             if t.practice_session_id.as_deref() == Some(session_id.as_str()) {
                 t.advance(4);
             }

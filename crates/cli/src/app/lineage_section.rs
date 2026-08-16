@@ -1,5 +1,5 @@
 //! The sidebar's lineage section (spec 0081): a collapsible region of the
-//! session-list pane, between the session rows and the operator/matrix-rain
+//! session-list pane, between the session rows and the user/matrix-rain
 //! panel, that renders the SELECTED session's fork/subagent lineage tree.
 //!
 //! This replaces the floating hover/pin preview that used to anchor to the
@@ -395,7 +395,7 @@ mod tests {
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: construct_protocol::SessionKind::User,
             archived: false,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
             merge: None,

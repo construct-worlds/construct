@@ -62,7 +62,7 @@ The recovery is deliberately confined to the delivery path.
 
 ## Examples
 
-- A caller has been talking to a service under a stable key. An operator deletes
+- A caller has been talking to a service under a stable key. A user deletes
   that session from the TUI. The caller's next message opens a new session and
   is answered; the reply has no memory of the earlier exchange.
 - A service routes every delivery to one shared session. That session is

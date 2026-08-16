@@ -105,5 +105,5 @@ without teaching it the other's implementation details.
   The tunnel carries opaque bytes; the database channel performs its own
   handshake and authentication.
 - A service is paused while its channel is public. The publication route is
-  withdrawn. Resuming restores only the loopback listener until the operator
+  withdrawn. Resuming restores only the loopback listener until the user
   explicitly publishes again.

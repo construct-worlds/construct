@@ -401,7 +401,7 @@ fn dominant_cwd(members: &[&SessionSummary]) -> Option<String> {
 }
 
 /// What a member card's content line says: the one fact about this session
-/// the operator would otherwise open it to learn. Ordered by urgency —
+/// the user would otherwise open it to learn. Ordered by urgency —
 /// a waiting approval beats everything, an error beats conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CardLine {
@@ -969,7 +969,7 @@ mod tests {
             approval_mode: Default::default(),
             kind: SessionKind::User,
             archived: false,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: attention,
             forked_from: None,
             merge: None,
@@ -1036,7 +1036,7 @@ mod tests {
     /// session" in urgency order: a waiting approval preempts everything,
     /// an error preempts conversation, and only an *unwatched* stop turns
     /// assistant text into an "asks" — idle interactive sessions the
-    /// operator already saw stay at "last".
+    /// user already saw stay at "last".
     #[test]
     fn card_line_ranks_approval_over_error_over_conversation() {
         let mut s = session("s", Some("p"), SessionState::Errored, false);
@@ -1159,7 +1159,7 @@ mod tests {
             legend.contains("● claude-opus-5")
                 && legend.contains("idle")
                 && legend.contains("Σ idle"),
-            "project legend should use the operator legend layout: {legend:?}"
+            "project legend should use the minibuffer legend layout: {legend:?}"
         );
 
         // A pane too short for a meter draws none, and clears the rect.

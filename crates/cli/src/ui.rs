@@ -2,8 +2,8 @@
 
 use crate::app::{
     feature_guidance, harness_guidance, harness_picker_entries, smith_method_guidance, App,
-    ConfigureTab, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Minibuffer,
-    MinibufferChoiceAction, MinibufferChoiceHit, MinibufferIntent, PaneFocus, RemoteControlHit,
+    ConfigureTab, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Prompt,
+    PromptChoiceAction, PromptChoiceHit, PromptIntent, PaneFocus, RemoteControlHit,
     RemoteControlHitAction, ScreenPoint, Selection, ServiceTitleMenuAction, SessionTitleMenuAction,
     TextSelectionRange, TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit,
     WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS,
@@ -163,8 +163,8 @@ impl FrameSlide {
 /// Split `area` into the sliding main block and the footer strip below it,
 /// advancing the slide animation toward whatever the footer now demands.
 pub(crate) fn frame_layout(app: &mut App, area: Rect, modeline_h: u16, now: Instant) -> FrameSlide {
-    let demand = compute_minibuffer_height(app, area.height);
-    if app.resizing_orchestrator_panel.is_some() {
+    let demand = compute_prompt_height(app, area.height);
+    if app.resizing_minibuffer_panel.is_some() {
         app.main_slide.snap_to(demand.saturating_sub(1));
     } else {
         app.main_slide.retarget(demand.saturating_sub(1), now);
@@ -196,7 +196,7 @@ fn frame_slide_geometry(area: Rect, modeline_h: u16, demand: u16, offset: f32) -
     let visible_h = area.height.saturating_sub(modeline_h + footer_h);
     let footer_y = area.y + visible_h + modeline_h;
     let minibuffer_h = demand.min(footer_h);
-    let minibuffer_y = area.y + area.height - minibuffer_h;
+    let prompt_y = area.y + area.height - minibuffer_h;
     FrameSlide {
         main: Rect {
             height: main_h,
@@ -209,13 +209,13 @@ fn frame_slide_geometry(area: Rect, modeline_h: u16, demand: u16, offset: f32) -
             ..area
         },
         minibuffer: Rect {
-            y: minibuffer_y,
+            y: prompt_y,
             height: minibuffer_h,
             ..area
         },
-        gap: (minibuffer_y > footer_y).then(|| Rect {
+        gap: (prompt_y > footer_y).then(|| Rect {
             y: footer_y,
-            height: minibuffer_y - footer_y,
+            height: prompt_y - footer_y,
             ..area
         }),
     }
@@ -287,7 +287,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.dynamic_ui_widget_hits.clear();
     app.layout.dynamic_ui_panel_close_hits.clear();
     app.layout.dynamic_ui_inline_hit = None;
-    app.layout.matrix_operator_title_hit = None;
+    app.layout.matrix_minibuffer_title_hit = None;
     app.layout.matrix_panel_mode_hit = None;
     app.layout.matrix_theme_hit = None;
     app.layout.matrix_widget_hits.clear();
@@ -360,7 +360,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let slide = frame_layout(app, area, MODELINE_H, Instant::now());
     let main_area = slide.main;
     let modeline_area = slide.modeline;
-    let minibuffer_area = slide.minibuffer;
+    let prompt_area = slide.minibuffer;
     // Hover is tracked in screen coordinates; the block renders in its own, so
     // the pointer moves with it and comes back before the footer renders.
     let screen_mouse = app.mouse_pos;
@@ -413,7 +413,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.list_area = Some(cols[0]);
     app.layout.view_area = Some(detail_area);
     app.layout.matrix_rain_area = None;
-    app.layout.minibuffer_area = Some(minibuffer_area);
+    app.layout.prompt_area = Some(prompt_area);
     app.layout.modal_area = None;
     app.layout.list_row_count = app.list_items().len();
     app.layout.list_items_area = None;
@@ -459,7 +459,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.mouse_pos = screen_mouse;
 
     render_modeline(f, modeline_area, app);
-    render_minibuffer(f, minibuffer_area, app);
+    render_prompt(f, prompt_area, app);
     render_resize_handle_cursor(f, app);
     render_tasks_popup(f, app);
     render_remote_control_popup(f, app);
@@ -859,7 +859,7 @@ const SESSION_ROW_GUTTER_CELLS: usize = 1;
 /// its first child never nudges its own title — or its siblings' — sideways.
 ///
 /// The disclosure wins the cell when a session is both, because it is the
-/// affordance the operator can act on. No current list row is both: the list
+/// affordance the user can act on. No current list row is both: the list
 /// gives forks no disclosure, always rendering their descendants expanded. If
 /// that changes, lineage needs somewhere else to live rather than a second
 /// reserved column.
@@ -1054,23 +1054,23 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
-    if let Some((xs, xe, y)) = app.layout.matrix_operator_loop_hit {
+    if let Some((xs, xe, y)) = app.layout.matrix_minibuffer_loop_hit {
         if my == y && mx >= xs && mx < xe {
-            let label = if app.operator_loop_disabled() {
-                " Resume operator loop "
+            let label = if app.minibuffer_loop_disabled() {
+                " Resume minibuffer loop "
             } else {
-                " Pause operator loop "
+                " Pause minibuffer loop "
             };
             render_button_tooltip(f, &app.theme, label, xs, y.saturating_add(2));
             return;
         }
     }
-    if let Some((xs, xe, y)) = app.layout.matrix_operator_title_hit {
+    if let Some((xs, xe, y)) = app.layout.matrix_minibuffer_title_hit {
         if my == y && mx >= xs && mx < xe {
             render_button_tooltip(
                 f,
                 &app.theme,
-                &format!(" operator {} ", matrix_operator_status(app)),
+                &format!(" minibuffer {} ", matrix_minibuffer_status(app)),
                 xs,
                 y.saturating_add(2),
             );
@@ -1126,9 +1126,9 @@ fn render_list_title_button_tooltips(f: &mut Frame, app: &App) {
         if let Some((xs, xe, y)) = matrix_rain_close_button_range(rain) {
             if my == y && mx >= xs && mx < xe {
                 let (label, anchor_y) = if app.matrix_rain_hidden {
-                    (" Expand Operator ", y)
+                    (" Expand Minibuffer ", y)
                 } else {
-                    (" Collapse Operator ", y.saturating_add(2))
+                    (" Collapse Minibuffer ", y.saturating_add(2))
                 };
                 render_button_tooltip(f, &app.theme, label, xs, anchor_y);
             }
@@ -1460,7 +1460,7 @@ fn render_harness_unavailable_tooltip(f: &mut Frame, app: &App) {
     let Some((mx, my)) = app.mouse_pos else {
         return;
     };
-    let hits = &app.layout.minibuffer_harness_hits;
+    let hits = &app.layout.prompt_harness_hits;
     let hit = hits
         .iter()
         .find(|h| h.y == my && mx >= h.x_start && mx < h.x_end && !h.available);
@@ -1807,7 +1807,7 @@ fn render_turn_picker(f: &mut Frame, area: Rect, app: &mut App) {
             y,
         });
     }
-    app.layout.minibuffer_turn_hits = hits;
+    app.layout.prompt_turn_hits = hits;
 
     // Prompt row under the menu, mirroring the harness picker's input row.
     if area.height > 0 {
@@ -1827,8 +1827,8 @@ fn render_turn_picker(f: &mut Frame, area: Rect, app: &mut App) {
 /// Render the harness picker as a filterable completion menu above its input
 /// row. Each visible row is clickable and carries the same availability
 /// semantics as keyboard selection.
-fn render_harness_picker(f: &mut Frame, area: Rect, app: &mut App, mb: &Minibuffer) {
-    let is_fork = matches!(mb.intent, MinibufferIntent::ForkSessionHarness { .. });
+fn render_harness_picker(f: &mut Frame, area: Rect, app: &mut App, mb: &Prompt) {
+    let is_fork = matches!(mb.intent, PromptIntent::ForkSessionHarness { .. });
     let entries = harness_picker_entries(
         &app.harnesses,
         is_fork,
@@ -1911,7 +1911,7 @@ fn render_harness_picker(f: &mut Frame, area: Rect, app: &mut App, mb: &Minibuff
             Paragraph::new(line).style(row_style),
             Rect::new(area.x, y, area.width, 1),
         );
-        app.layout.minibuffer_harness_hits.push(HarnessHit {
+        app.layout.prompt_harness_hits.push(HarnessHit {
             name: entry.name.clone(),
             x_start: area.x,
             x_end: area.right(),
@@ -1974,7 +1974,7 @@ enum PromptPart {
     Text(&'static str),
     Choice {
         label: &'static str,
-        action: MinibufferChoiceAction,
+        action: PromptChoiceAction,
     },
 }
 
@@ -1984,14 +1984,14 @@ enum PromptPart {
 /// clicks — those keep the default flat prompt+input rendering.
 ///
 /// Each intent reuses whichever of the two keyboard mechanisms it already
-/// dispatches through (see `handle_minibuffer_key` / `run_minibuffer_submit`
-/// in `app/minibuffer.rs`): `MinibufferChoiceAction::Key` for the
+/// dispatches through (see `handle_minibuffer_key` / `run_prompt_submit`
+/// in `app/minibuffer.rs`): `PromptChoiceAction::Key` for the
 /// single-keypress fast-path intents, `::Submit` for the typed-then-submit
 /// intents. This function only decides how the choice renders — never how
 /// it's decided.
-fn minibuffer_choice_suffix(intent: &MinibufferIntent) -> Option<Vec<PromptPart>> {
-    use MinibufferChoiceAction::{Key, Submit};
-    use MinibufferIntent::*;
+fn prompt_choice_suffix(intent: &PromptIntent) -> Option<Vec<PromptPart>> {
+    use PromptChoiceAction::{Key, Submit};
+    use PromptIntent::*;
     Some(match intent {
         // Single-keypress fast path, plain y/N.
         RestartConfirm { .. } | RestartDaemonConfirm | UpgradeConfirm { .. } => vec![
@@ -2117,7 +2117,7 @@ fn minibuffer_choice_suffix(intent: &MinibufferIntent) -> Option<Vec<PromptPart>
 
 /// Render a confirm/approval minibuffer prompt with its choice cluster as
 /// individually clickable + hoverable spans, registering each one's column
-/// range in `app.layout.minibuffer_choice_hits` for `click_minibuffer` to
+/// range in `app.layout.prompt_choice_hits` for `click_prompt` to
 /// dispatch. Mirrors `render_harness_picker`'s hover treatment (bold +
 /// underline on hover, plain underline otherwise) for a consistent
 /// clickable-affordance look across both minibuffer flavors.
@@ -2125,7 +2125,7 @@ fn render_minibuffer_choices(
     f: &mut Frame,
     area: Rect,
     app: &mut App,
-    mb: &Minibuffer,
+    mb: &Prompt,
     parts: Vec<PromptPart>,
 ) {
     let mouse = app.mouse_pos;
@@ -2160,7 +2160,7 @@ fn render_minibuffer_choices(
                     label.to_string(),
                     if hovered { hover_style } else { base_style },
                 ));
-                app.layout.minibuffer_choice_hits.push(MinibufferChoiceHit {
+                app.layout.prompt_choice_hits.push(PromptChoiceHit {
                     x_start,
                     x_end,
                     y: area.y,
@@ -2217,10 +2217,10 @@ pub fn matrix_rain_panel_height(preferred: Option<u16>, available_h: u16) -> u16
 fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
     // Same slide contract as the full layout (spec 0112): the zoomed pane
     // keeps its full-screen geometry and a tall footer slides it, so zooming
-    // with the operator panel open never reflows the child.
+    // with the minibuffer panel open never reflows the child.
     let slide = frame_layout(app, area, 0, Instant::now());
     let main_area = slide.main;
-    let minibuffer_area = slide.minibuffer;
+    let prompt_area = slide.minibuffer;
     let screen_mouse = app.mouse_pos;
     app.mouse_pos = slide.main_block_pos(screen_mouse);
 
@@ -2231,7 +2231,7 @@ fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.list_area = None;
     app.layout.view_area = Some(main_area);
     app.layout.matrix_rain_area = None;
-    app.layout.minibuffer_area = Some(minibuffer_area);
+    app.layout.prompt_area = Some(prompt_area);
     app.layout.modal_area = None;
     app.layout.list_items_area = None;
     app.layout.list_scroll_offset = 0;
@@ -2247,7 +2247,7 @@ fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
     }
     apply_main_block_slide(f, app, &slide);
     app.mouse_pos = screen_mouse;
-    render_minibuffer(f, minibuffer_area, app);
+    render_prompt(f, prompt_area, app);
     if app.help_visible {
         let help_popup = render_help(f, area, app);
         app.layout.modal_area = Some(help_popup);
@@ -2260,7 +2260,7 @@ fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
 fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
     let slide = frame_layout(app, area, 0, Instant::now());
     let main_area = slide.main;
-    let minibuffer_area = slide.minibuffer;
+    let prompt_area = slide.minibuffer;
     let screen_mouse = app.mouse_pos;
     app.mouse_pos = slide.main_block_pos(screen_mouse);
 
@@ -2268,7 +2268,7 @@ fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.list_area = Some(main_area);
     app.layout.view_area = None;
     app.layout.matrix_rain_area = None;
-    app.layout.minibuffer_area = Some(minibuffer_area);
+    app.layout.prompt_area = Some(prompt_area);
     app.layout.modal_area = None;
     app.layout.list_row_count = app.list_items().len();
     app.layout.list_items_area = None;
@@ -2277,7 +2277,7 @@ fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
     render_sessions(f, main_area, app);
     apply_main_block_slide(f, app, &slide);
     app.mouse_pos = screen_mouse;
-    render_minibuffer(f, minibuffer_area, app);
+    render_prompt(f, prompt_area, app);
     if app.help_visible {
         let help_popup = render_help(f, area, app);
         app.layout.modal_area = Some(help_popup);
@@ -2736,7 +2736,7 @@ fn format_age_ms(ms: u64) -> String {
     }
 }
 
-/// The "this session wants the operator" marker (spec 0054): a blue dot,
+/// The "this session wants the user" marker (spec 0054): a blue dot,
 /// trailing the session's title on its row and standing in for the
 /// wants-you count in the list title. One constant because the two must
 /// look identical — the tally is a count of exactly these dots.
@@ -2744,7 +2744,7 @@ const ATTENTION_MARKER_GLYPH: &str = "●";
 
 /// One bucket of the session list's fleet tally.
 ///
-/// Deliberately not a run state. "Wants the operator" is the sticky
+/// Deliberately not a run state. "Wants the user" is the sticky
 /// attention marker (spec 0054), not `AwaitingInput` — a session sitting at
 /// a prompt is usually just idle, and tallying idle sessions as if they
 /// were blocked would cry wolf on the whole fleet (spec 0169).
@@ -2757,7 +2757,7 @@ pub(crate) enum FleetTally {
 
 impl FleetTally {
     /// The wants-you tally wears the per-row attention marker's own dot, not
-    /// a glyph of its own: the operator learns the blue dot from the rows,
+    /// a glyph of its own: the user learns the blue dot from the rows,
     /// and a summary that counts those dots should look like the thing it
     /// counts. That deliberately leaves working and wants-you separated only
     /// by hue — the tradeoff is accepted and carried by the tooltip, which
@@ -2885,16 +2885,16 @@ impl FleetStatusBuckets {
 /// Counts **rendered rows**, not sessions: the input is the very list the
 /// tally sits above, so the summary can never disagree with the rows
 /// beneath it (spec 0169). Rows the list folds away or never renders —
-/// the orchestrator, daemon-internal probes, a collapsed subtree's
+/// the minibuffer, daemon-internal probes, a collapsed subtree's
 /// children — are absent from the input and so cannot be counted.
 ///
 /// Each row is bucketed by the marker it actually paints. A collapsed
 /// parent or group header that shows a rolled-up attention dot counts
-/// once, as itself: it is the row the operator can reach and expand.
+/// once, as itself: it is the row the user can reach and expand.
 ///
 /// Buckets are disjoint and ranked — errored, then wants-you, then working
 /// — so the numbers read as parts of one whole rather than as overlapping
-/// filters. A crashed session the operator hasn't seen is counted once, as
+/// filters. A crashed session the user hasn't seen is counted once, as
 /// errored: it is the more specific and more urgent reading.
 ///
 /// Idle sessions are deliberately untallied. `AwaitingInput` is the fleet's
@@ -2904,7 +2904,7 @@ impl FleetStatusBuckets {
 /// Harness-native subagent mirrors (`native_subagent` set) are also
 /// excluded: they are read-only projections of work the parent harness
 /// owns (spec 0079), and counting them inflates the title with rows the
-/// operator cannot act on as first-class sessions. Construct-owned
+/// minibuffer cannot act on as first-class sessions. Construct-owned
 /// subagents and forked sessions remain tallied.
 pub(crate) fn fleet_status_buckets(items: &[AppListItem]) -> FleetStatusBuckets {
     let mut buckets = FleetStatusBuckets::default();
@@ -2921,7 +2921,7 @@ pub(crate) fn fleet_status_buckets(items: &[AppListItem]) -> FleetStatusBuckets 
                 if summary.archived {
                     continue;
                 }
-                // Harness-native mirrors are list rows the operator can
+                // Harness-native mirrors are list rows the user can
                 // inspect, but not sessions Construct owns — keep them
                 // out of the title scan so a busy Claude/Codex child tree
                 // does not drown out the fleet's own working/wants-you
@@ -3078,7 +3078,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     // list — see `fleet_status_buckets`.
     let app_items = app.list_items();
     // Fleet tallies trail the title: how many sessions are working, how many
-    // want the operator, how many broke — answerable without reading the
+    // want the user, how many broke — answerable without reading the
     // rows, and still true when the list is scrolled or the fleet is longer
     // than the pane. Empty buckets render nothing so a calm fleet stays
     // quiet, and hovering a tally spells it out in words (spec 0169).
@@ -3347,7 +3347,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                         ),
                         Span::styled(name_display, name_style),
                         // Unblock marker: a blue dot trailing the title when the
-                        // session needs the operator (spec 0054). The list
+                        // session needs the user (spec 0054). The list
                         // title's wants-you tally counts these dots and wears
                         // the same glyph and hue.
                         Span::styled(
@@ -3563,7 +3563,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
     // Session rows keep their full width; the scrollbar is an auto-hidden
     // transparent overlay over the rightmost column (background tint only,
     // matching the session-view terminal scrollbar). Hovering the
-    // session-list header or rows reveals it, while lineage/operator hover
+    // session-list header or rows reveals it, while lineage/minibuffer hover
     // does not. An active drag keeps its bar alive until mouse-up.
     let list_hover_area = Rect {
         x: area.x,
@@ -3712,7 +3712,7 @@ fn split_lineage_section(
 
 /// Render the sidebar's lineage section: a header bar (a `─` rule carrying
 /// the `⑂ lineage` label, the view-mode toggle, and a `−`/`+` collapse
-/// button — the same furniture as the operator panel's title bar lower in
+/// button — the same furniture as the minibuffer panel's title bar lower in
 /// the sidebar)
 /// above the selected session's lineage diagram. Reuses
 /// `App::lineage_section_rows` (`crate::lineage::build_tree`/`flatten`
@@ -3742,7 +3742,7 @@ fn render_lineage_section(
     app.layout.lineage_area = Some(rect);
     let focused = app.lineage_focused && app.focus == PaneFocus::List;
 
-    // Header bar: a full-width `─` rule (the operator panel's visual
+    // Header bar: a full-width `─` rule (the minibuffer panel's visual
     // language), label at the left, mode toggle + collapse button at the
     // right. The bare bar doubles as the height drag handle.
     let line_style = if focused {
@@ -3770,7 +3770,7 @@ fn render_lineage_section(
     };
     f.buffer_mut()
         .set_string(rect.x + 1, rect.y, title, title_style);
-    // Collapse/expand button at the right end, exactly like the operator
+    // Collapse/expand button at the right end, exactly like the user
     // panel's (`matrix_rain_close_button_range` geometry).
     if rect.width >= 8 {
         let glyph = if app.lineage_collapsed {
@@ -3778,7 +3778,7 @@ fn render_lineage_section(
         } else {
             " − "
         };
-        // Flush right, matching the operator panel's toggle below.
+        // Flush right, matching the minibuffer panel's toggle below.
         let bx = rect.x + rect.width.saturating_sub(3);
         let button = Rect {
             x: bx,
@@ -4235,7 +4235,7 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
     }
 
     let activity = update_matrix_rain_intensity(app, now);
-    // Token-meter mode replaces the animated body only. Operator widgets
+    // Token-meter mode replaces the animated body only. Minibuffer widgets
     // still overlay it (spec 0019), and intensity keeps easing above so the
     // rain resumes mid-stride rather than snapping when the user switches
     // back.
@@ -4417,11 +4417,11 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
     // Hover tooltip: if the cursor is over a horizontal word, name the
     // session it came from. Drawn last so it sits on top of the rain.
     render_matrix_reveal_tooltip(f, rain_area, app);
-    // Operator monolog: overlaid on the still-running rain (not a takeover), so
+    // Prompt monolog: overlaid on the still-running rain (not a takeover), so
     // the rain keeps animating underneath and doesn't restart when the text
-    // clears. Skipped while the orchestrator panel is open (the text is already
+    // clears. Skipped while the minibuffer panel is open (the text is already
     // visible right below). Widgets render after, on top.
-    render_operator_monolog(f, rain_area, app, now);
+    render_minibuffer_monolog(f, rain_area, app, now);
     render_matrix_widget_viewport(f, rain_area, app, now);
 }
 
@@ -4445,7 +4445,7 @@ fn render_token_meter(f: &mut Frame, area: Rect, app: &mut App, now: Instant) {
         render_token_meter_surface(f, area, &app.theme, &app.token_meter);
 }
 
-/// Shared token-meter graph and legend used by the operator, project, and
+/// Shared token-meter graph and legend used by the user, project, and
 /// service surfaces. Keeping the complete renderer here makes model colors,
 /// grid layout, rate formatting, overflow counts, and the right-aligned sum
 /// one visual contract rather than three approximations.
@@ -5150,7 +5150,7 @@ fn token_hover_text_fallback(header: &str, rows: &[TokenHoverRow]) -> String {
     format!(" {} ", parts.join(" · "))
 }
 
-/// Reveal speed and post-typing dwell for the operator monolog.
+/// Reveal speed and post-typing dwell for the minibuffer monolog.
 const MONOLOG_MS_PER_CHAR: u64 = 28;
 const MONOLOG_HOLD_MS: u64 = 4200;
 /// Clear-space padding around the typewriter text so it reads cleanly over the
@@ -5161,22 +5161,22 @@ const MONOLOG_VPAD: u16 = 1;
 /// Word-wrap `text` to `max_w` display columns: break at spaces where possible,
 /// hard-break overlong words, honor embedded newlines. Returns the lines so the
 /// caller can size a tight box around them.
-/// Overlay the operator's latest monolog on top of the (still-running) matrix
+/// Overlay the minibuffer's latest monolog on top of the (still-running) matrix
 /// rain as a bright typewriter line in a padded clear-box, removing it at once
 /// after the type → hold window (no fade). Returns `true` if it drew this
 /// frame. Crucially this is an
 /// *overlay*, not a takeover: the rain is rendered every frame regardless, so
 /// it keeps animating underneath and never restarts when the text clears.
-/// Skipped while the orchestrator panel is open — the operator's text is
+/// Skipped while the minibuffer panel is open — the user's text is
 /// already visible right below in the panel, so the overlay would duplicate it.
-pub(crate) fn render_operator_monolog(
+pub(crate) fn render_minibuffer_monolog(
     f: &mut Frame,
     area: Rect,
     app: &mut App,
     now: Instant,
 ) -> bool {
     // Snapshot what we need so the borrow ends before we may clear the state.
-    let (chars, started_at) = match app.operator_monolog.as_ref() {
+    let (chars, started_at) = match app.minibuffer_monolog.as_ref() {
         Some(m) => (m.text.chars().collect::<Vec<char>>(), m.started_at),
         None => return false,
     };
@@ -5186,12 +5186,12 @@ pub(crate) fn render_operator_monolog(
     let type_ms = n.saturating_mul(MONOLOG_MS_PER_CHAR);
     // Disappear at once after the hold — no fade-out.
     if elapsed >= type_ms + MONOLOG_HOLD_MS {
-        app.operator_monolog = None;
+        app.minibuffer_monolog = None;
         return false;
     }
     if matches!(
-        app.minibuffer.as_ref().map(|m| &m.intent),
-        Some(MinibufferIntent::Orchestrator)
+        app.prompt.as_ref().map(|m| &m.intent),
+        Some(PromptIntent::Minibuffer)
     ) {
         return false; // duplicate of the open panel below
     }
@@ -5253,7 +5253,7 @@ fn render_matrix_widget_viewport(f: &mut Frame, rain_area: Rect, app: &mut App, 
     if !app.matrix_widget_visible(now) {
         return;
     }
-    let panels = app.orchestrator_widget_panels();
+    let panels = app.minibuffer_widget_panels();
     if panels.is_empty() || rain_area.width < 8 || rain_area.height < 3 {
         return;
     }
@@ -5273,7 +5273,7 @@ fn render_matrix_widget_viewport(f: &mut Frame, rain_area: Rect, app: &mut App, 
         .and_then(|id| panels.iter().position(|panel| &panel.id == id))
         .unwrap_or(0);
     let panel = panels[selected_idx].clone();
-    let Some(session_id) = app.orchestrator_id.clone() else {
+    let Some(session_id) = app.minibuffer_id.clone() else {
         return;
     };
 
@@ -5288,7 +5288,7 @@ fn render_matrix_widget_viewport(f: &mut Frame, rain_area: Rect, app: &mut App, 
         width,
         height,
     };
-    let title = dynamic_ui_panel_title(&panel).unwrap_or_else(|| "Operator widget".to_string());
+    let title = dynamic_ui_panel_title(&panel).unwrap_or_else(|| "Minibuffer widget".to_string());
     let title = format!(" {} ", title);
     f.render_widget(Clear, area);
     f.render_widget(
@@ -5344,16 +5344,16 @@ fn render_matrix_widget_viewport(f: &mut Frame, rain_area: Rect, app: &mut App, 
     );
 }
 
-fn matrix_operator_status(app: &App) -> &'static str {
-    if app.operator_has_pending_approval() {
+fn matrix_minibuffer_status(app: &App) -> &'static str {
+    if app.minibuffer_has_pending_approval() {
         return "approval";
     }
-    let Some(orchestrator_id) = app.orchestrator_id.as_deref() else {
+    let Some(minibuffer_id) = app.minibuffer_id.as_deref() else {
         return "offline";
     };
     if app
         .agent_statuses
-        .get(orchestrator_id)
+        .get(minibuffer_id)
         .is_some_and(|status| status.active)
     {
         return "thinking";
@@ -5361,7 +5361,7 @@ fn matrix_operator_status(app: &App) -> &'static str {
     if app
         .sessions
         .iter()
-        .find(|session| session.id == orchestrator_id)
+        .find(|session| session.id == minibuffer_id)
         .is_some_and(|session| session.last_pty_at_ms.is_some_and(recent_pty_activity))
     {
         return "acting";
@@ -5513,20 +5513,20 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
         f.buffer_mut().set_string(x, area.y, "─", line_style);
     }
 
-    let panels = app.orchestrator_widget_panels();
+    let panels = app.minibuffer_widget_panels();
     // Expire any lapsed hover preview (and clear state when no panels remain)
     // so the squares below reflect the live shown/pinned widget.
     app.matrix_widget_visible(now);
-    let approval_pending = app.operator_has_pending_approval();
-    let operator_text = if approval_pending {
-        "operator !"
+    let approval_pending = app.minibuffer_has_pending_approval();
+    let minibuffer_text = if approval_pending {
+        "minibuffer !"
     } else {
-        "operator"
+        "minibuffer"
     };
 
-    // Play/pause toggle for the operator ambient loop.
+    // Play/pause toggle for the minibuffer ambient loop.
     // ▶ = loop is paused (click to enable); ⏸ = loop is running (click to disable).
-    let loop_disabled = app.operator_loop_disabled();
+    let loop_disabled = app.minibuffer_loop_disabled();
     let loop_icon = if loop_disabled { "▶" } else { "⏸" };
     let loop_icon_width = UnicodeWidthStr::width(loop_icon) as u16;
     let loop_icon_x = area.x.saturating_add(1);
@@ -5545,22 +5545,22 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
     };
     f.buffer_mut()
         .set_string(loop_icon_x, area.y, loop_icon, loop_icon_style);
-    app.layout.matrix_operator_loop_hit = Some((loop_icon_x, loop_icon_end, area.y));
+    app.layout.matrix_minibuffer_loop_hit = Some((loop_icon_x, loop_icon_end, area.y));
 
-    // Operator label renders after the icon; the leading space in " operator "
+    // Prompt label renders after the icon; the leading space in " minibuffer "
     // provides the visual gap between icon and text.
-    let label = format!(" {operator_text} ");
+    let label = format!(" {minibuffer_text} ");
     let label_x = loop_icon_end;
-    let operator_start = label_x.saturating_add(1);
-    let operator_end = operator_start.saturating_add(UnicodeWidthStr::width(operator_text) as u16);
-    let operator_hovered = app
+    let minibuffer_start = label_x.saturating_add(1);
+    let minibuffer_end = minibuffer_start.saturating_add(UnicodeWidthStr::width(minibuffer_text) as u16);
+    let minibuffer_hovered = app
         .mouse_pos
-        .is_some_and(|(mx, my)| my == area.y && mx >= operator_start && mx < operator_end);
-    let operator_style = if approval_pending {
+        .is_some_and(|(mx, my)| my == area.y && mx >= minibuffer_start && mx < minibuffer_end);
+    let minibuffer_style = if approval_pending {
         Style::default()
             .fg(app.theme.warning)
             .add_modifier(Modifier::BOLD)
-    } else if operator_hovered {
+    } else if minibuffer_hovered {
         Style::default()
             .fg(app.theme.matrix_flash_good)
             .add_modifier(Modifier::BOLD)
@@ -5568,8 +5568,8 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
         Style::default().fg(app.theme.accent)
     };
     f.buffer_mut()
-        .set_string(label_x, area.y, label.as_str(), operator_style);
-    app.layout.matrix_operator_title_hit = Some((operator_start, operator_end, area.y));
+        .set_string(label_x, area.y, label.as_str(), minibuffer_style);
+    app.layout.matrix_minibuffer_title_hit = Some((minibuffer_start, minibuffer_end, area.y));
 
     let toggle_glyph = if app.matrix_rain_hidden {
         " + "
@@ -5578,7 +5578,7 @@ fn render_matrix_rain_header(f: &mut Frame, area: Rect, app: &mut App, now: Inst
     };
     let toggle_x = area.x + area.width.saturating_sub(3);
 
-    let separator_x = operator_end.saturating_add(1);
+    let separator_x = minibuffer_end.saturating_add(1);
     if !panels.is_empty() {
         f.buffer_mut()
             .set_string(separator_x, area.y, "─", line_style);
@@ -8362,7 +8362,7 @@ fn append_service_channel_actions(
 
 /// Render a service as a normal split-pane surface. The editor state is the
 /// same editor state used before the service view existed, but the service now owns the whole
-/// pane: its definition and contextual help stay visible while the operator
+/// pane: its definition and contextual help stay visible while the user
 /// edits it, and the lower section gives the service's routed sessions a
 /// direct entry point.
 fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, focused: bool) {
@@ -8822,7 +8822,7 @@ fn render_service_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, foc
     let content_h = activity.len();
     let max_scroll = content_h.saturating_sub(viewport_h);
     if editing {
-        // Keyboard navigation owns the viewport: the row the operator just
+        // Keyboard navigation owns the viewport: the row the user just
         // moved to is always brought back into view.
         if let Some(row) = focus_row {
             if row < app.service_view_scroll {
@@ -9217,7 +9217,7 @@ fn render_empty_session_state(f: &mut Frame, area: Rect, app: &mut App) {
         Line::from(vec![
             Span::raw("  "),
             Span::styled("C-x x", if hovered[1] { hover_style } else { label_style }),
-            Span::raw("    open the Operator"),
+            Span::raw("    open the Minibuffer"),
         ]),
         Line::from(vec![
             Span::raw("  "),
@@ -13317,7 +13317,7 @@ fn render_modeline_version_notice_tooltip(f: &mut Frame, app: &App) {
         return;
     };
     // Owned, because the config tooltip names the waiting fields rather than
-    // making the operator click to find out what the restart is for.
+    // making the user click to find out what the restart is for.
     let label = match hit.action {
         KeyAction::OpenRestartDaemonConfirm => {
             " Daemon build differs — click to restart ".to_string()
@@ -13373,18 +13373,18 @@ fn render_modeline_theme_tooltip(f: &mut Frame, app: &App) {
 
 /// Compute how many rows the minibuffer footer occupies this frame.
 /// The default footer is 1 row (palette / hints / intent prompts).
-/// When the orchestrator panel is focused (its `MinibufferIntent`
+/// When the minibuffer panel is focused (its `PromptIntent`
 /// active) it expands to a fixed cap so the embedded smith REPL has
 /// room to render its banner + chat bubbles, leaving the main view
 /// most of the screen.
-pub fn compute_minibuffer_height(app: &App, total_h: u16) -> u16 {
-    if let Some(mb) = app.minibuffer.as_ref().filter(|mb| {
+pub fn compute_prompt_height(app: &App, total_h: u16) -> u16 {
+    if let Some(mb) = app.prompt.as_ref().filter(|mb| {
         matches!(
             mb.intent,
-            MinibufferIntent::NewSessionHarness | MinibufferIntent::ForkSessionHarness { .. }
+            PromptIntent::NewSessionHarness | PromptIntent::ForkSessionHarness { .. }
         )
     }) {
-        let is_fork = matches!(mb.intent, MinibufferIntent::ForkSessionHarness { .. });
+        let is_fork = matches!(mb.intent, PromptIntent::ForkSessionHarness { .. });
         // Size from the complete candidate set so filtering does not move the
         // input row or the main content above the picker (spec 0110).
         let row_count = harness_picker_entries(&app.harnesses, is_fork, "", false)
@@ -13393,20 +13393,20 @@ pub fn compute_minibuffer_height(app: &App, total_h: u16) -> u16 {
         return (row_count + 1).min(total_h.saturating_sub(2).max(1));
     }
     if matches!(
-        app.minibuffer.as_ref().map(|m| &m.intent),
-        Some(MinibufferIntent::ForkTurnPick { .. })
+        app.prompt.as_ref().map(|m| &m.intent),
+        Some(PromptIntent::ForkTurnPick { .. })
     ) {
         let row_count = app.turn_picker_entries.len().clamp(1, TURN_PICKER_MAX_ROWS) as u16;
         return (row_count + 1).min(total_h.saturating_sub(2).max(1));
     }
     let is_orch = matches!(
-        app.minibuffer.as_ref().map(|m| &m.intent),
-        Some(MinibufferIntent::Orchestrator)
+        app.prompt.as_ref().map(|m| &m.intent),
+        Some(PromptIntent::Minibuffer)
     );
     if !is_orch {
         return 1;
     }
-    minibuffer_panel_height(app.orchestrator_panel_h, total_h)
+    minibuffer_panel_height(app.minibuffer_panel_h, total_h)
 }
 
 fn minibuffer_panel_height(preferred: Option<u16>, total_h: u16) -> u16 {
@@ -13432,8 +13432,8 @@ fn minibuffer_panel_height(preferred: Option<u16>, total_h: u16) -> u16 {
 fn minibuffer_hint_label(action: KeyAction, profile: Profile) -> &'static str {
     use KeyAction::*;
     match (action, profile) {
-        (OpenCommandPalette, Profile::Vim) => ": operator",
-        (OpenCommandPalette, Profile::Emacs) => "C-x x operator",
+        (OpenCommandPalette, Profile::Vim) => ": minibuffer",
+        (OpenCommandPalette, Profile::Emacs) => "C-x x minibuffer",
         (OpenNewSession, Profile::Vim) => "o new",
         (OpenNewSession, Profile::Emacs) => "C-x C-f new",
         (OpenFork, Profile::Vim) => "f fork",
@@ -13458,27 +13458,27 @@ fn zoom_hint_label(profile: Profile, unzoom: bool) -> &'static str {
     }
 }
 
-fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
-    app.layout.minibuffer_harness_hits.clear();
-    app.layout.minibuffer_choice_hits.clear();
-    app.layout.minibuffer_turn_hits.clear();
+fn render_prompt(f: &mut Frame, area: Rect, app: &mut App) {
+    app.layout.prompt_harness_hits.clear();
+    app.layout.prompt_choice_hits.clear();
+    app.layout.prompt_turn_hits.clear();
 
-    // Orchestrator panel: events above, input row at the bottom.
+    // Minibuffer panel: events above, input row at the bottom.
     if matches!(
-        app.minibuffer.as_ref().map(|m| &m.intent),
-        Some(MinibufferIntent::Orchestrator)
+        app.prompt.as_ref().map(|m| &m.intent),
+        Some(PromptIntent::Minibuffer)
     ) {
-        render_orchestrator_panel(f, area, app);
+        render_minibuffer_panel(f, area, app);
         return;
     }
 
-    if let Some(mb) = &app.minibuffer {
+    if let Some(mb) = &app.prompt {
         // Harness picker: render `[name1|name2|...|group]` with each
         // name as its own clickable span, recording column ranges
         // for the click handler. Hover bolds + underlines.
         if matches!(
             mb.intent,
-            MinibufferIntent::NewSessionHarness | MinibufferIntent::ForkSessionHarness { .. }
+            PromptIntent::NewSessionHarness | PromptIntent::ForkSessionHarness { .. }
         ) {
             let mb_clone = mb.clone();
             render_harness_picker(f, area, app, &mb_clone);
@@ -13486,14 +13486,14 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
         }
         // Anchored fork's turn picker (spec 0163): same completion-menu
         // shape as the harness picker, one row per past user turn.
-        if matches!(mb.intent, MinibufferIntent::ForkTurnPick { .. }) {
+        if matches!(mb.intent, PromptIntent::ForkTurnPick { .. }) {
             render_turn_picker(f, area, app);
             return;
         }
         // Confirm/approval prompts: render the y/N (or richer) choice
         // cluster as clickable spans (spec 0075), same precedent as the
         // harness picker above.
-        if let Some(parts) = minibuffer_choice_suffix(&mb.intent) {
+        if let Some(parts) = prompt_choice_suffix(&mb.intent) {
             let mb_clone = mb.clone();
             render_minibuffer_choices(f, area, app, &mb_clone, parts);
             return;
@@ -13591,25 +13591,25 @@ fn render_minibuffer(f: &mut Frame, area: Rect, app: &mut App) {
 
     const MINIBUFFER_HINT_WINDOW: usize = 3;
     const MINIBUFFER_HINT_ROTATE_EVERY: Duration = Duration::from_secs(180);
-    let context_changed = app.minibuffer_hint_context != Some(app.zoom);
-    app.minibuffer_hint_context = Some(app.zoom);
+    let context_changed = app.prompt_hint_context != Some(app.zoom);
+    app.prompt_hint_context = Some(app.zoom);
     if pool.len() > MINIBUFFER_HINT_WINDOW {
         let now = Instant::now();
-        let timer_due = match app.minibuffer_hint_rotated_at {
+        let timer_due = match app.prompt_hint_rotated_at {
             Some(last) => now.duration_since(last) >= MINIBUFFER_HINT_ROTATE_EVERY,
             None => true,
         };
         if timer_due || context_changed {
-            app.minibuffer_hint_rotated_at = Some(now);
-            app.minibuffer_hint_offset =
-                (app.minibuffer_hint_offset + MINIBUFFER_HINT_WINDOW) % pool.len();
+            app.prompt_hint_rotated_at = Some(now);
+            app.prompt_hint_offset =
+                (app.prompt_hint_offset + MINIBUFFER_HINT_WINDOW) % pool.len();
         }
     } else {
-        app.minibuffer_hint_offset = 0;
+        app.prompt_hint_offset = 0;
     }
     let shown = pool.len().min(MINIBUFFER_HINT_WINDOW);
     let mut segments: Vec<(&str, KeyAction)> = (0..shown)
-        .map(|i| pool[(app.minibuffer_hint_offset + i) % pool.len()])
+        .map(|i| pool[(app.prompt_hint_offset + i) % pool.len()])
         .collect();
     segments.push(("help", KeyAction::ToggleHelp));
 
@@ -14196,7 +14196,7 @@ fn chat_event_kind(ev: &SessionEvent) -> ChatEventKind {
         | SessionEvent::ClientCommand { .. }
         | SessionEvent::ToolApprovalResolved { .. }
         | SessionEvent::ApprovalModeChanged { .. }
-        | SessionEvent::OperatorLoopChanged { .. }
+        | SessionEvent::MinibufferLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
         | SessionEvent::NativeIdChanged { .. }
         | SessionEvent::EffortChanged { .. }
@@ -14499,7 +14499,7 @@ fn format_chat_event_body(theme: &Theme, ev: &SessionEvent) -> Vec<Span<'static>
         | SessionEvent::ClientCommand { .. }
         | SessionEvent::ToolApprovalResolved { .. }
         | SessionEvent::ApprovalModeChanged { .. }
-        | SessionEvent::OperatorLoopChanged { .. }
+        | SessionEvent::MinibufferLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
         | SessionEvent::NativeIdChanged { .. }
         | SessionEvent::EffortChanged { .. }
@@ -15183,7 +15183,7 @@ fn state_style(theme: &Theme, state: SessionState) -> Style {
         SessionState::Running => Style::default().fg(theme.success),
         // Same green as `Running` on purpose — see `SessionState::glyph`.
         // A session at a prompt is idle, not blocked; the trailing
-        // attention marker says when one actually wants the operator.
+        // attention marker says when one actually wants the user.
         SessionState::AwaitingInput => Style::default().fg(theme.success),
         SessionState::Paused => Style::default().fg(theme.warning),
         SessionState::Done => Style::default().fg(theme.info),
@@ -15331,9 +15331,9 @@ pub fn short_event_label(ev: &SessionEvent) -> String {
         SessionEvent::ApprovalModeChanged { mode } => {
             format!("approval-mode {}", mode.badge().unwrap_or("manual"))
         }
-        SessionEvent::OperatorLoopChanged { enabled } => {
+        SessionEvent::MinibufferLoopChanged { enabled } => {
             format!(
-                "operator-loop {}",
+                "minibuffer-loop {}",
                 if *enabled { "enabled" } else { "disabled" }
             )
         }
@@ -15517,13 +15517,13 @@ fn primary_label(s: &construct_protocol::SessionSummary) -> String {
     }
 }
 
-/// Render the orchestrator's PTY in the bottom strip. The orchestrator
+/// Render the minibuffer's PTY in the bottom strip. The minibuffer
 /// is a smith interactive session; the same items-model history that
 /// renders any other PTY-backed session is replayed onto a fresh
 /// parser sized to the panel's inner area each frame. Tool-block
 /// hit ranges land in `app.block_hits` for click-toggle dispatch.
-fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
-    let Some(id) = app.orchestrator_id.clone() else {
+fn render_minibuffer_panel(f: &mut Frame, area: Rect, app: &mut App) {
+    let Some(id) = app.minibuffer_id.clone() else {
         return;
     };
     if area.height == 0 {
@@ -15536,22 +15536,22 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
     // Avoid per-frame clear to limit flicker; block draw overwrites borders.
     f.render_widget(block, area);
 
-    // Publish the orchestrator panel's inner size; `run_loop` debounces
+    // Publish the minibuffer panel's inner size; `run_loop` debounces
     // and fires the actual `pty_resize` once the value settles. Stops
     // drag-resize from spraying one IPC per frame.
     let cols = inner.width.max(1);
     let rows = inner.height.max(1);
-    if app.orchestrator_desired_size != Some((cols, rows)) {
-        app.orchestrator_desired_size = Some((cols, rows));
+    if app.minibuffer_desired_size != Some((cols, rows)) {
+        app.minibuffer_desired_size = Some((cols, rows));
     }
 
-    // Same split logic as the main view: if the orchestrator session
+    // Same split logic as the main view: if the minibuffer session
     // is publishing `EditorState`, carve out a fixed editor pane at
     // the bottom of the panel so the `❯` and live typing are always
     // visible — otherwise this panel rendered only the PTY scrollback
     // and the editor was invisible (smith stopped painting it).
     //
-    // On a fresh TUI attach, the user can open the orchestrator panel
+    // On a fresh TUI attach, the user can open the minibuffer panel
     // before the adapter's initial `EditorState` notification has
     // reached us. Still reserve one fallback input row in that first
     // frame so the prompt/cursor render in the right place instead of
@@ -15559,7 +15559,7 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
     let has_editor_state = app.editor_states.contains_key(&id);
     let editor_state = app.editor_states.get(&id).cloned();
     let agent_status = app.agent_statuses.get(&id).cloned();
-    let force_input_pane = !has_editor_state && app.is_orchestrator_panel_open();
+    let force_input_pane = !has_editor_state && app.is_minibuffer_panel_open();
     let (chat_area, editor_area) =
         if editor_state.is_some() || agent_status.is_some() || force_input_pane {
             let raw_rows =
@@ -15589,7 +15589,7 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
     // the editor pane grows on each keystroke; render only the bottom
     // slice. See the matching note in `render_terminal`.
     let row_offset = inner.height.saturating_sub(chat_area.height);
-    let out = history.replay(inner.width, inner.height, app.orchestrator_scrollback);
+    let out = history.replay(inner.width, inner.height, app.minibuffer_scrollback);
 
     // Clear and bottom-align short content so the last message hugs the input.
     f.render_widget(Clear, chat_area);
@@ -15606,7 +15606,7 @@ fn render_orchestrator_panel(f: &mut Frame, area: Rect, app: &mut App) {
 
     let mut paint_area = chat_area;
     let mut paint_row_offset = row_offset;
-    if editor_area.is_some() && app.orchestrator_scrollback == 0 {
+    if editor_area.is_some() && app.minibuffer_scrollback == 0 {
         let content_rows = non_empty_row_span(out.screen);
         if content_rows > 0 && content_rows < chat_area.height {
             let top_pad = chat_area.height - content_rows;
@@ -25155,7 +25155,7 @@ mod tests {
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind: construct_protocol::SessionKind::User,
             archived: false,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
             merge: None,
@@ -25276,7 +25276,7 @@ mod tests {
         assert_eq!(session_row_marker(&plain, true, true), "▼");
         assert_eq!(session_row_marker(&fork, false, false), "⑂");
         // The affordance outranks the identity mark when a row is somehow
-        // both — the operator can act on a disclosure.
+        // both — the user can act on a disclosure.
         assert_eq!(session_row_marker(&fork, true, true), "▼");
     }
 
@@ -25353,9 +25353,9 @@ mod tests {
         );
     }
 
-    /// The title tallies summarize the rows the operator can actually see,
+    /// The title tallies summarize the rows the user can actually see,
     /// so anything the list hides must not be counted — otherwise the
-    /// numbers disagree with the list directly beneath them. The orchestrator
+    /// numbers disagree with the list directly beneath them. The minibuffer
     /// and daemon-internal probes never reach this function at all: they are
     /// already gone from `list_items()`. Archived rows can reach it, via an
     /// expanded archive drawer, and are a deliberate exclusion; harness-
@@ -25381,7 +25381,7 @@ mod tests {
     }
 
     /// Harness-native mirrors paint as list rows but are read-only
-    /// projections the operator cannot drive (spec 0079). Counting them
+    /// projections the user cannot drive (spec 0079). Counting them
     /// would let a busy Claude/Codex child tree drown the fleet signal.
     /// Construct-owned subagents and forks remain tallied.
     #[test]
@@ -25457,7 +25457,7 @@ mod tests {
     }
 
     /// "Wants you" is the sticky attention marker, not `AwaitingInput`. An
-    /// idle session the operator has already seen is not waiting on anyone,
+    /// idle session the user has already seen is not waiting on anyone,
     /// and counting the fleet's resting state would make the tally useless.
     #[test]
     fn fleet_counts_read_attention_not_awaiting_input() {
@@ -25486,7 +25486,7 @@ mod tests {
     }
 
     /// Buckets are disjoint so the tallies read as parts of one whole. A
-    /// crash the operator hasn't seen is counted once, as errored — the more
+    /// crash the user hasn't seen is counted once, as errored — the more
     /// specific and more urgent of the two readings.
     #[test]
     fn fleet_counts_bucket_each_session_once() {
@@ -25524,7 +25524,7 @@ mod tests {
 
     /// A collapsed parent paints one rolled-up dot for its hidden flagged
     /// descendants, so it counts once and the panel lists the parent — the
-    /// row the operator can actually reach and expand.
+    /// row the user can actually reach and expand.
     #[test]
     fn fleet_counts_a_collapsed_subtree_rollup_once() {
         let mut parent =
@@ -25571,7 +25571,7 @@ mod tests {
 
     /// The wants-you tally is a count of the per-row attention dots, so it
     /// has to *be* that dot — a tally wearing a different glyph than the
-    /// markers it counts asks the operator to learn the mapping twice.
+    /// markers it counts asks the user to learn the mapping twice.
     #[test]
     fn wants_you_tally_wears_the_attention_marker() {
         assert_eq!(FleetTally::NeedsYou.glyph(), ATTENTION_MARKER_GLYPH);
@@ -26583,7 +26583,7 @@ mod tests {
 
         assert_eq!(
             open.main, closed.main,
-            "the block keeps its size when the operator panel opens"
+            "the block keeps its size when the minibuffer panel opens"
         );
         assert_eq!(closed.shift.delta, 0, "a one-row footer never slides");
         assert_eq!(open.shift.delta, 12, "the block slides the footer's growth");

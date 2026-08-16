@@ -36,7 +36,7 @@ mod editor;
 mod fleet_panel;
 mod lineage_section;
 mod matrix_clicks;
-mod minibuffer;
+mod prompt;
 mod mouse;
 mod playbook_popup;
 pub mod route_menu;
@@ -1024,7 +1024,7 @@ fn chat_scroll_kind(ev: &SessionEvent) -> ChatScrollKind {
         | SessionEvent::ClientCommand { .. }
         | SessionEvent::ToolApprovalResolved { .. }
         | SessionEvent::ApprovalModeChanged { .. }
-        | SessionEvent::OperatorLoopChanged { .. }
+        | SessionEvent::MinibufferLoopChanged { .. }
         | SessionEvent::ModelChanged { .. }
         | SessionEvent::NativeIdChanged { .. }
         | SessionEvent::EffortChanged { .. }
@@ -1112,7 +1112,7 @@ pub enum ZoomMode {
 }
 
 /// What the Matrix-rain panel's body is currently showing (spec 0167).
-/// The panel hosts named built-in modes; the operator-widget viewport
+/// The panel hosts named built-in modes; the minibuffer-widget viewport
 /// (spec 0019) remains a transient overlay on top of whichever mode is
 /// selected, not a third value here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1147,7 +1147,7 @@ impl MatrixPanelMode {
 }
 
 #[derive(Debug, Clone)]
-pub enum MinibufferIntent {
+pub enum PromptIntent {
     SendInput {
         session_id: String,
     },
@@ -1240,12 +1240,12 @@ pub enum MinibufferIntent {
     ServiceDeleteConfirm {
         name: String,
     },
-    /// Persistent orchestrator session input. Unlike other intents
+    /// Persistent minibuffer session input. Unlike other intents
     /// this one stays open across Enter — the panel re-opens with an
     /// empty input after each submission. Slash-prefixed input is
     /// dispatched locally (no LLM cost); non-slash input is sent to
-    /// the orchestrator session via `session.send_input`.
-    Orchestrator,
+    /// the minibuffer session via `session.send_input`.
+    Minibuffer,
     /// Approval prompt for a Risky tool call from an agent harness
     /// without inline approval UI. Single-key dispatch: `y`/Enter
     /// approve, `n`/Esc deny, `a` auto-review, `f` always-approve.
@@ -1263,11 +1263,11 @@ pub enum MinibufferIntent {
 }
 
 #[derive(Debug, Clone)]
-pub struct Minibuffer {
+pub struct Prompt {
     pub prompt: String,
     pub input: String,
     pub cursor: usize,
-    pub intent: MinibufferIntent,
+    pub intent: PromptIntent,
     /// Inline status appended after the input. Examples: "no such harness"
     /// or an unavailable-harness diagnostic. Cleared by the next text edit.
     pub error: Option<String>,
@@ -1426,7 +1426,7 @@ impl FleetTallyHit {
 }
 
 /// The panel a fleet tally opens: the rows that tally counted, listed and
-/// clickable, so a number the operator can't act on becomes a way to reach
+/// clickable, so a number the user can't act on becomes a way to reach
 /// the sessions behind it (spec 0169).
 ///
 /// Held open while the pointer is over the tally *or* over the panel
@@ -1685,7 +1685,7 @@ impl SessionTitleMenu {
     }
 }
 
-/// Operator-rain analogue of [`DynamicUiHover`]: the rain panel shows a single
+/// Prompt-rain analogue of [`DynamicUiHover`]: the rain panel shows a single
 /// widget at a time, so only the panel id and expiry are needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatrixWidgetHover {
@@ -1740,9 +1740,9 @@ pub struct App {
     /// Cache for `ui::render_chat`'s formatted chat lines, keyed to
     /// `transcript`/`transcript_session` — see `ui::ChatLinesCache`.
     pub chat_lines_cache: ui::ChatLinesCache,
-    pub minibuffer: Option<Minibuffer>,
+    pub prompt: Option<Prompt>,
     /// Keyboard highlight within the expanded harness completion menu.
-    /// Kept outside `Minibuffer` because it is presentation state specific
+    /// Kept outside `Prompt` because it is presentation state specific
     /// to the two harness-picker intents.
     pub harness_picker_selected: usize,
     /// Fork pickers open with the source harness pre-filled but still show
@@ -1766,15 +1766,15 @@ pub struct App {
     /// Rotation index into the idle minibuffer placeholder's context hint
     /// pool: advances by the shown-window size every
     /// `MINIBUFFER_HINT_ROTATE_EVERY`, or immediately whenever
-    /// `minibuffer_hint_context` shows the context (zoom mode) changed,
+    /// `prompt_hint_context` shows the context (zoom mode) changed,
     /// cycling through candidates the current viewport is too narrow to
     /// show all at once.
-    pub minibuffer_hint_offset: usize,
-    pub minibuffer_hint_rotated_at: Option<Instant>,
+    pub prompt_hint_offset: usize,
+    pub prompt_hint_rotated_at: Option<Instant>,
     /// Zoom mode as of the last placeholder render — compared each frame so
     /// a zoom change (a new relevant-hints context) rotates the window
     /// immediately instead of waiting out the timer.
-    pub minibuffer_hint_context: Option<ZoomMode>,
+    pub prompt_hint_context: Option<ZoomMode>,
     pub harnesses: Vec<HarnessInfo>,
     /// Ambient-feature status rows from `features.status` (spec 0151),
     /// refreshed alongside `harnesses` and updated live by the
@@ -1887,7 +1887,7 @@ pub struct App {
     /// clickable "restart daemon" segment.
     pub daemon_build_id: Option<String>,
     /// Configuration the daemon has read but cannot apply until it restarts
-    /// (spec 0190), named for an operator — `[router] port`, and disabling a
+    /// (spec 0190), named for a user — `[router] port`, and disabling a
     /// router that is already serving. Non-empty renders a clickable
     /// "restart to apply" segment beside the version notice. Pushed by
     /// `config/state`, and replayed when this client subscribes, so it
@@ -1949,11 +1949,11 @@ pub struct App {
     /// Written by `render_matrix_rain`, consumed by mouse hover (tooltip)
     /// and click (switch to the session). Reset every frame.
     pub matrix_reveal_hits: Vec<MatrixRevealHit>,
-    /// The orchestrator panel's most recent inner (cols, rows) as
+    /// The minibuffer panel's most recent inner (cols, rows) as
     /// computed during render. Written by `ui::render`, consumed by
     /// `run_loop`'s debounce — once the value stays stable for
     /// `RESIZE_DEBOUNCE_MS`, a single `pty_resize` IPC fires.
-    pub orchestrator_desired_size: Option<(u16, u16)>,
+    pub minibuffer_desired_size: Option<(u16, u16)>,
     pub terminal_pane_size: (u16, u16), // (cols, rows) of the right pane.
     /// Desired PTY size per split window, keyed by main-window id. Split panes
     /// can have different widths/heights, so adapters like claude need the
@@ -2011,7 +2011,7 @@ pub struct App {
     tick_redraw_requested: Cell<bool>,
     /// Set by `on_notification` to report whether the just-handled
     /// notification changed something currently *visible* (a focused /
-    /// split pane, the orchestrator panel, or any structural /
+    /// split pane, the minibuffer panel, or any structural /
     /// status change shown in the list). The run loop reads it to avoid a
     /// full-frame `terminal.draw()` for the high-frequency background
     /// `Pty` chunks of off-screen sessions — those only warm history /
@@ -2026,22 +2026,22 @@ pub struct App {
     /// the TUI stays responsive instead of blocking startup on full transcript
     /// replay.
     pub hydrating_sessions: HashSet<String>,
-    /// Scrollback offset for the daemon-owned orchestrator panel rendered in
-    /// the minibuffer. Kept separate from `view_scrollback` so reading operator
+    /// Scrollback offset for the daemon-owned minibuffer panel rendered in
+    /// the minibuffer. Kept separate from `view_scrollback` so reading minibuffer
     /// history does not leave the main session view scrolled when the panel
     /// closes.
-    pub orchestrator_scrollback: usize,
-    /// Active operator monolog typewritten over the matrix rain (`None` = rain).
-    pub operator_monolog: Option<OperatorMonolog>,
-    /// Accumulates the orchestrator's streaming assistant text across the
-    /// current turn; consolidated into `operator_monolog` at turn end.
-    pub operator_utterance: String,
-    /// User-preferred height for the daemon-owned orchestrator panel rendered
+    pub minibuffer_scrollback: usize,
+    /// Active minibuffer monolog typewritten over the matrix rain (`None` = rain).
+    pub minibuffer_monolog: Option<MinibufferMonolog>,
+    /// Accumulates the minibuffer's streaming assistant text across the
+    /// current turn; consolidated into `minibuffer_monolog` at turn end.
+    pub minibuffer_utterance: String,
+    /// User-preferred height for the daemon-owned minibuffer panel rendered
     /// in the minibuffer. Clamped by terminal height at render time.
-    pub orchestrator_panel_h: Option<u16>,
+    pub minibuffer_panel_h: Option<u16>,
     /// `Some((anchor_row, anchor_height))` while the user drags the
-    /// orchestrator panel's top border.
-    pub resizing_orchestrator_panel: Option<(u16, u16)>,
+    /// minibuffer panel's top border.
+    pub resizing_minibuffer_panel: Option<(u16, u16)>,
     /// Animated vertical offset of the main block while a multi-row footer is
     /// open (spec 0112).
     pub main_slide: MainSlideState,
@@ -2129,12 +2129,12 @@ pub struct App {
     /// (`PlaybookPopup::pinned_clip`); a double-click navigates to the full
     /// session view, same as every click did before pinning existed.
     pub last_playbook_clip_click: Option<(String, Instant)>,
-    /// ID of the daemon-owned orchestrator session, if one is present
-    /// in the sessions list. The orchestrator runs as a smith
+    /// ID of the daemon-owned minibuffer session, if one is present
+    /// in the sessions list. The minibuffer runs as a smith
     /// interactive (PTY) session; the TUI renders its PTY in the
     /// minibuffer panel and routes keystrokes there when the panel is
     /// focused. `None` falls back to the static palette UX.
-    pub orchestrator_id: Option<String>,
+    pub minibuffer_id: Option<String>,
     /// Width (in terminal cells) of the session-list pane in the
     /// normal (non-zoomed) layout. Adjustable by dragging the right
     /// border with the mouse; clamped at render time to
@@ -2206,7 +2206,7 @@ pub struct App {
     pub lineage_mode: crate::lineage::LineageViewMode,
     /// User drag-resized height of the lineage section (header row
     /// included); `None` = size to the diagram's content. Set by dragging
-    /// the section's header bar (same gesture as the operator panel's
+    /// the section's header bar (same gesture as the minibuffer panel's
     /// title bar). Clamped to the sidebar's caps at render time and
     /// persisted across launches.
     pub lineage_h: Option<u16>,
@@ -2306,7 +2306,7 @@ pub struct App {
     /// and rendered above queued input while a turn is active.
     pub agent_statuses: HashMap<String, construct_protocol::AgentStatus>,
     /// Pending tool approvals by session id, with the tool/args each prompt
-    /// is waiting on. Orchestrator approvals stay inline in the Operator
+    /// is waiting on. Prompt approvals stay inline in the User
     /// PTY, but this lets the Matrix title bar surface a clear attention
     /// marker and the project dashboard say *what* wants approval.
     pub pending_tool_approvals:
@@ -2375,11 +2375,11 @@ pub struct App {
     /// Matrix-rain drop cycle keys that already spawned. Intensity decay stops
     /// future cycles from entering this set; existing drops finish their fall.
     pub matrix_rain_active_drops: HashMap<u64, u16>,
-    /// Operator widget pinned open by a click on its title square. Persistent
+    /// Minibuffer widget pinned open by a click on its title square. Persistent
     /// until clicked again (or the panel is deleted) — survives the cursor
     /// leaving the rain panel, unlike a hover preview.
     pub matrix_widget_pinned: Option<String>,
-    /// Operator widget shown transiently on hover. Takes visual precedence over
+    /// Minibuffer widget shown transiently on hover. Takes visual precedence over
     /// `matrix_widget_pinned` while live, then reverts to the pin when it lapses.
     pub matrix_widget_hover: Option<MatrixWidgetHover>,
     /// User-hidden Matrix-rain panel. Toggle with `/rain`; close with the
@@ -2651,19 +2651,19 @@ impl PromptDraft {
     }
 }
 
-/// The operator's latest finalized utterance, typewritten over the matrix
+/// The user's latest finalized utterance, typewritten over the matrix
 /// rain as an ambient "monolog" then auto-cleared. Lets the user see what the
-/// operator said without opening the (collapsed) minibuffer panel.
+/// minibuffer said without opening the (collapsed) minibuffer panel.
 #[derive(Debug, Clone)]
-pub struct OperatorMonolog {
+pub struct MinibufferMonolog {
     pub text: String,
     pub started_at: Instant,
 }
 
-/// Consolidate the orchestrator's streaming assistant text into a user-facing
+/// Consolidate the minibuffer's streaming assistant text into a user-facing
 /// monolog line, or `None` if it's empty or the internal `noted` no-op token
-/// (which the operator replies when nothing needs surfacing).
-pub fn operator_monolog_text(raw: &str) -> Option<String> {
+/// (which the user replies when nothing needs surfacing).
+pub fn minibuffer_monolog_text(raw: &str) -> Option<String> {
     let t = raw.trim();
     if t.is_empty() {
         return None;
@@ -3721,7 +3721,7 @@ pub const SESSION_LIST_H_MIN: u16 = 3;
 
 /// A clickable / hoverable text segment in the minibuffer hint line —
 /// e.g. "C-x z unzoom" or "? help" — that dispatches a KeyAction when
-/// clicked. Geometry is filled by `render_minibuffer` so the click
+/// clicked. Geometry is filled by `render_prompt` so the click
 /// handler can hit-test against the live last-frame layout.
 #[derive(Debug, Clone, Copy)]
 pub struct HintZone {
@@ -3995,7 +3995,7 @@ impl LineageBoxHit {
 }
 
 /// A routed session row rendered inside a service view. The whole row is a
-/// navigation target so the operator can jump from service configuration to
+/// navigation target so the user can jump from service configuration to
 /// the live conversation without first finding it in the global session list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceSessionHit {
@@ -4027,7 +4027,7 @@ impl ServiceSessionHit {
 }
 
 /// One visible channel-catalog row in the service view. Carries the catalog
-/// index the frame painted, so a click acts on the channel the operator saw
+/// index the frame painted, so a click acts on the channel the user saw
 /// even after the section has been scrolled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceChannelRowHit {
@@ -4049,7 +4049,7 @@ pub struct LayoutSnapshot {
     pub main_window_areas: Vec<WindowPaneHit>,
     pub main_window_dividers: Vec<WindowDividerHit>,
     pub matrix_rain_area: Option<ratatui::layout::Rect>,
-    pub minibuffer_area: Option<ratatui::layout::Rect>,
+    pub prompt_area: Option<ratatui::layout::Rect>,
     /// Last rendered chat areas by session id to conditionally clear only
     /// when geometry grows (editor shrinks), avoiding per-frame clears.
     pub last_chat_areas: std::collections::HashMap<String, ratatui::layout::Rect>,
@@ -4122,18 +4122,18 @@ pub struct LayoutSnapshot {
     /// their owner, and an open help modal's close-on-interaction wins.
     pub tutorial_card_area: Option<ratatui::layout::Rect>,
     /// Clickable harness names in the new-session picker prompt
-    /// (`MinibufferIntent::NewSessionHarness`). Click → submit the
+    /// (`PromptIntent::NewSessionHarness`). Click → submit the
     /// matching name as if the user typed it and hit Enter.
-    pub minibuffer_harness_hits: Vec<HarnessHit>,
+    pub prompt_harness_hits: Vec<HarnessHit>,
     /// Clickable choice labels (`y`, `N`, `d`, `a`, `y=approve`, ...) in the
     /// last-rendered minibuffer confirm/approval prompt (spec 0075). Click →
     /// dispatch exactly as the matching keypress would, via whichever of the
-    /// two keyboard mechanisms (`MinibufferChoiceAction`) the intent uses.
-    pub minibuffer_choice_hits: Vec<MinibufferChoiceHit>,
+    /// two keyboard mechanisms (`PromptChoiceAction`) the intent uses.
+    pub prompt_choice_hits: Vec<PromptChoiceHit>,
     /// Clickable rows of the anchored fork's turn picker
-    /// (`MinibufferIntent::ForkTurnPick`, spec 0163). Click → select that
+    /// (`PromptIntent::ForkTurnPick`, spec 0163). Click → select that
     /// turn and submit, exactly as Enter on it would.
-    pub minibuffer_turn_hits: Vec<TurnRowHit>,
+    pub prompt_turn_hits: Vec<TurnRowHit>,
     /// Bounds of the topmost modal/dialog rendered in the last frame.
     /// Mouse clicks outside this rect dismiss the modal instead of
     /// falling through to panes underneath it.
@@ -4161,7 +4161,7 @@ pub struct LayoutSnapshot {
     /// between expanded and collapsed-to-header.
     pub lineage_header_hit: Option<ratatui::layout::Rect>,
     /// The collapse/expand `−`/`+` button at the right end of the section
-    /// header — mirrors the operator panel's toggle.
+    /// header — mirrors the minibuffer panel's toggle.
     pub lineage_collapse_hit: Option<ratatui::layout::Rect>,
     /// The view-mode toggle on the section header — click switches between
     /// the boxed-lane diagram and git-graph-style rails.
@@ -4282,9 +4282,9 @@ pub struct LayoutSnapshot {
     pub dynamic_ui_panel_close_hits: Vec<DynamicUiPanelCloseHit>,
     pub dynamic_ui_inline_hit: Option<DynamicUiInlineHit>,
     /// Matrix-rain title-bar play/pause loop-toggle button: `(x_start, x_end, y)`.
-    pub matrix_operator_loop_hit: Option<(u16, u16, u16)>,
-    /// Matrix-rain title-bar Operator label bounds: `(x_start, x_end, y)`.
-    pub matrix_operator_title_hit: Option<(u16, u16, u16)>,
+    pub matrix_minibuffer_loop_hit: Option<(u16, u16, u16)>,
+    /// Matrix-rain title-bar Prompt label bounds: `(x_start, x_end, y)`.
+    pub matrix_minibuffer_title_hit: Option<(u16, u16, u16)>,
     /// Matrix-panel body mode switch (rain ↔ token meter, spec 0167):
     /// `(start_col, end_col, row)`.
     pub matrix_panel_mode_hit: Option<(u16, u16, u16)>,
@@ -4301,7 +4301,7 @@ pub struct LayoutSnapshot {
     /// it stands for (spec 0169). Empty when the tallies don't fit or all
     /// read zero.
     pub list_title_tally_hits: Vec<FleetTallyHit>,
-    /// Matrix-rain title-bar widget viewport affordances for the operator session.
+    /// Matrix-rain title-bar widget viewport affordances for the minibuffer session.
     pub matrix_widget_hits: Vec<MatrixWidgetHit>,
     /// Dynamic UI title-bar affordance bounds: `(x_start, x_end, y, session_id)`.
     pub dynamic_ui_trigger: Option<(u16, u16, u16, String)>,
@@ -4396,7 +4396,7 @@ impl MainSlideState {
 ///
 /// The main block — session list, split panes, lineage, playbook
 /// popups — is always laid out at the size it has when the footer occupies a
-/// single row. A taller footer (operator panel, harness picker) slides that
+/// single row. A taller footer (minibuffer panel, harness picker) slides that
 /// block up out of the viewport instead of shrinking it, so no pane changes
 /// size and no child PTY sees a resize. Rendering runs in the block's own
 /// unslid coordinates; this maps the hit geometry it recorded back into screen
@@ -4552,8 +4552,8 @@ impl LayoutSnapshot {
             dynamic_ui_widget_hits,
             dynamic_ui_panel_close_hits,
             dynamic_ui_inline_hit,
-            matrix_operator_loop_hit,
-            matrix_operator_title_hit,
+            matrix_minibuffer_loop_hit,
+            matrix_minibuffer_title_hit,
             matrix_panel_mode_hit,
             matrix_token_graph_area,
             matrix_theme_hit,
@@ -4565,7 +4565,7 @@ impl LayoutSnapshot {
             dynamic_ui_dropdown_area,
             // Footer, modeline and modal surfaces render *after* the slide, in
             // screen coordinates already — they must not be translated.
-            minibuffer_area: _,
+            prompt_area: _,
             modeline_approval_mode_hit: _,
             modeline_context_gauge_hit: _,
             modeline_model_hit: _,
@@ -4576,9 +4576,9 @@ impl LayoutSnapshot {
             suggest_deck_visible_rows: _,
             suggest_deck_divider_x: _,
             tutorial_card_area: _,
-            minibuffer_harness_hits: _,
-            minibuffer_choice_hits: _,
-            minibuffer_turn_hits: _,
+            prompt_harness_hits: _,
+            prompt_choice_hits: _,
+            prompt_turn_hits: _,
             remote_control_hits: _,
             configure_tab_hits: _,
             // Consumed inside the main block's own render pass (or carries no
@@ -4722,8 +4722,8 @@ impl LayoutSnapshot {
         shift.opt_triple(playbook_title_close_hit);
         shift.opt_triple(playbook_title_name_hit);
         shift.opt_triple(playbook_selection_run_hit);
-        shift.opt_triple(matrix_operator_loop_hit);
-        shift.opt_triple(matrix_operator_title_hit);
+        shift.opt_triple(matrix_minibuffer_loop_hit);
+        shift.opt_triple(matrix_minibuffer_title_hit);
         shift.opt_triple(matrix_panel_mode_hit);
         shift.opt_rect(matrix_token_graph_area);
         shift.opt_triple(matrix_theme_hit);
@@ -4965,7 +4965,7 @@ pub struct TurnRowHit {
 /// minibuffer prompt that offers a small fixed set of keyboard choices
 /// (`y`/`N`, `y`/`n`/`a`/`f`, `d`/`a`/`N`, ...).
 #[derive(Debug, Clone)]
-pub struct MinibufferChoiceHit {
+pub struct PromptChoiceHit {
     pub x_start: u16,
     /// Exclusive end column.
     pub x_end: u16,
@@ -4973,18 +4973,18 @@ pub struct MinibufferChoiceHit {
     /// How a click on this label should be dispatched. Always mirrors
     /// whichever of the two keyboard mechanisms the owning intent already
     /// uses — never a third, click-only decision path.
-    pub action: MinibufferChoiceAction,
+    pub action: PromptChoiceAction,
 }
 
-/// Dispatch shape for a `MinibufferChoiceHit`.
+/// Dispatch shape for a `PromptChoiceHit`.
 #[derive(Debug, Clone)]
-pub enum MinibufferChoiceAction {
+pub enum PromptChoiceAction {
     /// Single-keypress fast path (the early-return `match key.code` blocks
-    /// near the top of `handle_minibuffer_key`): synthesize this key and
+    /// near the top of `handle_prompt_key`): synthesize this key and
     /// feed it through the same handler a real keypress goes through, so
     /// the decision logic never gets duplicated for the click path.
     Key(char),
-    /// Typed-then-submit path (`run_minibuffer_submit`): submit this
+    /// Typed-then-submit path (`run_prompt_submit`): submit this
     /// literal string, exactly as if the user had typed it and pressed
     /// Enter.
     Submit(String),
@@ -5025,7 +5025,7 @@ pub enum RemoteControlHitAction {
 
 fn selection_bounds_for_layout(
     layout: &LayoutSnapshot,
-    is_orchestrator_panel: bool,
+    is_minibuffer_panel: bool,
     col: u16,
     row: u16,
 ) -> Option<ratatui::layout::Rect> {
@@ -5063,8 +5063,8 @@ fn selection_bounds_for_layout(
         }
     }
 
-    if let Some(minibuffer) = layout.minibuffer_area {
-        let minibuffer_content = if is_orchestrator_panel {
+    if let Some(minibuffer) = layout.prompt_area {
+        let prompt_content = if is_minibuffer_panel {
             ratatui::layout::Rect {
                 x: minibuffer.x,
                 y: minibuffer.y.saturating_add(1),
@@ -5074,8 +5074,8 @@ fn selection_bounds_for_layout(
         } else {
             minibuffer
         };
-        if contains(minibuffer_content, col, row) {
-            return Some(minibuffer_content);
+        if contains(prompt_content, col, row) {
+            return Some(prompt_content);
         }
     }
 
@@ -5219,10 +5219,10 @@ async fn run_with_socket_initial_selection(
     let theme = theme_config.resolve(None);
     let initial_orch_id = sessions
         .iter()
-        .find(|s| s.kind == construct_protocol::SessionKind::Orchestrator && !s.state.is_terminal())
+        .find(|s| s.kind == construct_protocol::SessionKind::Minibuffer && !s.state.is_terminal())
         .map(|s| s.id.clone());
     // Restore the previously-selected session if it still exists,
-    // else fall back to the first non-orchestrator session.
+    // else fall back to the first non-minibuffer session.
     let persisted = crate::tui_state::load();
     let requested_initial_sel = initial_session_id.as_ref().and_then(|id| {
         sessions
@@ -5367,16 +5367,16 @@ async fn run_with_socket_initial_selection(
         transcript_session: None,
         transcript_scroll: 0,
         chat_lines_cache: ui::ChatLinesCache::default(),
-        minibuffer: None,
+        prompt: None,
         harness_picker_selected: 0,
         harness_picker_filter_active: false,
         turn_picker_entries: Vec::new(),
         turn_picker_selected: 0,
         turn_picker_loading: false,
         selected_load_generation: 0,
-        minibuffer_hint_offset: 0,
-        minibuffer_hint_rotated_at: None,
-        minibuffer_hint_context: None,
+        prompt_hint_offset: 0,
+        prompt_hint_rotated_at: None,
+        prompt_hint_context: None,
         harnesses,
         features: features_status
             .as_ref()
@@ -5429,7 +5429,7 @@ async fn run_with_socket_initial_selection(
         block_hits: HashMap::new(),
         turn_mark_hits: HashMap::new(),
         matrix_reveal_hits: Vec::new(),
-        orchestrator_desired_size: None,
+        minibuffer_desired_size: None,
         tasks_popup: None,
         lineage_focused: false,
         lineage_collapsed: false,
@@ -5471,11 +5471,11 @@ async fn run_with_socket_initial_selection(
         tick_redraw_requested: Cell::new(false),
         notification_dirtied_view: true,
         hydrating_sessions: HashSet::new(),
-        orchestrator_scrollback: 0,
-        operator_monolog: None,
-        operator_utterance: String::new(),
-        orchestrator_panel_h: persisted.orchestrator_panel_h,
-        resizing_orchestrator_panel: None,
+        minibuffer_scrollback: 0,
+        minibuffer_monolog: None,
+        minibuffer_utterance: String::new(),
+        minibuffer_panel_h: persisted.minibuffer_panel_h,
+        resizing_minibuffer_panel: None,
         main_slide: MainSlideState::default(),
         dragging_terminal_scrollbar: None,
         dragging_list_scrollbar: None,
@@ -5498,7 +5498,7 @@ async fn run_with_socket_initial_selection(
         saw_mouse_motion: false,
         mouse_capture_enabled: true,
         last_playbook_clip_click: None,
-        orchestrator_id: initial_orch_id,
+        minibuffer_id: initial_orch_id,
         list_panel_w: persisted.list_panel_w.unwrap_or(LIST_PANEL_W_DEFAULT),
         resizing_list: None,
         matrix_rain_h: persisted.matrix_rain_h,
@@ -5639,7 +5639,7 @@ async fn run_with_socket_initial_selection(
     for id in app
         .main_window_sessions_needing_hydration()
         .into_iter()
-        .chain(app.orchestrator_session_needing_hydration())
+        .chain(app.minibuffer_session_needing_hydration())
     {
         app.hydrating_sessions.insert(id);
     }
@@ -5740,7 +5740,7 @@ async fn run_with_socket_initial_selection(
         last_selected_session_id: app.selection.session_id().map(|s| s.to_string()),
         zoom: app.zoom,
         list_panel_w: Some(app.list_panel_w),
-        orchestrator_panel_h: app.orchestrator_panel_h,
+        minibuffer_panel_h: app.minibuffer_panel_h,
         matrix_rain_h: app.matrix_rain_h,
         list_collapsed: app.list_collapsed,
         matrix_rain_hidden: app.matrix_rain_hidden,
@@ -5826,7 +5826,7 @@ async fn run_loop(
         mpsc::unbounded_channel::<(String, String)>();
     app.playbook_projection_tx = playbook_projection_tx;
     // Status messages from a background `spawn_detached_upgrade` (see
-    // `MinibufferIntent::UpgradeConfirm`). The sender lives on `app` so the
+    // `PromptIntent::UpgradeConfirm`). The sender lives on `app` so the
     // minibuffer handler can kick off the install without blocking the event
     // loop on the download/install; this loop drains the result and surfaces
     // it via `set_status`.
@@ -5877,7 +5877,7 @@ async fn run_loop(
 
     // Debounce window for resize events. Terminal-app drags and
     // list/view divider drags both flood `terminal_pane_size` (and
-    // the orchestrator panel's size) with many close-spaced values;
+    // the minibuffer panel's size) with many close-spaced values;
     // firing `pty_resize` per frame creates IPC churn and asks every
     // child PTY to reflow repeatedly. Sitting on the size until it
     // stays stable for this window collapses the storm into one IPC.
@@ -5999,7 +5999,7 @@ async fn run_loop(
             for id in app
                 .main_window_sessions_needing_hydration()
                 .into_iter()
-                .chain(app.orchestrator_session_needing_hydration())
+                .chain(app.minibuffer_session_needing_hydration())
                 .chain(app.playbook_referenced_sessions_needing_hydration())
             {
                 if selected_hydrating.contains(&id)
@@ -6052,8 +6052,8 @@ async fn run_loop(
                 }
                 None => {}
             }
-            // Orchestrator panel resize — same debounce, separate target.
-            if let Some(orch_size) = app.orchestrator_desired_size {
+            // Minibuffer panel resize — same debounce, separate target.
+            if let Some(orch_size) = app.minibuffer_desired_size {
                 if orch_size != last_orch_sent && orch_size.0 > 0 && orch_size.1 > 0 {
                     match pending_orch {
                         Some((p, _)) if p == orch_size => {}
@@ -6065,7 +6065,7 @@ async fn run_loop(
             }
             if let Some((size, at)) = pending_orch {
                 if at.elapsed() >= resize_debounce {
-                    if let Some(orch_id) = app.orchestrator_id.clone() {
+                    if let Some(orch_id) = app.minibuffer_id.clone() {
                         // Fire-and-forget: the adapter may still be in its startup
                         // health-check when the panel first opens (model broken,
                         // OAuth refresh in flight, etc.).  Awaiting it directly
@@ -6799,11 +6799,11 @@ impl App {
         self.refresh_daemon_build_id().await;
         self.connected = true;
         self.ensure_selection_valid();
-        self.orchestrator_id = self
+        self.minibuffer_id = self
             .sessions
             .iter()
             .find(|s| {
-                s.kind == construct_protocol::SessionKind::Orchestrator && !s.state.is_terminal()
+                s.kind == construct_protocol::SessionKind::Minibuffer && !s.state.is_terminal()
             })
             .map(|s| s.id.clone());
         self.transcript_session = None;
@@ -6953,13 +6953,13 @@ impl App {
         // text lands in the playbook only when no minibuffer/palette overlay is
         // capturing input *and* the view pane holds focus. With an overlay open,
         // `dispatch_paste_text` below routes the paste to the minibuffer /
-        // orchestrator instead; with focus on the list, it routes to the
+        // minibuffer instead; with focus on the list, it routes to the
         // selected session rather than editing the playbook.
         if self
             .playbook_popup
             .as_ref()
             .is_some_and(|popup| !popup.terminal_focus)
-            && self.minibuffer.is_none()
+            && self.prompt.is_none()
             && self.focus == PaneFocus::View
         {
             // A file dropped onto the playbook editor over an ssh bridge:
@@ -6977,11 +6977,11 @@ impl App {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_else(|| path.clone());
-                        self.minibuffer = Some(Minibuffer {
+                        self.prompt = Some(Prompt {
                             prompt: format!("Upload local file {name} to the playbook? [y/n] "),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::ConfirmLocalFileUpload {
+                            intent: PromptIntent::ConfirmLocalFileUpload {
                                 session_id,
                                 path,
                                 to_playbook: true,
@@ -7040,14 +7040,14 @@ impl App {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.clone());
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!(
                             "Upload local file {name} to {}? [y/n] ",
                             short_id(&session_id)
                         ),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::ConfirmLocalFileUpload {
+                        intent: PromptIntent::ConfirmLocalFileUpload {
                             session_id,
                             path,
                             to_playbook: false,
@@ -7091,9 +7091,9 @@ impl App {
     }
 
     fn large_text_paste_target(&self) -> Option<String> {
-        match self.minibuffer.as_ref().map(|m| &m.intent) {
-            Some(MinibufferIntent::SendInput { session_id }) => Some(session_id.clone()),
-            Some(MinibufferIntent::Orchestrator) => self.orchestrator_id.clone(),
+        match self.prompt.as_ref().map(|m| &m.intent) {
+            Some(PromptIntent::SendInput { session_id }) => Some(session_id.clone()),
+            Some(PromptIntent::Minibuffer) => self.minibuffer_id.clone(),
             Some(_) => None,
             None if self.is_pty_captured() => self.selected_id(),
             None => None,
@@ -7101,17 +7101,17 @@ impl App {
     }
 
     fn dispatch_paste_text(&mut self, text: String) {
-        match self.minibuffer.as_ref().map(|m| &m.intent) {
-            Some(MinibufferIntent::Orchestrator) => {
-                if let Some(orch_id) = self.orchestrator_id.clone() {
-                    self.orchestrator_scrollback = 0;
+        match self.prompt.as_ref().map(|m| &m.intent) {
+            Some(PromptIntent::Minibuffer) => {
+                if let Some(orch_id) = self.minibuffer_id.clone() {
+                    self.minibuffer_scrollback = 0;
                     let bytes = self.encode_paste_for_pty(&orch_id, text);
-                    self.queue_pty_input(orch_id, bytes, "orchestrator pty_input");
+                    self.queue_pty_input(orch_id, bytes, "minibuffer pty_input");
                 }
             }
             Some(_) => {
-                if let Some(mb) = self.minibuffer.as_mut() {
-                    minibuffer::insert_minibuffer_text(mb, &text);
+                if let Some(mb) = self.prompt.as_mut() {
+                    prompt::insert_prompt_text(mb, &text);
                 }
             }
             None if self.is_pty_captured() => {
@@ -7239,7 +7239,7 @@ impl App {
             .playbook_popup
             .as_ref()
             .is_some_and(|popup| !popup.terminal_focus)
-            && self.minibuffer.is_none()
+            && self.prompt.is_none()
             && self.focus == PaneFocus::View
         {
             self.attach_item_to_playbook(item).await;
@@ -7815,7 +7815,7 @@ impl App {
     /// row stands in for. Mirrors the membership filters in `list_items` so
     /// the count shown on the row matches what a cascade delete removes.
     fn archived_sessions_in_section(&self, section: &ArchiveSection) -> Vec<String> {
-        let orch_id = self.orchestrator_id.as_deref();
+        let orch_id = self.minibuffer_id.as_deref();
         match section {
             ArchiveSection::Ungrouped => self
                 .sessions
@@ -7978,9 +7978,9 @@ impl App {
     /// are excluded — a boundary item would evict them from the fast
     /// renderer and shadow-scrollback paths, and their alt-screen children
     /// repaint rows too freely for a content-anchored icon to be truthful.
-    /// The hidden orchestrator is excluded too: it isn't forkable UI.
+    /// The hidden minibuffer is excluded too: it isn't forkable UI.
     fn session_records_turn_boundaries(&self, session_id: &str) -> bool {
-        if self.orchestrator_id.as_deref() == Some(session_id) {
+        if self.minibuffer_id.as_deref() == Some(session_id) {
             return false;
         }
         self.sessions
@@ -8000,8 +8000,8 @@ impl App {
         entries: Vec<TurnPickerEntry>,
     ) {
         let still_open = matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::ForkTurnPick { source_session_id })
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::ForkTurnPick { source_session_id })
                 if source_session_id == session_id
         );
         if !still_open {
@@ -8046,8 +8046,8 @@ impl App {
             .collect()
     }
 
-    fn orchestrator_session_needing_hydration(&self) -> Option<String> {
-        let id = self.orchestrator_id.as_ref()?;
+    fn minibuffer_session_needing_hydration(&self) -> Option<String> {
+        let id = self.minibuffer_id.as_ref()?;
         let needs_history = self
             .sessions
             .iter()
@@ -8063,7 +8063,7 @@ impl App {
     /// tail the instant the pointer lands on the clip. (The shimmer-text hover
     /// always targets the playbook's own dispatching session, which is already
     /// warm, so it doesn't need this.) These workers are usually neither
-    /// selected nor the orchestrator, so without this nothing else
+    /// selected nor the minibuffer, so without this nothing else
     /// hydrates them and the clip-chip preview silently degrades to the bare
     /// text tooltip.
     fn playbook_referenced_sessions_needing_hydration(&self) -> Vec<String> {
@@ -8199,7 +8199,7 @@ impl App {
                 .then_with(|| a.name.cmp(&b.name))
         });
 
-        let orch_id = self.orchestrator_id.as_deref();
+        let orch_id = self.minibuffer_id.as_deref();
         let mut subagents_by_parent: HashMap<&str, Vec<&SessionSummary>> = HashMap::new();
         for s in self.sessions.iter().filter(|s| is_subagent_session(s)) {
             if let Some(parent) = s.parent_session_id.as_deref() {
@@ -8488,7 +8488,7 @@ impl App {
             .sessions
             .iter()
             .filter(|s| s.group_id.is_none())
-            // Hide the orchestrator from the list — it's rendered in
+            // Hide the minibuffer from the list — it's rendered in
             // the minibuffer instead. Subagents render only as children
             // of their parent session.
             .filter(|s| Some(s.id.as_str()) != orch_id)
@@ -9122,26 +9122,26 @@ impl App {
             Ok(list) => self.groups = list,
             Err(e) => self.set_status(format!("project list failed: {e}")),
         }
-        self.refresh_orchestrator_id();
+        self.refresh_minibuffer_id();
         self.ensure_selection_valid();
     }
 
-    /// Re-derive `orchestrator_id` from the current sessions list.
+    /// Re-derive `minibuffer_id` from the current sessions list.
     /// Called after any list mutation (refresh, state notification,
     /// session-deleted) so the minibuffer stays bound to the right
-    /// session — and falls back to palette mode if the orchestrator
+    /// session — and falls back to palette mode if the minibuffer
     /// goes away.
     ///
-    /// Prefers a *live* (non-terminal) orchestrator. If only terminal
-    /// orchestrators exist (e.g. a previous run failed to start
-    /// smith), we behave as if there's no orchestrator so the user
+    /// Prefers a *live* (non-terminal) minibuffer. If only terminal
+    /// minibuffers exist (e.g. a previous run failed to start
+    /// smith), we behave as if there's no minibuffer so the user
     /// gets the palette fallback.
-    fn refresh_orchestrator_id(&mut self) {
-        self.orchestrator_id = self
+    fn refresh_minibuffer_id(&mut self) {
+        self.minibuffer_id = self
             .sessions
             .iter()
             .find(|s| {
-                s.kind == construct_protocol::SessionKind::Orchestrator && !s.state.is_terminal()
+                s.kind == construct_protocol::SessionKind::Minibuffer && !s.state.is_terminal()
             })
             .map(|s| s.id.clone());
     }
@@ -9280,7 +9280,7 @@ impl App {
         if index == 0 {
             // Pane 1 is the session list.
             self.reset_vim_mode();
-            self.collapse_orchestrator_panel_on_focus_change();
+            self.collapse_minibuffer_panel_on_focus_change();
             if matches!(self.zoom, ZoomMode::View) {
                 self.zoom = ZoomMode::List;
             }
@@ -9293,7 +9293,7 @@ impl App {
             return false;
         };
         self.reset_vim_mode();
-        self.collapse_orchestrator_panel_on_focus_change();
+        self.collapse_minibuffer_panel_on_focus_change();
         // Asking for a window implies the view side should be visible.
         if matches!(self.zoom, ZoomMode::List) {
             self.zoom = ZoomMode::View;
@@ -9340,7 +9340,7 @@ impl App {
             return false;
         };
         self.reset_vim_mode();
-        self.collapse_orchestrator_panel_on_focus_change();
+        self.collapse_minibuffer_panel_on_focus_change();
         self.focus_main_window(id);
         self.set_status(format!("focus: window {id}"));
         true
@@ -9734,7 +9734,7 @@ impl App {
         // A session selection stays valid as long as the session still
         // exists, even when it has no navigable list row — e.g. a subagent,
         // which renders only as a child of its parent (and never at all when
-        // the parent is the hidden orchestrator) but is reachable through a
+        // the parent is the hidden minibuffer) but is reachable through a
         // playbook session clip. The main view can display any live session;
         // the list simply won't highlight a row for it. Without this, clicking
         // such a clip selects the session and the next session-list refresh
@@ -9946,9 +9946,9 @@ impl App {
     }
 
     /// True when the session is currently rendered somewhere on screen:
-    /// a pane of the active window (including splits), or the orchestrator
+    /// a pane of the active window (including splits), or the minibuffer
     /// panel. Used to decide whether a background `Pty` chunk needs an
-    /// immediate full-frame repaint. Conservative — treats the orchestrator
+    /// immediate full-frame repaint. Conservative — treats the minibuffer
     /// as always-visible so the gate never drops a needed redraw; the cost
     /// of an occasional extra paint is far cheaper than missing one.
     fn session_visible_on_screen(&self, id: &str) -> bool {
@@ -9960,7 +9960,7 @@ impl App {
         {
             return true;
         }
-        if self.orchestrator_id.as_deref() == Some(id) {
+        if self.minibuffer_id.as_deref() == Some(id) {
             return true;
         }
         false
@@ -10143,7 +10143,7 @@ impl App {
                         // the explicit `call_id` field (with a legacy
                         // fallback to the `tool` field for old
                         // transcripts). Tool events from the
-                        // orchestrator session also land here.
+                        // minibuffer session also land here.
                         if let SessionEvent::ToolUse { tool, args, .. } = &payload.event {
                             // The TUI-dispatch tool (`tui`) is a
                             // slash-command short-circuit, not a real
@@ -10253,14 +10253,14 @@ impl App {
                             // (`SessionSummary::last_message`), refreshed by
                             // the per-event State broadcast — no client-side
                             // message cache needed here.
-                            // Accumulate the orchestrator's streaming assistant
+                            // Accumulate the minibuffer's streaming assistant
                             // text; finalized into a typewriter monolog at turn
                             // end (the AgentStatus active=false handler below).
                             if matches!(kind, crate::pty_render::MessageKind::Assistant)
-                                && self.orchestrator_id.as_deref()
+                                && self.minibuffer_id.as_deref()
                                     == Some(payload.session_id.as_str())
                             {
-                                self.operator_utterance.push_str(&text);
+                                self.minibuffer_utterance.push_str(&text);
                             }
                         }
                         // Adapter editor state — drives the fixed
@@ -10313,7 +10313,7 @@ impl App {
                                         (payload.session_id.clone(), panel.id.clone()),
                                         until,
                                     );
-                                    if self.orchestrator_id.as_deref()
+                                    if self.minibuffer_id.as_deref()
                                         == Some(payload.session_id.as_str())
                                     {
                                         self.matrix_widget_hover = Some(MatrixWidgetHover {
@@ -10343,7 +10343,7 @@ impl App {
                                 if self.dynamic_ui_focused.as_ref() == Some(&key) {
                                     self.dynamic_ui_focused = None;
                                 }
-                                if self.orchestrator_id.as_deref()
+                                if self.minibuffer_id.as_deref()
                                     == Some(payload.session_id.as_str())
                                 {
                                     if self.matrix_widget_pinned.as_deref() == Some(id.as_str()) {
@@ -10361,7 +10361,7 @@ impl App {
                             _ => {}
                         }
                         if let SessionEvent::AgentStatus(status) = &payload.event {
-                            let is_orchestrator = self.orchestrator_id.as_deref()
+                            let is_minibuffer = self.minibuffer_id.as_deref()
                                 == Some(payload.session_id.as_str());
                             if status.active {
                                 // NOTE: `active=true` fires on *every* delta (a
@@ -10377,16 +10377,16 @@ impl App {
                                 self.agent_statuses.remove(&payload.session_id);
                                 // Turn end — consolidate the accumulated text into
                                 // a single typewriter monolog over the matrix rain.
-                                if is_orchestrator {
+                                if is_minibuffer {
                                     if let Some(text) =
-                                        operator_monolog_text(&self.operator_utterance)
+                                        minibuffer_monolog_text(&self.minibuffer_utterance)
                                     {
-                                        self.operator_monolog = Some(OperatorMonolog {
+                                        self.minibuffer_monolog = Some(MinibufferMonolog {
                                             text,
                                             started_at: Instant::now(),
                                         });
                                     }
-                                    self.operator_utterance.clear();
+                                    self.minibuffer_utterance.clear();
                                 }
                                 if let Some(bytes) = agent_status_history_line(status) {
                                     let history = self
@@ -10398,12 +10398,12 @@ impl App {
                             }
                             return;
                         }
-                        // Orchestrator session events: PTY bytes flow
+                        // Minibuffer session events: PTY bytes flow
                         // through the regular PTY branch above (into
                         // `terminals[id]`). Non-PTY events (Message,
                         // ToolUse, ToolResult, ...) just record into
                         // the transcript like any other session — the
-                        // orchestrator is filtered from the *list*
+                        // minibuffer is filtered from the *list*
                         // view, but its events are still useful for
                         // CLI / MCP introspection and don't hurt the
                         // TUI (the panel renders the PTY screen, not
@@ -10459,7 +10459,7 @@ impl App {
                         {
                             self.report_seen(&id);
                         }
-                        self.refresh_orchestrator_id();
+                        self.refresh_minibuffer_id();
                     }
                 }
             }
@@ -10835,12 +10835,12 @@ impl App {
     /// by another client, so a lingering prompt would be stale.
     fn dismiss_approval_prompt(&mut self, session_id: &str, call_id: &str) {
         let is_match = matches!(
-            self.minibuffer.as_ref().map(|mb| &mb.intent),
-            Some(MinibufferIntent::ApproveTool { session_id: s, call_id: c, .. })
+            self.prompt.as_ref().map(|mb| &mb.intent),
+            Some(PromptIntent::ApproveTool { session_id: s, call_id: c, .. })
                 if s == session_id && c == call_id
         );
         if is_match {
-            self.minibuffer = None;
+            self.prompt = None;
         }
     }
 
@@ -10854,30 +10854,30 @@ impl App {
         }
     }
 
-    pub fn operator_has_pending_approval(&self) -> bool {
-        let Some(orchestrator_id) = self.orchestrator_id.as_deref() else {
+    pub fn minibuffer_has_pending_approval(&self) -> bool {
+        let Some(minibuffer_id) = self.minibuffer_id.as_deref() else {
             return false;
         };
         self.pending_tool_approvals
-            .get(orchestrator_id)
+            .get(minibuffer_id)
             .is_some_and(|pending| !pending.is_empty())
     }
 
-    pub fn operator_loop_disabled(&self) -> bool {
-        let Some(id) = self.orchestrator_id.as_deref() else {
+    pub fn minibuffer_loop_disabled(&self) -> bool {
+        let Some(id) = self.minibuffer_id.as_deref() else {
             return false;
         };
         self.sessions
             .iter()
             .find(|s| s.id == id)
-            .is_some_and(|s| s.operator_loop_disabled)
+            .is_some_and(|s| s.minibuffer_loop_disabled)
     }
 
-    fn toggle_orchestrator_panel(&mut self) {
-        if self.is_orchestrator_panel_open() {
-            self.minibuffer = None;
+    fn toggle_minibuffer_panel(&mut self) {
+        if self.is_minibuffer_panel_open() {
+            self.prompt = None;
         } else {
-            self.open_minibuffer_for_command();
+            self.open_prompt_for_command();
         }
     }
 
@@ -10903,10 +10903,10 @@ impl App {
         if self.selection.session_id() != Some(session_id.as_str()) {
             return;
         }
-        // Otherwise: any non-orchestrator minibuffer is shorter-lived
+        // Otherwise: any non-minibuffer minibuffer is shorter-lived
         // and shouldn't be clobbered by an unrelated approval. Skip
         // when busy.
-        if self.minibuffer.is_some() {
+        if self.prompt.is_some() {
             return;
         }
         let risk_label = match risk {
@@ -10919,11 +10919,11 @@ impl App {
         // separately as clickable spans (spec 0075), built from
         // `allow_auto_review` on the intent itself.
         let prompt = format!("approve [{risk_label}] {tool}({}) ▸ ", short_args);
-        self.minibuffer = Some(Minibuffer {
+        self.prompt = Some(Prompt {
             prompt,
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::ApproveTool {
+            intent: PromptIntent::ApproveTool {
                 session_id,
                 call_id,
                 tool,
@@ -10936,7 +10936,7 @@ impl App {
     }
 
     fn session_renders_approval_inline(&self, session_id: &str) -> bool {
-        self.orchestrator_id.as_deref() == Some(session_id)
+        self.minibuffer_id.as_deref() == Some(session_id)
             || self
                 .sessions
                 .iter()
@@ -11020,11 +11020,11 @@ impl App {
         self.playbook_projection_pending.remove(id);
         self.playbook_collaborators
             .retain(|_, cursor| cursor.session_id != id);
-        // Orchestrator session went away → palette fallback after the
-        // re-derive below. The orchestrator's PTY parser in
+        // Minibuffer session went away → palette fallback after the
+        // re-derive below. The minibuffer's PTY parser in
         // `terminals[id]` was already removed by the generic cleanup
         // above.
-        self.refresh_orchestrator_id();
+        self.refresh_minibuffer_id();
         self.ensure_selection_valid();
         // Deletion is dispatched off the event loop on purpose (see
         // `spawn_session_delete`), and reacting to it must be too: the
@@ -11304,7 +11304,7 @@ impl App {
             // underneath instead of the menu.
             && self.route_menu.is_none()
             && self.resizing_list.is_none()
-            && self.resizing_orchestrator_panel.is_none()
+            && self.resizing_minibuffer_panel.is_none()
             && self.resizing_matrix_rain.is_none()
             && self.resizing_main_window.is_none()
             && self.resizing_playbook_popup.is_none()
@@ -11352,7 +11352,7 @@ impl App {
             // sees it — the menu looks dead while rendering perfectly.
             && self.route_menu.is_none()
             && self.resizing_list.is_none()
-            && self.resizing_orchestrator_panel.is_none()
+            && self.resizing_minibuffer_panel.is_none()
             && self.resizing_matrix_rain.is_none()
             && self.resizing_main_window.is_none()
             && self.resizing_lineage.is_none()
@@ -11575,14 +11575,14 @@ impl App {
                         return;
                     }
                 }
-                // Operator/minibuffer panel: the top border is the panel's title
+                // Prompt/minibuffer panel: the top border is the panel's title
                 // area and acts as a vertical resize handle.
-                if self.is_on_orchestrator_panel_divider(ev.column, ev.row) {
-                    let cur_h = self.layout.minibuffer_area.map(|a| a.height).unwrap_or(
-                        self.orchestrator_panel_h
+                if self.is_on_minibuffer_panel_divider(ev.column, ev.row) {
+                    let cur_h = self.layout.prompt_area.map(|a| a.height).unwrap_or(
+                        self.minibuffer_panel_h
                             .unwrap_or(MINIBUFFER_PANEL_H_DEFAULT),
                     );
-                    self.resizing_orchestrator_panel = Some((ev.row, cur_h));
+                    self.resizing_minibuffer_panel = Some((ev.row, cur_h));
                     return;
                 }
                 if self.begin_terminal_scrollbar_drag_or_jump(ev.column, ev.row) {
@@ -11597,9 +11597,9 @@ impl App {
                 if self.is_over_dynamic_ui_overlay(ev.column, ev.row) {
                     return;
                 }
-                // Lineage section header: like the operator panel's title
+                // Lineage section header: like the minibuffer panel's title
                 // bar, dragging it adjusts the section height (the section
-                // is bottom-anchored above the operator panel, so dragging
+                // is bottom-anchored above the minibuffer panel, so dragging
                 // the header up grows it). The header's own buttons (collapse,
                 // mode toggle) are excluded so their clicks stay clicks.
                 if self.is_on_lineage_header_bar(ev.column, ev.row) {
@@ -11650,7 +11650,7 @@ impl App {
                         .max(LIST_PANEL_W_MIN as i32)
                         .min(u16::MAX as i32) as u16;
                     self.list_panel_w = want;
-                } else if let Some((anchor_row, anchor_h)) = self.resizing_orchestrator_panel {
+                } else if let Some((anchor_row, anchor_h)) = self.resizing_minibuffer_panel {
                     // Dragging the top border UP grows the panel; dragging it
                     // DOWN shrinks it. The render path still clamps to the
                     // available terminal height.
@@ -11658,7 +11658,7 @@ impl App {
                     let want = (anchor_h as i32 + delta)
                         .max(MINIBUFFER_PANEL_H_MIN as i32)
                         .min(MINIBUFFER_PANEL_H_MAX as i32) as u16;
-                    self.orchestrator_panel_h = Some(want);
+                    self.minibuffer_panel_h = Some(want);
                 } else if let Some((anchor_row, anchor_h)) = self.resizing_lineage {
                     // Dragging the header UP grows the section; DOWN
                     // shrinks it. Clamped to the sidebar's caps at render.
@@ -11710,7 +11710,7 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 let was_resizing = self.resizing_list.is_some()
-                    || self.resizing_orchestrator_panel.is_some()
+                    || self.resizing_minibuffer_panel.is_some()
                     || self.dragging_terminal_scrollbar.is_some()
                     || self.dragging_list_scrollbar.is_some()
                     || self.dragging_lineage_scrollbar.is_some()
@@ -11719,7 +11719,7 @@ impl App {
                     || self.resizing_lineage.is_some()
                     || self.resizing_playbook_attachment.is_some();
                 self.resizing_list = None;
-                self.resizing_orchestrator_panel = None;
+                self.resizing_minibuffer_panel = None;
                 self.dragging_terminal_scrollbar = None;
                 self.dragging_list_scrollbar = None;
                 self.dragging_lineage_scrollbar = None;
@@ -12017,16 +12017,16 @@ impl App {
                 return;
             }
         }
-        if let Some(mb_area) = self.layout.minibuffer_area {
+        if let Some(mb_area) = self.layout.prompt_area {
             if contains(mb_area, col, row) {
-                // Orchestrator panel: click on a tool block toggles
-                // its expand state. The orchestrator's render area
+                // Minibuffer panel: click on a tool block toggles
+                // its expand state. The minibuffer's render area
                 // is the minibuffer rect minus the 1-row top border.
                 if matches!(
-                    self.minibuffer.as_ref().map(|m| &m.intent),
-                    Some(MinibufferIntent::Orchestrator)
+                    self.prompt.as_ref().map(|m| &m.intent),
+                    Some(PromptIntent::Minibuffer)
                 ) {
-                    if let Some(orch_id) = self.orchestrator_id.clone() {
+                    if let Some(orch_id) = self.minibuffer_id.clone() {
                         let inner = ratatui::layout::Rect {
                             x: mb_area.x,
                             y: mb_area.y + 1,
@@ -12038,7 +12038,7 @@ impl App {
                         }
                     }
                 }
-                self.click_minibuffer(mb_area, col, row).await;
+                self.click_prompt(mb_area, col, row).await;
                 return;
             }
         }
@@ -12150,7 +12150,7 @@ impl App {
                 if self.selection.service_name().is_some() {
                     // Clicking a service pane focuses it, and a focused
                     // service view is its editor (spec 0175).
-                    self.collapse_orchestrator_panel_on_focus_change();
+                    self.collapse_minibuffer_panel_on_focus_change();
                     self.focus = PaneFocus::View;
                     self.sync_service_editor_with_selection();
                     // Channel rows scroll, so their positions come from the
@@ -12195,7 +12195,7 @@ impl App {
                         return;
                     }
                 }
-                self.collapse_orchestrator_panel_on_focus_change();
+                self.collapse_minibuffer_panel_on_focus_change();
                 self.focus = PaneFocus::View;
                 return;
             }
@@ -12231,20 +12231,20 @@ impl App {
         self.url_hit_at(col, row)
     }
 
-    /// Collapse the orchestrator panel (close the
-    /// `MinibufferIntent::Orchestrator` minibuffer) if it's
+    /// Collapse the minibuffer panel (close the
+    /// `PromptIntent::Minibuffer` minibuffer) if it's
     /// currently open. Called from every code path that moves
     /// focus to a different pane — clicking list / view / pin
     /// strip, the `SwitchFocus` and `FocusView` actions, the
     /// session-create completion handler. No-op when the panel
     /// isn't open or a different intent (palette, send-input,
     /// rename, etc.) is active.
-    fn collapse_orchestrator_panel_on_focus_change(&mut self) {
+    fn collapse_minibuffer_panel_on_focus_change(&mut self) {
         if matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::Orchestrator)
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::Minibuffer)
         ) {
-            self.minibuffer = None;
+            self.prompt = None;
         }
     }
 
@@ -12355,8 +12355,8 @@ impl App {
     /// view is on a PTY-backed session in terminal mode. vt100 clamps the
     /// offset to its actual buffer size internally on `set_scrollback`.
     fn adjust_scrollback(&mut self, delta: i32) {
-        if self.is_orchestrator_panel_open() {
-            self.orchestrator_scrollback = adjusted_scrollback(self.orchestrator_scrollback, delta);
+        if self.is_minibuffer_panel_open() {
+            self.minibuffer_scrollback = adjusted_scrollback(self.minibuffer_scrollback, delta);
             return;
         }
         if self.view != ViewMode::Terminal || !self.in_pty_session() {
@@ -12509,15 +12509,15 @@ impl App {
         offset
     }
 
-    pub(crate) fn is_orchestrator_panel_open(&self) -> bool {
+    pub(crate) fn is_minibuffer_panel_open(&self) -> bool {
         matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::Orchestrator)
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::Minibuffer)
         )
     }
 
     fn can_scroll_pty_history(&self) -> bool {
-        self.is_orchestrator_panel_open()
+        self.is_minibuffer_panel_open()
             || (self.view == ViewMode::Terminal && self.in_pty_session())
     }
 
@@ -12836,9 +12836,9 @@ impl App {
         // The playbook captures keystrokes only while it is the topmost input
         // surface *and* the view pane holds focus. If a minibuffer/palette
         // overlay is open over it (e.g. `C-x x` opened the command palette or
-        // the operator input), that overlay must capture input instead —
+        // the user input), that overlay must capture input instead —
         // otherwise typed keys leak into the playbook buffer and the
-        // palette/operator is unusable. The `C-x` chord that *opens* an overlay
+        // palette/minibuffer is unusable. The `C-x` chord that *opens* an overlay
         // still reaches the playbook global handler because no minibuffer exists
         // yet at that point; once the overlay is open the minibuffer block below
         // takes over.
@@ -12853,7 +12853,7 @@ impl App {
             .playbook_popup
             .as_ref()
             .is_some_and(|popup| !popup.terminal_focus)
-            && self.minibuffer.is_none()
+            && self.prompt.is_none()
             && self.focus == PaneFocus::View
         {
             if self.handle_playbook_global_key(key).await {
@@ -12869,17 +12869,17 @@ impl App {
             self.handle_remote_control_key(key).await;
             return;
         }
-        // Minibuffer captures all input when open — with one exception:
-        // the orchestrator intent is just a focus marker for a
-        // PTY-backed panel, so keys go to the orchestrator session's
+        // Prompt captures all input when open — with one exception:
+        // the minibuffer intent is just a focus marker for a
+        // PTY-backed panel, so keys go to the minibuffer session's
         // PTY (with the standard `C-x` chord escape) rather than into
         // the minibuffer's text input.
-        if let Some(mb) = &self.minibuffer {
-            if matches!(mb.intent, MinibufferIntent::Orchestrator) {
-                self.handle_orchestrator_key(key).await;
+        if let Some(mb) = &self.prompt {
+            if matches!(mb.intent, PromptIntent::Minibuffer) {
+                self.handle_minibuffer_key(key).await;
                 return;
             }
-            self.handle_minibuffer_key(key).await;
+            self.handle_prompt_key(key).await;
             return;
         }
         // Service-view commands are a normal pane-level fast path, but they
@@ -12939,7 +12939,7 @@ impl App {
         }
 
         if self.should_autofocus_view_from_list(key) {
-            self.collapse_orchestrator_panel_on_focus_change();
+            self.collapse_minibuffer_panel_on_focus_change();
             self.focus = PaneFocus::View;
         }
 
@@ -13212,15 +13212,15 @@ impl App {
                 self.refresh_selected_transcript().await;
             }
             EnterInsert => {
-                self.collapse_orchestrator_panel_on_focus_change();
+                self.collapse_minibuffer_panel_on_focus_change();
                 self.focus = PaneFocus::View;
                 if !self.set_vim_insert_if_captured() {
                     if let Some(id) = self.selected_id() {
-                        self.minibuffer = Some(Minibuffer {
+                        self.prompt = Some(Prompt {
                             prompt: format!("Send to {}: ", short_id(&id)),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::SendInput { session_id: id },
+                            intent: PromptIntent::SendInput { session_id: id },
                             error: None,
                         });
                     } else {
@@ -13230,11 +13230,11 @@ impl App {
             }
             OpenSendInput => {
                 if let Some(id) = self.selected_id() {
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Send to {}: ", short_id(&id)),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::SendInput { session_id: id },
+                        intent: PromptIntent::SendInput { session_id: id },
                         error: None,
                     });
                 } else {
@@ -13247,11 +13247,11 @@ impl App {
                 }
                 self.harness_picker_selected = 0;
                 self.harness_picker_filter_active = true;
-                self.minibuffer = Some(Minibuffer {
+                self.prompt = Some(Prompt {
                     prompt: "New session: ".to_string(),
                     input: String::new(),
                     cursor: 0,
-                    intent: MinibufferIntent::NewSessionHarness,
+                    intent: PromptIntent::NewSessionHarness,
                     error: None,
                 });
             }
@@ -13275,11 +13275,11 @@ impl App {
                 self.turn_picker_entries = vec![turn_picker_now_row()];
                 self.turn_picker_selected = 0;
                 self.turn_picker_loading = true;
-                self.minibuffer = Some(Minibuffer {
+                self.prompt = Some(Prompt {
                     prompt: "Fork session: ".to_string(),
                     input: String::new(),
                     cursor: 0,
-                    intent: MinibufferIntent::ForkTurnPick {
+                    intent: PromptIntent::ForkTurnPick {
                         source_session_id: id.clone(),
                     },
                     error: None,
@@ -13324,11 +13324,11 @@ impl App {
                     };
                     let current = s.title.clone().unwrap_or_default();
                     let cursor = current.chars().count();
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Rename {} to: ", short_id(&id)),
                         input: current,
                         cursor,
-                        intent: MinibufferIntent::Rename { session_id: id },
+                        intent: PromptIntent::Rename { session_id: id },
                         error: None,
                     });
                 }
@@ -13338,11 +13338,11 @@ impl App {
                     };
                     let current = g.name.clone();
                     let cursor = current.chars().count();
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: "Rename project to: ".to_string(),
                         input: current,
                         cursor,
-                        intent: MinibufferIntent::GroupRename { group_id: id },
+                        intent: PromptIntent::GroupRename { group_id: id },
                         error: None,
                     });
                 }
@@ -13356,18 +13356,18 @@ impl App {
                 Selection::Session(id) => {
                     // The `[d]`/`[a]`/`[m]`/`[N]` choice cluster and its
                     // descriptions render as clickable spans (spec 0075,
-                    // see `ui::minibuffer_choice_suffix`) — this prompt only
+                    // see `ui::prompt_choice_suffix`) — this prompt only
                     // carries the data-dependent question prefix. Forks get
                     // an extra `[m] merge and archive` option.
                     let is_fork = self
                         .sessions
                         .iter()
                         .any(|s| s.id == id && s.forked_from.is_some());
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Session {}: ", short_id(&id)),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::DeleteConfirm {
+                        intent: PromptIntent::DeleteConfirm {
                             session_id: id,
                             is_fork,
                         },
@@ -13381,11 +13381,11 @@ impl App {
                         .find(|g| g.id == id)
                         .map(|g| g.name.clone())
                         .unwrap_or_default();
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Delete project '{}'? ", name),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::GroupDeleteConfirm { group_id: id },
+                        intent: PromptIntent::GroupDeleteConfirm { group_id: id },
                         error: None,
                     });
                 }
@@ -13403,11 +13403,11 @@ impl App {
                         self.set_status(format!("service {name} not found"));
                         return;
                     }
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Delete service {name}? "),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::ServiceDeleteConfirm { name },
+                        intent: PromptIntent::ServiceDeleteConfirm { name },
                         error: None,
                     });
                 }
@@ -13433,7 +13433,7 @@ impl App {
                         } else {
                             format!(", skips {native_mirrors} native mirror(s)")
                         };
-                        self.minibuffer = Some(Minibuffer {
+                        self.prompt = Some(Prompt {
                             prompt: format!(
                                 "Delete all {} managed archived session(s) in {}{}? (drops transcript + worktree) ",
                                 ids.len(),
@@ -13442,7 +13442,7 @@ impl App {
                             ),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::ArchivedDeleteConfirm { section },
+                            intent: PromptIntent::ArchivedDeleteConfirm { section },
                             error: None,
                         });
                     }
@@ -13528,7 +13528,7 @@ impl App {
                 }
             }
             OpenCommandPalette => {
-                self.open_minibuffer_for_command();
+                self.open_prompt_for_command();
             }
             OpenSwitchSession => {
                 self.open_session_picker(SessionPickerPurpose::Switch);
@@ -13544,7 +13544,7 @@ impl App {
                     if matches!(self.zoom, ZoomMode::List) {
                         self.zoom = ZoomMode::View;
                     }
-                    self.collapse_orchestrator_panel_on_focus_change();
+                    self.collapse_minibuffer_panel_on_focus_change();
                     self.focus = PaneFocus::View;
                     self.set_vim_insert_if_captured();
                     self.set_status("focus: view".into());
@@ -13562,7 +13562,7 @@ impl App {
                     return;
                 }
                 // Project dashboard: Enter from the list focuses the pane so
-                // the operator can move the member cursor; Enter again (view
+                // the user can move the member cursor; Enter again (view
                 // already focused) opens the highlighted member.
                 if let Some(project_id) = self.selection.group_id().map(str::to_owned) {
                     if self.focus == PaneFocus::View {
@@ -13573,7 +13573,7 @@ impl App {
                         ZoomMode::List => self.zoom = ZoomMode::View,
                         ZoomMode::View | ZoomMode::None => {}
                     }
-                    self.collapse_orchestrator_panel_on_focus_change();
+                    self.collapse_minibuffer_panel_on_focus_change();
                     self.focus = PaneFocus::View;
                     return;
                 }
@@ -13592,11 +13592,11 @@ impl App {
                     if s.state.is_terminal() {
                         let session_id = s.id.clone();
                         let short = short_id(&session_id).to_string();
-                        self.minibuffer = Some(Minibuffer {
+                        self.prompt = Some(Prompt {
                             prompt: format!("Restart session {short}? "),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::RestartConfirm { session_id },
+                            intent: PromptIntent::RestartConfirm { session_id },
                             error: None,
                         });
                         return;
@@ -13612,7 +13612,7 @@ impl App {
                     }
                     ZoomMode::View | ZoomMode::None => {}
                 }
-                self.collapse_orchestrator_panel_on_focus_change();
+                self.collapse_minibuffer_panel_on_focus_change();
                 self.focus = PaneFocus::View;
                 self.set_vim_insert_if_captured();
             }
@@ -13621,7 +13621,7 @@ impl App {
                 // zoomed (and focused). In normal layout it cycles
                 // list plus all visible main windows.
                 self.reset_vim_mode();
-                self.collapse_orchestrator_panel_on_focus_change();
+                self.collapse_minibuffer_panel_on_focus_change();
                 match self.zoom {
                     ZoomMode::List => {
                         self.zoom = ZoomMode::View;
@@ -13815,8 +13815,8 @@ impl App {
             }
             ScrollTop => {
                 if self.can_scroll_pty_history() {
-                    if self.is_orchestrator_panel_open() {
-                        self.orchestrator_scrollback = SCROLLBACK_MAX;
+                    if self.is_minibuffer_panel_open() {
+                        self.minibuffer_scrollback = SCROLLBACK_MAX;
                     } else {
                         let active_window = Some(self.active_window_id);
                         self.set_scrollback_for_window(active_window, SCROLLBACK_MAX);
@@ -13828,8 +13828,8 @@ impl App {
             }
             ScrollBottom => {
                 if self.can_scroll_pty_history() {
-                    if self.is_orchestrator_panel_open() {
-                        self.orchestrator_scrollback = 0;
+                    if self.is_minibuffer_panel_open() {
+                        self.minibuffer_scrollback = 0;
                     } else {
                         let active_window = Some(self.active_window_id);
                         self.set_scrollback_for_window(active_window, 0);
@@ -13864,36 +13864,36 @@ impl App {
                 self.open_configure_popup().await;
             }
             OpenRestartDaemonConfirm => {
-                self.minibuffer = Some(Minibuffer {
+                self.prompt = Some(Prompt {
                     prompt: "Restart daemon? ".to_string(),
                     input: String::new(),
                     cursor: 0,
-                    intent: MinibufferIntent::RestartDaemonConfirm,
+                    intent: PromptIntent::RestartDaemonConfirm,
                     error: None,
                 });
             }
             OpenConfigRestartConfirm => {
-                // Name the waiting fields in the prompt: the operator is being
+                // Name the waiting fields in the prompt: the user is being
                 // asked to drop every attached client, and "Restart daemon?"
                 // alone does not say what they get for it.
-                self.minibuffer = Some(Minibuffer {
+                self.prompt = Some(Prompt {
                     prompt: format!(
                         "Restart daemon to apply {}? ",
                         self.config_restart_required.join(", ")
                     ),
                     input: String::new(),
                     cursor: 0,
-                    intent: MinibufferIntent::RestartDaemonConfirm,
+                    intent: PromptIntent::RestartDaemonConfirm,
                     error: None,
                 });
             }
             OpenUpgradeConfirm => {
                 if let Some(version) = self.latest_version.clone() {
-                    self.minibuffer = Some(Minibuffer {
+                    self.prompt = Some(Prompt {
                         prompt: format!("Upgrade to {version} and restart the daemon? "),
                         input: String::new(),
                         cursor: 0,
-                        intent: MinibufferIntent::UpgradeConfirm { version },
+                        intent: PromptIntent::UpgradeConfirm { version },
                         error: None,
                     });
                 }
@@ -13928,15 +13928,15 @@ impl App {
         }
     }
 
-    /// Key handler for the orchestrator panel: same shape as the main
+    /// Key handler for the minibuffer panel: same shape as the main
     /// view's PTY mode (C-x chord escape, `C-x C-x` to forward a
     /// literal C-x byte). `Esc` closes the panel; the next `C-x x`
     /// reopens it. All non-chord keys are encoded to PTY bytes and
-    /// forwarded to the orchestrator session.
-    async fn handle_orchestrator_key(&mut self, key: KeyEvent) {
-        let Some(orch_id) = self.orchestrator_id.clone() else {
-            // Orchestrator went away — fall back to palette mode.
-            self.minibuffer = None;
+    /// forwarded to the minibuffer session.
+    async fn handle_minibuffer_key(&mut self, key: KeyEvent) {
+        let Some(orch_id) = self.minibuffer_id.clone() else {
+            // Prompt went away — fall back to palette mode.
+            self.prompt = None;
             return;
         };
         let is_ctrl_x =
@@ -13946,7 +13946,7 @@ impl App {
         if !self.chord_state.is_empty() && is_ctrl_x {
             self.chord_state = ChordState::default();
             self.chord_label.clear();
-            self.queue_pty_input(orch_id, vec![0x18], "orchestrator pty_input");
+            self.queue_pty_input(orch_id, vec![0x18], "minibuffer pty_input");
             return;
         }
         // Start of a chord or continuation: dispatch through the keymap.
@@ -13962,15 +13962,15 @@ impl App {
         }
         // Esc closes the panel without sending anything to the PTY.
         if matches!(key.code, KeyCode::Esc) {
-            self.minibuffer = None;
+            self.prompt = None;
             return;
         }
-        // Everything else goes to the orchestrator's PTY.
+        // Everything else goes to the minibuffer's PTY.
         if let Some(bytes) = encode_key_to_bytes(key) {
-            // Typing into operator snaps back to live output, matching the main
+            // Typing into minibuffer snaps back to live output, matching the main
             // PTY pane's behavior.
-            self.orchestrator_scrollback = 0;
-            self.queue_pty_input(orch_id, bytes, "orchestrator pty_input");
+            self.minibuffer_scrollback = 0;
+            self.queue_pty_input(orch_id, bytes, "minibuffer pty_input");
         }
     }
     /// Report the active theme's painted background to the daemon (spec
@@ -14310,9 +14310,9 @@ impl App {
     /// the event was queued for the child; `false` falls back to construct's
     /// own scrollback.
     fn forward_op_xy_scroll_to_child(&mut self, down: bool) -> bool {
-        // The orchestrator panel keeps its own scrollback semantics — the
+        // The minibuffer panel keeps its own scrollback semantics — the
         // encoder scrolls the panel, mirroring `adjust_scrollback`.
-        if self.is_orchestrator_panel_open() {
+        if self.is_minibuffer_panel_open() {
             return false;
         }
         if self.view != ViewMode::Terminal || !self.in_pty_session() {
@@ -14420,9 +14420,9 @@ impl App {
     }
 
     /// Execute a slash-style command (`zoom`, `new`, `quit`, ...) with
-    /// no LLM involvement. Used both by the orchestrator panel (when
+    /// no LLM involvement. Used both by the minibuffer panel (when
     /// input starts with `/`) and by the static palette (fallback when
-    /// no orchestrator is present).
+    /// no minibuffer is present).
     pub(super) async fn run_slash_command(&mut self, cmd: &str) {
         let cmd = cmd.trim();
         // Split into verb + remaining args. Commands that don't
@@ -14677,11 +14677,11 @@ impl App {
                         }
                     }
                     ("delete", Some(service)) => {
-                        self.minibuffer = Some(Minibuffer {
+                        self.prompt = Some(Prompt {
                             prompt: format!("Delete service {}? ", service.name),
                             input: String::new(),
                             cursor: 0,
-                            intent: MinibufferIntent::ServiceDeleteConfirm {
+                            intent: PromptIntent::ServiceDeleteConfirm {
                                 name: service.name,
                             },
                             error: None,
@@ -14853,7 +14853,7 @@ impl App {
     /// re-opens to refresh. Click handlers in the popup itself can
     /// issue `tool_action(kill)` to terminate running tasks.
     pub async fn open_tasks_popup(&mut self) {
-        let Some(id) = self.selected_id().or_else(|| self.orchestrator_id.clone()) else {
+        let Some(id) = self.selected_id().or_else(|| self.minibuffer_id.clone()) else {
             self.set_status("no session selected".into());
             return;
         };
@@ -15211,17 +15211,17 @@ impl App {
         self.show_remote_chooser(None).await;
     }
 
-    /// Dismiss the dialog, and with it the orchestrator panel it was
+    /// Dismiss the dialog, and with it the minibuffer panel it was
     /// launched from — so a single Esc puts the user back in whichever
     /// session they had focused before typing the slash, instead of
     /// leaving the panel eating their keystrokes.
     fn close_remote_control_popup(&mut self) {
         self.remote_control_popup = None;
         if matches!(
-            self.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::Orchestrator)
+            self.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::Minibuffer)
         ) {
-            self.minibuffer = None;
+            self.prompt = None;
         }
     }
 
@@ -16953,13 +16953,13 @@ mod tests {
     }
 
     #[test]
-    fn operator_monolog_text_filters_noise() {
-        assert_eq!(operator_monolog_text(""), None);
-        assert_eq!(operator_monolog_text("   "), None);
-        assert_eq!(operator_monolog_text("noted"), None);
-        assert_eq!(operator_monolog_text("  Noted.  "), None);
+    fn minibuffer_monolog_text_filters_noise() {
+        assert_eq!(minibuffer_monolog_text(""), None);
+        assert_eq!(minibuffer_monolog_text("   "), None);
+        assert_eq!(minibuffer_monolog_text("noted"), None);
+        assert_eq!(minibuffer_monolog_text("  Noted.  "), None);
         assert_eq!(
-            operator_monolog_text("  'run using smith' is waiting at the trust prompt.  ")
+            minibuffer_monolog_text("  'run using smith' is waiting at the trust prompt.  ")
                 .as_deref(),
             Some("'run using smith' is waiting at the trust prompt.")
         );
@@ -17113,7 +17113,7 @@ mod tests {
             }],
             main_window_dividers: Vec::new(),
             matrix_rain_area: None,
-            minibuffer_area: Some(Rect::new(0, 29, 100, 4)),
+            prompt_area: Some(Rect::new(0, 29, 100, 4)),
             last_chat_areas: std::collections::HashMap::new(),
             modeline_approval_mode_hit: None,
             modeline_model_hit: None,
@@ -17133,9 +17133,9 @@ mod tests {
             list_scrollbar: None,
             shortcut_hints: Vec::new(),
             tutorial_card_area: None,
-            minibuffer_harness_hits: Vec::new(),
-            minibuffer_turn_hits: Vec::new(),
-            minibuffer_choice_hits: Vec::new(),
+            prompt_harness_hits: Vec::new(),
+            prompt_turn_hits: Vec::new(),
+            prompt_choice_hits: Vec::new(),
             modal_area: None,
             remote_control_hits: Vec::new(),
             session_title_name_hits: Vec::new(),
@@ -17183,10 +17183,10 @@ mod tests {
             dynamic_ui_widget_hits: Vec::new(),
             dynamic_ui_panel_close_hits: Vec::new(),
             dynamic_ui_inline_hit: None,
-            matrix_operator_loop_hit: None,
+            matrix_minibuffer_loop_hit: None,
             matrix_panel_mode_hit: None,
             matrix_token_graph_area: None,
-            matrix_operator_title_hit: None,
+            matrix_minibuffer_title_hit: None,
             matrix_theme_hit: None,
             list_title_tally_hits: Vec::new(),
             matrix_widget_hits: Vec::new(),
@@ -17314,16 +17314,16 @@ mod tests {
             transcript_session: None,
             transcript_scroll: 0,
             chat_lines_cache: ui::ChatLinesCache::default(),
-            minibuffer: None,
+            prompt: None,
             harness_picker_selected: 0,
             harness_picker_filter_active: false,
             turn_picker_entries: Vec::new(),
             turn_picker_selected: 0,
             turn_picker_loading: false,
             selected_load_generation: 0,
-            minibuffer_hint_offset: 0,
-            minibuffer_hint_rotated_at: None,
-            minibuffer_hint_context: None,
+            prompt_hint_offset: 0,
+            prompt_hint_rotated_at: None,
+            prompt_hint_context: None,
             harnesses: Vec::new(),
             features: Vec::new(),
             service_route_catalog: Vec::new(),
@@ -17375,7 +17375,7 @@ mod tests {
             block_hits: HashMap::new(),
             turn_mark_hits: HashMap::new(),
             matrix_reveal_hits: Vec::new(),
-            orchestrator_desired_size: None,
+            minibuffer_desired_size: None,
             terminal_pane_size: (80, 24),
             window_pane_sizes: HashMap::new(),
             zoom: ZoomMode::None,
@@ -17390,11 +17390,11 @@ mod tests {
             tick_redraw_requested: Cell::new(false),
             notification_dirtied_view: true,
             hydrating_sessions: HashSet::new(),
-            orchestrator_scrollback: 0,
-            operator_monolog: None,
-            operator_utterance: String::new(),
-            orchestrator_panel_h: None,
-            resizing_orchestrator_panel: None,
+            minibuffer_scrollback: 0,
+            minibuffer_monolog: None,
+            minibuffer_utterance: String::new(),
+            minibuffer_panel_h: None,
+            resizing_minibuffer_panel: None,
             main_slide: MainSlideState::default(),
             dragging_terminal_scrollbar: None,
             dragging_list_scrollbar: None,
@@ -17417,7 +17417,7 @@ mod tests {
             saw_mouse_motion: false,
             mouse_capture_enabled: true,
             last_playbook_clip_click: None,
-            orchestrator_id: None,
+            minibuffer_id: None,
             list_panel_w: LIST_PANEL_W_DEFAULT,
             resizing_list: None,
             matrix_rain_h: None,
@@ -17673,7 +17673,7 @@ mod tests {
             approval_mode: construct_protocol::ApprovalMode::Manual,
             kind,
             archived: false,
-            operator_loop_disabled: false,
+            minibuffer_loop_disabled: false,
             needs_attention: false,
             forked_from: None,
             merge: None,
@@ -19631,8 +19631,8 @@ mod tests {
             .await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::CommandPalette)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::CommandPalette)
             ),
             "C-x x must close the dialog AND open the command palette"
         );
@@ -20545,7 +20545,7 @@ mod tests {
     /// Clicking a clip that points at a session with no navigable list row —
     /// the canonical case being a subagent, which renders only as a child of
     /// its parent (and never at all when the parent is the hidden
-    /// orchestrator) — must switch to it *persistently*. Two prior bugs made
+    /// minibuffer) — must switch to it *persistently*. Two prior bugs made
     /// it flicker back to the playbook: (1) the click never synced the active
     /// window pane, so the main view kept rendering the old session, and
     /// (2) the next `refresh_sessions → ensure_selection_valid` reverted the
@@ -20556,15 +20556,15 @@ mod tests {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let (mut app, _dir, _server) = empty_app().await;
         let s1 = summary_with_kind(construct_protocol::SessionKind::User);
-        // The orchestrator (the fleet dispatcher whose playbook holds the clips)
+        // The minibuffer (the fleet dispatcher whose playbook holds the clips)
         // is hidden from the list, so its subagent children never get a row.
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch".into();
         let mut sub = summary_with_kind(construct_protocol::SessionKind::Subagent);
         sub.id = "sub1".into();
         sub.parent_session_id = Some("orch".into());
         app.sessions = vec![s1, orch, sub];
-        app.orchestrator_id = Some("orch".into());
+        app.minibuffer_id = Some("orch".into());
         // The playbook-owner session is selected and its playbook is open; the
         // active window pane points at it (test_app's initial leaf is s1).
         app.selection = Selection::Session("s1".into());
@@ -22655,8 +22655,8 @@ mod tests {
     #[tokio::test]
     async fn playbook_open_command_palette_captures_typed_chars() {
         let (mut app, _dir, server) = empty_app().await;
-        // No orchestrator session → `C-x x` opens the M-x command palette.
-        app.orchestrator_id = None;
+        // No minibuffer session → `C-x x` opens the M-x command palette.
+        app.minibuffer_id = None;
         app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
 
         // `C-x x` while the playbook is focused opens the command palette.
@@ -22666,8 +22666,8 @@ mod tests {
             .await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::CommandPalette)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::CommandPalette)
             ),
             "C-x x must open the command palette over the playbook"
         );
@@ -22679,7 +22679,7 @@ mod tests {
             .await;
 
         assert_eq!(
-            app.minibuffer.as_ref().map(|m| m.input.as_str()),
+            app.prompt.as_ref().map(|m| m.input.as_str()),
             Some("hi"),
             "typing must fill the command palette input"
         );
@@ -22692,14 +22692,14 @@ mod tests {
         server.abort();
     }
 
-    /// Same routing precedence for the operator/orchestrator panel: when
-    /// `C-x x` opens the persistent orchestrator input over a focused
-    /// playbook, keys must go to the orchestrator (its PTY), not the playbook.
+    /// Same routing precedence for the user/minibuffer panel: when
+    /// `C-x x` opens the persistent minibuffer input over a focused
+    /// playbook, keys must go to the minibuffer (its PTY), not the playbook.
     #[tokio::test]
-    async fn playbook_open_orchestrator_panel_captures_typed_chars() {
+    async fn playbook_open_minibuffer_panel_captures_typed_chars() {
         let (mut app, _dir, server) = empty_app().await;
-        // An orchestrator session → `C-x x` opens the operator input panel.
-        app.orchestrator_id = Some("orch".to_string());
+        // An minibuffer session → `C-x x` opens the user input panel.
+        app.minibuffer_id = Some("orch".to_string());
         app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 0));
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
@@ -22708,26 +22708,26 @@ mod tests {
             .await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::Orchestrator)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::Minibuffer)
             ),
-            "C-x x must open the orchestrator panel over the playbook"
+            "C-x x must open the minibuffer panel over the playbook"
         );
 
-        // A plain keystroke is forwarded to the orchestrator's PTY, which
+        // A plain keystroke is forwarded to the minibuffer's PTY, which
         // snaps its scrollback back to live — an observable side effect of
-        // the orchestrator path running instead of the playbook path.
-        app.orchestrator_scrollback = 7;
+        // the minibuffer path running instead of the playbook path.
+        app.minibuffer_scrollback = 7;
         app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.orchestrator_scrollback, 0,
-            "typing must route to the orchestrator PTY (snaps scrollback to live)"
+            app.minibuffer_scrollback, 0,
+            "typing must route to the minibuffer PTY (snaps scrollback to live)"
         );
         assert_eq!(
             app.playbook_popup.as_ref().unwrap().buffer,
             "draft",
-            "typing into the orchestrator must not insert into the playbook"
+            "typing into the minibuffer must not insert into the playbook"
         );
         server.abort();
     }
@@ -22738,7 +22738,7 @@ mod tests {
     async fn playbook_typing_with_no_overlay_still_inserts() {
         let (mut app, _dir, server) = empty_app().await;
         app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 5));
-        assert!(app.minibuffer.is_none(), "precondition: no overlay open");
+        assert!(app.prompt.is_none(), "precondition: no overlay open");
 
         app.on_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE))
             .await;
@@ -22748,7 +22748,7 @@ mod tests {
             "draft!",
             "with no overlay, a typed char inserts into the playbook"
         );
-        assert!(app.minibuffer.is_none());
+        assert!(app.prompt.is_none());
         server.abort();
     }
 
@@ -25662,7 +25662,7 @@ mod tests {
             hovered.contains("1 session needs you"),
             "hovering the wants-you tally should name it in words: {hovered}"
         );
-        // And the panel lists the very row it counted, so the operator can
+        // And the panel lists the very row it counted, so the user can
         // reach it rather than hunt the list for the dot.
         let panel = app.fleet_panel.as_ref().expect("hover opens the panel");
         assert_eq!(
@@ -25854,7 +25854,7 @@ mod tests {
 
     /// A group header has no run state of its own — it stands in for flagged
     /// members hidden inside it. Clicking it lands on the group, where the
-    /// operator still has to expand to find the session, so its mark has to
+    /// minibuffer still has to expand to find the session, so its mark has to
     /// warn that it is a way in rather than a destination.
     #[test]
     fn a_group_panel_row_wears_its_disclosure_not_a_state_glyph() {
@@ -26065,7 +26065,7 @@ mod tests {
         server.abort();
     }
 
-    /// Esc is the universal dismissal, but only for a panel the operator
+    /// Esc is the universal dismissal, but only for a panel the user
     /// deliberately pinned — a panel merely following the pointer must not
     /// swallow Esc from a focused PTY.
     #[tokio::test]
@@ -26088,7 +26088,7 @@ mod tests {
     }
 
     /// Clicking a row is the whole point: it selects the session the tally
-    /// counted and hands the keyboard to the list, so the operator lands
+    /// counted and hands the keyboard to the list, so the user lands
     /// where they can act.
     #[tokio::test]
     async fn clicking_a_fleet_panel_row_selects_it_and_focuses_the_list() {
@@ -26201,7 +26201,7 @@ mod tests {
 
     /// The tally is a summary of the rows the list paints. A daemon-internal
     /// probe is hidden from every list by design, so counting it advertises
-    /// work against a row the operator can never find.
+    /// work against a row the user can never find.
     #[tokio::test]
     async fn fleet_tally_excludes_sessions_the_list_never_renders() {
         let (mut app, _dir, server) = empty_app().await;
@@ -28151,23 +28151,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playbook_run_for_orchestrator_does_not_panic_and_submit_does_not_clear_other_shimmers()
+    async fn playbook_run_for_minibuffer_does_not_panic_and_submit_does_not_clear_other_shimmers()
     {
         // TDD for the reported panic (screenshot 2026-06-27 9.43.19),
         // "Playbook click 'run' on smith session does type the prompt, but not submit",
         // and "On smith session playbook, when submit the prompt, all shimmer animation clears".
-        // Orchestrator (smith minibuffer) sessions must not participate in normal
+        // Prompt (smith minibuffer) sessions must not participate in normal
         // playbook run shimmer, and activity on them must not wipe User/Subagent shimmers.
         let (mut app, _dir, server) = empty_app().await;
 
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch1".into();
         let mut user = summary_with_kind(construct_protocol::SessionKind::User);
         user.id = "user1".into();
         app.sessions = vec![orch.clone(), user.clone()];
         app.selection = Selection::Session("orch1".into());
 
-        // Exercise the run start path that could panic or set bad state for orchestrator.
+        // Exercise the run start path that could panic or set bad state for minibuffer.
         let body = "# do the task\nImplement the thing".to_string();
         app.start_playbook_run("orch1", &body, false, "");
 
@@ -28178,17 +28178,17 @@ mod tests {
             "user playbook run must be tracked"
         );
 
-        // Simulate orchestrator submit / state update clearing only its own entry
+        // Simulate minibuffer submit / state update clearing only its own entry
         // (the unconditional removes in on_playbook_state / result paths).
         app.playbook_runs.remove("orch1");
         assert!(
             app.playbook_runs.contains_key("user1"),
-            "user shimmer must survive orchestrator activity/submit"
+            "user shimmer must survive minibuffer activity/submit"
         );
 
-        // Orchestrator should not have left a popup in normal flows.
+        // Prompt should not have left a popup in normal flows.
         if let Some(p) = app.playbook_popup.as_ref() {
-            assert_ne!(p.saved_markdown, "should not be here for orchestrator");
+            assert_ne!(p.saved_markdown, "should not be here for minibuffer");
         }
 
         server.abort();
@@ -31995,7 +31995,7 @@ mod tests {
     #[tokio::test]
     async fn playbook_referenced_sessions_need_hydration_for_hover_preview() {
         // A playbook shown in a main-window leaf references a worker session that
-        // is neither selected, pinned, nor the orchestrator. Its PTY history
+        // is neither selected, pinned, nor the minibuffer. Its PTY history
         // must be hydrated so the playbook hover preview (spec 0060) can paint a
         // live terminal tail instead of degrading to the bare text tooltip.
         let (mut app, _dir, server) = empty_app().await;
@@ -33734,7 +33734,7 @@ mod tests {
     }
 
     /// A row already on screen must not move the viewport. The panel selects
-    /// as much as it scrolls, and jerking the list for a row the operator can
+    /// as much as it scrolls, and jerking the list for a row the user can
     /// already see loses their place for nothing.
     #[tokio::test]
     async fn list_scroll_offset_for_visible_leaves_an_already_visible_row_alone() {
@@ -35129,10 +35129,10 @@ mod tests {
         );
 
         assert!(matches!(
-            app.minibuffer.as_ref().map(|mb| &mb.intent),
-            Some(MinibufferIntent::ApproveTool { session_id, allow_auto_review: true, .. }) if session_id == "s1"
+            app.prompt.as_ref().map(|mb| &mb.intent),
+            Some(PromptIntent::ApproveTool { session_id, allow_auto_review: true, .. }) if session_id == "s1"
         ));
-        let prompt = &app.minibuffer.as_ref().unwrap().prompt;
+        let prompt = &app.prompt.as_ref().unwrap().prompt;
         assert!(prompt.contains("approve [risky] shell(echo hi)"));
         // The `y=approve  n=deny  a=auto-review  f=always-approve` choice
         // cluster is no longer baked into the stored prompt text — it
@@ -35156,16 +35156,16 @@ mod tests {
         );
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "smith renders approval inline in the session PTY"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn approval_prompt_does_not_open_for_orchestrator_session() {
+    async fn approval_prompt_does_not_open_for_minibuffer_session() {
         let (mut app, _dir, server) = captured_app().await;
-        app.orchestrator_id = Some("s1".into());
+        app.minibuffer_id = Some("s1".into());
 
         app.maybe_open_approval_prompt(
             "s1".into(),
@@ -35177,8 +35177,8 @@ mod tests {
         );
 
         assert!(
-            app.minibuffer.is_none(),
-            "orchestrator renders approval inline in its PTY"
+            app.prompt.is_none(),
+            "minibuffer renders approval inline in its PTY"
         );
         server.abort();
     }
@@ -35197,8 +35197,8 @@ mod tests {
         );
 
         assert!(matches!(
-            app.minibuffer.as_ref().map(|mb| &mb.intent),
-            Some(MinibufferIntent::ApproveTool {
+            app.prompt.as_ref().map(|mb| &mb.intent),
+            Some(PromptIntent::ApproveTool {
                 allow_auto_review: false,
                 ..
             })
@@ -35224,7 +35224,7 @@ mod tests {
         );
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "background approval requests should not open the global minibuffer"
         );
         server.abort();
@@ -35316,14 +35316,14 @@ mod tests {
     }
 
     /// Render the current minibuffer into a scratch terminal so
-    /// `app.layout.minibuffer_choice_hits` (and `minibuffer_area`) reflect
+    /// `app.layout.prompt_choice_hits` (and `prompt_area`) reflect
     /// this frame, then return the minibuffer's rect.
-    fn render_minibuffer_for_test(app: &mut App) -> ratatui::layout::Rect {
+    fn render_prompt_for_test(app: &mut App) -> ratatui::layout::Rect {
         let backend = ratatui::backend::TestBackend::new(120, 30);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, app)).expect("render");
         app.layout
-            .minibuffer_area
+            .prompt_area
             .expect("minibuffer area registered")
     }
 
@@ -35335,21 +35335,21 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Restart session s1? ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::RestartConfirm {
+            intent: PromptIntent::RestartConfirm {
                 session_id: "s1".into(),
             },
             error: None,
         });
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
             .await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "confirming should close the prompt"
         );
         let calls = drain_calls(&mut calls);
@@ -35369,30 +35369,30 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Restart session s1? ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::RestartConfirm {
+            intent: PromptIntent::RestartConfirm {
                 session_id: "s1".into(),
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(h.action, MinibufferChoiceAction::Key('y')))
+            .find(|h| matches!(h.action, PromptChoiceAction::Key('y')))
             .cloned()
             .expect("y choice hit registered");
         assert_eq!(hit.y, mb_area.y);
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking the y choice should close the prompt, same as pressing y"
         );
         let calls = drain_calls(&mut calls);
@@ -35412,29 +35412,29 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Restart session s1? ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::RestartConfirm {
+            intent: PromptIntent::RestartConfirm {
                 session_id: "s1".into(),
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(h.action, MinibufferChoiceAction::Key('n')))
+            .find(|h| matches!(h.action, PromptChoiceAction::Key('n')))
             .cloned()
             .expect("N choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking N should close the prompt"
         );
         assert!(
@@ -35454,19 +35454,19 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Session s1: ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::DeleteConfirm {
+            intent: PromptIntent::DeleteConfirm {
                 session_id: "s1".into(),
                 is_fork: false,
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
-        let mut hits = app.layout.minibuffer_choice_hits.clone();
+        let mb_area = render_prompt_for_test(&mut app);
+        let mut hits = app.layout.prompt_choice_hits.clone();
         hits.sort_by_key(|h| h.x_start);
         assert_eq!(
             hits.len(),
@@ -35483,9 +35483,9 @@ mod tests {
                 "choice hits must not overlap: {hits:?}"
             );
         }
-        assert!(matches!(&hits[0].action, MinibufferChoiceAction::Submit(s) if s == "d"));
-        assert!(matches!(&hits[1].action, MinibufferChoiceAction::Submit(s) if s == "a"));
-        assert!(matches!(&hits[2].action, MinibufferChoiceAction::Submit(s) if s == "N"));
+        assert!(matches!(&hits[0].action, PromptChoiceAction::Submit(s) if s == "d"));
+        assert!(matches!(&hits[1].action, PromptChoiceAction::Submit(s) if s == "a"));
+        assert!(matches!(&hits[2].action, PromptChoiceAction::Submit(s) if s == "N"));
         server.abort();
     }
 
@@ -35495,45 +35495,45 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Session s1: ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::DeleteConfirm {
+            intent: PromptIntent::DeleteConfirm {
                 session_id: "s1".into(),
                 is_fork: true,
             },
             error: None,
         });
 
-        let _mb_area = render_minibuffer_for_test(&mut app);
-        let mut hits = app.layout.minibuffer_choice_hits.clone();
+        let _mb_area = render_prompt_for_test(&mut app);
+        let mut hits = app.layout.prompt_choice_hits.clone();
         hits.sort_by_key(|h| h.x_start);
         assert_eq!(
             hits.len(),
             4,
             "fork end-prompt should include merge and archive, got {hits:?}"
         );
-        assert!(matches!(&hits[0].action, MinibufferChoiceAction::Submit(s) if s == "d"));
-        assert!(matches!(&hits[1].action, MinibufferChoiceAction::Submit(s) if s == "a"));
-        assert!(matches!(&hits[2].action, MinibufferChoiceAction::Submit(s) if s == "m"));
-        assert!(matches!(&hits[3].action, MinibufferChoiceAction::Submit(s) if s == "N"));
+        assert!(matches!(&hits[0].action, PromptChoiceAction::Submit(s) if s == "d"));
+        assert!(matches!(&hits[1].action, PromptChoiceAction::Submit(s) if s == "a"));
+        assert!(matches!(&hits[2].action, PromptChoiceAction::Submit(s) if s == "m"));
+        assert!(matches!(&hits[3].action, PromptChoiceAction::Submit(s) if s == "N"));
         server.abort();
     }
 
     #[tokio::test]
     async fn delete_confirm_typed_submit_d_deletes_session_baseline() {
         // Baseline for the click-parity test below: typing "d" then Enter
-        // goes through `run_minibuffer_submit` (family B's keyboard path).
+        // goes through `run_prompt_submit` (family B's keyboard path).
         let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
             construct_protocol::SessionKind::User,
         )])
         .await;
-        let intent = MinibufferIntent::DeleteConfirm {
+        let intent = PromptIntent::DeleteConfirm {
             session_id: "s1".into(),
             is_fork: false,
         };
-        app.run_minibuffer_submit(intent, "d".to_string()).await;
+        app.run_prompt_submit(intent, "d".to_string()).await;
 
         let calls = vec![tokio::time::timeout(Duration::from_secs(1), calls.recv())
             .await
@@ -35555,30 +35555,30 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Session s1: ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::DeleteConfirm {
+            intent: PromptIntent::DeleteConfirm {
                 session_id: "s1".into(),
                 is_fork: false,
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(&h.action, MinibufferChoiceAction::Submit(s) if s == "d"))
+            .find(|h| matches!(&h.action, PromptChoiceAction::Submit(s) if s == "d"))
             .cloned()
             .expect("d choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking d should close the prompt"
         );
         let calls = vec![tokio::time::timeout(Duration::from_secs(1), calls.recv())
@@ -35601,30 +35601,30 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Session s1: ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::DeleteConfirm {
+            intent: PromptIntent::DeleteConfirm {
                 session_id: "s1".into(),
                 is_fork: false,
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(&h.action, MinibufferChoiceAction::Submit(s) if s == "N"))
+            .find(|h| matches!(&h.action, PromptChoiceAction::Submit(s) if s == "N"))
             .cloned()
             .expect("N choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking N should close the prompt"
         );
         assert!(
@@ -35638,12 +35638,12 @@ mod tests {
         server.abort();
     }
 
-    fn approve_tool_minibuffer(allow_auto_review: bool) -> Minibuffer {
-        Minibuffer {
+    fn approve_tool_prompt(allow_auto_review: bool) -> Prompt {
+        Prompt {
             prompt: "approve [risky] shell(echo hi) \u{25b8} ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::ApproveTool {
+            intent: PromptIntent::ApproveTool {
                 session_id: "s1".into(),
                 call_id: "call-1".into(),
                 tool: "shell".into(),
@@ -35661,10 +35661,10 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(approve_tool_minibuffer(true));
+        app.prompt = Some(approve_tool_prompt(true));
 
-        let mb_area = render_minibuffer_for_test(&mut app);
-        let hits = &app.layout.minibuffer_choice_hits;
+        let mb_area = render_prompt_for_test(&mut app);
+        let hits = &app.layout.prompt_choice_hits;
         assert_eq!(hits.len(), 4, "y/n/a/f should each get one choice hit");
         for h in hits {
             assert_eq!(h.y, mb_area.y);
@@ -35672,7 +35672,7 @@ mod tests {
         for expected in ['y', 'n', 'a', 'f'] {
             assert!(
                 hits.iter()
-                    .any(|h| matches!(h.action, MinibufferChoiceAction::Key(c) if c == expected)),
+                    .any(|h| matches!(h.action, PromptChoiceAction::Key(c) if c == expected)),
                 "missing choice hit for {expected}"
             );
         }
@@ -35685,10 +35685,10 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(approve_tool_minibuffer(false));
+        app.prompt = Some(approve_tool_prompt(false));
 
-        render_minibuffer_for_test(&mut app);
-        let hits = &app.layout.minibuffer_choice_hits;
+        render_prompt_for_test(&mut app);
+        let hits = &app.layout.prompt_choice_hits;
         assert_eq!(
             hits.len(),
             3,
@@ -35696,34 +35696,34 @@ mod tests {
         );
         assert!(!hits
             .iter()
-            .any(|h| matches!(h.action, MinibufferChoiceAction::Key('a'))));
+            .any(|h| matches!(h.action, PromptChoiceAction::Key('a'))));
         server.abort();
     }
 
     #[tokio::test]
     async fn approve_tool_click_n_denies_where_it_used_to_no_op() {
-        // Before spec 0075, `click_minibuffer` explicitly no-op'd on every
+        // Before spec 0075, `click_prompt` explicitly no-op'd on every
         // click while an `ApproveTool` prompt was open. Regression guard:
         // clicking "n=deny" must now actually deny the call.
         let (mut app, _dir, server, mut calls) = choice_click_app(vec![summary_with_kind(
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(approve_tool_minibuffer(true));
+        app.prompt = Some(approve_tool_prompt(true));
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(h.action, MinibufferChoiceAction::Key('n')))
+            .find(|h| matches!(h.action, PromptChoiceAction::Key('n')))
             .cloned()
             .expect("n=deny choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking a decision should close the prompt"
         );
         let calls = drain_calls(&mut calls);
@@ -35746,29 +35746,29 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Delete project 'demo'? ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::GroupDeleteConfirm {
+            intent: PromptIntent::GroupDeleteConfirm {
                 group_id: "g1".into(),
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(&h.action, MinibufferChoiceAction::Submit(s) if s == "all"))
+            .find(|h| matches!(&h.action, PromptChoiceAction::Submit(s) if s == "all"))
             .cloned()
             .expect("all choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking all should close the prompt"
         );
         let calls = drain_calls(&mut calls);
@@ -35792,29 +35792,29 @@ mod tests {
             construct_protocol::SessionKind::User,
         )])
         .await;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Archive session s1? ".into(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::MenuArchiveConfirm {
+            intent: PromptIntent::MenuArchiveConfirm {
                 session_id: "s1".into(),
             },
             error: None,
         });
 
-        let mb_area = render_minibuffer_for_test(&mut app);
+        let mb_area = render_prompt_for_test(&mut app);
         let hit = app
             .layout
-            .minibuffer_choice_hits
+            .prompt_choice_hits
             .iter()
-            .find(|h| matches!(&h.action, MinibufferChoiceAction::Submit(s) if s == "y"))
+            .find(|h| matches!(&h.action, PromptChoiceAction::Submit(s) if s == "y"))
             .cloned()
             .expect("y choice hit registered");
 
-        app.click_minibuffer(mb_area, hit.x_start, hit.y).await;
+        app.click_prompt(mb_area, hit.x_start, hit.y).await;
 
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "clicking y should close the prompt"
         );
         let calls = drain_calls(&mut calls);
@@ -36538,11 +36538,11 @@ mod tests {
             .await;
 
         assert!(app.suggest_deck.is_none(), "accept closes the deck");
-        let mb = app.minibuffer.as_ref().expect("minibuffer prefilled");
+        let mb = app.prompt.as_ref().expect("minibuffer prefilled");
         assert_eq!(mb.input, "run the tests");
         assert!(matches!(
             mb.intent,
-            MinibufferIntent::SendInput { ref session_id } if session_id == "s1"
+            PromptIntent::SendInput { ref session_id } if session_id == "s1"
         ));
         assert!(
             app.suggestion_hands.contains_key("s1"),
@@ -36573,7 +36573,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.minibuffer.as_ref().map(|m| m.input.as_str()),
+            app.prompt.as_ref().map(|m| m.input.as_str()),
             Some("cargo build")
         );
         server.abort();
@@ -36917,11 +36917,11 @@ mod tests {
         );
     }
 
-    /// Spec 0112: opening the operator panel must not resize anything. The
+    /// Spec 0112: opening the minibuffer panel must not resize anything. The
     /// panes keep the geometry they had with a one-row footer; the block just
     /// slides up behind the panel.
     #[tokio::test]
-    async fn opening_the_operator_panel_slides_the_view_instead_of_resizing_it() {
+    async fn opening_the_minibuffer_panel_slides_the_view_instead_of_resizing_it() {
         let (mut app, _dir, _server) = two_session_app().await;
         let draw = |app: &mut App| {
             let backend = ratatui::backend::TestBackend::new(80, 40);
@@ -36935,15 +36935,15 @@ mod tests {
         let pane_sizes = app.window_pane_sizes.clone();
         let list_area = app.layout.list_area.expect("list pane rendered");
 
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: String::new(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::Orchestrator,
+            intent: PromptIntent::Minibuffer,
             error: None,
         });
         // Land the slide animation so the frame renders at the full offset.
-        let panel_h = crate::ui::compute_minibuffer_height(&app, 40);
+        let panel_h = crate::ui::compute_prompt_height(&app, 40);
         app.main_slide.retarget(
             panel_h - 1,
             Instant::now() - Duration::from_millis(MAIN_SLIDE_MS * 4),
@@ -37263,42 +37263,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_monolog_typewriter_renders_then_expires() {
+    async fn minibuffer_monolog_typewriter_renders_then_expires() {
         let (mut app, _dir, server) = empty_app().await;
         let backend = ratatui::backend::TestBackend::new(60, 12);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         let area = Rect::new(0, 0, 60, 12);
 
         // ~500ms in: several characters revealed, still showing.
-        app.operator_monolog = Some(OperatorMonolog {
+        app.minibuffer_monolog = Some(MinibufferMonolog {
             text: "session waiting at trust prompt".into(),
             started_at: Instant::now() - std::time::Duration::from_millis(500),
         });
         let mut showing = false;
         terminal
             .draw(|f| {
-                showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now())
+                showing = crate::ui::render_minibuffer_monolog(f, area, &mut app, Instant::now())
             })
             .expect("draw");
         assert!(showing, "monolog should be showing mid-cycle");
         let screen = rendered_text(terminal.backend().buffer());
         assert!(screen.contains("session"), "missing typed text:\n{screen}");
-        // No "operator ▸" label — the matrix panel title already says "operator".
+        // No "minibuffer ▸" label — the matrix panel title already says "minibuffer".
         assert!(!screen.contains("▸"), "label should be gone:\n{screen}");
 
         // Far past type+hold+fade: clears itself and yields the rain.
-        app.operator_monolog = Some(OperatorMonolog {
+        app.minibuffer_monolog = Some(MinibufferMonolog {
             text: "session waiting at trust prompt".into(),
             started_at: Instant::now() - std::time::Duration::from_secs(30),
         });
         terminal
             .draw(|f| {
-                showing = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now())
+                showing = crate::ui::render_minibuffer_monolog(f, area, &mut app, Instant::now())
             })
             .expect("draw");
         assert!(!showing, "monolog should have expired");
         assert!(
-            app.operator_monolog.is_none(),
+            app.minibuffer_monolog.is_none(),
             "expired monolog not cleared"
         );
 
@@ -37310,7 +37310,7 @@ mod tests {
         // The run loop reads `notification_dirtied_view` to skip a full-frame
         // repaint for background PTY chunks. Verify the gate: visible session
         // PTY -> dirties; off-screen session PTY -> does not; structural events
-        // and orchestrator sessions -> always dirty.
+        // and minibuffer sessions -> always dirty.
         let (mut app, _dir, server) = empty_app().await;
         let mut vis = summary_with_kind(construct_protocol::SessionKind::User);
         vis.id = "vis".into();
@@ -37375,26 +37375,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_monolog_skipped_while_orchestrator_panel_open() {
+    async fn minibuffer_monolog_skipped_while_minibuffer_panel_open() {
         let (mut app, _dir, server) = empty_app().await;
         let backend = ratatui::backend::TestBackend::new(60, 12);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         let area = Rect::new(0, 0, 60, 12);
-        app.operator_monolog = Some(OperatorMonolog {
+        app.minibuffer_monolog = Some(MinibufferMonolog {
             text: "session waiting at trust prompt".into(),
             started_at: Instant::now() - std::time::Duration::from_millis(500),
         });
-        // Orchestrator panel open → the text is visible below, so don't overlay.
-        app.minibuffer = Some(Minibuffer {
+        // Minibuffer panel open → the text is visible below, so don't overlay.
+        app.prompt = Some(Prompt {
             prompt: String::new(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::Orchestrator,
+            intent: PromptIntent::Minibuffer,
             error: None,
         });
         let mut drew = true;
         terminal
-            .draw(|f| drew = crate::ui::render_operator_monolog(f, area, &mut app, Instant::now()))
+            .draw(|f| drew = crate::ui::render_minibuffer_monolog(f, area, &mut app, Instant::now()))
             .expect("draw");
         assert!(!drew, "monolog should be skipped while the panel is open");
         let screen = rendered_text(terminal.backend().buffer());
@@ -37406,12 +37406,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_monolog_accumulates_across_delta_heartbeats() {
+    async fn minibuffer_monolog_accumulates_across_delta_heartbeats() {
         // `AgentStatus active=true` fires on every delta (a per-token "Working"
         // heartbeat), so the utterance must accumulate across them, not reset —
         // otherwise only the final delta survives ("noted" → "ed").
         let (mut app, _dir, server) = empty_app().await;
-        app.orchestrator_id = Some("op".into());
+        app.minibuffer_id = Some("op".into());
 
         async fn feed(app: &mut App, event: SessionEvent, seq: u64) {
             let n = Notification {
@@ -37458,9 +37458,9 @@ mod tests {
         feed(&mut app, say("ed"), 4).await;
         feed(&mut app, worked(), 5).await;
         assert!(
-            app.operator_monolog.is_none(),
+            app.minibuffer_monolog.is_none(),
             "noted must be filtered, got {:?}",
-            app.operator_monolog.as_ref().map(|m| &m.text)
+            app.minibuffer_monolog.as_ref().map(|m| &m.text)
         );
 
         // A real finding across deltas → monolog gets the FULL text, not a tail.
@@ -37470,7 +37470,7 @@ mod tests {
         feed(&mut app, say("blocked"), 9).await;
         feed(&mut app, worked(), 10).await;
         assert_eq!(
-            app.operator_monolog.as_ref().map(|m| m.text.as_str()),
+            app.minibuffer_monolog.as_ref().map(|m| m.text.as_str()),
             Some("session blocked")
         );
 
@@ -37615,8 +37615,8 @@ mod tests {
         app.handle_left_click(hint.x_start, hint.y).await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::RestartDaemonConfirm)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::RestartDaemonConfirm)
             ),
             "clicking the daemon segment should open the restart-daemon confirm"
         );
@@ -37655,8 +37655,8 @@ mod tests {
         app.handle_left_click(hint.x_start, hint.y).await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::UpgradeConfirm { version }) if version == "9.9.9"
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::UpgradeConfirm { version }) if version == "9.9.9"
             ),
             "clicking the update-available segment should open the upgrade confirm"
         );
@@ -37710,8 +37710,8 @@ mod tests {
         app.handle_left_click(hit.x_start, hit.y).await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::RestartDaemonConfirm)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::RestartDaemonConfirm)
             ),
             "clicking the daemon segment must open the restart-daemon confirm"
         );
@@ -37758,7 +37758,7 @@ mod tests {
         // theme/remote controls renderable while still sweeping enough width
         // to move the empty-hint collision boundary.
         for width in [120u16, 124, 128, 132, 136, 140] {
-            app.minibuffer = None;
+            app.prompt = None;
             let backend = ratatui::backend::TestBackend::new(width, 36);
             let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
             terminal
@@ -37785,8 +37785,8 @@ mod tests {
             app.handle_left_click(hit.x_start, hit.y).await;
             assert!(
                 matches!(
-                    app.minibuffer.as_ref().map(|m| &m.intent),
-                    Some(MinibufferIntent::RestartDaemonConfirm)
+                    app.prompt.as_ref().map(|m| &m.intent),
+                    Some(PromptIntent::RestartDaemonConfirm)
                 ),
                 "daemon segment click hijacked at width {width}"
             );
@@ -37822,13 +37822,13 @@ mod tests {
         app.handle_left_click(hint.x_start, hint.y).await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::RestartDaemonConfirm)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::RestartDaemonConfirm)
             ),
             "clicking the config segment should open the restart confirm"
         );
         assert!(
-            app.minibuffer
+            app.prompt
                 .as_ref()
                 .is_some_and(|m| m.prompt.contains("[router] port")),
             "the prompt should name what the restart is for"
@@ -37874,7 +37874,7 @@ mod tests {
         app.config_restart_required = vec!["[router] port".to_string()];
 
         for width in [120u16, 124, 128, 132, 136, 140] {
-            app.minibuffer = None;
+            app.prompt = None;
             let backend = ratatui::backend::TestBackend::new(width, 36);
             let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
             terminal
@@ -37903,12 +37903,12 @@ mod tests {
                 let hit = *hit;
                 app.handle_left_click(hit.x_start, hit.y).await;
                 assert!(
-                    app.minibuffer
+                    app.prompt
                         .as_ref()
                         .is_some_and(|m| m.prompt.contains("[router] port")),
                     "config segment click hijacked at width {width}"
                 );
-                app.minibuffer = None;
+                app.prompt = None;
             }
             let hit = *hints
                 .iter()
@@ -37916,7 +37916,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("daemon zone missing at width {width}"));
             app.handle_left_click(hit.x_start, hit.y).await;
             assert_eq!(
-                app.minibuffer.as_ref().map(|m| m.prompt.as_str()),
+                app.prompt.as_ref().map(|m| m.prompt.as_str()),
                 Some("Restart daemon? "),
                 "daemon segment click hijacked at width {width}"
             );
@@ -38082,7 +38082,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("construct") && line.contains("theme:matrix"))
             .expect("theme label should live in the modeline/status bar");
-        let minibuffer_line = screen
+        let prompt_line = screen
             .lines()
             .last()
             .expect("screen should have a minibuffer row");
@@ -38095,19 +38095,19 @@ mod tests {
             "theme label should be right-aligned in status bar:\n{modeline}"
         );
         assert!(
-            !minibuffer_line.contains("theme:matrix"),
-            "theme label should not render in minibuffer body:\n{minibuffer_line}"
+            !prompt_line.contains("theme:matrix"),
+            "theme label should not render in minibuffer body:\n{prompt_line}"
         );
         assert!(
             app.layout.matrix_theme_hit.is_none(),
             "matrix rain header should not own theme click target"
         );
-        let minibuffer_y = app.layout.minibuffer_area.expect("minibuffer area").y;
+        let prompt_y = app.layout.prompt_area.expect("minibuffer area").y;
         assert!(app
             .layout
             .shortcut_hints
             .iter()
-            .any(|h| h.action == KeyAction::CycleTheme && h.y < minibuffer_y));
+            .any(|h| h.action == KeyAction::CycleTheme && h.y < prompt_y));
         let theme_hit = app
             .layout
             .modeline_theme_hit
@@ -38603,7 +38603,7 @@ mod tests {
         server.abort();
     }
 
-    /// The dialog is reached from the orchestrator, so it overlays the main
+    /// The dialog is reached from the minibuffer, so it overlays the main
     /// view — often a session running a full-screen, mouse-grabbing harness.
     /// A click on a dialog control must reach the dialog, not be forwarded down
     /// that child's PTY. Regression test for the modal guard on
@@ -38766,10 +38766,10 @@ mod tests {
         let (x, y) = click(&app, KeyAction::OpenCommandPalette);
         app.handle_left_click(x, y).await;
         assert!(matches!(
-            app.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::CommandPalette)
+            app.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::CommandPalette)
         ));
-        app.minibuffer = None;
+        app.prompt = None;
 
         let (x, y) = click(&app, KeyAction::ToggleHelp);
         app.handle_left_click(x, y).await;
@@ -38779,10 +38779,10 @@ mod tests {
         let (x, y) = click(&app, KeyAction::OpenNewSession);
         app.handle_left_click(x, y).await;
         assert!(matches!(
-            app.minibuffer.as_ref().map(|m| &m.intent),
-            Some(MinibufferIntent::NewSessionHarness)
+            app.prompt.as_ref().map(|m| &m.intent),
+            Some(PromptIntent::NewSessionHarness)
         ));
-        app.minibuffer = None;
+        app.prompt = None;
 
         let (x, y) = click(&app, KeyAction::Quit);
         app.handle_left_click(x, y).await;
@@ -38808,10 +38808,10 @@ mod tests {
         // The fork flow opens INSTANTLY on the turn stage: only the "now"
         // row (preselected, loading in the background) — never blocked on
         // the transcript fetch.
-        let minibuffer = app.minibuffer.as_ref().expect("turn picker");
+        let minibuffer = app.prompt.as_ref().expect("turn picker");
         assert!(matches!(
             &minibuffer.intent,
-            MinibufferIntent::ForkTurnPick { source_session_id } if source_session_id == "s1"
+            PromptIntent::ForkTurnPick { source_session_id } if source_session_id == "s1"
         ));
         assert!(app.turn_picker_loading);
         assert_eq!(app.turn_picker_entries.len(), 1);
@@ -38820,12 +38820,12 @@ mod tests {
 
         // Enter on "now" continues straight to the harness picker with the
         // source harness pre-filled — Enter-Enter is still the head fork.
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
-        let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
+        let minibuffer = app.prompt.as_ref().expect("fork harness picker");
         assert!(matches!(
             &minibuffer.intent,
-            MinibufferIntent::ForkSessionHarness {
+            PromptIntent::ForkSessionHarness {
                 source_session_id,
                 at_seq: None,
             } if source_session_id == "s1"
@@ -38845,11 +38845,11 @@ mod tests {
         app.turn_picker_entries = vec![turn_picker_now_row()];
         app.turn_picker_selected = 0;
         app.turn_picker_loading = true;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Fork session: ".to_string(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::ForkTurnPick {
+            intent: PromptIntent::ForkTurnPick {
                 source_session_id: "s1".to_string(),
             },
             error: None,
@@ -38886,7 +38886,7 @@ mod tests {
         assert_eq!(app.turn_picker_selected, 1, "now stays preselected");
 
         // After the picker closes, late results must not resurrect state.
-        app.minibuffer = None;
+        app.prompt = None;
         app.turn_picker_entries = Vec::new();
         app.apply_turn_entries_loaded(
             "s1",
@@ -38983,23 +38983,23 @@ mod tests {
             },
         ];
         app.turn_picker_selected = 1;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Fork from turn: ".to_string(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::ForkTurnPick {
+            intent: PromptIntent::ForkTurnPick {
                 source_session_id: "s1".to_string(),
             },
             error: None,
         });
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
 
-        let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
+        let minibuffer = app.prompt.as_ref().expect("fork harness picker");
         assert!(matches!(
             &minibuffer.intent,
-            MinibufferIntent::ForkSessionHarness {
+            PromptIntent::ForkSessionHarness {
                 source_session_id,
                 at_seq: Some(5),
             } if source_session_id == "s1"
@@ -39019,21 +39019,21 @@ mod tests {
             preview: "fork from the present".into(),
         }];
         app.turn_picker_selected = 0;
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Fork session: ".to_string(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::ForkTurnPick {
+            intent: PromptIntent::ForkTurnPick {
                 source_session_id: "s1".to_string(),
             },
             error: None,
         });
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
-        let minibuffer = app.minibuffer.as_ref().expect("fork harness picker");
+        let minibuffer = app.prompt.as_ref().expect("fork harness picker");
         assert!(matches!(
             &minibuffer.intent,
-            MinibufferIntent::ForkSessionHarness {
+            PromptIntent::ForkSessionHarness {
                 source_session_id,
                 at_seq: None,
             } if source_session_id == "s1"
@@ -39074,11 +39074,11 @@ mod tests {
         assert!(screen.contains("Generic shell command runner"));
         assert!(screen.contains("OpenAI Codex"));
         assert!(screen.contains("unavailable"));
-        let unfiltered_picker_height = app.layout.minibuffer_area.expect("picker area").height;
+        let unfiltered_picker_height = app.layout.prompt_area.expect("picker area").height;
         assert!(unfiltered_picker_height > 1);
         assert_eq!(
             app.layout
-                .minibuffer_harness_hits
+                .prompt_harness_hits
                 .first()
                 .map(|hit| hit.name.as_str()),
             Some("project"),
@@ -39086,7 +39086,7 @@ mod tests {
         );
         let unavailable_hit = app
             .layout
-            .minibuffer_harness_hits
+            .prompt_harness_hits
             .iter()
             .find(|hit| hit.name == "codex")
             .cloned()
@@ -39098,11 +39098,11 @@ mod tests {
             Some("codex: `codex` CLI not found")
         );
         assert!(
-            app.minibuffer.is_some(),
+            app.prompt.is_some(),
             "unavailable click keeps picker open"
         );
 
-        let mb = app.minibuffer.as_mut().expect("picker");
+        let mb = app.prompt.as_mut().expect("picker");
         mb.input = "openai".to_string();
         mb.cursor = mb.input.len();
         app.harness_picker_filter_active = true;
@@ -39116,16 +39116,16 @@ mod tests {
         assert!(!filtered.contains("Generic shell command runner"));
         assert_eq!(
             app.layout
-                .minibuffer_area
+                .prompt_area
                 .expect("filtered picker area")
                 .height,
             unfiltered_picker_height,
             "filtering keeps the picker height stable"
         );
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
-        let error = app.minibuffer.as_ref().and_then(|mb| mb.error.as_deref());
+        let error = app.prompt.as_ref().and_then(|mb| mb.error.as_deref());
         assert_eq!(error, Some("`codex` CLI not found"));
         server.abort();
     }
@@ -39146,14 +39146,14 @@ mod tests {
             .collect();
         app.run_action(KeyAction::OpenFork).await;
 
-        let unfiltered_height = crate::ui::compute_minibuffer_height(&app, 30);
-        let mb = app.minibuffer.as_mut().expect("fork picker");
+        let unfiltered_height = crate::ui::compute_prompt_height(&app, 30);
+        let mb = app.prompt.as_mut().expect("fork picker");
         mb.input = "codex".to_string();
         mb.cursor = mb.input.len();
         app.harness_picker_filter_active = true;
 
         assert_eq!(
-            crate::ui::compute_minibuffer_height(&app, 30),
+            crate::ui::compute_prompt_height(&app, 30),
             unfiltered_height,
             "filtering keeps the fork picker height stable"
         );
@@ -39183,25 +39183,25 @@ mod tests {
         ];
         app.run_action(KeyAction::OpenNewSession).await;
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(app.harness_picker_selected, 1);
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(app.harness_picker_selected, 2);
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(app.harness_picker_selected, 1);
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
             .await;
         assert_eq!(app.harness_picker_selected, 0);
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
         assert_eq!(app.harness_picker_selected, 2);
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
 
-        let minibuffer = app.minibuffer.as_ref().expect("picker remains open");
+        let minibuffer = app.prompt.as_ref().expect("picker remains open");
         assert_eq!(minibuffer.input, "codex");
         assert_eq!(minibuffer.cursor, "codex".len());
         assert!(!app.harness_picker_filter_active);
@@ -39232,16 +39232,16 @@ mod tests {
         app.run_action(KeyAction::OpenNewSession).await;
 
         for c in ['c', 'o', 'd'] {
-            app.handle_minibuffer_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+            app.handle_prompt_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
                 .await;
         }
         assert!(app.harness_picker_filter_active);
         assert_eq!(app.harness_picker_selected, 0);
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
 
-        let minibuffer = app.minibuffer.as_ref().expect("picker remains open");
+        let minibuffer = app.prompt.as_ref().expect("picker remains open");
         assert_eq!(minibuffer.input, "codex");
         assert!(!app.harness_picker_filter_active);
         let entries = harness_picker_entries(&app.harnesses, false, "", false);
@@ -39253,10 +39253,10 @@ mod tests {
             "the full list highlight follows the Tab-completed harness"
         );
 
-        app.handle_minibuffer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         assert!(
-            app.minibuffer.is_none(),
+            app.prompt.is_none(),
             "Enter after completing codex must submit codex, not open the project prompt"
         );
         server.abort();
@@ -39290,7 +39290,7 @@ mod tests {
         terminal
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw picker");
-        let area = app.layout.minibuffer_area.expect("picker area");
+        let area = app.layout.prompt_area.expect("picker area");
         let wheel = |kind| MouseEvent {
             kind,
             column: area.x,
@@ -39620,8 +39620,8 @@ mod tests {
             .await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::NewSessionHarness)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::NewSessionHarness)
             ),
             "C-x C-f should still open the new-session picker"
         );
@@ -40201,7 +40201,7 @@ mod tests {
         // `shortcut_hints` also carries unrelated hints from other panes
         // (e.g. the modeline's theme toggle) — isolate the placeholder's
         // own row.
-        let mb_row = app.layout.minibuffer_area.expect("minibuffer area").y;
+        let mb_row = app.layout.prompt_area.expect("minibuffer area").y;
         let placeholder_hints: Vec<_> = app
             .layout
             .shortcut_hints
@@ -40233,7 +40233,7 @@ mod tests {
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw");
 
-        let mb_row = app.layout.minibuffer_area.expect("minibuffer area").y;
+        let mb_row = app.layout.prompt_area.expect("minibuffer area").y;
         let hit = app
             .layout
             .shortcut_hints
@@ -40266,7 +40266,7 @@ mod tests {
         terminal
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw");
-        let mb_row = app.layout.minibuffer_area.expect("minibuffer area").y;
+        let mb_row = app.layout.prompt_area.expect("minibuffer area").y;
         let first: Vec<KeyAction> = app
             .layout
             .shortcut_hints
@@ -40276,7 +40276,7 @@ mod tests {
             .collect();
 
         // Force the rotation timer overdue without waiting on wall-clock time.
-        app.minibuffer_hint_rotated_at = Some(Instant::now() - Duration::from_secs(200));
+        app.prompt_hint_rotated_at = Some(Instant::now() - Duration::from_secs(200));
         terminal
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw");
@@ -40308,7 +40308,7 @@ mod tests {
         terminal
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw");
-        let mb_row = app.layout.minibuffer_area.expect("minibuffer area").y;
+        let mb_row = app.layout.prompt_area.expect("minibuffer area").y;
         let first: Vec<KeyAction> = app
             .layout
             .shortcut_hints
@@ -40316,7 +40316,7 @@ mod tests {
             .filter(|h| h.y == mb_row)
             .map(|h| h.action)
             .collect();
-        let rotated_at_before = app.minibuffer_hint_rotated_at;
+        let rotated_at_before = app.prompt_hint_rotated_at;
 
         // Well under the 180s timer — only the zoom (context) change should
         // trigger a rotation here.
@@ -40337,7 +40337,7 @@ mod tests {
             "a zoom change should rotate the window immediately, without waiting for the timer"
         );
         assert_ne!(
-            app.minibuffer_hint_rotated_at, rotated_at_before,
+            app.prompt_hint_rotated_at, rotated_at_before,
             "a context-triggered rotation should also reset the timer"
         );
         server.abort();
@@ -40962,7 +40962,7 @@ mod tests {
             .await;
         assert_eq!(app.focus, PaneFocus::View);
         assert_eq!(app.vim_mode, VimMode::Insert);
-        assert!(app.minibuffer.is_none());
+        assert!(app.prompt.is_none());
 
         app.reset_vim_mode();
         app.focus = PaneFocus::List;
@@ -40970,7 +40970,7 @@ mod tests {
             .await;
         assert_eq!(app.focus, PaneFocus::View);
         assert_eq!(app.vim_mode, VimMode::Insert);
-        assert!(app.minibuffer.is_none());
+        assert!(app.prompt.is_none());
         server.abort();
     }
 
@@ -40992,8 +40992,8 @@ mod tests {
 
         assert_eq!(app.vim_mode, VimMode::Normal);
         assert!(matches!(
-            app.minibuffer.as_ref().map(|mb| &mb.intent),
-            Some(MinibufferIntent::SendInput { session_id }) if session_id == "s1"
+            app.prompt.as_ref().map(|mb| &mb.intent),
+            Some(PromptIntent::SendInput { session_id }) if session_id == "s1"
         ));
         server.abort();
     }
@@ -41241,39 +41241,39 @@ mod tests {
         );
     }
 
-    /// The orchestrator/operator panel ("the minibuffer is just another
+    /// The minibuffer/minibuffer panel ("the minibuffer is just another
     /// session") has its own copy of the escape hatch: `C-x C-x` inside the
     /// panel cancels the chord and forwards a literal C-x (0x18) to the
-    /// orchestrator's PTY, matching the main-view behavior.
+    /// minibuffer's PTY, matching the main-view behavior.
     #[tokio::test]
-    async fn orchestrator_panel_ctrl_x_ctrl_x_forwards_literal_ctrl_x() {
+    async fn minibuffer_panel_ctrl_x_ctrl_x_forwards_literal_ctrl_x() {
         let (mut app, _dir, server) = empty_app().await;
-        // An orchestrator session → `C-x x` opens the operator input panel.
-        app.orchestrator_id = Some("orch".to_string());
+        // An minibuffer session → `C-x x` opens the user input panel.
+        app.minibuffer_id = Some("orch".to_string());
 
         // Swap in a channel we own so the forwarded bytes are observable.
         let (tx, mut rx) = mpsc::unbounded_channel::<PtyInputJob>();
         app.pty_input_tx = tx;
 
-        // Open the orchestrator panel (`C-x x`) — this routes later keys
-        // through `handle_orchestrator_key` and forwards no PTY bytes itself.
+        // Open the minibuffer panel (`C-x x`) — this routes later keys
+        // through `handle_minibuffer_key` and forwards no PTY bytes itself.
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .await;
         assert!(
             matches!(
-                app.minibuffer.as_ref().map(|m| &m.intent),
-                Some(MinibufferIntent::Orchestrator)
+                app.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::Minibuffer)
             ),
-            "precondition: the orchestrator panel must be open"
+            "precondition: the minibuffer panel must be open"
         );
         assert!(
             rx.try_recv().is_err(),
             "opening the panel must not forward any PTY bytes"
         );
 
-        // C-x C-x inside the panel forwards a literal C-x to the orchestrator.
+        // C-x C-x inside the panel forwards a literal C-x to the minibuffer.
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
             .await;
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
@@ -41281,15 +41281,15 @@ mod tests {
 
         let job = rx
             .try_recv()
-            .expect("C-x C-x must forward a byte to the orchestrator PTY");
+            .expect("C-x C-x must forward a byte to the minibuffer PTY");
         assert_eq!(
             job.session_id, "orch",
-            "the byte must target the orchestrator session"
+            "the byte must target the minibuffer session"
         );
         assert_eq!(
             job.bytes,
             vec![0x18],
-            "C-x C-x forwards a literal C-x (0x18) to the orchestrator"
+            "C-x C-x forwards a literal C-x (0x18) to the minibuffer"
         );
         assert!(
             app.chord_state.is_empty(),
@@ -41557,20 +41557,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orchestrator_hydration_loads_existing_sticky_widgets() {
+    async fn minibuffer_hydration_loads_existing_sticky_widgets() {
         use construct_protocol::{UiPanel, UiPlacement};
 
         let (mut app, _dir, server) = captured_app().await;
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch".into();
         orch.has_pty = true;
         app.sessions.push(orch);
-        app.refresh_orchestrator_id();
+        app.refresh_minibuffer_id();
 
         assert_eq!(
-            app.orchestrator_session_needing_hydration().as_deref(),
+            app.minibuffer_session_needing_hydration().as_deref(),
             Some("orch"),
-            "a freshly launched TUI should hydrate the hidden orchestrator before live widget events arrive"
+            "a freshly launched TUI should hydrate the hidden minibuffer before live widget events arrive"
         );
 
         app.apply_hydration_state(
@@ -41598,9 +41598,9 @@ mod tests {
         )
         .await;
 
-        assert!(app.orchestrator_session_needing_hydration().is_none());
-        assert_eq!(app.orchestrator_widget_panels().len(), 1);
-        assert_eq!(app.orchestrator_widget_panels()[0].id, "fleet-pulse");
+        assert!(app.minibuffer_session_needing_hydration().is_none());
+        assert_eq!(app.minibuffer_widget_panels().len(), 1);
+        assert_eq!(app.minibuffer_widget_panels()[0].id, "fleet-pulse");
         server.abort();
     }
 
@@ -41608,14 +41608,14 @@ mod tests {
     // behind the matrix rain (half-block `▀` cells), and vanishes when
     // the preview is gone — in lock-step with the terminal-view overlay.
     #[tokio::test]
-    async fn operator_matrix_widgets_render_without_unbounded_padding() {
+    async fn minibuffer_matrix_widgets_render_without_unbounded_padding() {
         use construct_protocol::{UiPanel, UiPlacement};
 
         let (mut app, _dir, server) = captured_app().await;
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch".into();
         app.sessions.push(orch);
-        app.refresh_orchestrator_id();
+        app.refresh_minibuffer_id();
         app.matrix_rain_hidden = false;
         app.matrix_widget_pinned = Some("fleet-pulse".into());
         app.ui_panels.insert(
@@ -41629,7 +41629,7 @@ mod tests {
                         title: Some("Ambient note".into()),
                         created_at_ms: 1,
                         placement: UiPlacement::Sticky,
-                        markdown: "# Ambient note\n\nOperator widgets are sticky.".into(),
+                        markdown: "# Ambient note\n\nMinibuffer widgets are sticky.".into(),
                     },
                 ),
                 (
@@ -41640,7 +41640,7 @@ mod tests {
                         title: Some("Fleet pulse".into()),
                         created_at_ms: 2,
                         placement: UiPlacement::Sticky,
-                        markdown: "# Fleet pulse\n\n:::timeline\n- [x] Demo widget visible\n- [~] Operator can surface fleet status here\n- [ ] Hover/click square indicators\n:::".into(),
+                        markdown: "# Fleet pulse\n\n:::timeline\n- [x] Demo widget visible\n- [~] User can surface fleet status here\n- [ ] Hover/click square indicators\n:::".into(),
                     },
                 ),
                 (
@@ -41660,10 +41660,10 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("operator widget render should not panic");
+            .expect("minibuffer widget render should not panic");
         assert_eq!(app.layout.matrix_widget_hits.len(), 3);
         let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("operator ─"));
+        assert!(text.contains("minibuffer ─"));
         assert!(
             text.contains("■"),
             "selected widget indicator should be filled"
@@ -41681,10 +41681,10 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let (mut app, _dir, server) = captured_app().await;
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch".into();
         app.sessions.push(orch);
-        app.refresh_orchestrator_id();
+        app.refresh_minibuffer_id();
         let panel = |id: &str, at: u64| {
             (
                 id.to_string(),
@@ -41738,10 +41738,10 @@ mod tests {
         use construct_protocol::{UiPanel, UiPlacement};
 
         let (mut app, _dir, server) = captured_app().await;
-        let mut orch = summary_with_kind(construct_protocol::SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(construct_protocol::SessionKind::Minibuffer);
         orch.id = "orch".into();
         app.sessions.push(orch);
-        app.refresh_orchestrator_id();
+        app.refresh_minibuffer_id();
         app.matrix_rain_hidden = false;
         app.ui_panels.insert(
             "orch".into(),
@@ -41761,7 +41761,7 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("operator widget title indicator should render");
+            .expect("minibuffer widget title indicator should render");
         let hit = app
             .layout
             .matrix_widget_hits
@@ -41771,14 +41771,14 @@ mod tests {
 
         app.mouse_pos = Some((hit.start_col, hit.row));
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("hovered operator widget title indicator should render");
+            .expect("hovered minibuffer widget title indicator should render");
         assert_eq!(
             term.backend()
                 .buffer()
                 .cell((hit.start_col, hit.row))
                 .map(|cell| cell.symbol()),
             Some("□"),
-            "hover preview should keep the operator widget title icon outlined"
+            "hover preview should keep the minibuffer widget title icon outlined"
         );
         assert_eq!(
             app.matrix_widget_hover
@@ -41789,14 +41789,14 @@ mod tests {
 
         app.toggle_matrix_widget_panel("alpha".into());
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("pinned operator widget title indicator should render");
+            .expect("pinned minibuffer widget title indicator should render");
         assert_eq!(
             term.backend()
                 .buffer()
                 .cell((hit.start_col, hit.row))
                 .map(|cell| cell.symbol()),
             Some("■"),
-            "clicked/pinned operator widget title icon should be filled"
+            "clicked/pinned minibuffer widget title icon should be filled"
         );
         server.abort();
     }
@@ -41844,7 +41844,7 @@ mod tests {
             .expect("collapsed rain title bar should render");
         let text = rendered_text(term.backend().buffer());
         assert!(
-            text.contains("operator"),
+            text.contains("minibuffer"),
             "collapsed panel should keep its title bar: {text:?}"
         );
 
@@ -41883,15 +41883,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_title_marks_pending_approval_and_toggles_panel_on_click() {
+    async fn minibuffer_title_marks_pending_approval_and_toggles_panel_on_click() {
         use construct_protocol::SessionKind;
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
         let (mut app, _dir, server) = captured_app().await;
-        let mut orch = summary_with_kind(SessionKind::Orchestrator);
+        let mut orch = summary_with_kind(SessionKind::Minibuffer);
         orch.id = "orch".into();
         app.sessions.push(orch);
-        app.refresh_orchestrator_id();
+        app.refresh_minibuffer_id();
         app.matrix_rain_hidden = false;
         app.pending_tool_approvals.insert(
             "orch".into(),
@@ -41906,13 +41906,13 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         term.draw(|f| crate::ui::render(f, &mut app))
-            .expect("operator approval title should render");
+            .expect("minibuffer approval title should render");
         let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("operator !"));
+        assert!(text.contains("minibuffer !"));
         let (x_start, _x_end, y) = app
             .layout
-            .matrix_operator_title_hit
-            .expect("operator title hitbox");
+            .matrix_minibuffer_title_hit
+            .expect("minibuffer title hitbox");
 
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -41928,7 +41928,7 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         })
         .await;
-        assert!(app.is_orchestrator_panel_open());
+        assert!(app.is_minibuffer_panel_open());
 
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -41944,7 +41944,7 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         })
         .await;
-        assert!(!app.is_orchestrator_panel_open());
+        assert!(!app.is_minibuffer_panel_open());
         server.abort();
     }
 
@@ -42383,7 +42383,7 @@ mod tests {
         app.click_list(app.layout.list_area.expect("list"), row.x + 1, row.y)
             .await;
         // Selecting a service is edit mode: there is no separate view-only
-        // state the operator has to step out of first (spec 0175).
+        // state the user has to step out of first (spec 0175).
         assert!(matches!(
             app.service_dialog.as_ref().map(|dialog| dialog.mode),
             Some(ServiceDialogMode::Edit)
@@ -42410,21 +42410,21 @@ mod tests {
     #[tokio::test]
     async fn serve_leaves_the_new_service_view_focused_and_editing() {
         let (mut app, _dir, server) = captured_app().await;
-        // `/serve` is normally typed into the orchestrator panel, which used
+        // `/serve` is normally typed into the minibuffer panel, which used
         // to stay open and swallow every keystroke aimed at the new view.
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: String::new(),
             input: String::new(),
             cursor: 0,
-            intent: MinibufferIntent::Orchestrator,
+            intent: PromptIntent::Minibuffer,
             error: None,
         });
 
         app.run_slash_command("serve demo").await;
 
         assert!(
-            app.minibuffer.is_none(),
-            "the orchestrator panel must not keep keyboard focus over the new service view"
+            app.prompt.is_none(),
+            "the minibuffer panel must not keep keyboard focus over the new service view"
         );
         assert_eq!(app.selection, Selection::Service("demo".into()));
         assert_eq!(app.focus, PaneFocus::View);
@@ -43177,12 +43177,12 @@ mod tests {
         assert_eq!(
             buffer[(graph.x, legend_y)].fg,
             entries[0].dot_color,
-            "the service legend dot should use the operator legend's cache tone"
+            "the service legend dot should use the minibuffer legend's cache tone"
         );
         assert_eq!(
             buffer[(graph.x + 2, legend_y)].fg,
             entries[0].color,
-            "the service legend text should use the operator legend's model color"
+            "the service legend text should use the minibuffer legend's model color"
         );
         let painted = (graph.y..graph.y + graph.height)
             .flat_map(|y| (graph.x..graph.x + graph.width).map(move |x| (x, y)))
@@ -43295,7 +43295,7 @@ mod tests {
         // Retired form-local delete: C-d no longer arms an in-view confirm.
         app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
             .await;
-        assert!(app.minibuffer.is_none());
+        assert!(app.prompt.is_none());
         assert!(
             !app
                 .service_dialog
@@ -43308,11 +43308,11 @@ mod tests {
         // Global kill chord (C-x k / dd / OpenDeleteConfirm) opens the
         // same minibuffer confirm sessions and projects use.
         app.run_action(KeyAction::OpenDeleteConfirm).await;
-        let mb = app.minibuffer.as_ref().expect("delete confirm minibuffer");
+        let mb = app.prompt.as_ref().expect("delete confirm minibuffer");
         assert!(
             matches!(
                 &mb.intent,
-                MinibufferIntent::ServiceDeleteConfirm { name } if name == "assistant"
+                PromptIntent::ServiceDeleteConfirm { name } if name == "assistant"
             ),
             "expected ServiceDeleteConfirm, got {:?}",
             mb.intent
@@ -43372,7 +43372,7 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .await;
         assert_eq!(
-            app.minibuffer
+            app.prompt
                 .as_ref()
                 .map(|minibuffer| minibuffer.input.as_str()),
             Some("s"),
@@ -43920,7 +43920,7 @@ mod tests {
             .selected_field = SLACK_FIELD_THREAD_CONTEXT;
 
         // Backspacing the seeded default all the way out reads as none rather
-        // than as "leave it alone" — 0 is a setting an operator chooses.
+        // than as "leave it alone" — 0 is a setting a user chooses.
         for _ in 0..8 {
             app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
                 .await;
@@ -43934,7 +43934,7 @@ mod tests {
         assert_eq!(channel_editor(&app).channel.thread_context, Some(120));
 
         // Past Slack's own page limit the field holds at the cap instead of
-        // letting the operator save a number the daemon would refuse.
+        // letting the user save a number the daemon would refuse.
         for ch in "000".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
                 .await;
@@ -44508,7 +44508,7 @@ mod tests {
             if rain.height > 0 {
                 assert!(
                     area.y + area.height <= rain.y,
-                    "the section sits above the operator panel: {area:?} vs {rain:?}"
+                    "the section sits above the minibuffer panel: {area:?} vs {rain:?}"
                 );
             }
         }
@@ -44588,7 +44588,7 @@ mod tests {
         let before = app.layout.lineage_area.expect("area").height;
 
         // Grab the bare bar (left edge — away from the buttons) and drag
-        // it up two rows: the section grows, like the operator panel.
+        // it up two rows: the section grows, like the minibuffer panel.
         app.on_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: header.x,
@@ -45083,7 +45083,7 @@ mod tests {
         let header = row_text(area.y);
         assert!(
             header.contains("⑂ lineage") && header.contains("──"),
-            "the header is a ─ rule carrying the label, like the operator \
+            "the header is a ─ rule carrying the label, like the user \
              panel's title bar: {header:?}"
         );
         assert!(
@@ -45940,7 +45940,7 @@ mod tests {
             construct_protocol::SessionKind::User
         )));
         assert!(!is_user_list_session(&summary_with_kind(
-            construct_protocol::SessionKind::Orchestrator
+            construct_protocol::SessionKind::Minibuffer
         )));
         assert!(!is_user_list_session(&summary_with_kind(
             construct_protocol::SessionKind::Subagent
@@ -47040,7 +47040,7 @@ mod tests {
         // previously wrote warnings over the alternate-screen TUI).
         app.selection = Selection::ArchivedRow(ArchiveSection::Children("native_owner".into()));
         app.run_action(KeyAction::OpenDeleteConfirm).await;
-        assert!(app.minibuffer.is_none());
+        assert!(app.prompt.is_none());
         assert!(
             app.status.as_ref().is_some_and(
                 |(message, _)| message.contains("native harness subagents are read-only")
@@ -47202,11 +47202,11 @@ mod tests {
             client,
             vec![summary_with_kind(construct_protocol::SessionKind::User)],
         );
-        app.minibuffer = Some(Minibuffer {
+        app.prompt = Some(Prompt {
             prompt: "Input: ".into(),
             input: "see ".into(),
             cursor: 4,
-            intent: MinibufferIntent::SendInput {
+            intent: PromptIntent::SendInput {
                 session_id: "s1".into(),
             },
             error: None,
@@ -47227,7 +47227,7 @@ mod tests {
             .expect("decode attachment");
         assert_eq!(decoded, paste.as_bytes());
         assert_eq!(
-            app.minibuffer.as_ref().map(|mb| mb.input.as_str()),
+            app.prompt.as_ref().map(|mb| mb.input.as_str()),
             Some("see [#file:/tmp/clipboard.txt]")
         );
 
@@ -48201,14 +48201,14 @@ mod tests {
     }
 
     #[test]
-    fn selection_bounds_use_minibuffer_line_for_operator_area() {
+    fn selection_bounds_use_minibuffer_line_for_minibuffer_area() {
         let bounds = selection_bounds_for_layout(&test_layout(), false, 0, 29);
 
         assert_eq!(bounds, Some(Rect::new(0, 29, 100, 4)));
     }
 
     #[test]
-    fn selection_bounds_exclude_orchestrator_panel_top_border() {
+    fn selection_bounds_exclude_minibuffer_panel_top_border() {
         assert_eq!(
             selection_bounds_for_layout(&test_layout(), true, 0, 29),
             None

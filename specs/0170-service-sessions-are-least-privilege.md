@@ -66,14 +66,14 @@ approval mode to wave through.
 - Loosening any default here is a security change and must be argued as one.
 - Re-granting reach is per service, never global and never per request.
 - A service that legitimately orchestrates other sessions is still possible,
-  but the operator must say so in that service's definition.
+  but the user must say so in that service's definition.
 - Filesystem and network confinement remain the harness sandbox's
   responsibility; a service inherits whatever that backend enforces on the
   host, including nothing on hosts where no backend is available.
 - Because the harness sandbox is the floor, a harness without one gives a
   service session weaker filesystem and network confinement than this decision
   implies. Choosing such a harness for a service is a deployment decision the
-  operator owns.
+  minibuffer owns.
 
 ## Non-Goals
 
@@ -87,9 +87,9 @@ approval mode to wave through.
 - A service is defined with no capability configuration. A request asking it
   to list every session on the machine gets a plain answer that it has no such
   tool, and no call is attempted.
-- An operator writes a service whose job is to triage incidents by opening
+- A user writes a service whose job is to triage incidents by opening
   sessions on their behalf, and grants that service reach explicitly. Its
   sessions can create and drive others; every other service on the host still
   cannot.
-- An operator renames a service and changes its instruction. The capability
+- A user renames a service and changes its instruction. The capability
   limits stored for it are unchanged by that edit.

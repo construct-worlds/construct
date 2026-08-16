@@ -405,7 +405,7 @@ fn block_sig(b: &ToolBlock) -> ItemSig {
 /// 1 and a wide character wraps — `prev_pos.row -= scrolled` goes
 /// negative because the cursor is already at row 0. The 2×2 floor
 /// is the smallest size that exercises only the safe code paths.
-/// Real PTYs are never this small, but the orchestrator panel
+/// Real PTYs are never this small, but the minibuffer panel
 /// shrinks its chat area to 1 row when the editor pane absorbs
 /// most of a narrow panel, and `/remote-control`'s C-x x trip
 /// exposed it. Removing this floor requires either a vt100
@@ -2624,8 +2624,8 @@ mod tests {
     /// PERF (suspect): tool-block sessions use `replay_full` — rebuild
     /// the parser from every item every frame so block synth bytes
     /// reflect live state (timers, expand/collapse). This is the
-    /// orchestrator panel's path; that panel renders every frame
-    /// regardless of which session is selected. If orchestrator
+    /// minibuffer panel's path; that panel renders every frame
+    /// regardless of which session is selected. If minibuffer
     /// history accumulates lots of bytes + a tool block, every
     /// frame does O(total bytes) work.
     #[test]
@@ -2841,7 +2841,7 @@ mod tests {
     //
     // Each agentd-supported harness writes to the PTY in a different
     // shape (shell = plain stdout, claude = alt-screen TUI, smith =
-    // chat + tool blocks, orchestrator = chat + EditorState, codex =
+    // chat + tool blocks, minibuffer = chat + EditorState, codex =
     // normal-screen TUI with accumulated history). Bugs that show up
     // in one frequently don't show up in another — these tests pin
     // each pattern's expected behavior so a future change can't
@@ -2859,7 +2859,7 @@ mod tests {
     //     populated history; per-event cost stays bounded.
     //   * "resize perf" — cost of resizing an already-populated
     //     session. Currently passes for sessions whose accumulated
-    //     `pending_chunk` is small (shell / smith / orchestrator /
+    //     `pending_chunk` is small (shell / smith / minibuffer /
     //     claude-via-alt-screen) and FAILS for codex (which
     //     accumulates a lot of normal-screen content).
     // ============================================================
@@ -3694,34 +3694,34 @@ mod tests {
         assert!(matches!(h.items[1], Item::ToolBlock(_)), "{:?}", h.items);
     }
 
-    // ----- orchestrator / minibuffer (smith-like content, no
+    // ----- minibuffer / minibuffer (smith-like content, no
     // tool blocks in the common case) -----
 
-    fn orchestrator_feed(h: &mut ItemHistory) {
-        // Orchestrator chat + a single observation echo. No tool
-        // blocks (those are rare in orchestrator). Treated as a
+    fn minibuffer_feed(h: &mut ItemHistory) {
+        // Prompt chat + a single observation echo. No tool
+        // blocks (those are rare in minibuffer). Treated as a
         // shell-like history through `replay_cached`.
         for _ in 0..50 {
-            h.feed_pty(b"orchestrator observation log entry...\r\n");
+            h.feed_pty(b"minibuffer observation log entry...\r\n");
         }
         h.feed_pty(b"> ");
     }
 
     #[test]
-    fn orchestrator_renders_after_bootstrap() {
+    fn minibuffer_renders_after_bootstrap() {
         let mut h = ItemHistory::new();
-        orchestrator_feed(&mut h);
+        minibuffer_feed(&mut h);
         let out = h.replay(60, 6, 0);
         let cell = out
             .screen
             .cell(5, 0)
             .map(|c| c.contents())
             .unwrap_or_default();
-        assert!(!cell.is_empty(), "orchestrator panel last row populated");
+        assert!(!cell.is_empty(), "minibuffer panel last row populated");
     }
 
     /// Regression: `C-x x` on a narrow / tall layout used to crash
-    /// the TUI because the orchestrator panel's chat area can
+    /// the TUI because the minibuffer panel's chat area can
     /// shrink to 1 row (editor pane absorbs the rest), and
     /// vt100-0.16.2's `col_wrap` underflows when rows / cols is 1
     /// and a wide character forces a wrap.
@@ -3743,14 +3743,14 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_resize_is_cheap() {
+    fn minibuffer_resize_is_cheap() {
         let mut h = ItemHistory::new();
-        orchestrator_feed(&mut h);
+        minibuffer_feed(&mut h);
         let _ = h.replay(60, 6, 0);
         let t = Instant::now();
         let _ = h.replay(80, 8, 0);
         let us = t.elapsed().as_micros();
-        assert!(us < 5_000, "orchestrator panel resize too slow: {us} µs");
+        assert!(us < 5_000, "minibuffer panel resize too slow: {us} µs");
     }
 
     // ----- codex (normal-screen, accumulated history) -----

@@ -700,14 +700,14 @@
     .session-list .item { padding-top: 9px; padding-bottom: 9px; }
     .session-list .archived-row { padding-top: 6px; padding-bottom: 6px; }
   }
-  /* Operator / orchestrator row — pinned at the top, name in
+  /* Minibuffer / minibuffer row — pinned at the top, name in
      the accent color so it stands out as the special fleet
      dispatcher session. */
-  .session-list .item.is-operator .name {
+  .session-list .item.is-minibuffer .name {
     color: var(--accent);
     font-weight: 600;
   }
-  .session-list .item.is-operator {
+  .session-list .item.is-minibuffer {
     border-bottom: 1px solid var(--border-faint);
     border-bottom-left-radius: 0;
     border-bottom-right-radius: 0;
@@ -2465,7 +2465,7 @@
   }
 
   /* Sidebar lineage section (spec 0081 / web parity): master–detail tree
-     for the selected session, between the list and the operator panel. */
+     for the selected session, between the list and the minibuffer panel. */
   .lineage-section {
     flex: 0 0 auto;
     display: flex;
@@ -2480,11 +2480,11 @@
     flex: 0 0 auto;
   }
   .lineage-section,
-  .operator-panel {
+  .minibuffer-panel {
     position: relative;
   }
   .lineage-header,
-  .operator-header {
+  .minibuffer-header {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
@@ -2499,7 +2499,7 @@
     cursor: default;
   }
   .lineage-header .section-title,
-  .operator-header .section-title {
+  .minibuffer-header .section-title {
     flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
@@ -2507,7 +2507,7 @@
     white-space: nowrap;
   }
   .lineage-header button,
-  .operator-header button {
+  .minibuffer-header button {
     appearance: none;
     flex: 0 0 auto;
     border: none;
@@ -2521,7 +2521,7 @@
     cursor: pointer;
   }
   .lineage-header button:hover,
-  .operator-header button:hover {
+  .minibuffer-header button:hover {
     color: var(--fg);
     background: color-mix(in srgb, var(--fg) 8%, transparent);
   }
@@ -2894,7 +2894,7 @@
   }
   /* Drag handle sits on the TOP border of the title bar (not under it). */
   .lineage-resize,
-  .operator-resize {
+  .minibuffer-resize {
     position: absolute;
     top: -3px;
     left: 0;
@@ -2905,14 +2905,14 @@
     background: transparent;
   }
   .lineage-resize:hover,
-  .operator-resize:hover,
+  .minibuffer-resize:hover,
   .lineage-resize.is-dragging,
-  .operator-resize.is-dragging {
+  .minibuffer-resize.is-dragging {
     background: color-mix(in srgb, var(--accent) 45%, transparent);
   }
 
-  /* Operator ambient panel (spec 0019 / 0167): fleet token meter by default. */
-  .operator-panel {
+  /* Minibuffer ambient panel (spec 0019 / 0167): fleet token meter by default. */
+  .minibuffer-panel {
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
@@ -2920,19 +2920,19 @@
     border-top: 1px solid var(--border);
     background: var(--bg);
   }
-  .operator-panel.is-collapsed .operator-body {
+  .minibuffer-panel.is-collapsed .minibuffer-body {
     display: none;
   }
-  .operator-body {
+  .minibuffer-body {
     flex: 0 0 auto;
-    height: var(--operator-h, 148px);
+    height: var(--minibuffer-h, 148px);
     min-height: 72px;
     display: flex;
     flex-direction: column;
     min-width: 0;
     overflow: hidden;
   }
-  .operator-meter {
+  .minibuffer-meter {
     flex: 1 1 auto;
     min-height: 0;
     display: flex;
@@ -2940,9 +2940,9 @@
     padding: 4px 6px 6px;
     gap: 4px;
   }
-  .operator-meter[hidden],
-  .operator-rain[hidden] { display: none !important; }
-  .operator-meter-graph {
+  .minibuffer-meter[hidden],
+  .minibuffer-rain[hidden] { display: none !important; }
+  .minibuffer-meter-graph {
     flex: 1 1 auto;
     min-height: 40px;
     width: 100%;
@@ -2952,12 +2952,12 @@
   }
   /* `display: block` above must not defeat the HTML `hidden` attribute —
      otherwise the empty-state message and the canvas show together. */
-  .operator-meter-graph[hidden],
-  .operator-meter-empty[hidden],
-  .operator-meter-legend[hidden] {
+  .minibuffer-meter-graph[hidden],
+  .minibuffer-meter-empty[hidden],
+  .minibuffer-meter-legend[hidden] {
     display: none !important;
   }
-  .operator-meter-empty {
+  .minibuffer-meter-empty {
     flex: 1 1 auto;
     display: flex;
     align-items: center;
@@ -2968,7 +2968,7 @@
     text-align: center;
     padding: 8px;
   }
-  .operator-meter-legend {
+  .minibuffer-meter-legend {
     flex: 0 0 auto;
     display: grid;
     gap: 2px 8px;
@@ -2978,36 +2978,36 @@
     max-height: 4.8em;
     overflow: hidden;
   }
-  .operator-meter-legend .leg-row {
+  .minibuffer-meter-legend .leg-row {
     display: flex;
     align-items: baseline;
     gap: 4px;
     min-width: 0;
   }
-  .operator-meter-legend .leg-dot {
+  .minibuffer-meter-legend .leg-dot {
     flex: 0 0 auto;
     width: 7px;
     height: 7px;
     border-radius: 50%;
     margin-top: 2px;
   }
-  .operator-meter-legend .leg-name {
+  .minibuffer-meter-legend .leg-name {
     flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .operator-meter-legend .leg-rate {
+  .minibuffer-meter-legend .leg-rate {
     flex: 0 0 auto;
     font-variant-numeric: tabular-nums;
     color: var(--fg-faint);
   }
-  .operator-meter-legend .leg-rate.is-active {
+  .minibuffer-meter-legend .leg-rate.is-active {
     color: inherit;
     font-weight: 600;
   }
-  .operator-rain {
+  .minibuffer-rain {
     flex: 1 1 auto;
     min-height: 0;
     width: 100%;
@@ -3015,7 +3015,7 @@
   }
   @media (max-width: 720px) {
     .lineage-body { height: var(--lineage-h, 120px); }
-    .operator-body { height: var(--operator-h, 120px); }
+    .minibuffer-body { height: var(--minibuffer-h, 120px); }
   }
 
   /* New-session form rows reuse the approval-sheet shell. */
@@ -3787,7 +3787,7 @@
   html[data-theme="matrix"] .session-list .item.active .state {
     color: var(--accent-fg);
   }
-  html[data-theme="matrix"] .session-list .item.is-operator.active .name {
+  html[data-theme="matrix"] .session-list .item.is-minibuffer.active .name {
     color: var(--accent-fg);
   }
 </style>
@@ -3880,31 +3880,31 @@
         <div class="lineage-body" id="lineageBody" role="tree" aria-label="session lineage"></div>
       </section>
       <!--
-        Operator ambient panel (specs 0019 / 0167): fleet token meter by
+        Minibuffer ambient panel (specs 0019 / 0167): fleet token meter by
         default, with a rain mode toggle. Anchored at the bottom of the
         sidebar like the TUI matrix-rain region.
       -->
-      <section class="operator-panel" id="operatorPanel">
+      <section class="minibuffer-panel" id="minibufferPanel">
         <!-- Resize handle on the TOP border of the title bar (TUI parity). -->
-        <div class="operator-resize" id="operatorResize" role="separator"
-             aria-orientation="horizontal" aria-label="resize operator panel"></div>
-        <div class="operator-header" id="operatorHeader">
-          <span class="section-title" id="operatorTitle">operator</span>
-          <button type="button" id="operatorModeBtn" aria-label="toggle operator panel mode"
+        <div class="minibuffer-resize" id="minibufferResize" role="separator"
+             aria-orientation="horizontal" aria-label="resize minibuffer panel"></div>
+        <div class="minibuffer-header" id="minibufferHeader">
+          <span class="section-title" id="minibufferTitle">minibuffer</span>
+          <button type="button" id="minibufferModeBtn" aria-label="toggle minibuffer panel mode"
                   title="Toggle rain / tokens">tokens ⇄</button>
-          <button type="button" id="operatorCollapseBtn" aria-label="collapse operator panel"
+          <button type="button" id="minibufferCollapseBtn" aria-label="collapse minibuffer panel"
                   title="Collapse">−</button>
         </div>
-        <div class="operator-body" id="operatorBody">
-          <div class="operator-meter" id="operatorMeter">
-            <canvas class="operator-meter-graph" id="operatorMeterGraph" width="260" height="90"
+        <div class="minibuffer-body" id="minibufferBody">
+          <div class="minibuffer-meter" id="minibufferMeter">
+            <canvas class="minibuffer-meter-graph" id="minibufferMeterGraph" width="260" height="90"
                     aria-label="fleet token usage"></canvas>
-            <div class="operator-meter-empty" id="operatorMeterEmpty" hidden>
+            <div class="minibuffer-meter-empty" id="minibufferMeterEmpty" hidden>
               no token usage reported yet
             </div>
-            <div class="operator-meter-legend" id="operatorMeterLegend"></div>
+            <div class="minibuffer-meter-legend" id="minibufferMeterLegend"></div>
           </div>
-          <canvas class="operator-rain" id="operatorRain" width="260" height="120" hidden
+          <canvas class="minibuffer-rain" id="minibufferRain" width="260" height="120" hidden
                   aria-label="matrix rain"></canvas>
         </div>
       </section>
@@ -4905,10 +4905,10 @@ const state = {
   // "boxes" (full, default) | "rails" (compact) — matches TUI LineageViewMode.
   lineageMode: "boxes",
   lineageSubagentsExpanded: new Set(),
-  // Operator ambient panel (specs 0019 / 0167 web parity).
-  operatorCollapsed: false,
+  // Minibuffer ambient panel (specs 0019 / 0167 web parity).
+  minibufferCollapsed: false,
   // "tokens" | "rain" — default tokens (spec 0019).
-  operatorPanelMode: "tokens",
+  minibufferPanelMode: "tokens",
   // Fleet token meter state (JS port of crates/cli/src/token_meter.rs).
   tokenMeter: null,
   // Last observed busy_ms per session id, for rate denominators.
@@ -5028,7 +5028,7 @@ function observeSessionPtyActivity(sessionId, atMs = Date.now()) {
 
 function initMiniUsageGraph() {
   if (!miniUsageGraphEl) return;
-  const repaint = () => scheduleOperatorPanelPaint();
+  const repaint = () => scheduleMinibufferPanelPaint();
   if (typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(repaint);
     ro.observe(miniUsageGraphEl);
@@ -5068,7 +5068,7 @@ function setComposerEnabled(on) {
 }
 
 // ---------------------------------------------------------------------------
-// Sidebar lineage + operator token meter (web parity for specs 0081 / 0019 / 0167)
+// Sidebar lineage + minibuffer token meter (web parity for specs 0081 / 0019 / 0167)
 // ---------------------------------------------------------------------------
 
 // The unsuffixed keys predate responsive preferences. Keep them as read-only
@@ -5077,13 +5077,13 @@ function setComposerEnabled(on) {
 const LINEAGE_COLLAPSED_KEY = "agentd.web.lineageCollapsed";
 const LINEAGE_MODE_KEY = "agentd.web.lineageMode";
 const LINEAGE_H_KEY = "agentd.web.lineageH";
-const OPERATOR_COLLAPSED_KEY = "agentd.web.operatorCollapsed";
-const OPERATOR_H_KEY = "agentd.web.operatorH";
-const OPERATOR_MODE_KEY = "agentd.web.operatorPanelMode";
+const MINIBUFFER_COLLAPSED_KEY = "agentd.web.minibufferCollapsed";
+const MINIBUFFER_H_KEY = "agentd.web.minibufferH";
+const MINIBUFFER_MODE_KEY = "agentd.web.minibufferPanelMode";
 const LINEAGE_H_MIN = 64;
 const LINEAGE_H_MAX = 360;
-const OPERATOR_H_MIN = 72;
-const OPERATOR_H_MAX = 320;
+const MINIBUFFER_H_MIN = 72;
+const MINIBUFFER_H_MAX = 320;
 const TOKEN_BUCKET_SECS = 60;
 const TOKEN_MAX_BUCKETS = 600;
 const TOKEN_PEAK_DECAY = 0.8;
@@ -5110,16 +5110,16 @@ const lineageSectionEl = $("lineageSection");
 const lineageBodyEl = $("lineageBody");
 const lineageCollapseBtn = $("lineageCollapseBtn");
 const lineageResizeEl = $("lineageResize");
-const operatorPanelEl = $("operatorPanel");
-const operatorBodyEl = $("operatorBody");
-const operatorCollapseBtn = $("operatorCollapseBtn");
-const operatorModeBtn = $("operatorModeBtn");
-const operatorResizeEl = $("operatorResize");
-const operatorMeterEl = $("operatorMeter");
-const operatorMeterGraphEl = $("operatorMeterGraph");
-const operatorMeterEmptyEl = $("operatorMeterEmpty");
-const operatorMeterLegendEl = $("operatorMeterLegend");
-const operatorRainEl = $("operatorRain");
+const minibufferPanelEl = $("minibufferPanel");
+const minibufferBodyEl = $("minibufferBody");
+const minibufferCollapseBtn = $("minibufferCollapseBtn");
+const minibufferModeBtn = $("minibufferModeBtn");
+const minibufferResizeEl = $("minibufferResize");
+const minibufferMeterEl = $("minibufferMeter");
+const minibufferMeterGraphEl = $("minibufferMeterGraph");
+const minibufferMeterEmptyEl = $("minibufferMeterEmpty");
+const minibufferMeterLegendEl = $("minibufferMeterLegend");
+const minibufferRainEl = $("minibufferRain");
 
 function sidebarPanelLayout() {
   return isNarrowLayout() ? "narrow" : "wide";
@@ -5147,14 +5147,14 @@ function loadSidebarPanelPrefs() {
     state.sidebarPanelLayout,
   );
   state.lineageMode = localStorage.getItem(LINEAGE_MODE_KEY) === "rails" ? "rails" : "boxes";
-  state.operatorCollapsed = loadSidebarPanelCollapsed(
-    OPERATOR_COLLAPSED_KEY,
+  state.minibufferCollapsed = loadSidebarPanelCollapsed(
+    MINIBUFFER_COLLAPSED_KEY,
     state.sidebarPanelLayout,
   );
-  const mode = localStorage.getItem(OPERATOR_MODE_KEY);
-  state.operatorPanelMode = mode === "rain" ? "rain" : "tokens";
+  const mode = localStorage.getItem(MINIBUFFER_MODE_KEY);
+  state.minibufferPanelMode = mode === "rain" ? "rain" : "tokens";
   const lh = Number(localStorage.getItem(LINEAGE_H_KEY));
-  const oh = Number(localStorage.getItem(OPERATOR_H_KEY));
+  const oh = Number(localStorage.getItem(MINIBUFFER_H_KEY));
   if (Number.isFinite(lh) && lh > 0) {
     document.documentElement.style.setProperty(
       "--lineage-h",
@@ -5163,8 +5163,8 @@ function loadSidebarPanelPrefs() {
   }
   if (Number.isFinite(oh) && oh > 0) {
     document.documentElement.style.setProperty(
-      "--operator-h",
-      `${Math.min(OPERATOR_H_MAX, Math.max(OPERATOR_H_MIN, oh))}px`,
+      "--minibuffer-h",
+      `${Math.min(MINIBUFFER_H_MAX, Math.max(MINIBUFFER_H_MIN, oh))}px`,
     );
   }
 }
@@ -5181,7 +5181,7 @@ function sessionBusyMsAt(session, nowMs = Date.now()) {
 
 function sessionDisplayTitle(s) {
   if (!s) return "";
-  if (s.kind === "orchestrator") return "operator";
+  if (s.kind === "minibuffer") return "minibuffer";
   const title = String(s.title || "").trim();
   if (title) return title;
   return String(s.harness || s.id || "session");
@@ -6032,7 +6032,7 @@ function observeCostForMeter(sessionId, event) {
   const session = state.sessions.find((s) => s.id === sessionId);
   const model = event.model || (session && session.model) || null;
   tokenObserve(ensureTokenMeter(), model, tokens, tokensCached, Date.now());
-  scheduleOperatorPanelPaint();
+  scheduleMinibufferPanelPaint();
 }
 
 function sampleComputeTimeForMeter() {
@@ -6082,12 +6082,12 @@ async function seedTokenMeterFromDaemon() {
       if (!session.model) continue;
       state.tokenMeterBusy.set(session.id, sessionBusyMsAt(session, t));
     }
-    scheduleOperatorPanelPaint();
+    scheduleMinibufferPanelPaint();
   } catch (_) {
     // Older daemon without usage.token_history — live Cost events still work.
     state.tokenMeter = createTokenMeter(Date.now());
     state.tokenMeterSeeded = true;
-    scheduleOperatorPanelPaint();
+    scheduleMinibufferPanelPaint();
   }
 }
 
@@ -6101,35 +6101,35 @@ function tokenIsIdle(meter) {
 }
 
 function paintTokenMeter() {
-  if (!operatorMeterEl || !operatorMeterGraphEl) return;
+  if (!minibufferMeterEl || !minibufferMeterGraphEl) return;
   const meter = ensureTokenMeter();
   const nowMs = Date.now();
   tokenAdvanceTo(meter, nowMs);
   sampleComputeTimeForMeter();
 
   const idle = tokenIsIdle(meter);
-  if (operatorMeterEmptyEl) operatorMeterEmptyEl.hidden = !idle;
-  operatorMeterGraphEl.hidden = idle;
-  if (operatorMeterLegendEl) operatorMeterLegendEl.hidden = idle;
+  if (minibufferMeterEmptyEl) minibufferMeterEmptyEl.hidden = !idle;
+  minibufferMeterGraphEl.hidden = idle;
+  if (minibufferMeterLegendEl) minibufferMeterLegendEl.hidden = idle;
   if (idle) {
-    if (operatorMeterLegendEl) operatorMeterLegendEl.replaceChildren();
+    if (minibufferMeterLegendEl) minibufferMeterLegendEl.replaceChildren();
     return;
   }
 
   // TUI paints one terminal cell per 1-minute bucket. Use a monospaced
   // cell width so columns read like the TUI bars, not hairline pixels.
-  const cssW = Math.max(40, operatorMeterGraphEl.clientWidth || operatorMeterEl.clientWidth || 200);
-  const { cols } = paintTokenBars(operatorMeterGraphEl, meter, {
+  const cssW = Math.max(40, minibufferMeterGraphEl.clientWidth || minibufferMeterEl.clientWidth || 200);
+  const { cols } = paintTokenBars(minibufferMeterGraphEl, meter, {
     columnWidth: 7,
     minWidth: cssW,
     minHeight: 32,
   });
 
   const entries = tokenLegend(meter, cols);
-  if (operatorMeterLegendEl) {
+  if (minibufferMeterLegendEl) {
     const colsN = Math.max(1, Math.min(3, Math.floor(cssW / 110)));
-    operatorMeterLegendEl.style.gridTemplateColumns = `repeat(${colsN}, minmax(0, 1fr))`;
-    operatorMeterLegendEl.innerHTML = entries.map((e) => {
+    minibufferMeterLegendEl.style.gridTemplateColumns = `repeat(${colsN}, minmax(0, 1fr))`;
+    minibufferMeterLegendEl.innerHTML = entries.map((e) => {
       const rate = formatTokenRate(e.rate);
       const active = e.rate != null;
       return `<div class="leg-row" title="${attr(e.label)} · ${attr(formatTokenCount(e.tokens))} tokens / ${TOKEN_BUCKET_SECS}s column">` +
@@ -6152,11 +6152,11 @@ function rainGlyph() {
 function ensureRainDrops(cssW, cssH) {
   const colW = 12;
   const cols = Math.max(6, Math.floor(cssW / colW));
-  if (!paintOperatorRain.drops) paintOperatorRain.drops = [];
-  const drops = paintOperatorRain.drops;
+  if (!paintMinibufferRain.drops) paintMinibufferRain.drops = [];
+  const drops = paintMinibufferRain.drops;
   // Rebuild columns when width changes enough that the count drifts.
-  if (drops.length !== cols || paintOperatorRain.colsW !== colW) {
-    paintOperatorRain.colsW = colW;
+  if (drops.length !== cols || paintMinibufferRain.colsW !== colW) {
+    paintMinibufferRain.colsW = colW;
     drops.length = 0;
     for (let i = 0; i < cols; i++) {
       drops.push({
@@ -6176,11 +6176,11 @@ function ensureRainDrops(cssW, cssH) {
   return drops;
 }
 
-function paintOperatorRain(dtMs = 16) {
-  if (!operatorRainEl || operatorRainEl.hidden) return;
-  const canvas = operatorRainEl;
+function paintMinibufferRain(dtMs = 16) {
+  if (!minibufferRainEl || minibufferRainEl.hidden) return;
+  const canvas = minibufferRainEl;
   const dpr = window.devicePixelRatio || 1;
-  const cssW = Math.max(40, canvas.clientWidth || (operatorBodyEl && operatorBodyEl.clientWidth) || 200);
+  const cssW = Math.max(40, canvas.clientWidth || (minibufferBodyEl && minibufferBodyEl.clientWidth) || 200);
   const cssH = Math.max(40, canvas.clientHeight || 100);
   const w = Math.round(cssW * dpr);
   const h = Math.round(cssH * dpr);
@@ -6188,7 +6188,7 @@ function paintOperatorRain(dtMs = 16) {
     canvas.width = w;
     canvas.height = h;
     // Fresh field on resize so trails don't smear at the wrong scale.
-    paintOperatorRain.drops = null;
+    paintMinibufferRain.drops = null;
   }
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -6256,39 +6256,39 @@ function paintOperatorRain(dtMs = 16) {
   ctx.shadowBlur = 0;
 }
 
-function applyOperatorPanelMode() {
-  if (!operatorPanelEl) return;
-  operatorPanelEl.classList.toggle("is-collapsed", !!state.operatorCollapsed);
-  if (operatorCollapseBtn) {
-    operatorCollapseBtn.textContent = state.operatorCollapsed ? "+" : "−";
-    operatorCollapseBtn.setAttribute(
+function applyMinibufferPanelMode() {
+  if (!minibufferPanelEl) return;
+  minibufferPanelEl.classList.toggle("is-collapsed", !!state.minibufferCollapsed);
+  if (minibufferCollapseBtn) {
+    minibufferCollapseBtn.textContent = state.minibufferCollapsed ? "+" : "−";
+    minibufferCollapseBtn.setAttribute(
       "aria-label",
-      state.operatorCollapsed ? "expand operator panel" : "collapse operator panel",
+      state.minibufferCollapsed ? "expand minibuffer panel" : "collapse minibuffer panel",
     );
   }
-  const tokens = state.operatorPanelMode !== "rain";
-  if (operatorMeterEl) operatorMeterEl.hidden = !tokens;
-  if (operatorRainEl) operatorRainEl.hidden = tokens;
-  if (operatorModeBtn) {
-    operatorModeBtn.textContent = tokens ? "tokens ⇄" : "rain ⇄";
-    operatorModeBtn.title = tokens ? "Show matrix rain" : "Show token usage";
+  const tokens = state.minibufferPanelMode !== "rain";
+  if (minibufferMeterEl) minibufferMeterEl.hidden = !tokens;
+  if (minibufferRainEl) minibufferRainEl.hidden = tokens;
+  if (minibufferModeBtn) {
+    minibufferModeBtn.textContent = tokens ? "tokens ⇄" : "rain ⇄";
+    minibufferModeBtn.title = tokens ? "Show matrix rain" : "Show token usage";
   }
   // Rain needs a continuous rAF loop; tokens only need a slow tick.
-  if (!tokens && !state.operatorCollapsed) startRainLoop();
+  if (!tokens && !state.minibufferCollapsed) startRainLoop();
   else stopRainLoop();
-  scheduleOperatorPanelPaint();
+  scheduleMinibufferPanelPaint();
 }
 
-function scheduleOperatorPanelPaint() {
+function scheduleMinibufferPanelPaint() {
   if (state.tokenMeterRaf) return;
   state.tokenMeterRaf = requestAnimationFrame(() => {
     state.tokenMeterRaf = 0;
     paintMiniUsageGraph();
-    if (!operatorPanelEl || state.operatorCollapsed) return;
-    if (state.operatorPanelMode === "rain") {
+    if (!minibufferPanelEl || state.minibufferCollapsed) return;
+    if (state.minibufferPanelMode === "rain") {
       // Rain is driven by startRainLoop; a one-shot is still useful on
       // mode switches / resize before the loop's next frame.
-      paintOperatorRain(16);
+      paintMinibufferRain(16);
     } else {
       paintTokenMeter();
     }
@@ -6300,12 +6300,12 @@ function startRainLoop() {
   let last = performance.now();
   const tick = (now) => {
     state.rainLoopRaf = 0;
-    if (!operatorPanelEl || state.operatorCollapsed || state.operatorPanelMode !== "rain") {
+    if (!minibufferPanelEl || state.minibufferCollapsed || state.minibufferPanelMode !== "rain") {
       return;
     }
     const dt = now - last;
     last = now;
-    paintOperatorRain(dt);
+    paintMinibufferRain(dt);
     state.rainLoopRaf = requestAnimationFrame(tick);
   };
   state.rainLoopRaf = requestAnimationFrame(tick);
@@ -6318,58 +6318,58 @@ function stopRainLoop() {
   }
 }
 
-function startOperatorPanelLoop() {
-  if (startOperatorPanelLoop.timer) return;
+function startMinibufferPanelLoop() {
+  if (startMinibufferPanelLoop.timer) return;
   // Token meter: refresh once a second. Rain runs on its own rAF loop.
-  startOperatorPanelLoop.timer = setInterval(() => {
+  startMinibufferPanelLoop.timer = setInterval(() => {
     if (!state.ws || state.ws.readyState !== 1) return;
-    scheduleOperatorPanelPaint();
-    if (!state.operatorCollapsed && state.operatorPanelMode === "rain") {
+    scheduleMinibufferPanelPaint();
+    if (!state.minibufferCollapsed && state.minibufferPanelMode === "rain") {
       if (!state.rainLoopRaf) startRainLoop();
     }
   }, 1000);
-  if (state.operatorPanelMode === "rain" && !state.operatorCollapsed) startRainLoop();
+  if (state.minibufferPanelMode === "rain" && !state.minibufferCollapsed) startRainLoop();
 }
 
-function bindOperatorPanel() {
-  if (!operatorPanelEl || operatorPanelEl.__bound) return;
-  operatorPanelEl.__bound = true;
-  if (operatorCollapseBtn) {
-    operatorCollapseBtn.addEventListener("click", (e) => {
+function bindMinibufferPanel() {
+  if (!minibufferPanelEl || minibufferPanelEl.__bound) return;
+  minibufferPanelEl.__bound = true;
+  if (minibufferCollapseBtn) {
+    minibufferCollapseBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      state.operatorCollapsed = !state.operatorCollapsed;
-      saveSidebarPanelCollapsed(OPERATOR_COLLAPSED_KEY, state.operatorCollapsed);
-      applyOperatorPanelMode();
+      state.minibufferCollapsed = !state.minibufferCollapsed;
+      saveSidebarPanelCollapsed(MINIBUFFER_COLLAPSED_KEY, state.minibufferCollapsed);
+      applyMinibufferPanelMode();
     });
   }
-  if (operatorModeBtn) {
-    operatorModeBtn.addEventListener("click", (e) => {
+  if (minibufferModeBtn) {
+    minibufferModeBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      state.operatorPanelMode = state.operatorPanelMode === "rain" ? "tokens" : "rain";
-      localStorage.setItem(OPERATOR_MODE_KEY, state.operatorPanelMode);
-      applyOperatorPanelMode();
+      state.minibufferPanelMode = state.minibufferPanelMode === "rain" ? "tokens" : "rain";
+      localStorage.setItem(MINIBUFFER_MODE_KEY, state.minibufferPanelMode);
+      applyMinibufferPanelMode();
     });
   }
-  bindVerticalResize(operatorResizeEl, {
-    min: OPERATOR_H_MIN,
-    max: OPERATOR_H_MAX,
-    cssVar: "--operator-h",
-    storageKey: OPERATOR_H_KEY,
-    getHeight: () => (operatorBodyEl ? operatorBodyEl.clientHeight : 148),
+  bindVerticalResize(minibufferResizeEl, {
+    min: MINIBUFFER_H_MIN,
+    max: MINIBUFFER_H_MAX,
+    cssVar: "--minibuffer-h",
+    storageKey: MINIBUFFER_H_KEY,
+    getHeight: () => (minibufferBodyEl ? minibufferBodyEl.clientHeight : 148),
   });
   // Redraw on sidebar width changes.
-  if (typeof ResizeObserver !== "undefined" && operatorBodyEl) {
-    const ro = new ResizeObserver(() => scheduleOperatorPanelPaint());
-    ro.observe(operatorBodyEl);
+  if (typeof ResizeObserver !== "undefined" && minibufferBodyEl) {
+    const ro = new ResizeObserver(() => scheduleMinibufferPanelPaint());
+    ro.observe(minibufferBodyEl);
   }
 }
 
 function initSidebarAmbientPanels() {
   loadSidebarPanelPrefs();
   bindLineageSection();
-  bindOperatorPanel();
-  applyOperatorPanelMode();
-  startOperatorPanelLoop();
+  bindMinibufferPanel();
+  applyMinibufferPanelMode();
+  startMinibufferPanelLoop();
 }
 
 function syncSidebarPanelLayout() {
@@ -6378,9 +6378,9 @@ function syncSidebarPanelLayout() {
 
   state.sidebarPanelLayout = layout;
   state.lineageCollapsed = loadSidebarPanelCollapsed(LINEAGE_COLLAPSED_KEY, layout);
-  state.operatorCollapsed = loadSidebarPanelCollapsed(OPERATOR_COLLAPSED_KEY, layout);
+  state.minibufferCollapsed = loadSidebarPanelCollapsed(MINIBUFFER_COLLAPSED_KEY, layout);
   renderLineageSection();
-  applyOperatorPanelMode();
+  applyMinibufferPanelMode();
 }
 
 function connect() {
@@ -6569,10 +6569,10 @@ async function refreshSessions(startingLayoutTree = null) {
     state.serviceChannelCatalog = Array.isArray(channelCatalog)
       ? channelCatalog.slice().sort((a, b) => String(a.id || "").localeCompare(String(b.id || "")))
       : [];
-    // The orchestrator session ("operator") used to be filtered out
+    // The minibuffer session ("minibuffer") used to be filtered out
     // to mirror the TUI, which surfaces it via a special
     // minibuffer panel instead of the list. The web client
-    // doesn't have that panel, so include operator in the list at the
+    // doesn't have that panel, so include minibuffer in the list at the
     // top — `orderedItems` pins it ahead of everything else.
     state.groups = Array.isArray(groups) ? groups : [];
     renderSessions();
@@ -6586,7 +6586,7 @@ async function refreshSessions(startingLayoutTree = null) {
       state.serviceNewToken = null;
       state.serviceChannelDraft = null;
       serviceViewEl.hidden = true;
-      const fallback = orderedSessions().find((session) => session.kind !== "orchestrator") || orderedSessions()[0];
+      const fallback = orderedSessions().find((session) => session.kind !== "minibuffer") || orderedSessions()[0];
       if (fallback) selectSession(fallback.id, { replaceUrl: true });
       return;
     }
@@ -6601,10 +6601,10 @@ async function refreshSessions(startingLayoutTree = null) {
       selectService(requestedService.name, { replaceUrl: true });
       return;
     }
-    // Auto-select the first *user* session; operator is shown but
+    // Auto-select the first *user* session; minibuffer is shown but
     // shouldn't be the default landing — most phone visits are
     // to look at a real workload, not the dispatcher. Fall back
-    // to operator only when there are no user sessions yet.
+    // to minibuffer only when there are no user sessions yet.
     if (!state.currentId && !state.currentServiceName) {
       const ordered = orderedSessions();
       const requested = state.urlRequestedSessionId
@@ -6630,7 +6630,7 @@ async function refreshSessions(startingLayoutTree = null) {
       const fromLayout = layoutSessionId
         ? ordered.find((s) => s.id === layoutSessionId)
         : null;
-      const firstUser = ordered.find((s) => s.kind !== "orchestrator");
+      const firstUser = ordered.find((s) => s.kind !== "minibuffer");
       const pick = requested || fromLayout || firstUser || ordered[0];
       if (pick) selectSession(pick.id, { replaceUrl: true });
     } else {
@@ -7197,7 +7197,7 @@ serviceDeleteBtn.addEventListener("click", async () => {
     const first = state.services[0];
     if (first) selectService(first.name, { replaceUrl: true });
     else {
-      const firstSession = orderedSessions().find((session) => session.kind !== "orchestrator") || orderedSessions()[0];
+      const firstSession = orderedSessions().find((session) => session.kind !== "minibuffer") || orderedSessions()[0];
       if (firstSession) selectSession(firstSession.id, { replaceUrl: true });
     }
   } catch (e) {
@@ -7222,10 +7222,10 @@ serviceActivityEl.addEventListener("click", (event) => {
  * differently.
  */
 function orderedItems() {
-  // Operator session (orchestrator) goes at the very top, distinct
+  // Minibuffer session (minibuffer) goes at the very top, distinct
   // from the position-sorted user sessions. No reorder or
   // restart actions on this row — the daemon owns its lifecycle.
-  const operator = state.sessions.find((s) => s.kind === "orchestrator");
+  const minibuffer = state.sessions.find((s) => s.kind === "minibuffer");
   const userSessions = state.sessions.filter((s) => s.kind === "user" || !s.kind);
   const byId = new Map(state.sessions.map((s) => [s.id, s]));
   const subagentsByParent = new Map();
@@ -7349,7 +7349,7 @@ function orderedItems() {
   let sessionServiceIdx = 0;
   let projectServiceIdx = 0;
   const items = [];
-  if (operator) items.push({ kind: "session", session: operator, isOperator: true, depth: 0 });
+  if (minibuffer) items.push({ kind: "session", session: minibuffer, isMinibuffer: true, depth: 0 });
   for (const service of services) {
     if (!service.placement) items.push({ kind: "service", service, depth: 0 });
   }
@@ -7441,7 +7441,7 @@ function sessionStatusGlyph(s, now = Date.now()) {
     case "pending": return "○";
     case "running": return "●";
     // Same dot as running on purpose: "at a prompt" is usually just idle,
-    // not blocked on the operator. The attention marker carries "wants
+    // not blocked on the user. The attention marker carries "wants
     // you" (spec 0169).
     case "awaiting_input": return "●";
     case "paused": return "⏸";
@@ -7813,7 +7813,7 @@ function listDragTrack(x, y) {
   if (!row || !sessionListEl.contains(row)) return;
   if (isGroup && row.dataset.groupId === listDrag.sourceGroupId) return;
   if (isService && row.dataset.serviceName === listDrag.sourceServiceName) return;
-  if (!isGroup && (row.dataset.id === listDrag.sourceId || row.classList.contains("is-operator"))) return;
+  if (!isGroup && (row.dataset.id === listDrag.sourceId || row.classList.contains("is-minibuffer"))) return;
   const r = row.getBoundingClientRect();
   listDrag.dropAfter = y > r.top + r.height / 2;
   row.classList.add(listDrag.dropAfter ? "drop-after" : "drop-before");
@@ -7913,8 +7913,8 @@ function listDragFinish(commit) {
     const selector = isGroup
       ? ".group-header[data-group-id]"
       : isService
-        ? ".item[data-service-name], .item[data-id].depth-0:not(.is-operator), .group-header[data-group-id]"
-        : ".item[data-id]:not(.is-operator)";
+        ? ".item[data-service-name], .item[data-id].depth-0:not(.is-minibuffer), .group-header[data-group-id]"
+        : ".item[data-id]:not(.is-minibuffer)";
     const rowKey = (el) => el.dataset.serviceName || el.dataset.groupId || el.dataset.id;
     const ids = Array.from(sessionListEl.querySelectorAll(selector))
       .filter((el) => !(isService && outsideServiceFlow(el)))
@@ -7951,7 +7951,7 @@ function bindSessionListDrag() {
   sessionListEl.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0 || listDrag.armed) return;
     const row = ev.target.closest(".item[data-id], .item[data-service-name], .group-header[data-group-id]");
-    if (!row || row.classList.contains("is-operator")) return;
+    if (!row || row.classList.contains("is-minibuffer")) return;
     if (ev.target.closest(".disclosure.can-toggle")) return;
     listDrag.armed = true;
     listDrag.pointerId = ev.pointerId;
@@ -8013,7 +8013,7 @@ function bindSessionListDrag() {
  *  aria-level / aria-posinset / aria-setsize. Items arrive in DFS order;
  *  a sibling run is a maximal stretch of rows at one depth uninterrupted
  *  by a shallower row — the same grouping the indentation shows visually.
- *  (Group headers, services, and the operator carry no `depth` and count
+ *  (Group headers, services, and the user carry no `depth` and count
  *  as depth 0.) */
 function annotateTreePositions(items) {
   const stack = []; // stack[d] = the sibling run currently open at depth d
@@ -8139,14 +8139,14 @@ function sessionRowDescriptor(item) {
   }
   const s = item.session;
   const active = s.id === state.currentId ? " active" : "";
-  // Operator / orchestrator row: fixed label, daemon-owned lifecycle, no
+  // Minibuffer / minibuffer row: fixed label, daemon-owned lifecycle, no
   // action affordances — an empty disclosure spacer keeps the grid aligned.
-  if (item.isOperator) {
+  if (item.isMinibuffer) {
     return {
       key: "s:" + s.id,
       datasetKey: "id",
       datasetVal: s.id,
-      className: "item is-operator" + active,
+      className: "item is-minibuffer" + active,
       aria: {
         role: "treeitem",
         "aria-selected": active ? "true" : "false",
@@ -8156,7 +8156,7 @@ function sessionRowDescriptor(item) {
         `<div class="title-row">` +
         `<span class="disclosure"></span>` +
         sessionStatusHtml(s) +
-        `<div class="name">operator</div>` +
+        `<div class="name">minibuffer</div>` +
         `</div>`,
     };
   }
@@ -8280,19 +8280,19 @@ function renderSessions() {
   if (state.currentServiceName) renderServiceView();
   refreshSessionActions();
   renderLineageSection();
-  scheduleOperatorPanelPaint();
+  scheduleMinibufferPanelPaint();
 }
 
 /** Recompute the per-session action affordances against the
  *  currently-selected session: the title-bar pin/rename buttons and
  *  the session-menu dropdown items. Rename/pin/fork/archive/delete
- *  apply to user sessions only — the operator's label/lifecycle is
+ *  apply to user sessions only — the user's label/lifecycle is
  *  daemon-owned; restart only enables on terminal-state sessions;
  *  merge only enables on forks (kept visible on non-forks so the menu
  *  teaches the workflow, matching the TUI). */
 function refreshSessionActions() {
   const sel = state.sessions.find((s) => s.id === state.currentId);
-  const isUserSession = !!(sel && sel.kind !== "orchestrator");
+  const isUserSession = !!(sel && sel.kind !== "minibuffer");
   const status = (sel && sel.state ? sel.state : "").toLowerCase();
   const terminal = ["done", "errored", "killed", "stopped"].includes(status);
   const archived = !!(sel && sel.archived);

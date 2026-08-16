@@ -219,7 +219,7 @@ pub(crate) async fn reload(
         }
     }
 
-    // `suggest.enabled` and the orchestrator harness both feed the ambient
+    // `suggest.enabled` and the minibuffer harness both feed the ambient
     // feature status, so a reload that moved either must republish it or
     // clients keep rendering the old answer.
     manager.broadcast_features_state().await;
@@ -244,7 +244,7 @@ pub(crate) async fn reload(
     result
 }
 
-/// Name what changed, for an operator. Deliberately coarse — this is the text
+/// Name what changed, for a user. Deliberately coarse — this is the text
 /// beside a status line, not a diff. An empty result is what keeps a
 /// comment-only edit from announcing itself.
 fn describe_applied(previous: &Config, next: &Config) -> Vec<String> {
@@ -269,8 +269,8 @@ fn describe_applied(previous: &Config, next: &Config) -> Vec<String> {
     if previous.defaults.worktree != next.defaults.worktree {
         applied.push("[defaults]".to_string());
     }
-    if previous.orchestrator.effective_harness() != next.orchestrator.effective_harness() {
-        applied.push("[orchestrator]".to_string());
+    if previous.minibuffer.effective_harness() != next.minibuffer.effective_harness() {
+        applied.push("[minibuffer]".to_string());
     }
     if previous.playbook.templates_dir != next.playbook.templates_dir {
         applied.push("[playbook]".to_string());
@@ -295,7 +295,7 @@ fn describe_applied(previous: &Config, next: &Config) -> Vec<String> {
 /// How often a hand edit is noticed. Configuration changes on human
 /// timescales, so this trades a little latency for far fewer wakeups. Matches
 /// the service watcher deliberately: the two files sit in the same directory
-/// and an operator editing both should not see them apply on visibly
+/// and a user editing both should not see them apply on visibly
 /// different schedules.
 const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -330,7 +330,7 @@ pub fn spawn_watcher(paths: Paths, handle: ConfigHandle) {
 ///
 /// Individual paths, never a directory walk: the daemon rewrites
 /// `config.toml.template` in this same directory on every boot, and a walk
-/// would read that as an operator edit.
+/// would read that as a user edit.
 fn config_fingerprint(paths: &Paths) -> Vec<(String, u64, u128)> {
     let mut parts = vec![file_stamp(&paths.config_file())];
     // Plugins are part of the same derivation, so installing, disabling, or
@@ -440,7 +440,7 @@ mod tests {
         );
         assert!(
             result.applied.iter().any(|a| a == "harnesses"),
-            "the change should be named to the operator: {:?}",
+            "the change should be named to the user: {:?}",
             result.applied
         );
     }
@@ -476,7 +476,7 @@ mod tests {
         let result = reload_now(&manager, &paths).await;
 
         assert!(!result.reloaded, "a torn file is not an edit");
-        assert!(result.error.is_some(), "the operator is told why");
+        assert!(result.error.is_some(), "the user is told why");
         assert!(
             manager.config().adapters.contains_key("demo"),
             "the running configuration is untouched"
@@ -594,7 +594,7 @@ mod tests {
 
     /// The daemon rewrites `config.toml.template` in this directory on every
     /// boot. A fingerprint that walked the directory would read that as an
-    /// operator edit and reload on a loop.
+    /// minibuffer edit and reload on a loop.
     #[test]
     fn the_fingerprint_ignores_the_config_template() {
         let tmp = tempfile::tempdir().expect("tempdir");

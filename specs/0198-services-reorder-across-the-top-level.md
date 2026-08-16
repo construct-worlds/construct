@@ -34,7 +34,7 @@ daemon's persisted interleave with the same ordering rule.
 Services, sessions, and projects are peer rows in one unified list, but the
 reorder command previously stopped working at the service-block boundary: the
 same keybinding that walks a session across regions silently pinned a service
-inside its block. Operators organizing a fleet expect any top-level row to be
+inside its block. Minibuffers organizing a fleet expect any top-level row to be
 placeable relative to the others.
 
 ## Consequences

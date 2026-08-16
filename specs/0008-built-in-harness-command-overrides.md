@@ -17,7 +17,7 @@ Supporting direct full command overrides gives users flexibility while preservin
 
 ## Consequences
 
-Adapters should treat command override parsing as configuration, not as shell script evaluation. Whitespace and quoting can structure arguments, but shell expansion and shell operators should not be part of the contract.
+Adapters should treat command override parsing as configuration, not as shell script evaluation. Whitespace and quoting can structure arguments, but shell expansion and shell minibuffers should not be part of the contract.
 
 Existing binary-only override behavior should remain as a simpler fallback.
 

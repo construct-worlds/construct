@@ -7,7 +7,7 @@ Scope: Slack is an outbound service channel whose threads map to Construct servi
 
 ## Decision
 
-A Slack service channel connects through Slack Socket Mode using an operator-supplied `xapp-` app token and posts replies through the Web API using an operator-supplied `xoxb-` bot token. It opens no inbound listener.
+A Slack service channel connects through Slack Socket Mode using a user-supplied `xapp-` app token and posts replies through the Web API using a user-supplied `xoxb-` bot token. It opens no inbound listener.
 
 The channel accepts app mentions and direct messages. Each top-level event starts or continues a route keyed by workspace ID, channel ID, and thread timestamp; replies in that Slack thread reuse the same route. Slack's event ID is the ingress request ID, so replayed deliveries are deduplicated by the shared service runtime.
 
@@ -15,7 +15,7 @@ Every Socket Mode envelope is acknowledged before session work begins. Bot messa
 
 Socket Mode disconnects reconnect with bounded exponential backoff. Pausing, disabling, detaching, or materially editing a Slack channel closes its current connection immediately; enabling or attaching starts one without a daemon restart.
 
-Slack credentials are write-only configuration. API summaries, logs, errors, and UI state may report whether each credential exists, but must never return or print either token. Slack callers cannot submit tool approval decisions; approvals remain controlled by Construct's operator surfaces and existing service timeout policy.
+Slack credentials are write-only configuration. API summaries, logs, errors, and UI state may report whether each credential exists, but must never return or print either token. Slack callers cannot submit tool approval decisions; approvals remain controlled by Construct's minibuffer surfaces and existing service timeout policy.
 
 ## Reason
 
@@ -23,7 +23,7 @@ Socket Mode gives locally running Construct daemons Slack ingress without a publ
 
 ## Consequences
 
-Slack app configuration must enable Socket Mode, create an app-level token with `connections:write`, subscribe to `app_mention` and `message.im`, and grant the bot `app_mentions:read`, `im:history`, and `chat:write`. Operators install the app and enter both tokens manually; OAuth installation is not part of Construct.
+Slack app configuration must enable Socket Mode, create an app-level token with `connections:write`, subscribe to `app_mention` and `message.im`, and grant the bot `app_mentions:read`, `im:history`, and `chat:write`. Minibuffers install the app and enter both tokens manually; OAuth installation is not part of Construct.
 
 Channel tasks are not assumed to own TCP ports. Supervisors and clients must treat HTTP listeners and outbound Slack connections as peer channel lifecycles. Runtime state belongs to the service ingress layer and survives channel reconnects and configuration reloads.
 

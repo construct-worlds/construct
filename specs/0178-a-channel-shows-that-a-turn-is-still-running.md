@@ -9,7 +9,7 @@ Scope: What a service channel tells the person waiting while a turn it accepted 
 
 A channel that accepts a delivery and then goes silent is indistinguishable
 from one that dropped it. A channel may therefore show that a turn is still
-running, and the operator chooses how visible that is per channel — including
+running, and the user chooses how visible that is per channel — including
 turning it off.
 
 Four rules constrain it.
@@ -40,7 +40,7 @@ on anyone rendering it.
 
 ## Reason
 
-The person waiting is not the operator. They cannot see the session, the
+The person waiting is not the user. They cannot see the session, the
 harness, or the daemon log, so from their side a slow turn and a lost one look
 the same, and the reasonable response to both is to send the message again —
 which starts a second turn in the same thread and makes things worse.
@@ -51,7 +51,7 @@ silence into an action someone can take.
 
 Making it configurable acknowledges that channels differ: a busy shared channel
 may want nothing, a quiet one may want the acknowledgement, and some
-affordances cost permissions the operator's workspace may not have granted.
+affordances cost permissions the user's workspace may not have granted.
 
 ## Consequences
 
@@ -69,12 +69,12 @@ affordances cost permissions the operator's workspace may not have granted.
 - Streaming a turn's partial output, tool calls, or reasoning to the channel.
 - Making progress delivery reliable or ordered; it is a best-effort hint.
 - Giving the channel a way to answer an approval. Approvals stay with the
-  operator.
+  minibuffer.
 
 ## Examples
 
 A Slack thread asks a question that takes two minutes. After a few seconds the
 channel says it is working; the turn then stops at an approval and the same
-message changes to name the tool awaiting sign-off; when the operator approves
+message changes to name the tool awaiting sign-off; when the user approves
 and the turn finishes, that message becomes the answer. A question answered in
 three seconds produces just the answer, with nothing before it.

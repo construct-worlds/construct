@@ -17,7 +17,7 @@ per reading worth acting on:
 Each entry is a count plus a glyph. **The "wants you" entry wears the
 per-row attention marker itself** — the same glyph and the same hue — so the
 count and the markers it counts are visibly one signal rather than two
-vocabularies the operator has to learn separately. Failure keeps a glyph of
+vocabularies the user has to learn separately. Failure keeps a glyph of
 its own, so the one reading that must survive a terminal with no color at
 all still does.
 
@@ -28,7 +28,7 @@ worth more than glyph-level distinctness on the two buckets that are both
 what carries the distinction when color cannot.
 
 **An entry opens into the rows it counted.** A count that names a problem
-the operator then has to hunt for is half a signal, so each entry is a way
+the user then has to hunt for is half a signal, so each entry is a way
 in: it lists its own sessions, and picking one selects that session and
 brings it into view, scrolling the list if the row sat below the fold. The
 list is the destination — the panel closes and hands off rather than
@@ -40,7 +40,7 @@ under "errored" failed — so there the mark only restates the title. "Wants
 you" is not: it is a marker rather than a state, and it collects sessions
 stopped at a prompt beside sessions that finished beside rows standing in
 for flagged members. Those are different things to do next, and a panel that
-printed them as bare names would flatten the very distinction the operator
+printed them as bare names would flatten the very distinction the user
 opened it to resolve. The mark is the row's own rather than a vocabulary the
 panel mints, so a row standing in for hidden members shows its disclosure
 mark — the warning that it is a way in and not a destination. The marks are
@@ -53,7 +53,7 @@ and holds open while the pointer is over it, so a listed row is actually
 clickable. But hover cannot be the only door: terminals that never report
 mouse motion exist, and there the panel would be permanently invisible.
 Clicking the entry therefore pins it open until dismissed. Any surface
-rendering this tally owes the operator a motion-free way in.
+rendering this tally owes the user a motion-free way in.
 
 While the list is unfocused the tally dims **by attribute, not by
 desaturation**. Shifting it toward gray would collapse the only channel
@@ -66,14 +66,14 @@ The tally obeys four rules:
   for hidden descendants — a collapsed subtree or group surfacing one
   rolled-up marker — counts exactly once, as itself. The tally can then
   never disagree with the marks beneath it, and every entry it counts is a
-  row the operator can be taken to. Two deliberate exclusions apply even
+  row the user can be taken to. Two deliberate exclusions apply even
   when the row is painted: archived rows (so the tally does not flicker on
   a disclosure toggle), and harness-native subagent mirrors (sessions with
   native provenance — read-only projections of work the parent harness
   owns). Construct-owned subagents and forked sessions stay in the tally.
 - **Buckets are disjoint and ranked.** Every counted session lands in
   exactly one bucket, most specific reading first: errored, then wants-you,
-  then working. A crash the operator hasn't seen is counted once, as a
+  then working. A crash the user hasn't seen is counted once, as a
   crash.
 - **Zero is silent, and the tally yields.** Empty buckets render nothing,
   and the whole tally is dropped rather than collide with the controls
@@ -85,23 +85,23 @@ The tally obeys four rules:
 that means "sitting at a prompt" is the fleet's resting state, and clients
 must not dress it up as blocked: it shares the working state's glyph and
 color, and it is not tallied. Only the attention marker means a session
-wants the operator.
+wants the user.
 
 ## Reason
 
-The operator's most frequent question about a fleet is "which of these is
+The user's most frequent question about a fleet is "which of these is
 waiting on me?" Per-row markers only answer it for rows currently on screen;
 a fleet longer than the pane, or a scrolled list, has no summary at all —
-and the count is exactly what decides whether the operator needs to look.
+and the count is exactly what decides whether the user needs to look.
 
 The subtler half of this decision is *what* counts as waiting. An earlier
 attempt gave the at-a-prompt state its own "waiting" glyph and color, on the
-theory that it was the operator-blocked state. It is not. It is where
+theory that it was the user-blocked state. It is not. It is where
 sessions rest: a healthy fleet is mostly at prompts, so that rendering
 flagged everything, and a signal that fires on the resting state carries no
 information. The marker in spec 0054 already encodes the real predicate —
-*stopped, after activity the operator hasn't seen* — and it is sticky, so it
-survives the transition that produced it and clears when the operator
+*stopped, after activity the user hasn't seen* — and it is sticky, so it
+survives the transition that produced it and clears when the user
 actually looks.
 
 Tallying idle sessions was rejected for the same reason: it would put the
@@ -109,9 +109,9 @@ largest and least actionable number in the title.
 
 On glyphs: color is the least reliable channel available — terminal themes
 remap it, monochrome and low-contrast terminals drop it, and a meaningful
-share of operators cannot separate two adjacent hues. The first draft
+share of minibuffers cannot separate two adjacent hues. The first draft
 therefore minted a distinct glyph per bucket. That was wrong for the
-wants-you entry specifically: the operator already knows the blue dot from
+wants-you entry specifically: the user already knows the blue dot from
 the rows, and a summary that counts those dots while wearing a different
 mark reads as a fourth thing to learn rather than as their total. Matching
 the marker is worth more than the distinctness it costs, because the cost
@@ -121,18 +121,18 @@ failure, which keeps its own glyph.
 
 ## Consequences
 
-- Whatever detects "this session wants the operator" now feeds two surfaces
+- Whatever detects "this session wants the user" now feeds two surfaces
   — the per-row marker and the tally. Weakening that detection weakens the
-  summary the operator scans, not just one row.
+  summary the user scans, not just one row.
 - The wants-you tally and the per-row marker must change together. They are
   one signal rendered at two scales, and a change to either that is not
   mirrored in the other breaks the equivalence this decision rests on.
 - Adding a tally bucket means minting a glyph — distinct from the existing
-  ones unless it, too, mirrors a marker the operator already reads — and
+  ones unless it, too, mirrors a marker the user already reads — and
   giving it a name its panel can render.
 - Because two buckets share a glyph, the panel's wording is load-bearing
   rather than a convenience. Any surface that renders the tally without it
-  owes the operator another way to tell those two apart.
+  owes the user another way to tell those two apart.
 - The wording separates the buckets from each other; the per-row marks
   separate a bucket's members from each other. A bucket that can hold more
   than one kind of row owes both — naming the bucket says nothing about
@@ -148,7 +148,7 @@ failure, which keeps its own glyph.
   the frame that drew them — a tally that is not rendered has no hit zone,
   or a collapsed pane inherits a phantom button.
 - Selecting from the panel scrolls the list, which is otherwise moved only
-  by the operator. That is accepted because the operator asked for that row;
+  by the user. That is accepted because the user asked for that row;
   nothing else in this decision licenses moving the viewport on its own.
 - The tally's placement is not fixed by this spec, but wherever it renders
   it must be able to yield: the title bar is shared with controls that own
@@ -156,7 +156,7 @@ failure, which keeps its own glyph.
 - Hover text is the only place the tally's vocabulary is written out, so it
   must read as a sentence at every count, singular included.
 - Because buckets are ranked rather than overlapping, a session that is both
-  crashed and unseen appears once. An operator counting "how many things
+  crashed and unseen appears once. A user counting "how many things
   want me" must add the wants-you and errored entries. Such a row still
   paints both marks individually, so the visible attention markers can
   outnumber the wants-you count — the equivalence between that count and
@@ -165,8 +165,8 @@ failure, which keeps its own glyph.
 ## Non-Goals
 
 - Not a notification or escalation mechanism. This spec governs what is
-  legible at rest and what the operator can reach by asking; it says nothing
-  about alerting, sounds, or pulling the operator toward a flagged session
+  legible at rest and what the user can reach by asking; it says nothing
+  about alerting, sounds, or pulling the user toward a flagged session
   unprompted.
 - Not a second session list. The panel is an index into the list, capped
   rather than scrollable, and closes on use. A bucket too long to show
@@ -181,9 +181,9 @@ failure, which keeps its own glyph.
 ## Examples
 
 - A fleet of thirty: four agents mid-turn, twenty-three idle at prompts the
-  operator has already seen, three that stopped while the operator was away,
+  user has already seen, three that stopped while the user was away,
   and no failures. The title reports four working and three wanting the
-  operator; the twenty-three idle sessions are not tallied and no errored
+  minibuffer; the twenty-three idle sessions are not tallied and no errored
   entry renders.
   The two counts render with the same mark, told apart by hue and by the
   words their panels carry; three of the rows below carry that same mark
@@ -195,16 +195,16 @@ failure, which keeps its own glyph.
   two native mirrors. Expand the parent and the native rows still paint
   beneath it; they just do not join the title scan.
 - Only one of those three flagged rows is on screen; the pane is too short
-  for the rest. The operator opens the wants-you entry, reads the three
+  for the rest. The user opens the wants-you entry, reads the three
   names, and picks the second. The list scrolls until that row is visible
-  and selects it — the operator never scrolled by hand looking for a dot the
+  and selects it — the user never scrolled by hand looking for a dot the
   title had promised.
 - Two of those three stopped at a prompt and one ran to completion. All
   three carry the same attention marker in the list, but each row in the
-  panel wears its own state's mark, so the operator can see before clicking
+  panel wears its own state's mark, so the user can see before clicking
   that one of the three is finished work to read and two are questions to
   answer.
-- The operator focuses one of the three flagged sessions. Its marker clears,
+- The user focuses one of the three flagged sessions. Its marker clears,
   and the tally drops to two — without any run state having changed.
 - A group is collapsed with two flagged sessions inside it. The group's row
   carries one rolled-up marker, the tally counts one, and its panel lists

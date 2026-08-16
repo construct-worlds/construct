@@ -30,7 +30,7 @@ submitting it for another kind is refused rather than stored unread.
 ## Reason
 
 Two consecutive changes each added a Slack option to the definition and to the
-documentation, and neither added it to a client. The result was an operator who
+documentation, and neither added it to a client. The result was a user who
 could see in the docs that a bot can answer untagged messages, find the channel
 editor in front of them, and still have to go find a TOML file — while the
 editor sat one field away, silently preserving a value it would not show.
@@ -54,7 +54,7 @@ what leaves a client unable to render a field even once someone wants to.
   and preserves every value it cannot show.
 - Options whose safe use depends on context — anything that widens who can put
   text in front of a session — carry that caveat in the client, not only in the
-  documentation. The operator making the decision is the one looking at the
+  documentation. The user making the decision is the one looking at the
   field.
 
 ## Non-Goals

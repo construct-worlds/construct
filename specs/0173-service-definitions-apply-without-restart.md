@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-08-01
 Area: architecture
-Scope: When an edit to a service definition reaches the running daemon, and how that schedule is stated to the operator.
+Scope: When an edit to a service definition reaches the running daemon, and how that schedule is stated to the user.
 
 ## Decision
 
@@ -34,7 +34,7 @@ except as a new message, which is a different thing from re-instructing it.
 
 **Reload is all or nothing.** If any definition fails to parse, the running
 configuration is left exactly as it was. Partial application would leave the
-operator unable to say what is running, and it is what makes watching the
+minibuffer unable to say what is running, and it is what makes watching the
 configuration directory safe: a file caught mid-write simply fails to parse and
 is picked up once it is complete.
 
@@ -63,7 +63,7 @@ Definitions describe a running service, so an edit that requires a restart is
 an edit that has not been made. Worse, the previous behavior was silently
 partial: `paused` was consulted only when the daemon started, so pausing a
 service left it serving, and rotating a credential left the old one working.
-An operator reading the configuration could not tell what the daemon was doing.
+A user reading the configuration could not tell what the daemon was doing.
 
 Publishing the propagation classes as shared data, rather than as prose in each
 client, is what keeps the answer honest as the code changes. Prose drifts from
@@ -71,7 +71,7 @@ behavior silently; a shared table drifts loudly.
 
 The all-or-nothing rule and the stop-before-start ordering both exist because
 the failure modes are quiet. A half-applied reload and a port that was released
-after its replacement tried to bind are each states an operator would discover
+after its replacement tried to bind are each states a user would discover
 much later, through a service that simply is not answering.
 
 ## Consequences
@@ -105,7 +105,7 @@ much later, through a service that simply is not answering.
 
 ## Examples
 
-- An operator edits a definition file in a text editor and saves. Within a
+- A user edits a definition file in a text editor and saves. Within a
   couple of seconds the new routing rule governs the next request; no restart,
   no signal, no command.
 - A credential is rotated. The next request with the old secret is rejected and

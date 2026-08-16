@@ -273,7 +273,7 @@ fn canonical_service_model(model: &str) -> String {
         .unwrap_or_else(|| model.to_string())
 }
 
-/// Compare the operator-editable half of two definitions. Channels are
+/// Compare the user-editable half of two definitions. Channels are
 /// attached and detached straight against the daemon, so they are deliberately
 /// excluded: toggling one must never leave the editor looking dirty.
 fn same_editable_definition(left: &ServiceSummary, right: &ServiceSummary) -> bool {
@@ -303,7 +303,7 @@ impl ServiceDialog {
         }
     }
 
-    /// A service the operator has changed since it was last saved. A service
+    /// A service the user has changed since it was last saved. A service
     /// being created has never been saved, so it is unsaved by definition.
     pub fn is_dirty(&self) -> bool {
         self.mode == ServiceDialogMode::Create
@@ -643,13 +643,13 @@ impl App {
     }
 
     /// Transient surfaces that would otherwise keep swallowing keystrokes
-    /// after a command hands the operator a freshly focused service view. The
+    /// after a command hands the user a freshly focused service view. The
     /// minibuffer matters most: `/serve` is typically typed into the
-    /// orchestrator panel, which stays open unless it is dismissed here.
+    /// minibuffer panel, which stays open unless it is dismissed here.
     fn dismiss_surfaces_over_service_view(&mut self) {
         self.configure_popup = None;
         self.session_picker = None;
-        self.minibuffer = None;
+        self.prompt = None;
     }
 
     /// Keep the inline editor attached to whatever the active pane shows:
@@ -1143,7 +1143,7 @@ impl App {
                     .unwrap_or_default();
                 edit(&mut value);
                 // An emptied field reads as none rather than as "unchanged":
-                // the operator is typing a number, and 0 is a real setting.
+                // the user is typing a number, and 0 is a real setting.
                 channel.channel.thread_context = if value.is_empty() {
                     Some(0)
                 } else {
@@ -1629,7 +1629,7 @@ impl App {
         if dialog.is_dirty() {
             let saved = dialog.saved.clone();
             // Channels move independently of the definition, so keep the live
-            // attachment list and revert only what the operator typed.
+            // attachment list and revert only what the user typed.
             dialog.service = ServiceSummary {
                 channels: dialog.service.channels.clone(),
                 ..saved

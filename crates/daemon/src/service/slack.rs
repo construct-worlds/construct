@@ -185,7 +185,7 @@ impl SlackApi {
     }
 
     /// Reactions need the `reactions:write` scope. An app that was installed
-    /// before the operator selected the progress affordance will not have it,
+    /// before the user selected the progress affordance will not have it,
     /// so callers treat a failure here as cosmetic and answer anyway.
     async fn set_reaction(
         &self,
@@ -376,10 +376,10 @@ fn progress_text(progress: &IngressProgress, elapsed: std::time::Duration) -> St
         // Say who has to act. A turn stopped here will not move on its own,
         // and the person waiting in Slack cannot see the approval prompt.
         IngressProgress::AwaitingApproval { tool, summary } if summary.is_empty() => {
-            format!("_Waiting for an operator to approve `{tool}`.{waited}_")
+            format!("_Waiting for a user to approve `{tool}`.{waited}_")
         }
         IngressProgress::AwaitingApproval { tool, summary } => {
-            format!("_Waiting for an operator to approve `{tool}`: {summary}{waited}_")
+            format!("_Waiting for a user to approve `{tool}`: {summary}{waited}_")
         }
     }
 }
@@ -581,7 +581,7 @@ async fn reconcile_outstanding(
 ///
 /// Returns `None` — leaving the delivery exactly as it is today — when the
 /// thread is already routed, when the message opens its own thread so there is
-/// nothing earlier to read, when the operator set no context budget, or when
+/// nothing earlier to read, when the user set no context budget, or when
 /// Slack refuses the read. That last case is the one to keep graceful: reading
 /// history needs a scope an existing app install will not have, and a missing
 /// scope must cost context, never the answer.
@@ -816,7 +816,7 @@ struct SlackHistoryMessage {
 /// Everything in here was written by other people in a Slack workspace, and
 /// the session it lands in has tools. Without a boundary, "ignore previous
 /// instructions and…" typed by any workspace member becomes an instruction the
-/// agent has no way to distinguish from the operator's own. The fence is not a
+/// agent has no way to distinguish from the user's own. The fence is not a
 /// guarantee, but an unlabeled paste of channel text is strictly worse.
 fn thread_context_block(messages: &[SlackHistoryMessage], skip_ts: &str) -> Option<String> {
     let mut lines = Vec::new();
@@ -955,7 +955,7 @@ fn engagement_required(addressed: Addressed, follow_up: SlackFollowUp) -> Engage
 }
 
 /// Decide whether an untagged channel message is for us, given where the
-/// operator lets this channel keep listening.
+/// minibuffer lets this channel keep listening.
 async fn resolve_addressed(
     ingress: &ServiceIngress,
     follow_up: SlackFollowUp,
@@ -1251,7 +1251,7 @@ mod tests {
                 },
                 fresh
             ),
-            "_Waiting for an operator to approve `bash`: cargo test_"
+            "_Waiting for a user to approve `bash`: cargo test_"
         );
         assert_eq!(
             progress_text(
@@ -1261,7 +1261,7 @@ mod tests {
                 },
                 fresh
             ),
-            "_Waiting for an operator to approve `bash`._"
+            "_Waiting for a user to approve `bash`._"
         );
     }
 
@@ -1297,7 +1297,7 @@ mod tests {
                 },
                 minutes(9)
             ),
-            "_Waiting for an operator to approve `bash`. (9m)_"
+            "_Waiting for a user to approve `bash`. (9m)_"
         );
     }
 
@@ -1583,7 +1583,7 @@ mod tests {
         assert_eq!(by("chat.update")["ts"], "P1");
         assert_eq!(
             by("chat.update")["text"],
-            "_Waiting for an operator to approve `bash`: rm -rf build_"
+            "_Waiting for a user to approve `bash`: rm -rf build_"
         );
     }
 

@@ -194,7 +194,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             remote_supervisor::run(mgr, remote_rx).await;
         });
     }
-    // Resume + orchestrator bootstrap in the BACKGROUND so the IPC
+    // Resume + minibuffer bootstrap in the BACKGROUND so the IPC
     // socket (`server::serve` below) binds immediately, before any of
     // this slow, network/subprocess-bound work runs.
     //
@@ -202,21 +202,21 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
     // / respawn is bounded but slow — `connect_with_retry` waits up to
     // 5s for the adapter to re-bind its socket and `initialize()` waits
     // up to 60s for the handshake — and resume runs them sequentially.
-    // A fresh orchestrator spawn (when the prior smith session was
+    // A fresh minibuffer spawn (when the prior smith session was
     // terminal) adds another such round-trip. If even one adapter is
     // wedged, awaiting all of this before binding the socket leaves the
     // daemon unreachable for tens of seconds (worst case minutes), and
     // a TUI/web client that dropped on the restart `exec()` just spins
     // in "reconnecting…" the whole time — indistinguishable from a
     // hang. Binding first means the client reconnects within a poll
-    // cycle; sessions and the orchestrator panel then populate as they
-    // resume (each reattach broadcasts its State, and the orchestrator
+    // cycle; sessions and the minibuffer panel then populate as they
+    // resume (each reattach broadcasts its State, and the minibuffer
     // appears via the same event). `resume` stays first so an existing
-    // orchestrator is reattached before `ensure_orchestrator` checks
+    // minibuffer is reattached before `ensure_minibuffer` checks
     // for a live one (no duplicate spawn).
     //
     // Both steps are best-effort and log-only on failure: resume marks
-    // un-resumable sessions Errored; a failed orchestrator spawn just
+    // un-resumable sessions Errored; a failed minibuffer spawn just
     // leaves clients in palette mode.
     // Bind the router's listener BEFORE resume: sessions spawned by a
     // previous daemon were told this port at spawn and outlive us, so it
@@ -240,7 +240,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
         let mgr = manager.clone();
         tokio::spawn(async move {
             mgr.clone().resume_running_sessions().await;
-            mgr.ensure_orchestrator().await;
+            mgr.ensure_minibuffer().await;
         });
     }
     manager.spawn_widget_watcher();
@@ -362,7 +362,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
                     // Env-var boot path uses the auto-generated
                     // password; nobody is at the TUI to type one.
                     // The password lands in the info log so it's
-                    // visible to the operator running the daemon.
+                    // visible to the user running the daemon.
                     let params = construct_protocol::RemoteStartParams {
                         provider: boot_tunnel_provider(),
                         password: None,
@@ -488,7 +488,7 @@ pub async fn run(socket_override: Option<PathBuf>) -> Result<()> {
             //
             // Returns only on error — successful exec doesn't
             // return. Surface the error as the daemon's exit
-            // status so the operator sees why the restart failed.
+            // status so the user sees why the restart failed.
             use std::os::unix::process::CommandExt;
             let err = std::process::Command::new(&cmd.exe).args(&cmd.args).exec();
             Err(anyhow::anyhow!("exec({}) failed: {err}", cmd.exe.display()))
@@ -652,7 +652,7 @@ async fn bind_local_webui(paths: &Paths) -> anyhow::Result<(tokio::net::TcpListe
 
     let bound = listener.local_addr()?.port();
     let mut persisted = false;
-    // Persist only for the auto-selected path. An env pin is operator
+    // Persist only for the auto-selected path. An env pin is minibuffer
     // intent and must not clobber a previous home's recorded port; the
     // next unpinned start of this home should still reclaim whatever it
     // last auto-bound.

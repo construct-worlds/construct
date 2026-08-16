@@ -3,12 +3,12 @@
 Status: accepted
 Date: 2026-08-01
 Area: tui
-Scope: Fork/subagent lineage renders as a collapsible section of the left sidebar — between the session rows and the operator panel — showing the selected session's tree; there is no floating per-pane lineage widget.
+Scope: Fork/subagent lineage renders as a collapsible section of the left sidebar — between the session rows and the minibuffer panel — showing the selected session's tree; there is no floating per-pane lineage widget.
 
 ## Decision
 
 The sidebar stacks four regions top to bottom: the session rows, the lineage
-section, services, and the operator panel. The lineage section renders the
+section, services, and the minibuffer panel. The lineage section renders the
 SELECTED session's fork/subagent tree — the same tree data, diagram modes
 (boxed-lane and compact rails, toggled from the section header; the full
 boxed-lane diagram is the default), turn-info stats, and row
@@ -43,7 +43,7 @@ diagram glyph beneath them, while their full-cell tracks remain
 mouse-interactive.
 
 The section's header is a one-row horizontal rule carrying its label and
-controls — the same visual furniture as the operator panel's title bar
+controls — the same visual furniture as the minibuffer panel's title bar
 lower in the sidebar: a `−`/`+` collapse button at the right end, the view-mode
 toggle beside it, and the bare rule doubling as a height drag handle (dragging
 up grows the section, within the same caps). The collapse state, the dragged

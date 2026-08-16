@@ -671,10 +671,10 @@ pub enum SessionEvent {
     ApprovalModeChanged {
         mode: ApprovalMode,
     },
-    /// Adapter toggled the operator ambient loop (`/operator enable|disable`).
+    /// Adapter toggled the minibuffer ambient loop (`/minibuffer enable|disable`).
     /// Durable per-session state like [`ApprovalModeChanged`]: never written
     /// to the transcript; the daemon persists it so the choice survives restart.
-    OperatorLoopChanged {
+    MinibufferLoopChanged {
         enabled: bool,
     },
     /// Adapter switched the session's active model internally (e.g. the
@@ -1243,7 +1243,7 @@ pub mod ipc_method {
     /// see `SmithSetAuthMethodResult::note`.
     pub const SMITH_SET_AUTH_METHOD: &str = "smith.set_auth_method";
     /// Live status of the daemon's ambient features (auto-naming,
-    /// suggestions, operator — spec 0151): whether each is working,
+    /// suggestions, minibuffer — spec 0151): whether each is working,
     /// degraded, or off, with a human-readable reason. Lets clients
     /// connect a silently-missing convenience back to its cause instead
     /// of leaving the user guessing.
@@ -1428,7 +1428,7 @@ pub mod ipc_method {
     /// Re-read `config.toml` and apply it to the running daemon (spec 0190).
     /// The file watcher does this on its own when the file changes; this is
     /// the same act on demand, for a client that just wrote the file or an
-    /// operator who does not want to wait for the next tick. Returns a
+    /// user who does not want to wait for the next tick. Returns a
     /// `ConfigApplyResult` describing what applied and what needs a restart —
     /// a config that fails to parse is reported there, not raised as an error,
     /// because the running configuration is intact either way.
@@ -2418,11 +2418,11 @@ pub enum FeatureStatus {
 /// One ambient feature's live status, as reported by `features.status`
 /// (spec 0151). Ambient features are the daemon-driven conveniences that
 /// depend on the built-in smith harness having a usable model credential —
-/// session auto-naming, next-prompt suggestions, the operator session — and
+/// session auto-naming, next-prompt suggestions, the minibuffer session — and
 /// whose failure would otherwise be invisible to the user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureInfo {
-    /// Stable id: `"auto_title"`, `"suggestions"`, `"operator"`.
+    /// Stable id: `"auto_title"`, `"suggestions"`, `"minibuffer"`.
     pub id: String,
     /// Human label for display, e.g. "Session auto-naming".
     pub label: String,
@@ -2611,9 +2611,9 @@ pub struct UsageQueryResult {
     pub enabled: bool,
 }
 
-/// Distinguishes the implicit orchestrator session — created by the
+/// Distinguishes the implicit minibuffer session — created by the
 /// daemon at startup as the user's always-available command surface —
-/// from ordinary user-created sessions. The orchestrator session is
+/// from ordinary user-created sessions. The minibuffer session is
 /// otherwise identical to a user session; clients use this flag to
 /// render it differently (hidden from the session list, surfaced in
 /// the TUI's minibuffer).
@@ -2622,12 +2622,15 @@ pub struct UsageQueryResult {
 pub enum SessionKind {
     #[default]
     User,
-    Orchestrator,
+    /// Renamed from `orchestrator`; the alias keeps `meta.json` files
+    /// written before the rename loading.
+    #[serde(alias = "orchestrator")]
+    Minibuffer,
     Subagent,
     /// A short-lived, daemon-internal session spun up to run a harness's
     /// own usage/status slash command and capture what it renders (spec
     /// 0085). Hidden from every session list via the same `User`-only
-    /// allowlist that hides `Orchestrator`/`Subagent`; deleted (along with
+    /// allowlist that hides `Minibuffer`/`Subagent`; deleted (along with
     /// the native transcript file the harness CLI wrote for it) as soon as
     /// the probe finishes.
     UsageProbe,
@@ -2788,9 +2791,9 @@ pub struct SessionSummary {
     /// How adapters that gate tools handle Risky tool calls.
     #[serde(default)]
     pub approval_mode: ApprovalMode,
-    /// Distinguishes the orchestrator session (daemon-created, hidden
+    /// Distinguishes the minibuffer session (daemon-created, hidden
     /// from the session list) from ordinary user sessions. Persisted
-    /// in `meta.json` so the daemon recognizes the orchestrator
+    /// in `meta.json` so the daemon recognizes the minibuffer
     /// across restarts.
     #[serde(default)]
     pub kind: SessionKind,
@@ -2800,15 +2803,16 @@ pub struct SessionSummary {
     /// The daemon does not auto-resume archived sessions on startup.
     #[serde(default)]
     pub archived: bool,
-    /// Operator ambient loop is disabled (`/operator disable`). Only meaningful
-    /// for the orchestrator session; true (disabled) by default on fresh create,
-    /// false for all other session kinds.
-    #[serde(default)]
-    pub operator_loop_disabled: bool,
+    /// Minibuffer ambient loop is disabled (`/minibuffer disable`). Only meaningful
+    /// for the minibuffer session; true (disabled) by default on fresh create,
+    /// false for all other session kinds. The alias keeps `meta.json` files
+    /// from before the operator→minibuffer rename loading.
+    #[serde(default, alias = "operator_loop_disabled")]
+    pub minibuffer_loop_disabled: bool,
     /// Sticky "this session needs you" marker. The daemon raises it when the
     /// session leaves `Running` for a non-running state (awaiting input / done
     /// / errored) while it isn't the focused session, and clears it when the
-    /// operator switches to it or it returns to `Running`. Persisted so it
+    /// user switches to it or it returns to `Running`. Persisted so it
     /// survives daemon/client restart. Orthogonal to `state` — not a run state.
     #[serde(default)]
     pub needs_attention: bool,
@@ -3438,10 +3442,10 @@ pub struct CreateSessionParams {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub args: Vec<String>,
-    /// Marks an internal daemon caller as creating the orchestrator
+    /// Marks an internal daemon caller as creating the minibuffer
     /// session. Public IPC clients should leave this as
-    /// `SessionKind::User`; daemon-internal `ensure_orchestrator`
-    /// passes `Orchestrator`.
+    /// `SessionKind::User`; daemon-internal `ensure_minibuffer`
+    /// passes `Minibuffer`.
     #[serde(default)]
     pub kind: SessionKind,
     /// Parent session for internal child sessions such as Smith subagents.
@@ -3472,7 +3476,7 @@ pub struct ServiceSummary {
     /// until the first reorder materializes explicit positions.
     #[serde(default)]
     pub position: u64,
-    /// Where this row sits when the operator has moved it out of the leading
+    /// Where this row sits when the user has moved it out of the leading
     /// service block and into the top-level session/project flow. `None`
     /// keeps the row in the leading block (legacy behavior).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3664,7 +3668,7 @@ pub struct ServicePutResult {
 /// When an edit to a service field reaches the running system.
 ///
 /// Clients render the class beside the field being edited, and the daemon
-/// obeys the same table, so the promise an operator reads is the promise the
+/// obeys the same table, so the promise a user reads is the promise the
 /// daemon keeps. Adding a field to a service definition means giving it a
 /// class here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3782,7 +3786,7 @@ pub enum ConfigField {
     AdapterUsageProbe,
     DaemonEnv,
     DefaultsWorktree,
-    OrchestratorHarness,
+    MinibufferHarness,
     PlaybookTemplatesDir,
     SuggestEnabled,
     RouterEnabled,
@@ -3803,7 +3807,7 @@ impl ConfigField {
         ConfigField::AdapterUsageProbe,
         ConfigField::DaemonEnv,
         ConfigField::DefaultsWorktree,
-        ConfigField::OrchestratorHarness,
+        ConfigField::MinibufferHarness,
         ConfigField::PlaybookTemplatesDir,
         ConfigField::SuggestEnabled,
         ConfigField::RouterEnabled,
@@ -3836,7 +3840,7 @@ impl ConfigField {
             | ConfigField::AdapterEnv
             | ConfigField::DaemonEnv
             | ConfigField::DefaultsWorktree
-            | ConfigField::OrchestratorHarness => PropagationClass::NextSession,
+            | ConfigField::MinibufferHarness => PropagationClass::NextSession,
             // The port is transport identity: harness processes are told it
             // once, at spawn, and cannot be told it moved (spec 0183).
             ConfigField::RouterPort => PropagationClass::Restart,
@@ -3854,12 +3858,12 @@ impl ConfigField {
 /// The effect an accepted configuration reload had on the running daemon.
 ///
 /// Mirrors [`ServiceApplyResult`]: the daemon states what it did rather than
-/// telling the operator to restart and hope.
+/// telling the user to restart and hope.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigApplyResult {
     /// False when the file failed to parse — nothing changed.
     pub reloaded: bool,
-    /// What changed and is now in force, named for an operator.
+    /// What changed and is now in force, named for a user.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub applied: Vec<String>,
     /// What was read and recorded but is not in force until a restart. Sticky:
@@ -3873,7 +3877,7 @@ pub struct ConfigApplyResult {
 }
 
 impl ConfigApplyResult {
-    /// One line for an operator: what changed, or what stopped it.
+    /// One line for a user: what changed, or what stopped it.
     pub fn summary(&self) -> String {
         if let Some(error) = &self.error {
             return format!("config unchanged: {error}");
@@ -3915,7 +3919,7 @@ pub struct ConfigStateNotificationPayload {
 /// The effect an accepted service edit had on the running daemon.
 ///
 /// Definitions are applied live, so a client can state what happened rather
-/// than telling the operator to restart and hope.
+/// than telling the user to restart and hope.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceApplyResult {
     /// False when no supervisor is running (the edit is persisted and will be
@@ -3931,7 +3935,7 @@ pub struct ServiceApplyResult {
 }
 
 impl ServiceApplyResult {
-    /// One line for an operator: what changed, or what stopped it.
+    /// One line for a user: what changed, or what stopped it.
     pub fn summary(&self) -> String {
         if !self.failures.is_empty() {
             return format!("saved; {}", self.failures.join("; "));
@@ -5372,7 +5376,7 @@ mod session_state_glyph_tests {
 
     /// `Running` and `AwaitingInput` intentionally share a dot: both mean
     /// "alive, nothing wrong", and a session sitting at a prompt is usually
-    /// just idle rather than blocked on the operator. Pinned so a future
+    /// just idle rather than blocked on the user. Pinned so a future
     /// change has to argue with spec 0169 rather than quietly re-split them
     /// and re-introduce a per-row "waiting" signal that cries wolf.
     #[test]
