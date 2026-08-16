@@ -305,6 +305,32 @@ pub fn load_definitions(dir: &std::path::Path) -> Result<BTreeMap<String, Operat
     Ok(operators)
 }
 
+/// Names of every defined operator, tolerating malformed definition files.
+/// Session reordering only needs to know which `operator:<name>` title
+/// prefixes are claimed, so a definition whose TOML fails to parse still
+/// counts — its routed sessions nest under the operator row the moment the
+/// file is fixed, and hiding them from the flat reorder region either way
+/// keeps a swap from pairing a visible row with an invisible one.
+pub fn known_operator_names(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|v| v.to_str()) != Some("toml") {
+                return None;
+            }
+            let name = path.file_stem()?.to_str()?;
+            validate_operator_name(name).ok()?;
+            Some(name.to_string())
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 pub fn list_summaries(dir: &std::path::Path) -> Result<Vec<construct_protocol::OperatorSummary>> {
     let mut operators: Vec<_> = load_definitions(dir)?
         .into_iter()
