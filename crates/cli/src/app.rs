@@ -4041,6 +4041,15 @@ pub struct OperatorSessionHit {
     pub area: ratatui::layout::Rect,
 }
 
+/// One definition row rendered inside an operator view. Definition rows use
+/// fixed geometry, but recording their last-rendered bounds keeps mouse
+/// selection aligned with the renderer in split, zoomed, and slid layouts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorFieldHit {
+    pub field_index: usize,
+    pub area: ratatui::layout::Rect,
+}
+
 /// One visible action button for the selected operator channel. The hit keeps
 /// the operator identity captured by the rendered frame so mouse dispatch
 /// cannot accidentally act on a newly selected operator at the same position.
@@ -4059,6 +4068,12 @@ impl OperatorChannelActionHit {
 }
 
 impl OperatorSessionHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        App::rect_contains(self.area, col, row)
+    }
+}
+
+impl OperatorFieldHit {
     pub fn contains(&self, col: u16, row: u16) -> bool {
         App::rect_contains(self.area, col, row)
     }
@@ -4224,6 +4239,8 @@ pub struct LayoutSnapshot {
     pub lineage_box_hits: Vec<LineageBoxHit>,
     /// Clickable routed-session rows inside the focused operator view.
     pub operator_session_hits: Vec<OperatorSessionHit>,
+    /// Clickable definition rows inside operator views.
+    pub operator_field_hits: Vec<OperatorFieldHit>,
     /// Clickable channel-catalog rows inside the focused operator view. The
     /// section scrolls, so a row's screen position is only knowable from the
     /// frame that painted it.
@@ -4562,6 +4579,7 @@ impl LayoutSnapshot {
             lineage_hscrollbar,
             lineage_box_hits,
             operator_session_hits,
+            operator_field_hits,
             operator_channel_row_hits,
             operator_channel_action_hits,
             operator_channel_back_hit,
@@ -4711,6 +4729,7 @@ impl LayoutSnapshot {
         shift.retain_rows(dynamic_ui_triggers, |hit| &mut hit.2);
         shift.retain_rects(lineage_box_hits, |hit| &mut hit.area);
         shift.retain_rects(operator_session_hits, |hit| &mut hit.area);
+        shift.retain_rects(operator_field_hits, |hit| &mut hit.area);
         shift.retain_rects(operator_channel_row_hits, |hit| &mut hit.area);
         shift.retain_rects(operator_channel_action_hits, |hit| &mut hit.area);
         shift.opt_rect(operator_channel_back_hit);
@@ -12254,6 +12273,18 @@ impl App {
                     self.collapse_minibuffer_panel_on_focus_change();
                     self.focus = PaneFocus::View;
                     self.sync_operator_editor_with_selection();
+                    if let Some(hit) = self
+                        .layout
+                        .operator_field_hits
+                        .iter()
+                        .find(|hit| hit.contains(col, row))
+                        .cloned()
+                    {
+                        if let Some(dialog) = self.operator_dialog.as_mut() {
+                            dialog.focus = OperatorDialogFocus::Field(hit.field_index);
+                        }
+                        return;
+                    }
                     // Channel rows scroll, so their positions come from the
                     // frame that painted them rather than a fixed offset.
                     if let Some(hit) = self
@@ -17269,6 +17300,7 @@ mod tests {
             lineage_hscrollbar: None,
             lineage_box_hits: Vec::new(),
             operator_session_hits: Vec::new(),
+            operator_field_hits: Vec::new(),
             operator_channel_row_hits: Vec::new(),
             operator_channel_action_hits: Vec::new(),
             operator_channel_back_hit: None,
@@ -42807,6 +42839,51 @@ mod tests {
             assert!(
                 cell.style().add_modifier.contains(Modifier::BOLD),
                 "serving state should be bold"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn operator_view_definition_rows_are_mouse_selectable() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.select_operator("assistant".into());
+        app.session_transitions.clear();
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+
+        assert_eq!(
+            app.layout.operator_field_hits.len(),
+            OPERATOR_FIELD_COUNT,
+            "every visible definition row should register a mouse target"
+        );
+        for field_index in 0..OPERATOR_FIELD_COUNT {
+            let hit = app
+                .layout
+                .operator_field_hits
+                .iter()
+                .find(|hit| hit.field_index == field_index)
+                .cloned()
+                .expect("operator field hit");
+            let event = |kind| MouseEvent {
+                kind,
+                column: hit.area.x + 1,
+                row: hit.area.y,
+                modifiers: KeyModifiers::empty(),
+            };
+            app.on_mouse(event(MouseEventKind::Down(MouseButton::Left)))
+                .await;
+            app.on_mouse(event(MouseEventKind::Up(MouseButton::Left)))
+                .await;
+            assert_eq!(
+                app.operator_dialog.as_ref().map(|dialog| dialog.focus),
+                Some(OperatorDialogFocus::Field(field_index)),
+                "clicking definition row {field_index} should select it"
             );
         }
         server.abort();
