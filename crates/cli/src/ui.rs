@@ -326,6 +326,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.lineage_hscrollbar = None;
     app.layout.lineage_box_hits.clear();
     app.layout.operator_session_hits.clear();
+    app.layout.operator_field_hits.clear();
     app.layout.operator_channel_row_hits.clear();
     app.layout.operator_channel_action_hits.clear();
     app.layout.operator_channel_back_hit = None;
@@ -8732,6 +8733,19 @@ fn render_operator_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, fo
             Line::from(Span::styled(help_hint, Style::default().fg(app.theme.dim))),
         ]
     };
+    app.layout.operator_field_hits.extend(
+        (0..crate::app::OPERATOR_FIELD_COUNT)
+            .filter(|index| *index < columns[0].height as usize)
+            .map(|field_index| crate::app::OperatorFieldHit {
+                field_index,
+                area: Rect::new(
+                    columns[0].x,
+                    columns[0].y + field_index as u16,
+                    columns[0].width,
+                    1,
+                ),
+            }),
+    );
     f.render_widget(Paragraph::new(field_lines), columns[0]);
     let divider_x = columns[1].x.saturating_add(columns[1].width / 2);
     for y in columns[1].top()..columns[1].bottom() {
