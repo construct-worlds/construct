@@ -918,7 +918,7 @@ fn pane_ordinal_style_on_list_row(
     let (mut fg, mut bg) = pane_ordinal_colors(theme, in_active_pane);
     if let Some(row_bg) = row_highlight_bg {
         if row_bg == theme.highlight_bg {
-            fg = theme.highlight_fg;
+            fg = theme.text;
             bg = theme.inactive_highlight_bg;
         } else if row_bg == bg {
             std::mem::swap(&mut fg, &mut bg);
@@ -25613,7 +25613,7 @@ mod tests {
             Some(theme.highlight_bg),
         );
         assert_eq!(on_selected_active.bg, Some(theme.inactive_highlight_bg));
-        assert_eq!(on_selected_active.fg, Some(theme.highlight_fg));
+        assert_eq!(on_selected_active.fg, Some(theme.text));
 
         let on_selected_idle = pane_ordinal_style_on_list_row(
             &theme,
@@ -25621,7 +25621,7 @@ mod tests {
             Some(theme.highlight_bg),
         );
         assert_eq!(on_selected_idle.bg, Some(theme.inactive_highlight_bg));
-        assert_eq!(on_selected_idle.fg, Some(theme.highlight_fg));
+        assert_eq!(on_selected_idle.fg, Some(theme.text));
 
         let on_unfocused_idle = pane_ordinal_style_on_list_row(
             &theme,

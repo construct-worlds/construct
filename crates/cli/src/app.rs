@@ -20334,8 +20334,8 @@ mod tests {
         );
         assert_eq!(
             badge.style().fg,
-            Some(app.theme.highlight_fg),
-            "the digit uses the same ink as the selected row"
+            Some(app.theme.text),
+            "the digit uses normal foreground, not the inverted selection ink"
         );
         // A cell further along the same row still wears the selection bar.
         let title_cell = buffer
