@@ -20179,8 +20179,21 @@ mod tests {
 
         let pane1 = pane_area(&app, 1);
         let pane2 = pane_area(&app, 2);
+        // The top-left corner cell now wears the pane-ordinal badge (spec
+        // 0199), and the side/bottom borders are cleared under
+        // `hide_pane_side_borders`, so probe the top-RIGHT corner for the
+        // frame color.
         assert_eq!(
-            buffer.cell((pane1.x, pane1.y)).and_then(|c| c.style().fg),
+            buffer
+                .cell((pane1.x, pane1.y))
+                .map(|c| c.symbol().to_string()),
+            Some("1".to_string()),
+            "a split pane's top-left corner wears its ordinal badge"
+        );
+        assert_eq!(
+            buffer
+                .cell((pane1.x + pane1.width - 1, pane1.y))
+                .and_then(|c| c.style().fg),
             Some(dim),
             "last-focused pane's border must still dim when the list has focus"
         );
@@ -20199,7 +20212,9 @@ mod tests {
         let buffer = term.backend().buffer().clone();
         let pane1 = pane_area(&app, 1);
         assert_eq!(
-            buffer.cell((pane1.x, pane1.y)).and_then(|c| c.style().fg),
+            buffer
+                .cell((pane1.x + pane1.width - 1, pane1.y))
+                .and_then(|c| c.style().fg),
             Some(bright),
             "focused pane border renders at focused brightness"
         );

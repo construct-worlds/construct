@@ -6240,6 +6240,22 @@ fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
                 });
                 render_detail(f, area, app, Some(*id));
                 app.selection = old_selection;
+                // Pane-ordinal badge (spec 0199): painted over the border's
+                // top-left corner after the pane rendered, so every pane —
+                // session, service, project, empty, even the diff overlay —
+                // wears its number the same way, at the pane's geometric
+                // corner, without touching any title layout.
+                if let Some(n) = app.window_pane_ordinal(*id).filter(|n| *n <= 9) {
+                    if area.width >= 2 && area.height >= 1 {
+                        let in_active = *id == app.active_window_id;
+                        f.buffer_mut().set_string(
+                            area.x,
+                            area.y,
+                            n.to_string(),
+                            pane_ordinal_style(&app.theme, in_active),
+                        );
+                    }
+                }
             }
             MainWindowTree::Split {
                 direction,
@@ -8097,25 +8113,15 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
     // is slid aside. Keep its ordinary lifecycle glyph/color; the Playbook
     // popup owns the distinct square, playbook-colored glyph.
     let mode_glyph = summary.as_ref().map(|s| session_status_glyph(app, s));
-    // Pane-ordinal badge (spec 0199): with two or more split panes the title
-    // leads with this pane's number, immediately before the status glyph —
-    // the same digit the session's list row wears in its first column.
-    let ordinal_txt = window_id
-        .and_then(|id| app.window_pane_ordinal(id))
-        .map(|n| n.to_string());
-    let ordinal_w = ordinal_txt
-        .as_deref()
-        .map(UnicodeWidthStr::width)
-        .unwrap_or(0);
     // Label budget = total − 2 corners − right-side blocks − fixed
-    // title scaffolding (` <ordinal><glyph> <label> ` is 3 spaces + ordinal
-    // width + glyph width + label).
+    // title scaffolding (` <glyph> <label> ` is 3 spaces + glyph
+    // width + label).
     let glyph_w = mode_glyph.map(UnicodeWidthStr::width).unwrap_or(0);
     let label_budget = total
         .saturating_sub(2)
         .saturating_sub(harness_w)
         .saturating_sub(close_w)
-        .saturating_sub(3 + ordinal_w + glyph_w);
+        .saturating_sub(3 + glyph_w);
     // Title text keeps focused brightness on the last-focused pane even while
     // the list holds focus; every other unfocused pane's title inherits the
     // dimmed border style (a default span patches nothing over border cells).
@@ -8136,16 +8142,11 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
                 Some(rename) => visible_edit_window(&rename.buffer, rename.cursor, label_budget),
                 None => (truncate_to_width(&primary_label(s), label_budget), 0, 0),
             };
-            // Name hit-rect: right after ` <ordinal><glyph> ` (border +
-            // leading space + optional pane ordinal + glyph + the label
-            // span's own leading space) — mirrors
+            // Name hit-rect: right after ` <glyph> ` (border + leading space +
+            // glyph + the label span's own leading space) — mirrors
             // `playbook_title_left_layout`'s identical offset for the playbook
             // popup's title bar.
-            let name_x_start = area
-                .x
-                .saturating_add(3)
-                .saturating_add(ordinal_w as u16)
-                .saturating_add(glyph_w as u16);
+            let name_x_start = area.x.saturating_add(3).saturating_add(glyph_w as u16);
             let label_w = UnicodeWidthStr::width(rendered_label.as_str()) as u16;
             app.layout
                 .session_title_name_hits
@@ -8162,41 +8163,12 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App, window_id: Option<u64
             }
             Line::from(vec![
                 Span::raw(" "),
-                Span::styled(
-                    ordinal_txt.clone().unwrap_or_default(),
-                    pane_ordinal_style(&app.theme, last_focused),
-                ),
                 Span::styled(mode_glyph.unwrap_or(""), glyph_style),
                 Span::styled(format!(" {} ", rendered_label), name_style),
             ])
         }
-        // A pane's number must not disappear just because the pane shows a
-        // project or nothing: the badge identifies the pane, not its content.
-        // Without a badge these render exactly as before (no leading cell).
-        (None, Some(g)) => {
-            let mut spans = Vec::new();
-            if let Some(txt) = &ordinal_txt {
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    txt.clone(),
-                    pane_ordinal_style(&app.theme, last_focused),
-                ));
-            }
-            spans.push(Span::styled(format!(" project: {} ", g.name), name_style));
-            Line::from(spans)
-        }
-        (None, None) => {
-            let mut spans = Vec::new();
-            if let Some(txt) = &ordinal_txt {
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    txt.clone(),
-                    pane_ordinal_style(&app.theme, last_focused),
-                ));
-            }
-            spans.push(Span::styled(" no session ", name_style));
-            Line::from(spans)
-        }
+        (None, Some(g)) => Line::from(Span::styled(format!(" project: {} ", g.name), name_style)),
+        (None, None) => Line::from(Span::styled(" no session ", name_style)),
     };
     // Right-side cluster (widget indicators, harness label, close button) is
     // shared with the playbook popup so the two title bars can't drift. Close is

@@ -12,15 +12,21 @@ ordinal determined by layout order (the order the eye reads the splits in).
 The ordinal is rendered as a single-digit badge — the digit over a highlight
 background — in two places that must always agree:
 
-- **The pane title**, immediately before the session's status glyph.
+- **The pane frame**, painted over the border's top-left corner — the
+  pane's geometric anchor, ahead of its title.
 - **The session list**, in the first column of the row of every session
   currently visible in a pane.
 
 Badges replace an existing cell rather than adding one: no column in the
-list (marker, glyph, title, harness) and no offset in the pane title bar
+list (marker, glyph, title, harness) and nothing in the pane title bar
 moves when a badge appears or disappears. On a depth-0 list row the badge
 takes the reserved marker-gutter cell; on a nested row it takes the first
-rail/indent cell and the marker survives.
+rail/indent cell and the marker survives. On the pane it takes the corner
+border cell.
+
+The corner badge is painted after the pane renders, independent of what the
+pane shows: session, service, project, empty pane, and transient overlays
+all wear their number the same way.
 
 The badge's background brightness tracks focus: the pane that last held
 focus (and its session's list badge) wears the selection colors; every other
@@ -57,8 +63,8 @@ collisions.
 
 ## Non-Goals
 
-- No badge on service pane titles yet; service list rows are likewise
-  unbadged. The numbering already reserves their slots, so adding their
-  badges later is additive.
+- Service and project rows in the session list are unbadged (their panes
+  are, via the corner badge). The numbering already reserves their slots,
+  so badging their rows later is additive.
 - This does not renumber or alter the existing pane-cycling / focus-by-index
   keybindings; the badge is a visual locator only.
