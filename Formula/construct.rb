@@ -12,10 +12,10 @@ class Construct < Formula
 
   if Hardware::CPU.arm?
     url "https://github.com/construct-worlds/construct/releases/download/v#{version}/construct-aarch64-apple-darwin.tar.gz"
-    sha256 "2db7e04ee9ed8df6bea2d800d866fe91fa624b5cc16e89fa2d90990ae491f451"
+    sha256 "413fe69e1545cc7bb82922736af7dca5a6a20dcc71fbe1d2d82807710a6ee053"
   else
     url "https://github.com/construct-worlds/construct/releases/download/v#{version}/construct-x86_64-apple-darwin.tar.gz"
-    sha256 "afb07e4c0d9474112f0aec1614d7513f3de015479dcea160a336f67b0e9d705f"
+    sha256 "c8bbe1ad54dc261a7c0627e863bab24d6797403b9e445f18af6b5e017db2fcb1"
   end
 
   def install
