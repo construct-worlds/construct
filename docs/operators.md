@@ -1,8 +1,9 @@
 # Operators and channels
 
-A operator turns authenticated external deliveries into ordinary headless
-Construct sessions. Run `/serve <name>` in the TUI to create one, then attach
-or create an HTTP channel in its operator view.
+An operator turns authenticated external deliveries into ordinary headless
+Construct sessions. Press `C-x C-f` in the TUI and choose **operator** to create
+one. Enter its name in the minibuffer, then attach or create a channel in its
+operator view.
 
 Each HTTP channel owns a loopback port and a bearer credential. The credential
 is shown only when the channel is created or explicitly rotated. Submit work

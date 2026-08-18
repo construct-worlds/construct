@@ -533,7 +533,7 @@ fn default_operator(app: &App, suggested: String) -> OperatorSummary {
     }
 }
 
-fn valid_operator_name(name: &str) -> bool {
+pub(super) fn valid_operator_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 32
         && name
@@ -682,9 +682,7 @@ impl App {
     }
 
     /// Transient surfaces that would otherwise keep swallowing keystrokes
-    /// after a command hands the user a freshly focused operator view. The
-    /// minibuffer matters most: `/serve` is typically typed into the
-    /// minibuffer panel, which stays open unless it is dismissed here.
+    /// after an action hands the user a freshly focused operator view.
     fn dismiss_surfaces_over_operator_view(&mut self) {
         self.configure_popup = None;
         self.session_picker = None;
