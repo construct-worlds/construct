@@ -453,6 +453,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // documents and every pane-anchored overlay so whichever surface is
     // actually visible participates in the same glitch.
     render_main_transitions(f, app);
+    // Pane ordinals are the final pane-anchored overlay (spec 0199). Paint
+    // them after Playbooks and transitions so a rolled-down document cannot
+    // cover the badge at its owning pane's top-left corner.
+    paint_main_window_ordinal_badges(f, app);
 
     // The block is complete: slide it, translate everything it recorded into
     // screen coordinates, and hand the pointer back. Everything below paints
@@ -6314,6 +6318,24 @@ fn render_main_transitions(f: &mut Frame, app: &App) {
     }
 }
 
+fn paint_main_window_ordinal_badges(f: &mut Frame, app: &App) {
+    for pane in &app.layout.main_window_areas {
+        let Some(n) = app.window_pane_ordinal(pane.id).filter(|n| *n <= 9) else {
+            continue;
+        };
+        if pane.area.width < 2 || pane.area.height < 1 {
+            continue;
+        }
+        let in_active = pane.id == app.active_window_id;
+        f.buffer_mut().set_string(
+            pane.area.x,
+            pane.area.y,
+            n.to_string(),
+            pane_ordinal_style(&app.theme, in_active),
+        );
+    }
+}
+
 fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
     fn render_node(
         f: &mut Frame,
@@ -6342,22 +6364,6 @@ fn render_main_windows(f: &mut Frame, area: Rect, app: &mut App) {
                 });
                 render_detail(f, area, app, Some(*id));
                 app.selection = old_selection;
-                // Pane-ordinal badge (spec 0199): painted over the border's
-                // top-left corner after the pane rendered, so every pane —
-                // session, service, project, empty, even the diff overlay —
-                // wears its number the same way, at the pane's geometric
-                // corner, without touching any title layout.
-                if let Some(n) = app.window_pane_ordinal(*id).filter(|n| *n <= 9) {
-                    if area.width >= 2 && area.height >= 1 {
-                        let in_active = *id == app.active_window_id;
-                        f.buffer_mut().set_string(
-                            area.x,
-                            area.y,
-                            n.to_string(),
-                            pane_ordinal_style(&app.theme, in_active),
-                        );
-                    }
-                }
             }
             MainWindowTree::Split {
                 direction,

@@ -25353,6 +25353,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rolled_down_playbook_keeps_split_pane_ordinal_badge_visible() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "# playbook\n\nbody", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+
+        let backend = ratatui::backend::TestBackend::new(160, 45);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("playbook should render");
+
+        let pane = app
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|hit| hit.id == 1)
+            .expect("first split pane");
+        assert_eq!(
+            term.backend()
+                .buffer()
+                .cell((pane.area.x, pane.area.y))
+                .map(|cell| cell.symbol()),
+            Some("1"),
+            "rolled-down Playbook must not cover its pane ordinal badge"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn playbook_bottom_border_drag_resizes_coverage() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
