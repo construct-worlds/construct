@@ -73,6 +73,12 @@ impl Row {
     pub fn resize(&mut self, len: u16, cell: crate::Cell) {
         self.cells.resize(usize::from(len), cell);
         self.wrapped = false;
+        // Shrinking can discard a wide character's continuation cell.
+        if let Some(last_cell) = self.cells.last_mut() {
+            if last_cell.is_wide() {
+                last_cell.clear(*last_cell.attrs());
+            }
+        }
     }
 
     pub fn wrap(&mut self, wrap: bool) {
