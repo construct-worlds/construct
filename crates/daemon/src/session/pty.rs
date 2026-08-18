@@ -806,3 +806,18 @@ mod screen_snapshot_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod vt100_regression_tests {
+    #[test]
+    fn resize_clears_wide_character_stranded_at_right_edge() {
+        let mut parser = vt100::Parser::new(1, 10, 0);
+
+        parser.process(b"\x1b[1;9H");
+        parser.process("世".as_bytes());
+        parser.screen_mut().set_size(1, 9);
+        parser.process(b"\x1b[1;9HX");
+
+        assert_eq!(parser.screen().cell(0, 8).unwrap().contents(), "X");
+    }
+}
