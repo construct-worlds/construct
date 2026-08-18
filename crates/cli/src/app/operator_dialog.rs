@@ -669,6 +669,23 @@ impl App {
         });
     }
 
+    /// Open an unsaved operator using the first free conventional name. The
+    /// name field has focus, so the generated suffix is only a collision-safe
+    /// starting point and can be replaced immediately.
+    pub(super) fn open_new_operator_view_with_default_name(&mut self) {
+        let mut suggested = "operator".to_string();
+        let mut suffix = 2_u32;
+        while self
+            .operators
+            .iter()
+            .any(|operator| operator.name == suggested)
+        {
+            suggested = format!("operator-{suffix}");
+            suffix = suffix.saturating_add(1);
+        }
+        self.open_new_operator_view(suggested);
+    }
+
     pub fn open_edit_operator_view(&mut self, name: &str) -> bool {
         if !self.operators.iter().any(|operator| operator.name == name) {
             self.set_status(format!("operator {name} not found"));
@@ -682,9 +699,7 @@ impl App {
     }
 
     /// Transient surfaces that would otherwise keep swallowing keystrokes
-    /// after a command hands the user a freshly focused operator view. The
-    /// minibuffer matters most: `/serve` is typically typed into the
-    /// minibuffer panel, which stays open unless it is dismissed here.
+    /// after an action hands the user a freshly focused operator view.
     fn dismiss_surfaces_over_operator_view(&mut self) {
         self.configure_popup = None;
         self.session_picker = None;

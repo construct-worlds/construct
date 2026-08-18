@@ -13,7 +13,7 @@ impl App {
             Some(PromptIntent::ForkSessionHarness { .. })
         );
         // Fork shares the new-session harness picker (completion + Enter
-        // validation), but offers only real harnesses — no `project`/`group`.
+        // validation), but offers only real harnesses — no creation actions.
         let is_harness_picker = is_new_harness || is_fork_harness;
         let picker_entries = if is_harness_picker {
             let query = self
@@ -442,9 +442,9 @@ impl App {
                 if harness.is_empty() {
                     return;
                 }
-                // `project` is a synthetic option in the harness picker that
-                // redirects to the project-create flow. Keep `group` as a
-                // compatibility alias for muscle memory.
+                // `project` and `operator` are synthetic options in the
+                // harness picker that redirect to their creation flows. Keep
+                // `group` as a compatibility alias for muscle memory.
                 if harness == "project" || harness == "group" {
                     self.prompt = Some(Prompt {
                         prompt: "Project name: ".to_string(),
@@ -453,6 +453,10 @@ impl App {
                         intent: PromptIntent::NewGroupName,
                         error: None,
                     });
+                    return;
+                }
+                if harness == "operator" {
+                    self.open_new_operator_view_with_default_name();
                     return;
                 }
                 let cwd = std::env::current_dir()

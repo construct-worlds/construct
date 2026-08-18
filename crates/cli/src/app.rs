@@ -4878,8 +4878,8 @@ pub struct HarnessHit {
 }
 
 /// One row in the minibuffer harness completion menu. The new-session
-/// picker adds the synthetic `project` action; fork only returns real
-/// harnesses.
+/// picker adds the synthetic `project` and `operator` actions; fork only
+/// returns real harnesses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessPickerEntry {
     pub name: String,
@@ -4894,14 +4894,19 @@ pub fn harness_picker_entries(
     query: &str,
     filter_active: bool,
 ) -> Vec<HarnessPickerEntry> {
-    let mut entries = Vec::with_capacity(harnesses.len() + usize::from(!is_fork));
+    let mut entries = Vec::with_capacity(harnesses.len() + 2 * usize::from(!is_fork));
     if !is_fork {
-        // This is the only non-harness action in the menu. Keep it first so
-        // project creation is discoverable without scrolling through an
-        // expanding adapter list.
+        // Keep creation actions first so they remain discoverable without
+        // scrolling through an expanding adapter list.
         entries.push(HarnessPickerEntry {
             name: "project".to_string(),
             description: "Create a new project".to_string(),
+            available: true,
+            detail: None,
+        });
+        entries.push(HarnessPickerEntry {
+            name: "operator".to_string(),
+            description: "Create a new operator".to_string(),
             available: true,
             detail: None,
         });
@@ -4921,8 +4926,8 @@ pub fn harness_picker_entries(
         });
     }
 
-    // Stable sorting leaves `project` first and keeps harness registration
-    // order within each availability group.
+    // Stable sorting leaves `project` and `operator` first and keeps harness
+    // registration order within each availability group.
     entries.sort_by_key(|entry| !entry.available);
     entries
 }
@@ -14675,20 +14680,11 @@ impl App {
             "tasks" => {
                 self.open_tasks_popup().await;
             }
-            "serve" => {
-                let suggested = arg
-                    .split_whitespace()
-                    .next()
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or("operator")
-                    .to_string();
-                self.open_new_operator_view(suggested);
-            }
             // `/services` accepted as a pre-rename alias.
             "operators" | "services" => {
                 self.refresh_operators().await;
                 if self.operators.is_empty() {
-                    self.set_status("operators: none — run /serve to create one".to_string())
+                    self.set_status("operators: none — use C-x C-f and choose operator".to_string())
                 } else {
                     self.set_status(format!(
                         "operators: {}",
@@ -39573,10 +39569,12 @@ mod tests {
         assert_eq!(
             app.layout
                 .prompt_harness_hits
-                .first()
-                .map(|hit| hit.name.as_str()),
-            Some("project"),
-            "project action stays at the top of the new-session picker"
+                .iter()
+                .take(2)
+                .map(|hit| hit.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["project", "operator"],
+            "creation actions stay together at the top of the new-session picker"
         );
         let unavailable_hit = app
             .layout
@@ -39691,7 +39689,7 @@ mod tests {
         assert_eq!(app.harness_picker_selected, 0);
         app.handle_prompt_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
-        assert_eq!(app.harness_picker_selected, 2);
+        assert_eq!(app.harness_picker_selected, 3);
         app.handle_prompt_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
 
@@ -39798,7 +39796,7 @@ mod tests {
         assert_eq!(app.harness_picker_selected, 0);
         app.on_mouse(wheel(MouseEventKind::ScrollUp)).await;
         assert_eq!(
-            app.harness_picker_selected, 2,
+            app.harness_picker_selected, 3,
             "wheel navigation wraps from project to the last harness"
         );
 
@@ -39810,7 +39808,7 @@ mod tests {
         })
         .await;
         assert_eq!(
-            app.harness_picker_selected, 2,
+            app.harness_picker_selected, 3,
             "wheel events outside the picker keep their existing routing"
         );
         server.abort();
@@ -42916,7 +42914,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_list_row_opens_operator_view_and_serve_starts_creation() {
+    async fn operator_list_row_opens_operator_view_and_direct_creation_starts_a_draft() {
         let (mut app, _dir, server) = captured_app().await;
         app.operators.push(operator_summary_for_test("assistant"));
         let backend = ratatui::backend::TestBackend::new(120, 40);
@@ -42952,25 +42950,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serve_leaves_the_new_operator_view_focused_and_editing() {
+    async fn new_picker_operator_action_opens_a_unique_focused_draft_and_serve_is_removed() {
         let (mut app, _dir, server) = captured_app().await;
-        // `/serve` is normally typed into the minibuffer panel, which used
-        // to stay open and swallow every keystroke aimed at the new view.
-        app.prompt = Some(Prompt {
-            prompt: String::new(),
-            input: String::new(),
-            cursor: 0,
-            intent: PromptIntent::Minibuffer,
-            error: None,
-        });
-
         app.run_slash_command("serve demo").await;
+        assert_eq!(
+            app.status.as_ref().map(|(status, _)| status.as_str()),
+            Some("unknown command: serve")
+        );
+
+        app.operators.push(operator_summary_for_test("operator"));
+        app.operators.push(operator_summary_for_test("operator-2"));
+        app.run_action(KeyAction::OpenNewSession).await;
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
 
         assert!(
             app.prompt.is_none(),
-            "the minibuffer panel must not keep keyboard focus over the new operator view"
+            "choosing operator must close the creation picker"
         );
-        assert_eq!(app.selection, Selection::Operator("demo".into()));
+        assert_eq!(app.selection, Selection::Operator("operator-3".into()));
         assert_eq!(app.focus, PaneFocus::View);
         assert!(matches!(
             app.operator_dialog.as_ref().map(|dialog| dialog.mode),
@@ -42985,15 +42985,15 @@ mod tests {
             app.operator_dialog
                 .as_ref()
                 .map(|dialog| dialog.operator.name.as_str()),
-            Some("demo2")
+            Some("operator-32")
         );
-        assert_eq!(app.selection, Selection::Operator("demo2".into()));
+        assert_eq!(app.selection, Selection::Operator("operator-32".into()));
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         app.session_transitions.clear();
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("operator: demo2*"), "{text}");
+        assert!(text.contains("operator: operator-32*"), "{text}");
         assert!(
             !text.contains("no longer available"),
             "renaming a draft must not orphan its pane: {text}"

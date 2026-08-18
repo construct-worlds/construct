@@ -1,9 +1,9 @@
 # 0110-minibuffer-harness-completion-menu
 
 Status: accepted
-Date: 2026-07-26
+Date: 2026-08-18
 Area: tui
-Scope: How the minibuffer presents a growing set of harness choices for new sessions and forks.
+Scope: How the minibuffer presents creation actions and a growing set of harness choices for new sessions and forks.
 
 ## Decision
 
@@ -11,7 +11,11 @@ The new-session and fork harness pickers render as a completion menu anchored
 above the minibuffer input. Each row shows the harness name, its short
 description, and current availability. Available entries precede unavailable
 entries while preserving registration order within each group. The synthetic
-`project` action is always the first new-session entry.
+creation actions are always the first new-session entries: `project` first,
+then `operator`. Choosing `project` asks for its name. Choosing `operator`
+opens a focused, unsaved operator editor immediately, with an editable name
+that is made unique by appending a numeric suffix when needed. Operator
+creation has no separate `/serve` slash-command path.
 
 Typing filters rows case-insensitively by name or description. Up and Down move
 the highlighted row, with Control-P and Control-N as equivalent previous/next
@@ -44,12 +48,20 @@ Harness descriptions and live availability already exist, so presenting them
 as rows improves recognition without adding a second source of harness
 metadata or turning session creation into a modal workflow.
 
+Projects, operators, and sessions are peer things a user may mean to create
+with the new-item chord. Keeping those choices together gives `C-x C-f` one
+predictable creation vocabulary and avoids a separate slash command that is
+easy to miss and preserves the superseded service terminology.
+
 ## Consequences
 
 Future harnesses must remain usable without adding dedicated picker layout or
 key bindings. Clients must treat availability detail as opaque display text.
 Additional capability information should use progressive disclosure rather
 than accumulating badges on every row.
+
+New top-level creation kinds belong beside `project` and `operator` when they
+share this lightweight flow; they should not acquire one-off slash commands.
 
 The picker remains part of the minibuffer interaction model: opening it does
 not obscure the fleet with a centered dialog, and its keyboard, mouse, cancel,
