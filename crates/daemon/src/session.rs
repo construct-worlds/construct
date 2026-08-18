@@ -11519,11 +11519,86 @@ mod tests {
             "resuming work clears the marker",
         );
 
-        // A clean finish raises it (still unfocused).
+        // A clean finish from Running is itself unseen terminal activity and
+        // raises the marker even if the harness emitted no content first.
+        manager.mark_seen("mtest").await.expect("mark_seen mtest");
+        manager.mark_seen("other").await.expect("mark_seen other");
         manager
             .handle_event(&entry, SessionEvent::Done { exit_code: 0 })
             .await;
         assert!(entry.summary.read().await.needs_attention);
+    }
+
+    /// Regression: an idle interactive harness may exit cleanly immediately
+    /// before an externally-driven daemon restart. Its terminal cleanup is not
+    /// a completed turn, so the resulting AwaitingInput -> Done transition must
+    /// not manufacture a persisted attention dot. Spec 0054.
+    #[tokio::test]
+    async fn idle_clean_exit_does_not_raise_attention() {
+        use tempfile::tempdir;
+        use tokio::sync::RwLock;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+        let manager = Arc::new(mgr);
+
+        let mut summary = placement_summary(
+            "idle-pi",
+            0,
+            None,
+            construct_protocol::SessionKind::User,
+        );
+        summary.harness = "pi".into();
+        summary.has_pty = true;
+        summary.state = SessionState::AwaitingInput;
+        let entry = Arc::new(SessionEntry {
+            id: summary.id.clone(),
+            summary: RwLock::new(summary),
+            transcript_count: AtomicU64::new(0),
+            adapter: tokio::sync::Mutex::new(None),
+            pty: tokio::sync::Mutex::new(PtyState::default()),
+            deleted: AtomicBool::new(false),
+            archived: AtomicBool::new(false),
+            title_gen_attempted: AtomicBool::new(false),
+            pty_input_capture: tokio::sync::Mutex::new(PtyInputCapture::default()),
+            pty_input_queue: std::sync::Mutex::new(None),
+            tasks: tokio::sync::Mutex::new(TaskRegistry::default()),
+            pty_client_policy: std::sync::Mutex::new(PtyClientPolicy::default()),
+            unseen_activity: AtomicBool::new(false),
+            pty_burst_start_ms: AtomicI64::new(0),
+            resume_settling_since_ms: AtomicI64::new(0),
+            suggest_gen: AtomicU64::new(0),
+            osc11_tail: std::sync::Mutex::new(Vec::new()),
+        });
+        manager
+            .sessions
+            .write()
+            .await
+            .insert(entry.id.clone(), entry.clone());
+
+        manager
+            .handle_event(&entry, SessionEvent::Done { exit_code: 0 })
+            .await;
+
+        let result = entry.summary.read().await;
+        assert_eq!(result.state, SessionState::Done);
+        assert!(!result.needs_attention);
+        assert!(!entry.unseen_activity.load(Ordering::Relaxed));
+        drop(result);
+        assert!(
+            !manager
+                .storage
+                .load_summary("idle-pi")
+                .expect("persisted summary")
+                .needs_attention,
+            "a daemon restart must not reload an attention dot from an idle close",
+        );
     }
 
     /// Regression: focusing an inactive interactive session, typing at its

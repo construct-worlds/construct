@@ -429,9 +429,6 @@ impl SessionManager {
                 &event,
                 SessionEvent::Done { .. } | SessionEvent::Error { .. }
             );
-        if !is_focused && !terminal_resume_event && event_is_unseen_activity(&event) {
-            entry.unseen_activity.store(true, Ordering::Relaxed);
-        }
         {
             let mut s = entry.summary.write().await;
             s.last_event_at = Some(now);
@@ -442,6 +439,10 @@ impl SessionManager {
                 s.observe_last_message(*role, text);
             }
             let prev_state = s.state;
+            if !is_focused && !terminal_resume_event && event_is_unseen_activity(&event, prev_state)
+            {
+                entry.unseen_activity.store(true, Ordering::Relaxed);
+            }
             match &event {
                 SessionEvent::Status { state, .. } => {
                     crate::session::set_state_tracked(&mut s, *state, now.timestamp_millis());
@@ -927,18 +928,23 @@ impl SessionManager {
 // Events that represent genuine session activity the user would want to
 // see, used to gate the `needs_attention` marker (spec 0054): a session going
 // idle only flags when one of these arrived while it wasn't the focused one.
-pub(super) fn event_is_unseen_activity(e: &SessionEvent) -> bool {
-    matches!(
-        e,
+pub(super) fn event_is_unseen_activity(e: &SessionEvent, prior_state: SessionState) -> bool {
+    match e {
+        // Finishing a running turn is activity worth surfacing even when the
+        // harness emitted no content first. A clean exit from an already-idle
+        // prompt is only lifecycle teardown, though: treating that `Done` as
+        // activity manufactures a blue dot when an idle child closes just
+        // before a daemon restart. See spec 0054.
+        SessionEvent::Done { .. } => prior_state == SessionState::Running,
         SessionEvent::Pty { .. }
-            | SessionEvent::Message { .. }
-            | SessionEvent::Reasoning { .. }
-            | SessionEvent::ToolUse { .. }
-            | SessionEvent::ToolResult { .. }
-            | SessionEvent::Diff { .. }
-            | SessionEvent::Done { .. }
-            | SessionEvent::Error { .. }
-    )
+        | SessionEvent::Message { .. }
+        | SessionEvent::Reasoning { .. }
+        | SessionEvent::ToolUse { .. }
+        | SessionEvent::ToolResult { .. }
+        | SessionEvent::Diff { .. }
+        | SessionEvent::Error { .. } => true,
+        _ => false,
+    }
 }
 
 fn session_event_is_playbook_output(event: &SessionEvent) -> bool {

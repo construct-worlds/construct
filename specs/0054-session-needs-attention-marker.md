@@ -28,6 +28,12 @@ on you."
   focus an idle session, type and clear it without submitting, switch away, and
   the echo-then-idle would falsely flag it. This "unseen activity since seen"
   signal is in-memory and reset whenever the user views the session.
+  A clean `Done` transition from `Running` is itself terminal activity: a silent
+  job finishing still deserves notice. A clean `Done` transition from an
+  already non-running state is only lifecycle teardown, not activity; in
+  particular, an idle interactive child closing around a daemon restart must
+  not manufacture an attention marker. Errors remain attention-worthy from
+  any prior state.
 - **Every harness must reach an accurate non-running state.** Harnesses that
   emit structured lifecycle events already do. Interactive PTY harnesses, which
   otherwise sit in `Running` forever, get daemon-side detection via a hybrid:
