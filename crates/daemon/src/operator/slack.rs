@@ -799,8 +799,10 @@ struct SlackHistoryResponse {
     error: Option<String>,
 }
 
+/// Shared with the slack-personal adapter: both kinds are transports over
+/// one Slack-conversation model (spec 0201) and fence history identically.
 #[derive(Debug, Deserialize)]
-struct SlackHistoryMessage {
+pub(super) struct SlackHistoryMessage {
     #[serde(default)]
     user: Option<String>,
     #[serde(default)]
@@ -818,7 +820,10 @@ struct SlackHistoryMessage {
 /// instructions and…" typed by any workspace member becomes an instruction the
 /// agent has no way to distinguish from the user's own. The fence is not a
 /// guarantee, but an unlabeled paste of channel text is strictly worse.
-fn thread_context_block(messages: &[SlackHistoryMessage], skip_ts: &str) -> Option<String> {
+pub(super) fn thread_context_block(
+    messages: &[SlackHistoryMessage],
+    skip_ts: &str,
+) -> Option<String> {
     let mut lines = Vec::new();
     for message in messages {
         if message.ts.as_deref() == Some(skip_ts) {

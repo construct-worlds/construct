@@ -42714,6 +42714,11 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
+                mcp_command: None,
+                trigger: None,
+                response_mode: None,
+                disclosure: None,
+                poll_interval_secs: None,
                 attached_to: Some(name.to_string()),
                 publication: None,
             }],
@@ -43151,6 +43156,11 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
+                mcp_command: None,
+                trigger: None,
+                response_mode: None,
+                disclosure: None,
+                poll_interval_secs: None,
                 attached_to: None,
                 publication: None,
             })
@@ -44297,6 +44307,57 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn operator_channel_editor_cycles_to_slack_personal_with_safe_defaults() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = app.operators[0].channels.clone();
+        app.open_edit_operator_view("assistant");
+        app.open_new_operator_channel();
+        app.operator_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .selected_field = 1;
+        // http → slack → slack-personal.
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        let editor = app
+            .operator_dialog
+            .as_ref()
+            .unwrap()
+            .channel_editor
+            .as_ref()
+            .unwrap();
+        assert_eq!(editor.channel.kind, "slack-personal");
+        assert_eq!(editor.channel.port, None);
+        // Seeded with the safe posture of spec 0202: DMs only, drafts only,
+        // disclosure on — shown rather than left as blanks.
+        assert_eq!(editor.channel.trigger.as_deref(), Some("dm"));
+        assert_eq!(editor.channel.response_mode.as_deref(), Some("draft"));
+        assert_eq!(editor.channel.disclosure, Some(true));
+        assert_eq!(editor.channel.poll_interval_secs, Some(20));
+        assert_eq!(editor.channel.mcp_command.as_deref(), Some(""));
+
+        // The MCP command is a plain text field on row 2.
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await;
+        assert!(app.insert_operator_dialog_text("npx my-slack-mcp"));
+        let editor = app
+            .operator_dialog
+            .as_ref()
+            .unwrap()
+            .channel_editor
+            .as_ref()
+            .unwrap();
+        assert_eq!(editor.channel.mcp_command.as_deref(), Some("npx my-slack-mcp"));
+        server.abort();
+    }
+
     /// Open the editor on a fresh Slack channel, which is where the behavior
     /// options come seeded with the defaults a definition would get.
     async fn slack_channel_editor() -> (App, tempfile::TempDir, tokio::task::JoinHandle<()>) {
@@ -44574,6 +44635,11 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
+                mcp_command: None,
+                trigger: None,
+                response_mode: None,
+                disclosure: None,
+                poll_interval_secs: None,
                 attached_to: None,
                 publication: None,
             },
@@ -44592,6 +44658,11 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
+                mcp_command: None,
+                trigger: None,
+                response_mode: None,
+                disclosure: None,
+                poll_interval_secs: None,
                 attached_to: Some("other-operator".to_string()),
                 publication: None,
             },

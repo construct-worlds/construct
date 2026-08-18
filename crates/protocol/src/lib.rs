@@ -3523,7 +3523,7 @@ fn default_operator_session_mode() -> String {
     "headless".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OperatorChannelSummary {
     pub id: String,
     pub kind: String,
@@ -3555,6 +3555,19 @@ pub struct OperatorChannelSummary {
     pub follow_up: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_context: Option<usize>,
+    /// slack-personal options, `None` on every other kind. The MCP command is
+    /// configuration rather than a credential, so unlike tokens it is
+    /// reported back for editing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_to: Option<String>,
     /// Live public exposure, when this channel has been explicitly published.
@@ -4009,6 +4022,46 @@ pub struct OperatorChannelPut {
     pub follow_up: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_context: Option<usize>,
+    /// slack-personal only. Shell command that starts the channel's MCP
+    /// backend on stdio. Not a secret — credentials belong in the backend's
+    /// own configuration — but omitted values preserve the stored command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_command: Option<String>,
+    /// slack-personal behavior options; an omitted option keeps the stored
+    /// value, like the Slack bot options above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval_secs: Option<u64>,
+}
+
+/// Matches the serde defaults, so `..Default::default()` reads the same as a
+/// payload that omits those fields.
+impl Default for OperatorChannelPut {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            kind: String::new(),
+            enabled: default_operator_channel_true(),
+            port: None,
+            app_token: None,
+            bot_token: None,
+            allowed_workspaces: Vec::new(),
+            allowed_channels: Vec::new(),
+            progress: None,
+            follow_up: None,
+            thread_context: None,
+            mcp_command: None,
+            trigger: None,
+            response_mode: None,
+            disclosure: None,
+            poll_interval_secs: None,
+        }
+    }
 }
 
 /// Accepted values for a Slack channel's behavior options, in the order a
@@ -4025,6 +4078,19 @@ pub const SLACK_THREAD_CONTEXT_MAX: usize = 1000;
 pub const SLACK_PROGRESS_DEFAULT: &str = "placeholder";
 pub const SLACK_FOLLOW_UP_DEFAULT: &str = "thread";
 pub const SLACK_THREAD_CONTEXT_DEFAULT: usize = 50;
+
+/// Accepted values for a slack-personal channel's options. The channel acts
+/// through the user's own Slack account (spec 0201), so its options describe
+/// what may enter the operator and how visibly it may answer (spec 0202).
+pub const SLACK_PERSONAL_TRIGGER_VALUES: &[&str] = &["dm", "all"];
+pub const SLACK_PERSONAL_RESPONSE_VALUES: &[&str] = &["draft", "auto"];
+pub const SLACK_PERSONAL_TRIGGER_DEFAULT: &str = "dm";
+/// Draft by default: the human's deliberate send is what makes the words
+/// theirs, which is the safe posture for a channel that speaks as the user.
+pub const SLACK_PERSONAL_RESPONSE_DEFAULT: &str = "draft";
+pub const SLACK_PERSONAL_POLL_DEFAULT_SECS: u64 = 20;
+/// Floor on the poll interval, protecting the backend from a typo'd `1`.
+pub const SLACK_PERSONAL_POLL_MIN_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorChannelPutResult {
