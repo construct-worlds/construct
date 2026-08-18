@@ -456,7 +456,13 @@ impl App {
                     return;
                 }
                 if harness == "operator" {
-                    self.open_new_operator_view_with_default_name();
+                    self.prompt = Some(Prompt {
+                        prompt: "Operator name: ".to_string(),
+                        input: String::new(),
+                        cursor: 0,
+                        intent: PromptIntent::NewOperatorName,
+                        error: None,
+                    });
                     return;
                 }
                 let cwd = std::env::current_dir()
@@ -622,6 +628,25 @@ impl App {
                     }
                     Err(e) => self.set_status(format!("project create failed: {e}")),
                 }
+            }
+            PromptIntent::NewOperatorName => {
+                let trimmed = input.trim().to_string();
+                if !super::operator_dialog::valid_operator_name(&trimmed) {
+                    self.set_status(
+                        "operator name must be 1–32 lowercase letters, digits, or interior hyphens"
+                            .into(),
+                    );
+                    return;
+                }
+                if self
+                    .operators
+                    .iter()
+                    .any(|operator| operator.name == trimmed)
+                {
+                    self.set_status(format!("operator '{trimmed}' already exists"));
+                    return;
+                }
+                self.open_new_operator_view(trimmed);
             }
             PromptIntent::Rename { session_id } => {
                 let trimmed = input.trim().to_string();

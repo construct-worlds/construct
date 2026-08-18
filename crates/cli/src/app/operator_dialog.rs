@@ -533,7 +533,7 @@ fn default_operator(app: &App, suggested: String) -> OperatorSummary {
     }
 }
 
-fn valid_operator_name(name: &str) -> bool {
+pub(super) fn valid_operator_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 32
         && name
@@ -667,23 +667,6 @@ impl App {
             picker_scroll: 0,
             channel_editor: None,
         });
-    }
-
-    /// Open an unsaved operator using the first free conventional name. The
-    /// name field has focus, so the generated suffix is only a collision-safe
-    /// starting point and can be replaced immediately.
-    pub(super) fn open_new_operator_view_with_default_name(&mut self) {
-        let mut suggested = "operator".to_string();
-        let mut suffix = 2_u32;
-        while self
-            .operators
-            .iter()
-            .any(|operator| operator.name == suggested)
-        {
-            suggested = format!("operator-{suffix}");
-            suffix = suffix.saturating_add(1);
-        }
-        self.open_new_operator_view(suggested);
     }
 
     pub fn open_edit_operator_view(&mut self, name: &str) -> bool {

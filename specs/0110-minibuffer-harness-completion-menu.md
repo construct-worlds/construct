@@ -12,10 +12,9 @@ above the minibuffer input. Each row shows the harness name, its short
 description, and current availability. Available entries precede unavailable
 entries while preserving registration order within each group. The synthetic
 creation actions are always the first new-session entries: `project` first,
-then `operator`. Choosing `project` asks for its name. Choosing `operator`
-opens a focused, unsaved operator editor immediately, with an editable name
-that is made unique by appending a numeric suffix when needed. Operator
-creation has no separate `/serve` slash-command path.
+then `operator`. Choosing either action asks for its name in the minibuffer.
+After an operator name is accepted, a focused, unsaved operator editor opens
+under that name. Operator creation has no separate `/serve` slash-command path.
 
 Typing filters rows case-insensitively by name or description. Up and Down move
 the highlighted row, with Control-P and Control-N as equivalent previous/next

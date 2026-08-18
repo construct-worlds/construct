@@ -1191,9 +1191,12 @@ pub enum PromptIntent {
     ForkTurnPick {
         source_session_id: String,
     },
-    /// Second stage of the new-session wizard when the user typed `group`:
-    /// asks for the group's name.
+    /// Second stage of the new-session wizard when the user chooses `project`:
+    /// asks for the project's name.
     NewGroupName,
+    /// Second stage of the new-session wizard when the user chooses `operator`:
+    /// asks for the operator's name before opening its unsaved editor.
+    NewOperatorName,
     /// End-session prompt (`C-x k` / `dd`). When `is_fork` is true the choice
     /// cluster includes `[m] merge and archive` in addition to delete/archive.
     DeleteConfirm {
@@ -42950,7 +42953,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_picker_operator_action_opens_a_unique_focused_draft_and_serve_is_removed() {
+    async fn new_picker_operator_action_asks_for_name_then_opens_a_focused_draft() {
         let (mut app, _dir, server) = captured_app().await;
         app.run_slash_command("serve demo").await;
         assert_eq!(
@@ -42958,24 +42961,36 @@ mod tests {
             Some("unknown command: serve")
         );
 
-        app.operators.push(operator_summary_for_test("operator"));
-        app.operators.push(operator_summary_for_test("operator-2"));
         app.run_action(KeyAction::OpenNewSession).await;
         app.handle_prompt_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await;
         app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
 
-        assert!(
-            app.prompt.is_none(),
-            "choosing operator must close the creation picker"
-        );
-        assert_eq!(app.selection, Selection::Operator("operator-3".into()));
+        let name_prompt = app.prompt.as_mut().expect("operator name prompt");
+        assert_eq!(name_prompt.prompt, "Operator name: ");
+        assert!(matches!(name_prompt.intent, PromptIntent::NewOperatorName));
+        name_prompt.input = "triage".into();
+        name_prompt.cursor = name_prompt.input.len();
+        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+
+        assert!(app.prompt.is_none(), "submitting the name closes the prompt");
+        assert_eq!(app.selection, Selection::Operator("triage".into()));
         assert_eq!(app.focus, PaneFocus::View);
         assert!(matches!(
             app.operator_dialog.as_ref().map(|dialog| dialog.mode),
             Some(OperatorDialogMode::Create)
         ));
+
+        // Creation names cannot silently replace an existing operator.
+        app.operators.push(operator_summary_for_test("existing"));
+        app.run_prompt_submit(PromptIntent::NewOperatorName, "existing".into())
+            .await;
+        assert_eq!(
+            app.status.as_ref().map(|(status, _)| status.as_str()),
+            Some("operator 'existing' already exists")
+        );
 
         // Typing lands in the editor's Name field, not anywhere else, and the
         // pane keeps following the name it is being given.
@@ -42985,15 +43000,15 @@ mod tests {
             app.operator_dialog
                 .as_ref()
                 .map(|dialog| dialog.operator.name.as_str()),
-            Some("operator-32")
+            Some("triage2")
         );
-        assert_eq!(app.selection, Selection::Operator("operator-32".into()));
+        assert_eq!(app.selection, Selection::Operator("triage2".into()));
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         app.session_transitions.clear();
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("operator: operator-32*"), "{text}");
+        assert!(text.contains("operator: triage2*"), "{text}");
         assert!(
             !text.contains("no longer available"),
             "renaming a draft must not orphan its pane: {text}"
