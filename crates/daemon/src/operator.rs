@@ -7,15 +7,19 @@
 mod harness_error;
 mod http;
 mod ingress;
+mod mcp;
 mod slack;
+mod slack_personal;
 
 use anyhow::{anyhow, Context, Result};
 // The accepted values for a channel's behavior options are published by the
 // protocol so that what a client offers and what the daemon accepts cannot
 // drift apart.
 use construct_protocol::{
-    SLACK_FOLLOW_UP_VALUES as FOLLOW_UP_VALUES, SLACK_PROGRESS_VALUES as PROGRESS_VALUES,
-    SLACK_THREAD_CONTEXT_DEFAULT, SLACK_THREAD_CONTEXT_MAX as THREAD_CONTEXT_MAX,
+    SLACK_FOLLOW_UP_VALUES as FOLLOW_UP_VALUES, SLACK_PERSONAL_POLL_DEFAULT_SECS,
+    SLACK_PERSONAL_POLL_MIN_SECS, SLACK_PERSONAL_RESPONSE_VALUES, SLACK_PERSONAL_TRIGGER_VALUES,
+    SLACK_PROGRESS_VALUES as PROGRESS_VALUES, SLACK_THREAD_CONTEXT_DEFAULT,
+    SLACK_THREAD_CONTEXT_MAX as THREAD_CONTEXT_MAX,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -238,6 +242,69 @@ impl SlackFollowUp {
     }
 }
 
+/// What may enter a slack-personal operator (spec 0202). The channel has no
+/// bot to mention: DMs are addressed to the user by construction, while a
+/// channel message needs the trigger widened and the channel allowlisted.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SlackPersonalTrigger {
+    /// Direct messages only.
+    #[default]
+    Dm,
+    /// DMs plus every message in an allowlisted channel.
+    All,
+}
+
+impl SlackPersonalTrigger {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Dm => "dm",
+            Self::All => "all",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "dm" => Ok(Self::Dm),
+            "all" => Ok(Self::All),
+            other => Err(unknown_option("trigger", other, SLACK_PERSONAL_TRIGGER_VALUES)),
+        }
+    }
+}
+
+/// How visibly a slack-personal operator may answer (spec 0202). Everything
+/// it posts appears as the user, so the safe default leaves the send to them.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SlackPersonalResponse {
+    /// Compose the reply as a Slack draft; the human reviews and sends it.
+    #[default]
+    Draft,
+    /// Post directly, disclosed by default.
+    Auto,
+}
+
+impl SlackPersonalResponse {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Auto => "auto",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "draft" => Ok(Self::Draft),
+            "auto" => Ok(Self::Auto),
+            other => Err(unknown_option(
+                "response_mode",
+                other,
+                SLACK_PERSONAL_RESPONSE_VALUES,
+            )),
+        }
+    }
+}
+
 fn unknown_option(field: &str, value: &str, accepted: &[&str]) -> anyhow::Error {
     anyhow::anyhow!(
         "unknown {field} value {value:?}; expected one of {}",
@@ -275,10 +342,51 @@ pub struct OperatorChannelConfig {
     /// pulled into one. `0` reads none. Needs `channels:history`.
     #[serde(default = "default_thread_context")]
     pub thread_context: usize,
+    /// slack-personal only. Shell command that starts the channel's MCP
+    /// backend on stdio (spec 0201). Stored as `Option` — like the fields
+    /// above being Slack-only — so unrelated kinds serialize without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<SlackPersonalTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mode: Option<SlackPersonalResponse>,
+    /// Whether an auto-sent reply carries the agent marker. `None` reads as
+    /// on: undisclosed impersonation is the failure mode (spec 0202), so it
+    /// must be an explicit opt-out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval_secs: Option<u64>,
 }
 
 fn default_channel_enabled() -> bool {
     true
+}
+
+/// Matches the serde defaults, so a config built from `..Default::default()`
+/// reads the same as one parsed from a TOML that omits those fields.
+impl Default for OperatorChannelConfig {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            enabled: default_channel_enabled(),
+            port: None,
+            token: None,
+            app_token: None,
+            bot_token: None,
+            allowed_workspaces: Vec::new(),
+            allowed_channels: Vec::new(),
+            progress: SlackProgress::default(),
+            follow_up: SlackFollowUp::default(),
+            thread_context: default_thread_context(),
+            mcp_command: None,
+            trigger: None,
+            response_mode: None,
+            disclosure: None,
+            poll_interval_secs: None,
+        }
+    }
 }
 
 pub fn load_definitions(dir: &std::path::Path) -> Result<BTreeMap<String, OperatorConfig>> {
@@ -728,7 +836,10 @@ pub fn put_channel(
 ) -> Result<construct_protocol::OperatorChannelPutResult> {
     validate_operator_name(&params.operator_name)?;
     validate_channel_id(&params.channel.id)?;
-    if !matches!(params.channel.kind.as_str(), "http" | "slack") {
+    if !matches!(
+        params.channel.kind.as_str(),
+        "http" | "slack" | "slack-personal"
+    ) {
         return Err(anyhow!(
             "unsupported channel kind `{}`",
             params.channel.kind
@@ -801,6 +912,8 @@ pub fn put_channel(
                 .or_else(|| existing.as_ref().and_then(|channel| channel.token.clone()))
         })
         .flatten();
+    let slack_tokens_provided =
+        params.channel.app_token.is_some() || params.channel.bot_token.is_some();
     let app_token = params
         .channel
         .app_token
@@ -819,17 +932,89 @@ pub fn put_channel(
                 .as_ref()
                 .and_then(|channel| channel.bot_token.clone())
         });
-    if params.channel.kind == "slack" {
-        validate_slack_token("app", app_token.as_deref(), "xapp-")?;
-        validate_slack_token("bot", bot_token.as_deref(), "xoxb-")?;
-    } else if params.channel.progress.is_some()
-        || params.channel.follow_up.is_some()
-        || params.channel.thread_context.is_some()
+    // Refuse options a kind does not read (spec 0180): accepting one would
+    // store a value nothing reads, and report it back as though in effect.
+    match params.channel.kind.as_str() {
+        "slack" => {
+            validate_slack_token("app", app_token.as_deref(), "xapp-")?;
+            validate_slack_token("bot", bot_token.as_deref(), "xoxb-")?;
+            if params.channel.mcp_command.is_some()
+                || params.channel.trigger.is_some()
+                || params.channel.response_mode.is_some()
+                || params.channel.disclosure.is_some()
+                || params.channel.poll_interval_secs.is_some()
+            {
+                return Err(anyhow!(
+                    "mcp_command, trigger, response_mode, disclosure, and poll_interval_secs apply to slack-personal channels only"
+                ));
+            }
+        }
+        "slack-personal" => {
+            if slack_tokens_provided {
+                return Err(anyhow!(
+                    "app_token and bot_token apply to Slack bot channels only; slack-personal acts through its MCP backend"
+                ));
+            }
+            if params.channel.progress.is_some() || params.channel.follow_up.is_some() {
+                // The bot's progress affordances post as the bot; posting
+                // "working on it" as the user is not an option this channel
+                // offers, and follow-up is subsumed by its trigger policy.
+                return Err(anyhow!(
+                    "progress and follow_up apply to Slack bot channels only"
+                ));
+            }
+            if let Some(interval) = params.channel.poll_interval_secs {
+                if interval < SLACK_PERSONAL_POLL_MIN_SECS {
+                    return Err(anyhow!(
+                        "poll_interval_secs must be at least {SLACK_PERSONAL_POLL_MIN_SECS}"
+                    ));
+                }
+            }
+        }
+        _ => {
+            if params.channel.progress.is_some()
+                || params.channel.follow_up.is_some()
+                || params.channel.thread_context.is_some()
+                || params.channel.mcp_command.is_some()
+                || params.channel.trigger.is_some()
+                || params.channel.response_mode.is_some()
+                || params.channel.disclosure.is_some()
+                || params.channel.poll_interval_secs.is_some()
+            {
+                return Err(anyhow!(
+                    "progress, follow_up, thread_context, and slack-personal options apply to Slack channels only"
+                ));
+            }
+        }
+    }
+    // Preserve-on-omit, like the token fields: a client that does not offer
+    // these fields must not reset them by saving an unrelated one.
+    let mcp_command = params
+        .channel
+        .mcp_command
+        .filter(|command| !command.trim().is_empty())
+        .or_else(|| existing.as_ref().and_then(|channel| channel.mcp_command.clone()));
+    let trigger = match params.channel.trigger.as_deref() {
+        Some(value) => Some(SlackPersonalTrigger::parse(value)?),
+        None => existing.as_ref().and_then(|channel| channel.trigger),
+    };
+    let response_mode = match params.channel.response_mode.as_deref() {
+        Some(value) => Some(SlackPersonalResponse::parse(value)?),
+        None => existing.as_ref().and_then(|channel| channel.response_mode),
+    };
+    let disclosure = params
+        .channel
+        .disclosure
+        .or_else(|| existing.as_ref().and_then(|channel| channel.disclosure));
+    let poll_interval_secs = params
+        .channel
+        .poll_interval_secs
+        .or_else(|| existing.as_ref().and_then(|channel| channel.poll_interval_secs));
+    if params.channel.kind == "slack-personal"
+        && mcp_command.as_deref().map(str::trim).unwrap_or("").is_empty()
     {
-        // Accepting these on an HTTP channel would store an option nothing
-        // reads, and report it back as though it were in effect.
         return Err(anyhow!(
-            "progress, follow_up, and thread_context apply to Slack channels only"
+            "slack-personal channels need an mcp_command that starts their MCP backend"
         ));
     }
     // An omitted option keeps what is stored: a client that does not offer
@@ -872,6 +1057,11 @@ pub fn put_channel(
         progress,
         follow_up,
         thread_context,
+        mcp_command,
+        trigger,
+        response_mode,
+        disclosure,
+        poll_interval_secs,
     };
     operator
         .channels
@@ -1118,15 +1308,17 @@ fn channel_summary(
     config: &OperatorChannelConfig,
     attached_to: Option<String>,
 ) -> construct_protocol::OperatorChannelSummary {
-    // Behavior options belong to Slack, and a client that cannot see the stored
-    // value cannot show what an omitted field is preserving.
-    let slack = channel_kind(&id, config) == "slack";
+    // Behavior options belong to their kind, and a client that cannot see the
+    // stored value cannot show what an omitted field is preserving.
+    let kind = channel_kind(&id, config);
+    let slack = kind == "slack";
+    let personal = kind == "slack-personal";
     construct_protocol::OperatorChannelSummary {
-        id: id.clone(),
-        kind: channel_kind(&id, config),
+        id,
+        kind: kind.clone(),
         enabled: config.enabled,
         port: config.port,
-        has_credential: match channel_kind(&id, config).as_str() {
+        has_credential: match kind.as_str() {
             "slack" => {
                 config
                     .app_token
@@ -1137,6 +1329,10 @@ fn channel_summary(
                         .as_ref()
                         .is_some_and(|token| !token.is_empty())
             }
+            "slack-personal" => config
+                .mcp_command
+                .as_ref()
+                .is_some_and(|command| !command.trim().is_empty()),
             _ => config.token.as_ref().is_some_and(|token| !token.is_empty()),
         },
         has_app_token: config
@@ -1153,7 +1349,21 @@ fn channel_summary(
         allowed_channels: config.allowed_channels.clone(),
         progress: slack.then(|| config.progress.as_str().to_string()),
         follow_up: slack.then(|| config.follow_up.as_str().to_string()),
-        thread_context: slack.then_some(config.thread_context),
+        // Both Slack kinds read thread context when first pulled into a
+        // conversation already in progress.
+        thread_context: (slack || personal).then_some(config.thread_context),
+        mcp_command: personal.then(|| config.mcp_command.clone().unwrap_or_default()),
+        trigger: personal.then(|| config.trigger.unwrap_or_default().as_str().to_string()),
+        response_mode: personal.then(|| {
+            config
+                .response_mode
+                .unwrap_or_default()
+                .as_str()
+                .to_string()
+        }),
+        disclosure: personal.then(|| config.disclosure.unwrap_or(true)),
+        poll_interval_secs: personal
+            .then(|| config.poll_interval_secs.unwrap_or(SLACK_PERSONAL_POLL_DEFAULT_SECS)),
         attached_to,
         publication: None,
     }
@@ -1202,6 +1412,7 @@ fn validate_operator_name(name: &str) -> Result<()> {
 
 pub(crate) use ingress::{OperatorIngress as OperatorRuntime, OperatorIngressShared as OperatorShared};
 pub(crate) use slack::SlackConfig;
+pub(crate) use slack_personal::SlackPersonalConfig;
 
 /// Build the transport-neutral ingress runtime for one channel.
 pub(crate) fn channel_runtime(
@@ -1222,7 +1433,7 @@ pub(crate) fn bindable_port(
         return None;
     }
     let kind = channel_kind(channel_id, channel);
-    if kind == "slack" {
+    if kind == "slack" || kind == "slack-personal" {
         return None;
     }
     if kind != "http" {
@@ -1306,6 +1517,47 @@ pub(crate) async fn serve_slack(
     slack::serve(runtime, config, cancel).await
 }
 
+/// Snapshot one slack-personal channel for its outbound polling task.
+pub(crate) fn slack_personal_config(
+    operator: &str,
+    channel_id: &str,
+    channel: &OperatorChannelConfig,
+) -> Option<slack_personal::SlackPersonalConfig> {
+    if !channel.enabled || channel_kind(channel_id, channel) != "slack-personal" {
+        return None;
+    }
+    let mcp_command = channel
+        .mcp_command
+        .clone()
+        .filter(|command| !command.trim().is_empty());
+    let Some(mcp_command) = mcp_command else {
+        tracing::warn!(operator = %operator, channel = %channel_id, "slack-personal channel has no MCP command; skipping");
+        return None;
+    };
+    let poll_secs = channel
+        .poll_interval_secs
+        .unwrap_or(SLACK_PERSONAL_POLL_DEFAULT_SECS)
+        .max(SLACK_PERSONAL_POLL_MIN_SECS);
+    Some(slack_personal::SlackPersonalConfig {
+        mcp_command,
+        poll_interval: std::time::Duration::from_secs(poll_secs),
+        trigger: channel.trigger.unwrap_or_default(),
+        response: channel.response_mode.unwrap_or_default(),
+        disclosure: channel.disclosure.unwrap_or(true),
+        allowed_workspaces: channel.allowed_workspaces.clone(),
+        allowed_channels: channel.allowed_channels.clone(),
+        thread_context: channel.thread_context,
+    })
+}
+
+pub(crate) async fn serve_slack_personal(
+    runtime: Arc<OperatorRuntime>,
+    config: slack_personal::SlackPersonalConfig,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    slack_personal::serve(runtime, config, cancel).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::http::{content_length, find_headers_end, parse_http_route, HttpRoute};
@@ -1363,6 +1615,7 @@ mod tests {
                     progress: Default::default(),
                     follow_up: Default::default(),
                     thread_context: default_thread_context(),
+                    ..Default::default()
                 },
             )]),
         }
@@ -2183,6 +2436,7 @@ mod tests {
                     progress: None,
                     follow_up: None,
                     thread_context: None,
+                    ..Default::default()
                 },
                 rotate_secret: false,
             },
@@ -2268,6 +2522,7 @@ mod tests {
                     progress: None,
                     follow_up: None,
                     thread_context: None,
+                    ..Default::default()
                 },
                 rotate_secret: false,
             },
@@ -2289,6 +2544,7 @@ mod tests {
                     progress: None,
                     follow_up: None,
                     thread_context: None,
+                    ..Default::default()
                 },
                 rotate_secret: false,
             },
@@ -2412,6 +2668,7 @@ mod tests {
                     progress: None,
                     follow_up: None,
                     thread_context: None,
+                    ..Default::default()
                 },
                 rotate_secret: false,
             },
@@ -2501,6 +2758,7 @@ mod tests {
                     progress: None,
                     follow_up: None,
                     thread_context: None,
+                    ..Default::default()
                 },
                 rotate_secret: false,
             },
@@ -2552,6 +2810,7 @@ mod tests {
                     progress: None,
                     follow_up: None,
                     thread_context: None,
+                    ..Default::default()
                 },
                 rotate_secret: false,
             },
@@ -2599,6 +2858,7 @@ mod tests {
                 progress: progress.map(ToString::to_string),
                 follow_up: follow_up.map(ToString::to_string),
                 thread_context,
+                ..Default::default()
             },
             rotate_secret: false,
         }
@@ -2687,6 +2947,7 @@ mod tests {
                     follow_up: Some("channel".into()),
                     progress: None,
                     thread_context: None,
+                    ..Default::default()
                 },
                 rotate_secret: false,
             },
@@ -2762,6 +3023,7 @@ mod tests {
                     progress: None,
                     follow_up: None,
                     thread_context: None,
+                    ..Default::default()
                 },
                 rotate_secret: false,
             },
@@ -2785,5 +3047,182 @@ mod tests {
         assert!(validate_slack_token("app", Some("xapp-good"), "xapp-").is_ok());
         assert!(validate_slack_token("bot", Some("xoxp-user"), "xoxb-").is_err());
         assert!(validate_slack_token("bot", None, "xoxb-").is_err());
+    }
+
+    fn personal_put(
+        channel: construct_protocol::OperatorChannelPut,
+    ) -> construct_protocol::OperatorChannelPutParams {
+        construct_protocol::OperatorChannelPutParams {
+            operator_name: "chat".into(),
+            channel,
+            rotate_secret: false,
+        }
+    }
+
+    #[test]
+    fn a_slack_personal_channel_saves_and_reports_its_options() {
+        let (_config, operators) = slack_channel_fixture();
+        let result = put_channel(
+            &operators,
+            personal_put(construct_protocol::OperatorChannelPut {
+                id: "me".into(),
+                kind: "slack-personal".into(),
+                mcp_command: Some("npx my-slack-mcp".into()),
+                trigger: Some("all".into()),
+                response_mode: Some("auto".into()),
+                disclosure: Some(false),
+                poll_interval_secs: Some(30),
+                thread_context: Some(10),
+                allowed_channels: vec!["C1".into()],
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert!(result.channel.has_credential);
+        assert_eq!(result.channel.kind, "slack-personal");
+        assert_eq!(result.channel.mcp_command.as_deref(), Some("npx my-slack-mcp"));
+        assert_eq!(result.channel.trigger.as_deref(), Some("all"));
+        assert_eq!(result.channel.response_mode.as_deref(), Some("auto"));
+        assert_eq!(result.channel.disclosure, Some(false));
+        assert_eq!(result.channel.poll_interval_secs, Some(30));
+        assert_eq!(result.channel.thread_context, Some(10));
+
+        // A later edit that omits every option preserves the stored values.
+        let edited = put_channel(
+            &operators,
+            personal_put(construct_protocol::OperatorChannelPut {
+                id: "me".into(),
+                kind: "slack-personal".into(),
+                allowed_channels: vec!["C1".into()],
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(edited.channel.mcp_command.as_deref(), Some("npx my-slack-mcp"));
+        assert_eq!(edited.channel.trigger.as_deref(), Some("all"));
+        assert_eq!(edited.channel.response_mode.as_deref(), Some("auto"));
+        assert_eq!(edited.channel.disclosure, Some(false));
+        assert_eq!(edited.channel.poll_interval_secs, Some(30));
+    }
+
+    #[test]
+    fn a_slack_personal_channel_without_a_backend_command_is_refused() {
+        let (_config, operators) = slack_channel_fixture();
+        let error = put_channel(
+            &operators,
+            personal_put(construct_protocol::OperatorChannelPut {
+                id: "me".into(),
+                kind: "slack-personal".into(),
+                ..Default::default()
+            }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("mcp_command"), "{error}");
+    }
+
+    #[test]
+    fn options_are_refused_where_their_kind_does_not_read_them() {
+        let (_config, operators) = slack_channel_fixture();
+
+        // Bot-only affordances on a slack-personal channel: this channel may
+        // not post progress as the user, so storing the option would lie.
+        let error = put_channel(
+            &operators,
+            personal_put(construct_protocol::OperatorChannelPut {
+                id: "me".into(),
+                kind: "slack-personal".into(),
+                mcp_command: Some("cmd".into()),
+                progress: Some("both".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Slack bot channels only"), "{error}");
+
+        // slack-personal options on the bot kind.
+        let error = put_channel(
+            &operators,
+            personal_put(construct_protocol::OperatorChannelPut {
+                id: "bot".into(),
+                kind: "slack".into(),
+                app_token: Some("xapp-1".into()),
+                bot_token: Some("xoxb-1".into()),
+                trigger: Some("dm".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("slack-personal channels only"),
+            "{error}"
+        );
+
+        // Bot tokens on a slack-personal channel.
+        let error = put_channel(
+            &operators,
+            personal_put(construct_protocol::OperatorChannelPut {
+                id: "me".into(),
+                kind: "slack-personal".into(),
+                mcp_command: Some("cmd".into()),
+                app_token: Some("xapp-1".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("MCP backend"), "{error}");
+    }
+
+    #[test]
+    fn a_too_fast_poll_interval_is_refused() {
+        let (_config, operators) = slack_channel_fixture();
+        let error = put_channel(
+            &operators,
+            personal_put(construct_protocol::OperatorChannelPut {
+                id: "me".into(),
+                kind: "slack-personal".into(),
+                mcp_command: Some("cmd".into()),
+                poll_interval_secs: Some(1),
+                ..Default::default()
+            }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("at least"), "{error}");
+    }
+
+    #[test]
+    fn slack_personal_config_snapshots_the_channel_with_safe_defaults() {
+        let channel = OperatorChannelConfig {
+            kind: Some("slack-personal".into()),
+            mcp_command: Some("npx my-slack-mcp".into()),
+            ..Default::default()
+        };
+        let config = slack_personal_config("chat", "me", &channel).expect("config");
+        assert_eq!(config.mcp_command, "npx my-slack-mcp");
+        // The safe posture is the default posture: DMs only, drafts only,
+        // disclosure on (spec 0202).
+        assert_eq!(config.trigger, SlackPersonalTrigger::Dm);
+        assert_eq!(config.response, SlackPersonalResponse::Draft);
+        assert!(config.disclosure);
+        assert_eq!(config.poll_interval, std::time::Duration::from_secs(20));
+
+        // Disabled channels and channels without a command produce no task.
+        let disabled = OperatorChannelConfig {
+            enabled: false,
+            ..channel.clone()
+        };
+        assert!(slack_personal_config("chat", "me", &disabled).is_none());
+        let missing = OperatorChannelConfig {
+            kind: Some("slack-personal".into()),
+            ..Default::default()
+        };
+        assert!(slack_personal_config("chat", "me", &missing).is_none());
+
+        // A hand-edited interval below the floor is clamped, not obeyed.
+        let fast = OperatorChannelConfig {
+            poll_interval_secs: Some(1),
+            ..channel
+        };
+        let config = slack_personal_config("chat", "me", &fast).expect("config");
+        assert_eq!(config.poll_interval, std::time::Duration::from_secs(5));
     }
 }

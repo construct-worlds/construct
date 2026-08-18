@@ -9103,7 +9103,57 @@ pub(crate) fn render_operator_channel_editor(
         "disabled"
     }
     .to_string();
-    let fields_data: Vec<(&str, String)> = if editor.channel.kind == "slack" {
+    let fields_data: Vec<(&str, String)> = if editor.channel.kind == "slack-personal" {
+        vec![
+            ("Channel ID", editor.channel.id.clone()),
+            ("Kind", editor.channel.kind.clone()),
+            (
+                "MCP command",
+                editor.channel.mcp_command.clone().unwrap_or_default(),
+            ),
+            ("Workspaces", editor.channel.allowed_workspaces.join(",")),
+            ("Channels", editor.channel.allowed_channels.join(",")),
+            (
+                "Trigger",
+                editor.channel.trigger.clone().unwrap_or_default(),
+            ),
+            (
+                "Response",
+                editor.channel.response_mode.clone().unwrap_or_default(),
+            ),
+            (
+                "Disclosure",
+                if editor.channel.disclosure.unwrap_or(true) {
+                    "on".to_string()
+                } else {
+                    "off".to_string()
+                },
+            ),
+            (
+                "Poll interval",
+                editor
+                    .channel
+                    .poll_interval_secs
+                    .map(|secs| format!("{secs}s"))
+                    .unwrap_or_default(),
+            ),
+            (
+                "Thread context",
+                editor
+                    .channel
+                    .thread_context
+                    .map(|count| {
+                        if count == 0 {
+                            "0 · none".to_string()
+                        } else {
+                            format!("{count} messages")
+                        }
+                    })
+                    .unwrap_or_default(),
+            ),
+            ("State", state),
+        ]
+    } else if editor.channel.kind == "slack" {
         vec![
             ("Channel ID", editor.channel.id.clone()),
             ("Kind", editor.channel.kind.clone()),
@@ -9198,7 +9248,22 @@ pub(crate) fn render_operator_channel_editor(
         f.buffer_mut()
             .set_string(divider_x, y, "│", Style::default().fg(app.theme.border));
     }
-    let (title, body, hint) = if editor.channel.kind == "slack" {
+    let (title, body, hint) = if editor.channel.kind == "slack-personal" {
+        match editor.selected_field {
+            0 => ("Channel ID", "Stable local name for this channel; locked after creation.", "Type to edit when creating."),
+            1 => ("Kind", "slack-personal acts through your own Slack account via an MCP backend — no Slack app, no bot. Everything it posts appears as you.", "←/→ or Space switches kind when creating."),
+            2 => ("MCP command", "Shell command that starts the channel's MCP backend on stdio, e.g. a Slack MCP server authenticated as your account. The daemon polls it for new messages and posts replies through it.", "Type the command · restarts the backend on save."),
+            3 => ("Workspace allowlist", "Optional comma-separated Slack team IDs. Empty accepts messages from any workspace the backend can see.", "Type workspace IDs separated by commas."),
+            4 => ("Channel allowlist", "Channels the operator may read when the trigger is `all`. Unlike the bot kind, empty means no channels at all — only DMs are in scope by default.", "Type channel IDs separated by commas."),
+            5 => ("Trigger", "What enters the operator: dm forwards only your direct messages; all also forwards every message in an allowlisted channel. Your own messages trigger it only in your DM with yourself.", "Space or → next · ← previous · applies on save."),
+            6 => ("Response", "How visibly it answers: draft composes the reply in your Slack drafts for you to review and send; auto posts directly — as you.", "Space or → next · ← previous · applies on save."),
+            7 => ("Disclosure", "Whether an auto-sent reply carries a marker telling recipients an agent wrote it. It posts under your name, so turning this off means undisclosed impersonation of you.", "Space or ←/→ toggles · applies on save."),
+            8 => ("Poll interval", "Seconds between sweeps for new messages. Latency is this plus the backend's own lag; there is no push.", "Type a number of seconds, at least 5."),
+            9 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. This is text written by everyone in the thread, put in front of a session that holds tools.", "Type a number up to 1000 · applies on save."),
+            10 => ("State", "Disabled slack-personal channels stop their MCP backend and polling while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
+            _ => ("Channel", "", ""),
+        }
+    } else if editor.channel.kind == "slack" {
         match editor.selected_field {
             0 => ("Channel ID", "Stable local name for this channel; locked after creation.", "Type to edit when creating."),
             1 => ("Kind", "Slack uses an outbound Socket Mode connection; it does not open a local listener.", "←/→ or Space switches kind when creating."),
@@ -9254,10 +9319,10 @@ pub(crate) fn render_operator_channel_editor(
     f.render_widget(Paragraph::new(help).wrap(Wrap { trim: false }), columns[2]);
     let footer = if editor.mode == crate::app::OperatorChannelDialogMode::Create {
         "Enter/C-s save · Esc back"
-    } else if editor.channel.kind == "slack" {
-        "Enter/C-s save · C-d delete · Esc back"
-    } else {
+    } else if editor.channel.kind == "http" {
         "Enter/C-s save · C-r rotate credential · C-d delete · Esc back"
+    } else {
+        "Enter/C-s save · C-d delete · Esc back"
     };
     let footer_y = area.bottom().saturating_sub(1);
     f.render_widget(

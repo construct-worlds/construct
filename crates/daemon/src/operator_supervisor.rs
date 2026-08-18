@@ -143,6 +143,12 @@ struct SlackHandle {
     task: JoinHandle<()>,
 }
 
+struct SlackPersonalHandle {
+    config: operator::SlackPersonalConfig,
+    cancel: CancellationToken,
+    task: JoinHandle<()>,
+}
+
 /// Everything the supervisor owns. Lives in the task's stack frame, so there
 /// is no lock and no way for another task to observe it half-updated.
 #[derive(Default)]
@@ -153,6 +159,7 @@ struct Registry {
     shared: BTreeMap<String, Arc<OperatorShared>>,
     listeners: HashMap<ListenerKey, ListenerHandle>,
     slack: HashMap<ListenerKey, SlackHandle>,
+    slack_personal: HashMap<ListenerKey, SlackPersonalHandle>,
 }
 
 /// What must happen to one channel's socket for the desired state to hold.
@@ -226,6 +233,23 @@ fn desired_slack(
     desired
 }
 
+fn desired_slack_personal(
+    defs: &BTreeMap<String, OperatorConfig>,
+) -> BTreeMap<ListenerKey, operator::SlackPersonalConfig> {
+    let mut desired = BTreeMap::new();
+    for (name, config) in defs {
+        if config.paused {
+            continue;
+        }
+        for (channel_id, channel) in &config.channels {
+            if let Some(config) = operator::slack_personal_config(name, channel_id, channel) {
+                desired.insert((name.clone(), channel_id.clone()), config);
+            }
+        }
+    }
+    desired
+}
+
 /// The socket work to get from `current` to `desired`.
 ///
 /// Stops are listed before starts so the plan reads in the order it happens.
@@ -286,6 +310,7 @@ pub async fn run(
                         OperatorMsg::ListenerDied(key) => {
                             registry.listeners.remove(&key);
                             registry.slack.remove(&key);
+                            registry.slack_personal.remove(&key);
                             reconcile_publications(&manager, &registry);
                         }
                         OperatorMsg::Reply {
@@ -309,6 +334,7 @@ pub async fn run(
             OperatorMsg::ListenerDied(key) => {
                 registry.listeners.remove(&key);
                 registry.slack.remove(&key);
+                registry.slack_personal.remove(&key);
                 reconcile_publications(&manager, &registry);
             }
             OperatorMsg::Reply {
@@ -385,6 +411,7 @@ async fn reload(
 
     let (desired, conflicts) = desired_listeners(&defs);
     let desired_slack = desired_slack(&defs);
+    let desired_slack_personal = desired_slack_personal(&defs);
     for conflict in &conflicts {
         tracing::warn!(
             operator = %conflict.key.0,
@@ -537,6 +564,49 @@ async fn reload(
         }
     }
 
+    // slack-personal channels are outbound polling tasks with the same
+    // lifecycle rules as Socket Mode: a material edit replaces the task,
+    // an unchanged one keeps its backend process and sweep cursor.
+    let stale_personal: Vec<_> = registry
+        .slack_personal
+        .iter()
+        .filter_map(|(key, running)| match desired_slack_personal.get(key) {
+            Some(config) if config == &running.config => None,
+            _ => Some(key.clone()),
+        })
+        .collect();
+    let restarting_personal: HashSet<_> = stale_personal
+        .iter()
+        .filter(|key| desired_slack_personal.contains_key(*key))
+        .cloned()
+        .collect();
+    for key in stale_personal {
+        if let Some(running) = registry.slack_personal.remove(&key) {
+            let rebound = desired_slack_personal.contains_key(&key);
+            running.cancel.cancel();
+            let _ = running.task.await;
+            if !rebound {
+                report.stopped.push(key);
+            }
+        }
+    }
+    for (key, config) in desired_slack_personal {
+        if registry.slack_personal.contains_key(&key) {
+            continue;
+        }
+        let Some(shared) = registry.shared.get(&key.0).cloned() else {
+            continue;
+        };
+        let rebound = restarting_personal.contains(&key);
+        let running = start_slack_personal(handle, shared, key.clone(), config);
+        registry.slack_personal.insert(key.clone(), running);
+        if rebound {
+            report.rebound.push(key);
+        } else {
+            report.started.push(key);
+        }
+    }
+
     // Operators that disappeared keep their state file; only the live entry is
     // dropped, and only after its listeners are down.
     registry.shared.retain(|name, _| defs.contains_key(name));
@@ -601,6 +671,34 @@ fn reconcile_publications(manager: &SessionManager, registry: &Registry) {
                 .map(|(key, listener)| (key.clone(), listener.endpoint.clone()))
                 .collect(),
         );
+    }
+}
+
+fn start_slack_personal(
+    handle: &OperatorHandle,
+    shared: Arc<OperatorShared>,
+    key: ListenerKey,
+    config: operator::SlackPersonalConfig,
+) -> SlackPersonalHandle {
+    let runtime = operator::channel_runtime(shared, key.1.clone());
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task_handle = handle.clone();
+    let task_key = key.clone();
+    let running_config = config.clone();
+    let task = tokio::spawn(async move {
+        if let Err(error) = operator::serve_slack_personal(runtime, config, task_cancel.clone()).await
+        {
+            tracing::error!(operator = %task_key.0, channel = %task_key.1, %error, "slack-personal operator channel stopped");
+        }
+        if !task_cancel.is_cancelled() {
+            let _ = task_handle.0.send(OperatorMsg::ListenerDied(task_key));
+        }
+    });
+    SlackPersonalHandle {
+        config: running_config,
+        cancel,
+        task,
     }
 }
 
@@ -768,6 +866,7 @@ mod tests {
                             progress: Default::default(),
                             follow_up: Default::default(),
                             thread_context: 50,
+                            ..Default::default()
                         },
                     )
                 })
@@ -824,6 +923,7 @@ mod tests {
                     progress: Default::default(),
                     follow_up: Default::default(),
                     thread_context: 50,
+                    ..Default::default()
                 },
             )]),
         };
@@ -834,6 +934,46 @@ mod tests {
         let changed = desired_slack(&defs(&[("chat", slack_operator("xapp-second", false))]));
         assert!(first != changed);
         assert!(desired_slack(&defs(&[("chat", slack_operator("xapp-first", true),)])).is_empty());
+    }
+
+    #[test]
+    fn slack_personal_channels_are_outbound_tasks_and_edits_change_revision() {
+        let personal_operator = |command: &str, paused: bool| OperatorConfig {
+            position: 0,
+            placement: None,
+            instruction: String::new(),
+            harness: "smith".into(),
+            model: None,
+            session_mode: OperatorSessionMode::Headless,
+            cwd: ".".into(),
+            routing: OperatorRouting::SessionKey,
+            paused,
+            approval_timeout_secs: 0,
+            sandbox: OperatorSandboxConfig::default(),
+            channels: BTreeMap::from([(
+                "me".into(),
+                OperatorChannelConfig {
+                    kind: Some("slack-personal".into()),
+                    mcp_command: Some(command.into()),
+                    ..Default::default()
+                },
+            )]),
+        };
+        let first_defs = defs(&[("chat", personal_operator("first-backend", false))]);
+        assert!(
+            desired_listeners(&first_defs).0.is_empty(),
+            "slack-personal owns no port"
+        );
+        let first = desired_slack_personal(&first_defs);
+        assert!(first.contains_key(&key("chat", "me")));
+        let changed =
+            desired_slack_personal(&defs(&[("chat", personal_operator("second-backend", false))]));
+        assert!(first != changed, "a backend edit must replace the task");
+        assert!(
+            desired_slack_personal(&defs(&[("chat", personal_operator("first-backend", true))]))
+                .is_empty(),
+            "pausing stops the polling task"
+        );
     }
 
     #[test]

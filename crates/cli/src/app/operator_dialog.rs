@@ -238,13 +238,52 @@ pub(crate) const SLACK_FIELD_PROGRESS: usize = 6;
 pub(crate) const SLACK_FIELD_FOLLOW_UP: usize = 7;
 pub(crate) const SLACK_FIELD_THREAD_CONTEXT: usize = 8;
 pub(crate) const SLACK_FIELD_STATE: usize = 9;
+/// The slack-personal editor's field indexes, after ID (0), Kind (1),
+/// MCP command (2), Workspaces (3), and Channels (4).
+pub(crate) const PERSONAL_FIELD_TRIGGER: usize = 5;
+pub(crate) const PERSONAL_FIELD_RESPONSE: usize = 6;
+pub(crate) const PERSONAL_FIELD_DISCLOSURE: usize = 7;
+pub(crate) const PERSONAL_FIELD_POLL: usize = 8;
+pub(crate) const PERSONAL_FIELD_THREAD_CONTEXT: usize = 9;
+pub(crate) const PERSONAL_FIELD_STATE: usize = 10;
 const HTTP_FIELD_STATE: usize = 3;
 
 fn channel_field_count(editor: &OperatorChannelDialog) -> usize {
-    if editor.channel.kind == "slack" {
-        SLACK_FIELD_STATE + 1
+    channel_state_field(&editor.channel.kind) + 1
+}
+
+/// The two Slack kinds share the allowlist fields but at different indexes,
+/// because the bot kind spends 2–3 on its tokens and slack-personal spends 2
+/// on its MCP command.
+fn workspace_field(kind: &str) -> usize {
+    if kind == "slack" {
+        4
     } else {
-        HTTP_FIELD_STATE + 1
+        3
+    }
+}
+
+fn channel_allowlist_field(kind: &str) -> usize {
+    if kind == "slack" {
+        5
+    } else {
+        4
+    }
+}
+
+fn thread_context_field(kind: &str) -> usize {
+    if kind == "slack" {
+        SLACK_FIELD_THREAD_CONTEXT
+    } else {
+        PERSONAL_FIELD_THREAD_CONTEXT
+    }
+}
+
+fn channel_state_field(kind: &str) -> usize {
+    match kind {
+        "slack" => SLACK_FIELD_STATE,
+        "slack-personal" => PERSONAL_FIELD_STATE,
+        _ => HTTP_FIELD_STATE,
     }
 }
 
@@ -748,11 +787,16 @@ impl App {
                 allowed_channel_count: 0,
                 allowed_workspaces: Vec::new(),
                 allowed_channels: Vec::new(),
-                // Filled in when the kind is switched to Slack; an HTTP channel
-                // has no behavior options to show.
+                // Filled in when the kind is switched to a Slack kind; an
+                // HTTP channel has no behavior options to show.
                 progress: None,
                 follow_up: None,
                 thread_context: None,
+                mcp_command: None,
+                trigger: None,
+                response_mode: None,
+                disclosure: None,
+                poll_interval_secs: None,
                 attached_to: Some(dialog.operator.name.clone()),
                 publication: None,
             },
@@ -1110,51 +1154,72 @@ impl App {
         let Some(channel) = dialog.channel_editor.as_mut() else {
             return;
         };
-        match channel.selected_field {
-            0 if channel.mode == OperatorChannelDialogMode::Create => edit(&mut channel.channel.id),
-            2 if channel.channel.kind == "http" => {
-                let mut value = channel
-                    .channel
-                    .port
-                    .map(|port| port.to_string())
-                    .unwrap_or_default();
-                edit(&mut value);
-                channel.channel.port = value.parse::<u16>().ok().filter(|port| *port > 0);
-            }
-            2 if channel.channel.kind == "slack" => edit(&mut channel.app_token),
-            3 if channel.channel.kind == "slack" => edit(&mut channel.bot_token),
-            4 if channel.channel.kind == "slack" => {
-                let mut value = channel.channel.allowed_workspaces.join(",");
-                edit(&mut value);
-                channel.channel.allowed_workspaces = split_allowlist(&value);
-                channel.channel.allowed_workspace_count = channel.channel.allowed_workspaces.len();
-            }
-            5 if channel.channel.kind == "slack" => {
-                let mut value = channel.channel.allowed_channels.join(",");
-                edit(&mut value);
-                channel.channel.allowed_channels = split_allowlist(&value);
-                channel.channel.allowed_channel_count = channel.channel.allowed_channels.len();
-            }
-            SLACK_FIELD_THREAD_CONTEXT if channel.channel.kind == "slack" => {
-                let mut value = channel
-                    .channel
-                    .thread_context
-                    .map(|count| count.to_string())
-                    .unwrap_or_default();
-                edit(&mut value);
-                // An emptied field reads as none rather than as "unchanged":
-                // the user is typing a number, and 0 is a real setting.
-                channel.channel.thread_context = if value.is_empty() {
-                    Some(0)
-                } else {
-                    value
-                        .parse::<usize>()
-                        .ok()
-                        .map(|count| count.min(construct_protocol::SLACK_THREAD_CONTEXT_MAX))
-                        .or(channel.channel.thread_context)
-                };
-            }
-            _ => return,
+        let kind = channel.channel.kind.clone();
+        let slack_kind = matches!(kind.as_str(), "slack" | "slack-personal");
+        let field = channel.selected_field;
+        if field == 0 && channel.mode == OperatorChannelDialogMode::Create {
+            edit(&mut channel.channel.id);
+        } else if kind == "http" && field == 2 {
+            let mut value = channel
+                .channel
+                .port
+                .map(|port| port.to_string())
+                .unwrap_or_default();
+            edit(&mut value);
+            channel.channel.port = value.parse::<u16>().ok().filter(|port| *port > 0);
+        } else if kind == "slack" && field == 2 {
+            edit(&mut channel.app_token);
+        } else if kind == "slack" && field == 3 {
+            edit(&mut channel.bot_token);
+        } else if kind == "slack-personal" && field == 2 {
+            let mut value = channel.channel.mcp_command.clone().unwrap_or_default();
+            edit(&mut value);
+            channel.channel.mcp_command = Some(value);
+        } else if slack_kind && field == workspace_field(&kind) {
+            let mut value = channel.channel.allowed_workspaces.join(",");
+            edit(&mut value);
+            channel.channel.allowed_workspaces = split_allowlist(&value);
+            channel.channel.allowed_workspace_count = channel.channel.allowed_workspaces.len();
+        } else if slack_kind && field == channel_allowlist_field(&kind) {
+            let mut value = channel.channel.allowed_channels.join(",");
+            edit(&mut value);
+            channel.channel.allowed_channels = split_allowlist(&value);
+            channel.channel.allowed_channel_count = channel.channel.allowed_channels.len();
+        } else if kind == "slack-personal" && field == PERSONAL_FIELD_POLL {
+            let mut value = channel
+                .channel
+                .poll_interval_secs
+                .map(|secs| secs.to_string())
+                .unwrap_or_default();
+            edit(&mut value);
+            channel.channel.poll_interval_secs = if value.is_empty() {
+                None
+            } else {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .or(channel.channel.poll_interval_secs)
+            };
+        } else if slack_kind && field == thread_context_field(&kind) {
+            let mut value = channel
+                .channel
+                .thread_context
+                .map(|count| count.to_string())
+                .unwrap_or_default();
+            edit(&mut value);
+            // An emptied field reads as none rather than as "unchanged":
+            // the user is typing a number, and 0 is a real setting.
+            channel.channel.thread_context = if value.is_empty() {
+                Some(0)
+            } else {
+                value
+                    .parse::<usize>()
+                    .ok()
+                    .map(|count| count.min(construct_protocol::SLACK_THREAD_CONTEXT_MAX))
+                    .or(channel.channel.thread_context)
+            };
+        } else {
+            return;
         }
         channel.note = None;
         channel.new_secret = None;
@@ -1170,6 +1235,7 @@ impl App {
         };
         let editor_snapshot = editor.clone();
         let slack = editor_snapshot.channel.kind == "slack";
+        let personal = editor_snapshot.channel.kind == "slack-personal";
         let valid_id = valid_operator_name(&editor_snapshot.channel.id);
         let validation_error = if !valid_id {
             Some("Channel ID must be 1–32 lowercase letters, digits, or interior hyphens.")
@@ -1185,6 +1251,23 @@ impl App {
             && !editor_snapshot.bot_token.starts_with("xoxb-")
         {
             Some("Slack bot token must start with xoxb-.")
+        } else if personal
+            && editor_snapshot
+                .channel
+                .mcp_command
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            Some("slack-personal channels need an MCP command that starts their backend.")
+        } else if personal
+            && editor_snapshot
+                .channel
+                .poll_interval_secs
+                .is_some_and(|secs| secs < construct_protocol::SLACK_PERSONAL_POLL_MIN_SECS)
+        {
+            Some("Poll interval must be at least 5 seconds.")
         } else {
             None
         };
@@ -1211,12 +1294,25 @@ impl App {
                         .then_some(editor_snapshot.bot_token),
                     allowed_workspaces: editor_snapshot.channel.allowed_workspaces,
                     allowed_channels: editor_snapshot.channel.allowed_channels,
-                    // Slack-only: sending these for an HTTP channel is refused,
-                    // and the editor never shows them there.
+                    // Kind-specific: sending an option to a kind that does not
+                    // read it is refused, and the editor never shows it there.
                     progress: slack.then_some(editor_snapshot.channel.progress).flatten(),
                     follow_up: slack.then_some(editor_snapshot.channel.follow_up).flatten(),
-                    thread_context: slack
+                    thread_context: (slack || personal)
                         .then_some(editor_snapshot.channel.thread_context)
+                        .flatten(),
+                    mcp_command: personal
+                        .then_some(editor_snapshot.channel.mcp_command)
+                        .flatten(),
+                    trigger: personal.then_some(editor_snapshot.channel.trigger).flatten(),
+                    response_mode: personal
+                        .then_some(editor_snapshot.channel.response_mode)
+                        .flatten(),
+                    disclosure: personal
+                        .then_some(editor_snapshot.channel.disclosure)
+                        .flatten(),
+                    poll_interval_secs: personal
+                        .then_some(editor_snapshot.channel.poll_interval_secs)
                         .flatten(),
                 },
                 rotate_secret,
@@ -1928,34 +2024,37 @@ impl App {
                 if snapshot.selected_field == 1
                     && snapshot.mode == OperatorChannelDialogMode::Create =>
             {
+                let forward = key.code != KeyCode::Left;
                 if let Some(dialog) = self.operator_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
-                        editor.channel.kind = if editor.channel.kind == "http" {
-                            "slack"
-                        } else {
-                            "http"
-                        }
-                        .to_string();
+                        editor.channel.kind =
+                            cycle_option(&["http", "slack", "slack-personal"], Some(&editor.channel.kind), forward);
                         let slack = editor.channel.kind == "slack";
-                        editor.channel.port = (!slack).then_some(8787);
-                        // Show a new Slack channel the values it will be saved
-                        // with rather than three blanks.
-                        editor.channel.progress = slack
-                            .then(|| construct_protocol::SLACK_PROGRESS_DEFAULT.to_string());
-                        editor.channel.follow_up = slack
-                            .then(|| construct_protocol::SLACK_FOLLOW_UP_DEFAULT.to_string());
-                        editor.channel.thread_context =
-                            slack.then_some(construct_protocol::SLACK_THREAD_CONTEXT_DEFAULT);
+                        let personal = editor.channel.kind == "slack-personal";
+                        editor.channel.port = (!slack && !personal).then_some(8787);
+                        // Show a new channel the values it will be saved with
+                        // rather than a column of blanks.
+                        editor.channel.progress =
+                            slack.then(|| construct_protocol::SLACK_PROGRESS_DEFAULT.to_string());
+                        editor.channel.follow_up =
+                            slack.then(|| construct_protocol::SLACK_FOLLOW_UP_DEFAULT.to_string());
+                        editor.channel.thread_context = (slack || personal)
+                            .then_some(construct_protocol::SLACK_THREAD_CONTEXT_DEFAULT);
+                        editor.channel.mcp_command = personal.then(String::new);
+                        editor.channel.trigger = personal
+                            .then(|| construct_protocol::SLACK_PERSONAL_TRIGGER_DEFAULT.to_string());
+                        editor.channel.response_mode = personal
+                            .then(|| construct_protocol::SLACK_PERSONAL_RESPONSE_DEFAULT.to_string());
+                        editor.channel.disclosure = personal.then_some(true);
+                        editor.channel.poll_interval_secs =
+                            personal.then_some(construct_protocol::SLACK_PERSONAL_POLL_DEFAULT_SECS);
                         editor.selected_field = 1;
                         editor.note = None;
                     }
                 }
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if (snapshot.channel.kind == "http"
-                    && snapshot.selected_field == HTTP_FIELD_STATE)
-                    || (snapshot.channel.kind == "slack"
-                        && snapshot.selected_field == SLACK_FIELD_STATE) =>
+                if snapshot.selected_field == channel_state_field(&snapshot.channel.kind) =>
             {
                 if let Some(dialog) = self.operator_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
@@ -1964,26 +2063,57 @@ impl App {
                 }
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if snapshot.channel.kind == "slack"
+                if snapshot.channel.kind == "slack-personal"
+                    && snapshot.selected_field == PERSONAL_FIELD_DISCLOSURE =>
+            {
+                if let Some(dialog) = self.operator_dialog.as_mut() {
+                    if let Some(editor) = dialog.channel_editor.as_mut() {
+                        editor.channel.disclosure =
+                            Some(!editor.channel.disclosure.unwrap_or(true));
+                        editor.note = None;
+                    }
+                }
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if (snapshot.channel.kind == "slack"
                     && matches!(
                         snapshot.selected_field,
                         SLACK_FIELD_PROGRESS | SLACK_FIELD_FOLLOW_UP
-                    ) =>
+                    ))
+                    || (snapshot.channel.kind == "slack-personal"
+                        && matches!(
+                            snapshot.selected_field,
+                            PERSONAL_FIELD_TRIGGER | PERSONAL_FIELD_RESPONSE
+                        )) =>
             {
                 // More than two values, so Left has to mean the other way.
                 let forward = key.code != KeyCode::Left;
                 if let Some(dialog) = self.operator_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
-                        if editor.selected_field == SLACK_FIELD_PROGRESS {
-                            editor.channel.progress = Some(cycle_option(
-                                construct_protocol::SLACK_PROGRESS_VALUES,
-                                editor.channel.progress.as_deref(),
+                        if editor.channel.kind == "slack" {
+                            if editor.selected_field == SLACK_FIELD_PROGRESS {
+                                editor.channel.progress = Some(cycle_option(
+                                    construct_protocol::SLACK_PROGRESS_VALUES,
+                                    editor.channel.progress.as_deref(),
+                                    forward,
+                                ));
+                            } else {
+                                editor.channel.follow_up = Some(cycle_option(
+                                    construct_protocol::SLACK_FOLLOW_UP_VALUES,
+                                    editor.channel.follow_up.as_deref(),
+                                    forward,
+                                ));
+                            }
+                        } else if editor.selected_field == PERSONAL_FIELD_TRIGGER {
+                            editor.channel.trigger = Some(cycle_option(
+                                construct_protocol::SLACK_PERSONAL_TRIGGER_VALUES,
+                                editor.channel.trigger.as_deref(),
                                 forward,
                             ));
                         } else {
-                            editor.channel.follow_up = Some(cycle_option(
-                                construct_protocol::SLACK_FOLLOW_UP_VALUES,
-                                editor.channel.follow_up.as_deref(),
+                            editor.channel.response_mode = Some(cycle_option(
+                                construct_protocol::SLACK_PERSONAL_RESPONSE_VALUES,
+                                editor.channel.response_mode.as_deref(),
                                 forward,
                             ));
                         }
