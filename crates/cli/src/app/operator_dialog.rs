@@ -249,10 +249,11 @@ pub(crate) const SLACK_FIELD_STATE: usize = 9;
 /// MCP command (2), Workspaces (3), and Channels (4).
 pub(crate) const PERSONAL_FIELD_TRIGGER: usize = 5;
 pub(crate) const PERSONAL_FIELD_RESPONSE: usize = 6;
-pub(crate) const PERSONAL_FIELD_DISCLOSURE: usize = 7;
-pub(crate) const PERSONAL_FIELD_POLL: usize = 8;
-pub(crate) const PERSONAL_FIELD_THREAD_CONTEXT: usize = 9;
-pub(crate) const PERSONAL_FIELD_STATE: usize = 10;
+pub(crate) const PERSONAL_FIELD_AUTO_AFTER: usize = 7;
+pub(crate) const PERSONAL_FIELD_DISCLOSURE: usize = 8;
+pub(crate) const PERSONAL_FIELD_POLL: usize = 9;
+pub(crate) const PERSONAL_FIELD_THREAD_CONTEXT: usize = 10;
+pub(crate) const PERSONAL_FIELD_STATE: usize = 11;
 const HTTP_FIELD_STATE: usize = 3;
 
 fn channel_field_count(editor: &OperatorChannelDialog) -> usize {
@@ -277,7 +278,7 @@ pub fn channel_field_is_text(kind: &str, field: usize) -> bool {
         "slack" => matches!(field, 2..=5 | SLACK_FIELD_THREAD_CONTEXT),
         "slack-personal" => matches!(
             field,
-            2..=4 | PERSONAL_FIELD_POLL | PERSONAL_FIELD_THREAD_CONTEXT
+            2..=4 | PERSONAL_FIELD_AUTO_AFTER | PERSONAL_FIELD_POLL | PERSONAL_FIELD_THREAD_CONTEXT
         ),
         _ => field == 2,
     }
@@ -844,6 +845,7 @@ impl App {
                 mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
                 attached_to: Some(dialog.operator.name.clone()),
@@ -1236,6 +1238,21 @@ impl App {
             edit(&mut value);
             channel.channel.allowed_channels = split_allowlist(&value);
             channel.channel.allowed_channel_count = channel.channel.allowed_channels.len();
+        } else if kind == "slack-personal" && field == PERSONAL_FIELD_AUTO_AFTER {
+            let mut value = channel
+                .channel
+                .auto_after_secs
+                .map(|secs| secs.to_string())
+                .unwrap_or_default();
+            edit(&mut value);
+            channel.channel.auto_after_secs = if value.is_empty() {
+                None
+            } else {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .or(channel.channel.auto_after_secs)
+            };
         } else if kind == "slack-personal" && field == PERSONAL_FIELD_POLL {
             let mut value = channel
                 .channel
@@ -1318,6 +1335,13 @@ impl App {
         } else if personal
             && editor_snapshot
                 .channel
+                .auto_after_secs
+                .is_some_and(|secs| secs < construct_protocol::SLACK_PERSONAL_AUTO_AFTER_MIN_SECS)
+        {
+            Some("Auto-after delay must be at least 1 second.")
+        } else if personal
+            && editor_snapshot
+                .channel
                 .mcp_command
                 .as_deref()
                 .map(str::trim)
@@ -1371,6 +1395,9 @@ impl App {
                     trigger: personal.then_some(editor_snapshot.channel.trigger).flatten(),
                     response_mode: personal
                         .then_some(editor_snapshot.channel.response_mode)
+                        .flatten(),
+                    auto_after_secs: personal
+                        .then_some(editor_snapshot.channel.auto_after_secs)
                         .flatten(),
                     disclosure: personal
                         .then_some(editor_snapshot.channel.disclosure)
@@ -2139,6 +2166,8 @@ impl App {
                             .then(|| construct_protocol::SLACK_PERSONAL_TRIGGER_DEFAULT.to_string());
                         editor.channel.response_mode = personal
                             .then(|| construct_protocol::SLACK_PERSONAL_RESPONSE_DEFAULT.to_string());
+                        editor.channel.auto_after_secs = personal
+                            .then_some(construct_protocol::SLACK_PERSONAL_AUTO_AFTER_DEFAULT_SECS);
                         editor.channel.disclosure = personal.then_some(true);
                         editor.channel.poll_interval_secs =
                             personal.then_some(construct_protocol::SLACK_PERSONAL_POLL_DEFAULT_SECS);

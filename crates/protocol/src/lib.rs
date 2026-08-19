@@ -3565,6 +3565,8 @@ pub struct OperatorChannelSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_after_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disclosure: Option<bool>,
     /// slack-personal idle polling ceiling in seconds. Accepted activity
     /// temporarily drives the cadence lower before idle sweeps back off.
@@ -4035,6 +4037,10 @@ pub struct OperatorChannelPut {
     pub trigger: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mode: Option<String>,
+    /// Delay used by the `auto-after` response mode. Omitted values preserve
+    /// the stored delay, and new channels use the published default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_after_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disclosure: Option<bool>,
     /// slack-personal idle polling ceiling in seconds. Accepted activity
@@ -4062,6 +4068,7 @@ impl Default for OperatorChannelPut {
             mcp_command: None,
             trigger: None,
             response_mode: None,
+            auto_after_secs: None,
             disclosure: None,
             poll_interval_secs: None,
         }
@@ -4087,11 +4094,13 @@ pub const SLACK_THREAD_CONTEXT_DEFAULT: usize = 50;
 /// through the user's own Slack account (spec 0201), so its options describe
 /// what may enter the operator and how visibly it may answer (spec 0202).
 pub const SLACK_PERSONAL_TRIGGER_VALUES: &[&str] = &["dm", "all"];
-pub const SLACK_PERSONAL_RESPONSE_VALUES: &[&str] = &["draft", "auto"];
+pub const SLACK_PERSONAL_RESPONSE_VALUES: &[&str] = &["draft", "auto", "auto-after"];
 pub const SLACK_PERSONAL_TRIGGER_DEFAULT: &str = "dm";
 /// Draft by default: the human's deliberate send is what makes the words
 /// theirs, which is the safe posture for a channel that speaks as the user.
 pub const SLACK_PERSONAL_RESPONSE_DEFAULT: &str = "draft";
+pub const SLACK_PERSONAL_AUTO_AFTER_DEFAULT_SECS: u64 = 60;
+pub const SLACK_PERSONAL_AUTO_AFTER_MIN_SECS: u64 = 1;
 /// Default ceiling reached after the channel has been idle.
 pub const SLACK_PERSONAL_POLL_DEFAULT_SECS: u64 = 20;
 /// Active polling floor, also protecting the backend from a typo'd `1`.

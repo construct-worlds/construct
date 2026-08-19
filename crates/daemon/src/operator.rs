@@ -282,6 +282,9 @@ pub enum SlackPersonalResponse {
     Draft,
     /// Post directly, disclosed by default.
     Auto,
+    /// Wait for the configured grace period, then post only if the user has
+    /// not answered the thread themself (spec 0202).
+    AutoAfter,
 }
 
 impl SlackPersonalResponse {
@@ -289,6 +292,7 @@ impl SlackPersonalResponse {
         match self {
             Self::Draft => "draft",
             Self::Auto => "auto",
+            Self::AutoAfter => "auto-after",
         }
     }
 
@@ -296,6 +300,7 @@ impl SlackPersonalResponse {
         match value {
             "draft" => Ok(Self::Draft),
             "auto" => Ok(Self::Auto),
+            "auto-after" => Ok(Self::AutoAfter),
             other => Err(unknown_option(
                 "response_mode",
                 other,
@@ -351,6 +356,8 @@ pub struct OperatorChannelConfig {
     pub trigger: Option<SlackPersonalTrigger>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mode: Option<SlackPersonalResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_after_secs: Option<u64>,
     /// Whether an auto-sent reply carries the agent marker. `None` reads as
     /// on: undisclosed impersonation is the failure mode (spec 0202), so it
     /// must be an explicit opt-out.
@@ -383,6 +390,7 @@ impl Default for OperatorChannelConfig {
             mcp_command: None,
             trigger: None,
             response_mode: None,
+            auto_after_secs: None,
             disclosure: None,
             poll_interval_secs: None,
         }
@@ -941,11 +949,12 @@ pub fn put_channel(
             if params.channel.mcp_command.is_some()
                 || params.channel.trigger.is_some()
                 || params.channel.response_mode.is_some()
+                || params.channel.auto_after_secs.is_some()
                 || params.channel.disclosure.is_some()
                 || params.channel.poll_interval_secs.is_some()
             {
                 return Err(anyhow!(
-                    "mcp_command, trigger, response_mode, disclosure, and poll_interval_secs apply to slack-personal channels only"
+                    "mcp_command, trigger, response_mode, auto_after_secs, disclosure, and poll_interval_secs apply to slack-personal channels only"
                 ));
             }
         }
@@ -970,6 +979,14 @@ pub fn put_channel(
                     ));
                 }
             }
+            if let Some(delay) = params.channel.auto_after_secs {
+                if delay < construct_protocol::SLACK_PERSONAL_AUTO_AFTER_MIN_SECS {
+                    return Err(anyhow!(
+                        "auto_after_secs must be at least {}",
+                        construct_protocol::SLACK_PERSONAL_AUTO_AFTER_MIN_SECS
+                    ));
+                }
+            }
         }
         _ => {
             if params.channel.progress.is_some()
@@ -978,6 +995,7 @@ pub fn put_channel(
                 || params.channel.mcp_command.is_some()
                 || params.channel.trigger.is_some()
                 || params.channel.response_mode.is_some()
+                || params.channel.auto_after_secs.is_some()
                 || params.channel.disclosure.is_some()
                 || params.channel.poll_interval_secs.is_some()
             {
@@ -1002,6 +1020,11 @@ pub fn put_channel(
         Some(value) => Some(SlackPersonalResponse::parse(value)?),
         None => existing.as_ref().and_then(|channel| channel.response_mode),
     };
+    let auto_after_secs = params.channel.auto_after_secs.or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|channel| channel.auto_after_secs)
+    });
     let disclosure = params
         .channel
         .disclosure
@@ -1060,6 +1083,7 @@ pub fn put_channel(
         mcp_command,
         trigger,
         response_mode,
+        auto_after_secs,
         disclosure,
         poll_interval_secs,
     };
@@ -1361,6 +1385,11 @@ fn channel_summary(
                 .as_str()
                 .to_string()
         }),
+        auto_after_secs: personal.then(|| {
+            config
+                .auto_after_secs
+                .unwrap_or(construct_protocol::SLACK_PERSONAL_AUTO_AFTER_DEFAULT_SECS)
+        }),
         disclosure: personal.then(|| config.disclosure.unwrap_or(true)),
         poll_interval_secs: personal
             .then(|| config.poll_interval_secs.unwrap_or(SLACK_PERSONAL_POLL_DEFAULT_SECS)),
@@ -1543,6 +1572,11 @@ pub(crate) fn slack_personal_config(
         idle_poll_ceiling: std::time::Duration::from_secs(poll_secs),
         trigger: channel.trigger.unwrap_or_default(),
         response: channel.response_mode.unwrap_or_default(),
+        auto_after: std::time::Duration::from_secs(
+            channel
+                .auto_after_secs
+                .unwrap_or(construct_protocol::SLACK_PERSONAL_AUTO_AFTER_DEFAULT_SECS),
+        ),
         disclosure: channel.disclosure.unwrap_or(true),
         allowed_workspaces: channel.allowed_workspaces.clone(),
         allowed_channels: channel.allowed_channels.clone(),
@@ -2981,6 +3015,9 @@ mod tests {
         for value in FOLLOW_UP_VALUES {
             assert!(SlackFollowUp::parse(value).is_ok(), "{value}");
         }
+        for value in construct_protocol::SLACK_PERSONAL_RESPONSE_VALUES {
+            assert!(SlackPersonalResponse::parse(value).is_ok(), "{value}");
+        }
     }
 
     #[test]
@@ -3069,7 +3106,8 @@ mod tests {
                 kind: "slack-personal".into(),
                 mcp_command: Some("npx my-slack-mcp".into()),
                 trigger: Some("all".into()),
-                response_mode: Some("auto".into()),
+                response_mode: Some("auto-after".into()),
+                auto_after_secs: Some(45),
                 disclosure: Some(false),
                 poll_interval_secs: Some(30),
                 thread_context: Some(10),
@@ -3082,7 +3120,8 @@ mod tests {
         assert_eq!(result.channel.kind, "slack-personal");
         assert_eq!(result.channel.mcp_command.as_deref(), Some("npx my-slack-mcp"));
         assert_eq!(result.channel.trigger.as_deref(), Some("all"));
-        assert_eq!(result.channel.response_mode.as_deref(), Some("auto"));
+        assert_eq!(result.channel.response_mode.as_deref(), Some("auto-after"));
+        assert_eq!(result.channel.auto_after_secs, Some(45));
         assert_eq!(result.channel.disclosure, Some(false));
         assert_eq!(result.channel.poll_interval_secs, Some(30));
         assert_eq!(result.channel.thread_context, Some(10));
@@ -3100,7 +3139,8 @@ mod tests {
         .unwrap();
         assert_eq!(edited.channel.mcp_command.as_deref(), Some("npx my-slack-mcp"));
         assert_eq!(edited.channel.trigger.as_deref(), Some("all"));
-        assert_eq!(edited.channel.response_mode.as_deref(), Some("auto"));
+        assert_eq!(edited.channel.response_mode.as_deref(), Some("auto-after"));
+        assert_eq!(edited.channel.auto_after_secs, Some(45));
         assert_eq!(edited.channel.disclosure, Some(false));
         assert_eq!(edited.channel.poll_interval_secs, Some(30));
     }
@@ -3190,6 +3230,36 @@ mod tests {
     }
 
     #[test]
+    fn auto_after_delay_is_parsed_and_must_be_positive() {
+        let parsed: OperatorChannelConfig = toml::from_str(
+            r#"
+kind = "slack-personal"
+mcp_command = "backend"
+response_mode = "auto-after"
+auto_after_secs = 17
+"#,
+        )
+        .expect("parse delayed response mode");
+        assert_eq!(parsed.response_mode, Some(SlackPersonalResponse::AutoAfter));
+        assert_eq!(parsed.auto_after_secs, Some(17));
+
+        let (_config, operators) = slack_channel_fixture();
+        let error = put_channel(
+            &operators,
+            personal_put(construct_protocol::OperatorChannelPut {
+                id: "me".into(),
+                kind: "slack-personal".into(),
+                mcp_command: Some("cmd".into()),
+                response_mode: Some("auto-after".into()),
+                auto_after_secs: Some(0),
+                ..Default::default()
+            }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("at least 1"), "{error}");
+    }
+
+    #[test]
     fn slack_personal_config_snapshots_the_channel_with_safe_defaults() {
         let channel = OperatorChannelConfig {
             kind: Some("slack-personal".into()),
@@ -3202,6 +3272,7 @@ mod tests {
         // disclosure on (spec 0202).
         assert_eq!(config.trigger, SlackPersonalTrigger::Dm);
         assert_eq!(config.response, SlackPersonalResponse::Draft);
+        assert_eq!(config.auto_after, std::time::Duration::from_secs(60));
         assert!(config.disclosure);
         assert_eq!(
             config.idle_poll_ceiling,

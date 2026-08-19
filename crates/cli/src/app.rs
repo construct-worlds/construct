@@ -42762,6 +42762,7 @@ mod tests {
                 mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
                 attached_to: Some(name.to_string()),
@@ -43267,6 +43268,7 @@ mod tests {
                 mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
                 attached_to: None,
@@ -44511,6 +44513,7 @@ mod tests {
         // disclosure on — shown rather than left as blanks.
         assert_eq!(editor.channel.trigger.as_deref(), Some("dm"));
         assert_eq!(editor.channel.response_mode.as_deref(), Some("draft"));
+        assert_eq!(editor.channel.auto_after_secs, Some(60));
         assert_eq!(editor.channel.disclosure, Some(true));
         assert_eq!(editor.channel.poll_interval_secs, Some(20));
         assert_eq!(editor.channel.mcp_command.as_deref(), Some(""));
@@ -44527,6 +44530,31 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(editor.channel.mcp_command.as_deref(), Some("npx my-slack-mcp"));
+
+        // draft → auto → auto-after, using the protocol-published order.
+        app.operator_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .selected_field = crate::app::operator_dialog::PERSONAL_FIELD_RESPONSE;
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.operator_dialog
+                .as_ref()
+                .unwrap()
+                .channel_editor
+                .as_ref()
+                .unwrap()
+                .channel
+                .response_mode
+                .as_deref(),
+            Some("auto-after")
+        );
         server.abort();
     }
 
@@ -44810,6 +44838,7 @@ mod tests {
                 mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
                 attached_to: None,
@@ -44833,6 +44862,7 @@ mod tests {
                 mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
                 attached_to: Some("other-operator".to_string()),

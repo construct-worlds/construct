@@ -9175,6 +9175,14 @@ pub(crate) fn render_operator_channel_editor(
                 editor.channel.response_mode.clone().unwrap_or_default(),
             ),
             (
+                "Auto-after delay",
+                editor
+                    .channel
+                    .auto_after_secs
+                    .map(|secs| format!("{secs}s"))
+                    .unwrap_or_default(),
+            ),
+            (
                 "Disclosure",
                 if editor.channel.disclosure.unwrap_or(true) {
                     "on".to_string()
@@ -9321,11 +9329,12 @@ pub(crate) fn render_operator_channel_editor(
             3 => ("Workspace allowlist", "Optional comma-separated Slack team IDs. Empty accepts messages from any workspace the backend can see.", "Type workspace IDs separated by commas."),
             4 => ("Channel allowlist", "Channels the operator may read when the trigger is `all`. Unlike the bot kind, empty means no channels at all — only DMs are in scope by default.", "Type channel IDs separated by commas."),
             5 => ("Trigger", "What enters the operator: dm forwards only your direct messages; all also forwards every message in an allowlisted channel. Your own messages trigger it only in your DM with yourself.", "Space or → next · ← previous · applies on save."),
-            6 => ("Response", "How visibly it answers: draft composes the reply in your Slack drafts for you to review and send; auto posts directly — as you.", "Space or → next · ← previous · applies on save."),
-            7 => ("Disclosure", "Whether an auto-sent reply carries a marker telling recipients an agent wrote it. It posts under your name, so turning this off means undisclosed impersonation of you.", "Space or ←/→ toggles · applies on save."),
-            8 => ("Poll interval", "Seconds between sweeps for new messages. Latency is this plus the backend's own lag; there is no push.", "Type a number of seconds, at least 5."),
-            9 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. This is text written by everyone in the thread, put in front of a session that holds tools.", "Type a number up to 1000 · applies on save."),
-            10 => ("State", "Disabled slack-personal channels stop their MCP backend and polling while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
+            6 => ("Response", "How visibly it answers: draft composes a Slack draft; auto posts immediately; auto-after waits the configured grace period and posts only if you have not replied.", "Space or → next · ← previous · applies on save."),
+            7 => ("Auto-after delay", "Seconds auto-after waits once the agent has prepared a reply. At the end it rechecks the thread and yields if you answered first.", "Type a number of seconds, at least 1."),
+            8 => ("Disclosure", "Whether an auto-sent reply carries a marker telling recipients an agent wrote it. It posts under your name, so turning this off means undisclosed impersonation of you.", "Space or ←/→ toggles · applies on save."),
+            9 => ("Idle poll ceiling", "Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling.", "Type a number of seconds, at least 5."),
+            10 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. This is text written by everyone in the thread, put in front of a session that holds tools.", "Type a number up to 1000 · applies on save."),
+            11 => ("State", "Disabled slack-personal channels stop their MCP backend and polling while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
             _ => ("Channel", "", ""),
         }
     } else if editor.channel.kind == "slack" {
