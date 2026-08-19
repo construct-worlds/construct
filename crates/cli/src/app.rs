@@ -42763,6 +42763,7 @@ mod tests {
                 trigger: None,
                 response_mode: None,
                 response_mode_overrides: None,
+                auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
                 attached_to: Some(name.to_string()),
@@ -43269,6 +43270,7 @@ mod tests {
                 trigger: None,
                 response_mode: None,
                 response_mode_overrides: None,
+                auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
                 attached_to: None,
@@ -44518,6 +44520,7 @@ mod tests {
             Some(std::collections::BTreeMap::new())
         );
         assert!(editor.response_mode_overrides.is_empty());
+        assert_eq!(editor.channel.auto_after_secs, Some(60));
         assert_eq!(editor.channel.disclosure, Some(true));
         assert_eq!(editor.channel.poll_interval_secs, Some(20));
         assert_eq!(editor.channel.mcp_command.as_deref(), Some(""));
@@ -44534,6 +44537,31 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(editor.channel.mcp_command.as_deref(), Some("npx my-slack-mcp"));
+
+        // draft → auto → auto-after, using the protocol-published order.
+        app.operator_dialog
+            .as_mut()
+            .unwrap()
+            .channel_editor
+            .as_mut()
+            .unwrap()
+            .selected_field = crate::app::operator_dialog::PERSONAL_FIELD_RESPONSE;
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.operator_dialog
+                .as_ref()
+                .unwrap()
+                .channel_editor
+                .as_ref()
+                .unwrap()
+                .channel
+                .response_mode
+                .as_deref(),
+            Some("auto-after")
+        );
         server.abort();
     }
 
@@ -44544,18 +44572,18 @@ mod tests {
         };
 
         let expected = std::collections::BTreeMap::from([
-            ("C-sensitive".to_string(), "draft".to_string()),
+            ("C-sensitive".to_string(), "auto-after".to_string()),
             ("D-Private".to_string(), "auto".to_string()),
         ]);
         let text = format_response_mode_overrides(Some(&expected));
-        assert_eq!(text, "C-sensitive=draft,D-Private=auto");
+        assert_eq!(text, "C-sensitive=auto-after,D-Private=auto");
         assert_eq!(parse_response_mode_overrides(&text), Ok(expected));
         assert!(parse_response_mode_overrides("C1=auto,C1=draft")
             .unwrap_err()
             .contains("duplicate"));
         assert!(parse_response_mode_overrides("C1=unknown")
             .unwrap_err()
-            .contains("draft or auto"));
+            .contains("draft or auto or auto-after"));
     }
 
     #[tokio::test]
@@ -44639,7 +44667,7 @@ mod tests {
             editor.channel.mcp_command = Some("fake-mcp".into());
             editor.channel.trigger = Some("dm".into());
             editor.channel.response_mode = Some("draft".into());
-            editor.response_mode_overrides = "C-sensitive=auto,D-Private=draft".into();
+            editor.response_mode_overrides = "C-sensitive=auto-after,D-Private=draft".into();
         }
 
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -44648,13 +44676,13 @@ mod tests {
         assert_eq!(
             params.channel.response_mode_overrides,
             Some(std::collections::BTreeMap::from([
-                ("C-sensitive".into(), "auto".into()),
+                ("C-sensitive".into(), "auto-after".into()),
                 ("D-Private".into(), "draft".into()),
             ]))
         );
         assert_eq!(
             channel_editor(&app).response_mode_overrides,
-            "C-sensitive=auto,D-Private=draft",
+            "C-sensitive=auto-after,D-Private=draft",
             "the daemon summary is formatted back into the editor"
         );
         server.abort();
@@ -44941,6 +44969,7 @@ mod tests {
                 trigger: None,
                 response_mode: None,
                 response_mode_overrides: None,
+                auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
                 attached_to: None,
@@ -44965,6 +44994,7 @@ mod tests {
                 trigger: None,
                 response_mode: None,
                 response_mode_overrides: None,
+                auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
                 attached_to: Some("other-operator".to_string()),

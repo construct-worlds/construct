@@ -57,9 +57,10 @@ async fn web_operator_editor_round_trips_slack_personal_response_mode_overrides(
                 mcp_command: Some("fake-mcp".into()),
                 response_mode: Some("draft".into()),
                 response_mode_overrides: Some(std::collections::BTreeMap::from([
-                    ("C-sensitive".into(), "auto".into()),
+                    ("C-sensitive".into(), "auto-after".into()),
                     ("D-Private".into(), "draft".into()),
                 ])),
+                auto_after_secs: Some(45),
                 ..Default::default()
             },
             rotate_secret: false,
@@ -118,7 +119,14 @@ async fn web_operator_editor_round_trips_slack_personal_response_mode_overrides(
         .expect("read override input")
         .into_value()
         .expect("override text");
-    assert_eq!(initial, "C-sensitive=auto,D-Private=draft");
+    assert_eq!(initial, "C-sensitive=auto-after,D-Private=draft");
+    let initial_delay: String = page
+        .evaluate("document.querySelector('[data-channel-field=auto_after_secs]')?.value || ''")
+        .await
+        .expect("read auto-after delay")
+        .into_value()
+        .expect("auto-after delay text");
+    assert_eq!(initial_delay, "45");
 
     let validation_error: String = page
         .evaluate(
@@ -138,7 +146,7 @@ async fn web_operator_editor_round_trips_slack_personal_response_mode_overrides(
         .into_value()
         .expect("validation text");
     assert!(
-        validation_error.contains("must be draft or auto"),
+        validation_error.contains("must be draft or auto or auto-after"),
         "unexpected web validation: {validation_error}"
     );
 
@@ -146,7 +154,7 @@ async fn web_operator_editor_round_trips_slack_personal_response_mode_overrides(
         r#"
         (() => {
           const input = document.querySelector('[data-channel-field=response_mode_overrides_text]');
-          input.value = 'C-sensitive=draft,D-Private=auto';
+          input.value = 'C-sensitive=draft,D-Private=auto-after';
           input.dispatchEvent(new Event('input', { bubbles: true }));
           document.querySelector('[data-channel-save]').click();
         })()
@@ -168,7 +176,7 @@ async fn web_operator_editor_round_trips_slack_personal_response_mode_overrides(
             .and_then(|channel| channel.response_mode_overrides.as_ref());
         if overrides.is_some_and(|overrides| {
             overrides.get("C-sensitive").map(String::as_str) == Some("draft")
-                && overrides.get("D-Private").map(String::as_str) == Some("auto")
+                && overrides.get("D-Private").map(String::as_str) == Some("auto-after")
         }) {
             break;
         }
@@ -182,7 +190,7 @@ async fn web_operator_editor_round_trips_slack_personal_response_mode_overrides(
         .expect("read round-tripped override input")
         .into_value()
         .expect("override text");
-    assert_eq!(round_tripped, "C-sensitive=draft,D-Private=auto");
+    assert_eq!(round_tripped, "C-sensitive=draft,D-Private=auto-after");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

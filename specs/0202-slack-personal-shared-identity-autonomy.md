@@ -38,8 +38,9 @@ Auto-send carries two options:
 - **Disclosure**, default on: an automatic reply carries a marker (a
   signature line or reaction) telling recipients an agent wrote it.
   Turning disclosure off is an explicit, per-scope choice.
-- **Grace period**: auto-send waits a configured time and yields silently
-  if the human has already replied in the thread themself.
+- **Grace period**: auto-send may be immediate or use the `auto-after` mode,
+  which waits a configured number of seconds and yields silently if the human
+  has already replied in the thread themself.
 
 Approvals never move into Slack: rung 4 uses Construct's existing approval
 surfaces, and no Slack message can approve anything.

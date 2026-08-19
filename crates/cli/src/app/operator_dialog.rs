@@ -253,10 +253,11 @@ pub(crate) const SLACK_FIELD_STATE: usize = 9;
 pub(crate) const PERSONAL_FIELD_TRIGGER: usize = 5;
 pub(crate) const PERSONAL_FIELD_RESPONSE: usize = 6;
 pub(crate) const PERSONAL_FIELD_RESPONSE_OVERRIDES: usize = 7;
-pub(crate) const PERSONAL_FIELD_DISCLOSURE: usize = 8;
-pub(crate) const PERSONAL_FIELD_POLL: usize = 9;
-pub(crate) const PERSONAL_FIELD_THREAD_CONTEXT: usize = 10;
-pub(crate) const PERSONAL_FIELD_STATE: usize = 11;
+pub(crate) const PERSONAL_FIELD_AUTO_AFTER: usize = 8;
+pub(crate) const PERSONAL_FIELD_DISCLOSURE: usize = 9;
+pub(crate) const PERSONAL_FIELD_POLL: usize = 10;
+pub(crate) const PERSONAL_FIELD_THREAD_CONTEXT: usize = 11;
+pub(crate) const PERSONAL_FIELD_STATE: usize = 12;
 const HTTP_FIELD_STATE: usize = 3;
 
 fn channel_field_count(editor: &OperatorChannelDialog) -> usize {
@@ -283,6 +284,7 @@ pub fn channel_field_is_text(kind: &str, field: usize) -> bool {
             field,
             2..=4
                 | PERSONAL_FIELD_RESPONSE_OVERRIDES
+                | PERSONAL_FIELD_AUTO_AFTER
                 | PERSONAL_FIELD_POLL
                 | PERSONAL_FIELD_THREAD_CONTEXT
         ),
@@ -896,6 +898,7 @@ impl App {
                 trigger: None,
                 response_mode: None,
                 response_mode_overrides: None,
+                auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
                 attached_to: Some(dialog.operator.name.clone()),
@@ -1294,6 +1297,21 @@ impl App {
             channel.channel.allowed_channel_count = channel.channel.allowed_channels.len();
         } else if kind == "slack-personal" && field == PERSONAL_FIELD_RESPONSE_OVERRIDES {
             edit(&mut channel.response_mode_overrides);
+        } else if kind == "slack-personal" && field == PERSONAL_FIELD_AUTO_AFTER {
+            let mut value = channel
+                .channel
+                .auto_after_secs
+                .map(|secs| secs.to_string())
+                .unwrap_or_default();
+            edit(&mut value);
+            channel.channel.auto_after_secs = if value.is_empty() {
+                None
+            } else {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .or(channel.channel.auto_after_secs)
+            };
         } else if kind == "slack-personal" && field == PERSONAL_FIELD_POLL {
             let mut value = channel
                 .channel
@@ -1378,6 +1396,13 @@ impl App {
         } else if personal
             && editor_snapshot
                 .channel
+                .auto_after_secs
+                .is_some_and(|secs| secs < construct_protocol::SLACK_PERSONAL_AUTO_AFTER_MIN_SECS)
+        {
+            Some("Auto-after delay must be at least 1 second.".into())
+        } else if personal
+            && editor_snapshot
+                .channel
                 .mcp_command
                 .as_deref()
                 .map(str::trim)
@@ -1437,6 +1462,9 @@ impl App {
                     response_mode_overrides: personal.then_some(
                         parsed_response_mode_overrides.unwrap_or_default(),
                     ),
+                    auto_after_secs: personal
+                        .then_some(editor_snapshot.channel.auto_after_secs)
+                        .flatten(),
                     disclosure: personal
                         .then_some(editor_snapshot.channel.disclosure)
                         .flatten(),
@@ -2210,6 +2238,8 @@ impl App {
                         editor.channel.response_mode_overrides =
                             personal.then(std::collections::BTreeMap::new);
                         editor.response_mode_overrides.clear();
+                        editor.channel.auto_after_secs = personal
+                            .then_some(construct_protocol::SLACK_PERSONAL_AUTO_AFTER_DEFAULT_SECS);
                         editor.channel.disclosure = personal.then_some(true);
                         editor.channel.poll_interval_secs =
                             personal.then_some(construct_protocol::SLACK_PERSONAL_POLL_DEFAULT_SECS);

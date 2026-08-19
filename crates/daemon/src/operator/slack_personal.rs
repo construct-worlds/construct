@@ -18,7 +18,7 @@
 //!   `is_self` marks the account owner's own messages; `is_self_dm` marks the
 //!   owner's DM with themself.
 //! - `slack_read_thread {channel, thread_ts, limit}` →
-//!   `{"messages": [{"user", "text", "ts"}]}` oldest first.
+//!   `{"messages": [{"user", "text", "ts", "is_self"}]}` oldest first.
 //! - `slack_send_message {channel, thread_ts, text}` → `{"ts"}`.
 //! - `slack_create_draft {channel, thread_ts, text}` → `{}`.
 //!
@@ -49,6 +49,7 @@ pub(crate) struct SlackPersonalConfig {
     pub(super) trigger: SlackPersonalTrigger,
     pub(super) default_response: SlackPersonalResponse,
     pub(super) response_overrides: BTreeMap<String, SlackPersonalResponse>,
+    pub(super) auto_after: std::time::Duration,
     pub(super) disclosure: bool,
     pub(super) allowed_workspaces: Vec<String>,
     pub(super) allowed_channels: Vec<String>,
@@ -484,7 +485,12 @@ async fn resolve_delivery(
     }
     match reply {
         Ok(reply) => {
-            if let Err(error) = deliver_reply(config, backend, sent, &trace, &reply).await {
+            if let Err(error) = deliver_reply(config, cancel, backend, sent, &trace, &reply).await {
+                if cancel.is_cancelled() {
+                    // Keep the outstanding record: a replacement channel task
+                    // can resume the completed turn and restart its grace wait.
+                    return Err(error);
+                }
                 tracing::warn!(%error, "slack-personal reply delivery failed");
             }
         }
@@ -503,14 +509,15 @@ async fn resolve_delivery(
 
 async fn deliver_reply(
     config: &SlackPersonalConfig,
+    cancel: &CancellationToken,
     backend: &Backend,
     sent: &SentRegistry,
     trace: &PersonalTrace,
     reply: &str,
 ) -> Result<()> {
-    let client = backend.get()?;
     match config.response_for_channel(&trace.channel) {
         SlackPersonalResponse::Draft => {
+            let client = backend.get()?;
             client
                 .call_tool(
                     "slack_create_draft",
@@ -524,30 +531,99 @@ async fn deliver_reply(
                 .context("create Slack draft")?;
         }
         SlackPersonalResponse::Auto => {
-            let text = if config.disclosure {
-                format!("{reply}{DISCLOSURE_SUFFIX}")
+            let client = backend.get()?;
+            send_auto_reply(config, &client, sent, trace, reply).await?;
+        }
+        SlackPersonalResponse::AutoAfter => {
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(anyhow!("channel stopped")),
+                _ = tokio::time::sleep(config.auto_after) => {}
+            }
+            // Resolve the backend after the wait so reconnecting during the
+            // grace period does not leave this delivery on a dead process.
+            let client = backend.get()?;
+            if user_replied_after(&client, trace).await? {
+                tracing::info!(
+                    channel = %trace.channel,
+                    thread_ts = %trace.thread_ts,
+                    trigger_ts = %trace.message_ts,
+                    "slack-personal delayed reply yielded to the user's reply"
+                );
             } else {
-                reply.to_string()
-            };
-            let result = client
-                .call_tool(
-                    "slack_send_message",
-                    json!({
-                        "channel": trace.channel,
-                        "thread_ts": trace.thread_ts,
-                        "text": text,
-                    }),
-                )
-                .await
-                .context("send Slack message")?;
-            if let Some(ts) = result.get("ts").and_then(|value| value.as_str()) {
-                sent.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(format!("{}:{ts}", trace.channel));
+                send_auto_reply(config, &client, sent, trace, reply).await?;
             }
         }
     }
     Ok(())
+}
+
+async fn send_auto_reply(
+    config: &SlackPersonalConfig,
+    client: &McpClient,
+    sent: &SentRegistry,
+    trace: &PersonalTrace,
+    reply: &str,
+) -> Result<()> {
+    let text = if config.disclosure {
+        format!("{reply}{DISCLOSURE_SUFFIX}")
+    } else {
+        reply.to_string()
+    };
+    let result = client
+        .call_tool(
+            "slack_send_message",
+            json!({
+                "channel": trace.channel,
+                "thread_ts": trace.thread_ts,
+                "text": text,
+            }),
+        )
+        .await
+        .context("send Slack message")?;
+    if let Some(ts) = result.get("ts").and_then(|value| value.as_str()) {
+        sent.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(format!("{}:{ts}", trace.channel));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct GraceMessage {
+    #[serde(default)]
+    ts: String,
+    #[serde(default)]
+    is_self: bool,
+}
+
+/// Re-read the thread after the grace period. The account owner's own
+/// message wins the race: this operator is a backstop, not a competitor.
+async fn user_replied_after(client: &McpClient, trace: &PersonalTrace) -> Result<bool> {
+    let result = client
+        .call_tool(
+            "slack_read_thread",
+            json!({
+                "channel": trace.channel,
+                "thread_ts": trace.thread_ts,
+                "limit": construct_protocol::SLACK_THREAD_CONTEXT_MAX,
+            }),
+        )
+        .await
+        .context("check Slack thread before delayed send")?;
+    let messages: Vec<GraceMessage> = result
+        .get("messages")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .context("parse Slack thread before delayed send")?
+        .unwrap_or_default();
+    Ok(has_user_reply_after(&messages, &trace.message_ts))
+}
+
+fn has_user_reply_after(messages: &[GraceMessage], trigger_ts: &str) -> bool {
+    messages
+        .iter()
+        .any(|message| message.is_self && ts_after(&message.ts, trigger_ts))
 }
 
 /// Finish deliveries accepted before a restart. Resumable waits are picked
@@ -634,6 +710,32 @@ fn ts_after(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
 
+    async fn backend_with_thread(
+        messages: serde_json::Value,
+    ) -> (Backend, Arc<Mutex<Vec<String>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let (reader, writer) = super::super::mcp::fake_server(move |name, _| {
+            recorded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(name.to_string());
+            match name {
+                "slack_read_thread" => {
+                    super::super::mcp::text_result(json!({"messages": messages.clone()}))
+                }
+                "slack_send_message" => super::super::mcp::text_result(json!({"ts": "9.000001"})),
+                other => panic!("unexpected tool {other}"),
+            }
+        });
+        let client = McpClient::connect(reader, writer, None)
+            .await
+            .expect("connect fake MCP backend");
+        let backend = Backend::default();
+        backend.set(Arc::new(client));
+        (backend, calls)
+    }
+
     fn config() -> SlackPersonalConfig {
         SlackPersonalConfig {
             mcp_command: "fake".into(),
@@ -641,6 +743,7 @@ mod tests {
             trigger: SlackPersonalTrigger::Dm,
             default_response: SlackPersonalResponse::Draft,
             response_overrides: BTreeMap::new(),
+            auto_after: std::time::Duration::from_secs(60),
             disclosure: true,
             allowed_workspaces: Vec::new(),
             allowed_channels: Vec::new(),
@@ -732,26 +835,27 @@ mod tests {
     #[test]
     fn channel_response_mode_overrides_the_default_only_for_an_exact_match() {
         let mut config = config();
-        config.default_response = SlackPersonalResponse::Auto;
+        config.default_response = SlackPersonalResponse::Draft;
         config
             .response_overrides
-            .insert("C-sensitive".into(), SlackPersonalResponse::Draft);
+            .insert("C-sensitive".into(), SlackPersonalResponse::AutoAfter);
         config
             .response_overrides
             .insert("D-private".into(), SlackPersonalResponse::Auto);
 
         assert_eq!(
             config.response_for_channel("C-sensitive"),
-            SlackPersonalResponse::Draft
+            SlackPersonalResponse::AutoAfter,
+            "an exact CHANNEL=auto-after override wins over the global default"
         );
         assert_eq!(
             config.response_for_channel("C-other"),
-            SlackPersonalResponse::Auto,
+            SlackPersonalResponse::Draft,
             "channels without an override inherit the global response mode"
         );
         assert_eq!(
             config.response_for_channel("c-sensitive"),
-            SlackPersonalResponse::Auto,
+            SlackPersonalResponse::Draft,
             "Slack channel IDs are exact, case-sensitive keys"
         );
         assert_eq!(
@@ -894,6 +998,79 @@ mod tests {
         let mut empty = message("D1", "2.0");
         empty.text = "   ".into();
         assert!(!accepts(&config(), &empty));
+    }
+
+    #[tokio::test]
+    async fn auto_after_waits_then_rechecks_and_sends() {
+        let (backend, calls) = backend_with_thread(json!([
+            {"ts": "1.9", "is_self": true},
+            {"ts": "2.1", "is_self": false}
+        ]))
+        .await;
+        let mut config = config();
+        config.default_response = SlackPersonalResponse::AutoAfter;
+        config.auto_after = std::time::Duration::from_millis(30);
+        config.disclosure = false;
+        let sent = SentRegistry::default();
+        let trace = PersonalTrace {
+            channel: "D1".into(),
+            thread_ts: "1.0".into(),
+            message_ts: "2.0".into(),
+        };
+        let cancel = CancellationToken::new();
+        let mut delivery = Box::pin(deliver_reply(
+            &config, &cancel, &backend, &sent, &trace, "answer",
+        ));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(5), delivery.as_mut())
+                .await
+                .is_err(),
+            "auto-after must not touch Slack before its deadline"
+        );
+        assert!(calls.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+
+        delivery.await.expect("delayed delivery");
+        assert_eq!(
+            *calls.lock().unwrap_or_else(|e| e.into_inner()),
+            ["slack_read_thread", "slack_send_message"]
+        );
+        assert!(sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains("D1:9.000001"));
+    }
+
+    #[tokio::test]
+    async fn auto_after_yields_when_the_user_answers_first() {
+        let (backend, calls) =
+            backend_with_thread(json!([{"ts": "2.000001", "is_self": true}])).await;
+        let mut config = config();
+        config.default_response = SlackPersonalResponse::AutoAfter;
+        config.auto_after = std::time::Duration::from_millis(1);
+        let sent = SentRegistry::default();
+        let trace = PersonalTrace {
+            channel: "D1".into(),
+            thread_ts: "1.0".into(),
+            message_ts: "2.0".into(),
+        };
+
+        deliver_reply(
+            &config,
+            &CancellationToken::new(),
+            &backend,
+            &sent,
+            &trace,
+            "answer",
+        )
+        .await
+        .expect("grace check");
+
+        assert_eq!(
+            *calls.lock().unwrap_or_else(|e| e.into_inner()),
+            ["slack_read_thread"]
+        );
+        assert!(sent.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
     }
 
     #[test]
