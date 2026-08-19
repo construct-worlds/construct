@@ -829,6 +829,7 @@ impl App {
             // Tab / Shift-Tab nest and un-nest the current markdown list
             // item(s). They operate on every list line the selection spans, or
             // just the cursor's line when there is no selection.
+            KeyCode::Tab if shift && !ctrl && !alt => self.shift_playbook_indent(true),
             KeyCode::Tab if !ctrl && !alt => self.shift_playbook_indent(false),
             KeyCode::BackTab if !ctrl && !alt => self.shift_playbook_indent(true),
             KeyCode::Char(c) if ctrl_char.is_none() && !ctrl && !alt => {
@@ -1190,19 +1191,44 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let super_mod = key.modifiers.contains(KeyModifiers::SUPER);
         let ctrl_char = Self::normalized_ctrl_char(key);
+        let menu_open = self
+            .playbook_popup
+            .as_ref()
+            .and_then(|popup| popup.selection_menu.as_ref())
+            .is_some();
         let menu_focused = self
             .playbook_popup
             .as_ref()
             .and_then(|popup| popup.selection_menu.as_ref())
             .is_some_and(|menu| menu.focused);
+
+        // Esc peels off the transient menu before it cancels the selection.
+        // Keeping these as separate states lets the next Tab reach the
+        // editor's selected-list indentation command; a subsequent Esc then
+        // falls through to the normal selection-cancel path (spec 0196).
+        if menu_open && matches!(key.code, KeyCode::Esc) {
+            if let Some(popup) = self.playbook_popup.as_mut() {
+                popup.selection_menu = None;
+            }
+            self.layout.playbook_selection_run_hit = None;
+            self.layout.playbook_selection_verb_hits.clear();
+            self.set_status("playbook selection menu dismissed".to_string());
+            return true;
+        }
+
         if !menu_focused {
-            // C-o focuses the menu (advertised on its unfocused frame). It
-            // must NOT be Tab: while the menu is merely shown the editor's
-            // own keymap keeps working, and Tab / S-Tab there nest and
-            // un-nest every list line the selection spans (spec 0094) —
-            // claiming Tab here made multi-line indent unreachable while
-            // leaving S-Tab live, an asymmetry reported as issue #1106.
-            if ctrl_char == Some('o') && !alt && !super_mod {
+            // Bare Tab enters a visible menu. Once Esc has dismissed the
+            // menu, Tab reaches the editor and indents the still-selected
+            // list lines. C-o remains a compatibility alias and can reopen a
+            // dismissed menu without disturbing the selection (spec 0196).
+            let tab_focus = menu_open
+                && matches!(key.code, KeyCode::Tab)
+                && !ctrl
+                && !alt
+                && !super_mod
+                && !key.modifiers.contains(KeyModifiers::SHIFT);
+            let ctrl_o_focus = ctrl_char == Some('o') && !alt && !super_mod;
+            if tab_focus || ctrl_o_focus {
                 let Some(popup) = self.playbook_popup.as_mut() else {
                     return true;
                 };
@@ -1224,15 +1250,6 @@ impl App {
             .is_some_and(|menu| menu.selected_action == PlaybookSelectionAction::Comment);
 
         match key.code {
-            KeyCode::Esc => {
-                if let Some(menu) = self
-                    .playbook_popup
-                    .as_mut()
-                    .and_then(|popup| popup.selection_menu.as_mut())
-                {
-                    menu.focused = false;
-                }
-            }
             _ if ctrl_char == Some('g') => {
                 if let Some(popup) = self.playbook_popup.as_mut() {
                     popup.selection = None;
@@ -1244,6 +1261,9 @@ impl App {
             }
             KeyCode::Up => self.move_playbook_selection_action(-1),
             KeyCode::Down => self.move_playbook_selection_action(1),
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.move_playbook_selection_action(-1)
+            }
             KeyCode::Tab => self.move_playbook_selection_action(1),
             KeyCode::BackTab => self.move_playbook_selection_action(-1),
             KeyCode::Enter => {
