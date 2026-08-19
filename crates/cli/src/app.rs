@@ -52,7 +52,8 @@ pub use configure::{
     ConfigurePopup, ConfigureTab, CONFIGURE_TABS,
 };
 pub use operator_dialog::{
-    OperatorChannelAction, OperatorChannelActionAddress, OperatorChannelActions, OperatorChannelDialog,
+    channel_field_is_text, operator_field_is_text, OperatorChannelAction,
+    OperatorChannelActionAddress, OperatorChannelActions, OperatorChannelDialog,
     OperatorChannelDialogMode, OperatorDialog, OperatorDialogFocus, OperatorDialogMode,
     OperatorDialogPickerKind, OPERATOR_FIELD_COUNT, OPERATOR_PICKER_VISIBLE_ROWS,
 };
@@ -42990,13 +42991,22 @@ mod tests {
             app.operator_dialog.as_ref().map(|dialog| dialog.mode),
             Some(OperatorDialogMode::Create)
         ));
-        assert_eq!(app.selection, Selection::Operator("operator".into()));
+        // The draft's name starts empty (its suggestion is a placeholder),
+        // and the pane binds to the draft by that empty name until typing
+        // renames it keystroke by keystroke.
+        assert_eq!(app.selection, Selection::Operator(String::new()));
+        assert_eq!(
+            app.operator_dialog
+                .as_ref()
+                .map(|dialog| dialog.name_placeholder.as_str()),
+            Some("operator")
+        );
         assert_eq!(app.focus, PaneFocus::View);
         server.abort();
     }
 
     #[tokio::test]
-    async fn new_picker_operator_action_asks_for_name_then_opens_a_focused_draft() {
+    async fn new_picker_operator_action_opens_a_draft_with_a_name_placeholder() {
         let (mut app, _dir, server) = captured_app().await;
         app.run_slash_command("serve demo").await;
         assert_eq!(
@@ -43010,52 +43020,92 @@ mod tests {
         app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
 
-        let name_prompt = app.prompt.as_mut().expect("operator name prompt");
-        assert_eq!(name_prompt.prompt, "Operator name: ");
-        assert!(matches!(name_prompt.intent, PromptIntent::NewOperatorName));
-        name_prompt.input = "triage".into();
-        name_prompt.cursor = name_prompt.input.len();
-        app.handle_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .await;
-
-        assert!(app.prompt.is_none(), "submitting the name closes the prompt");
-        assert_eq!(app.selection, Selection::Operator("triage".into()));
+        // No name prompt: the draft editor opens straight away, the Name
+        // field is empty, and its suggestion is a placeholder — typed content
+        // and suggested content are visually and semantically distinct.
+        assert!(app.prompt.is_none(), "the picker action opens the editor directly");
+        assert_eq!(app.selection, Selection::Operator(String::new()));
         assert_eq!(app.focus, PaneFocus::View);
-        assert!(matches!(
-            app.operator_dialog.as_ref().map(|dialog| dialog.mode),
-            Some(OperatorDialogMode::Create)
-        ));
-
-        // Creation names cannot silently replace an existing operator.
-        app.operators.push(operator_summary_for_test("existing"));
-        app.run_prompt_submit(PromptIntent::NewOperatorName, "existing".into())
-            .await;
-        assert_eq!(
-            app.status.as_ref().map(|(status, _)| status.as_str()),
-            Some("operator 'existing' already exists")
-        );
-
-        // Typing lands in the editor's Name field, not anywhere else, and the
-        // pane keeps following the name it is being given.
-        app.on_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
-            .await;
-        assert_eq!(
-            app.operator_dialog
-                .as_ref()
-                .map(|dialog| dialog.operator.name.as_str()),
-            Some("triage2")
-        );
-        assert_eq!(app.selection, Selection::Operator("triage2".into()));
+        let dialog = app.operator_dialog.as_ref().expect("draft editor");
+        assert!(matches!(dialog.mode, OperatorDialogMode::Create));
+        assert_eq!(dialog.operator.name, "");
+        assert_eq!(dialog.name_placeholder, "operator");
+        assert_eq!(dialog.focus, OperatorDialogFocus::Field(0));
         let backend = ratatui::backend::TestBackend::new(120, 40);
         let mut term = ratatui::Terminal::new(backend).expect("terminal");
         app.session_transitions.clear();
         term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
         let text = rendered_text(term.backend().buffer());
-        assert!(text.contains("operator: triage2*"), "{text}");
+        assert!(
+            text.contains("operator: operator*"),
+            "the title borrows the placeholder while the name is empty: {text}"
+        );
+
+        // Typing lands in the editor's Name field, not anywhere else, and the
+        // pane keeps following the name it is being given.
+        for ch in "triage".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
+        }
+        assert_eq!(
+            app.operator_dialog
+                .as_ref()
+                .map(|dialog| dialog.operator.name.as_str()),
+            Some("triage")
+        );
+        assert_eq!(app.selection, Selection::Operator("triage".into()));
+        app.session_transitions.clear();
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let text = rendered_text(term.backend().buffer());
+        assert!(text.contains("operator: triage*"), "{text}");
         assert!(
             !text.contains("no longer available"),
             "renaming a draft must not orphan its pane: {text}"
         );
+
+        // Creation names cannot silently replace an existing operator — the
+        // check the retired name prompt used to make now happens at save.
+        app.operators.push(operator_summary_for_test("triage"));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.operator_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.note.as_deref()),
+            Some("operator 'triage' already exists")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_draft_saved_without_typing_adopts_its_name_placeholder() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.open_new_operator_view("operator");
+        assert_eq!(
+            app.operator_dialog.as_ref().map(|d| d.operator.name.as_str()),
+            Some("")
+        );
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        // Whatever the save round-trip did, the untyped name became the
+        // suggested one before validation ran — never an empty-name error —
+        // and the pane's binding followed it.
+        let dialog = app.operator_dialog.as_ref().expect("editor stays open");
+        assert_eq!(dialog.operator.name, "operator");
+        assert_ne!(
+            dialog.note.as_deref(),
+            Some("Name must be 1–32 lowercase letters, digits, or interior hyphens."),
+        );
+        assert_eq!(app.selection, Selection::Operator("operator".into()));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_taken_suggestion_moves_to_the_next_free_name() {
+        let (mut app, _dir, server) = captured_app().await;
+        assert_eq!(app.suggested_operator_name(), "operator");
+        app.operators.push(operator_summary_for_test("operator"));
+        assert_eq!(app.suggested_operator_name(), "operator-2");
         server.abort();
     }
 
@@ -44273,9 +44323,73 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(editor.mode, OperatorChannelDialogMode::Create);
-        assert_eq!(editor.channel.id, "http-2");
+        // The ID starts empty; the suggested next free ID is its placeholder.
+        assert_eq!(editor.channel.id, "");
+        assert_eq!(editor.id_placeholder, "http-2");
         assert_eq!(editor.channel.port, Some(8788));
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_channel_saved_without_typing_adopts_its_id_placeholder() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = app.operators[0].channels.clone();
+        app.open_edit_operator_view("assistant");
+        app.open_new_operator_channel();
+        assert_eq!(channel_editor(&app).channel.id, "");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        // Whatever the save round-trip did, the untyped ID became the
+        // suggested one before validation ran — never an empty-ID error.
+        let editor = channel_editor(&app);
+        assert_eq!(editor.channel.id, editor.id_placeholder);
+        assert_ne!(
+            editor.note.as_deref(),
+            Some("Channel ID must be 1–32 lowercase letters, digits, or interior hyphens."),
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn channel_editor_shows_the_id_placeholder_dimmed_and_underlines_the_input() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = app.operators[0].channels.clone();
+        app.open_edit_operator_view("assistant");
+        app.open_new_operator_channel();
+        let placeholder = channel_editor(&app).id_placeholder.clone();
+        assert!(!placeholder.is_empty());
+        app.session_transitions.clear();
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("draw");
+        let buffer = term.backend().buffer();
+        let text = rendered_text(buffer);
+        assert!(
+            text.contains(&placeholder),
+            "the empty ID shows its suggestion: {text}"
+        );
+        // The selected ID row is a free-text input, so its value area is
+        // underlined — that is what marks "type here" among rows that cycle.
+        let area = *buffer.area();
+        let mut underlined_dim_cells = 0usize;
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let cell = &buffer[(x, y)];
+                if cell
+                    .modifier
+                    .contains(ratatui::style::Modifier::UNDERLINED)
+                {
+                    underlined_dim_cells += 1;
+                }
+            }
+        }
+        assert!(
+            underlined_dim_cells >= placeholder.len(),
+            "the selected text field renders an underlined input area"
+        );
         server.abort();
     }
 
