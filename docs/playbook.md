@@ -57,6 +57,11 @@ IME) with the same capabilities, plus `Ctrl+S` to save, `Ctrl+F` for
 Emacs-style cursor-forward (click the Find button to search), and
 `Ctrl+Enter` to run.
 
+Triple-backtick code fences remain fully visible and editable in the TUI. The
+fence delimiters are dimmed and the body is code-styled, while Markdown syntax,
+smart clips, attachments, and action links inside the fence stay literal and
+non-interactive.
+
 ## Smart clips
 
 Smart clips are typed references stored as plain Markdown:

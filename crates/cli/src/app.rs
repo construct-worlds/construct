@@ -3328,21 +3328,17 @@ pub(crate) fn playbook_blocks(markdown: &str) -> Vec<PlaybookBlock> {
         .collect()
 }
 
-/// Session ids referenced by `@{session:…}` smart clips anywhere in `markdown`,
+/// Session ids referenced by active `@{session:…}` smart clips in `markdown`,
 /// in first-seen order and deduplicated. Used to keep the referenced worker
 /// sessions' PTY history warm so the playbook hover preview (spec 0060) can paint
 /// a live terminal tail the instant the pointer lands. `@{harness:…}` and other
 /// clip kinds are ignored — only sessions have a terminal to preview.
 pub(crate) fn playbook_referenced_session_ids(markdown: &str) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
-    let mut rest = markdown;
-    // `@`, `{`, `}` are ASCII so byte-`find` lands on char boundaries.
-    while let Some(open) = rest.find("@{") {
-        let after = &rest[open + 2..];
-        let Some(close) = after.find('}') else {
-            break;
-        };
-        let body = &after[..close];
+    for range in playbook_smart_clip_ranges(markdown) {
+        let body_start = byte_pos(markdown, range.start + 2);
+        let body_end = byte_pos(markdown, range.end.saturating_sub(1));
+        let body = &markdown[body_start..body_end];
         // Body looks like `session:abc` or `session:abc clip_id=3`; the kind/id
         // pair is the first whitespace-delimited token (mirrors the clip target
         // parse used for rendering).
@@ -3352,7 +3348,6 @@ pub(crate) fn playbook_referenced_session_ids(markdown: &str) -> Vec<String> {
                 ids.push(id.to_string());
             }
         }
-        rest = &after[close + 1..];
     }
     ids
 }
@@ -16269,6 +16264,9 @@ enum PlaybookNewline {
 }
 
 fn playbook_newline_action(buffer: &str, cursor: usize) -> PlaybookNewline {
+    if crate::playbook_markdown::playbook_offset_is_fenced(buffer, cursor) {
+        return PlaybookNewline::Plain;
+    }
     let mut line_start = 0usize;
     for (idx, ch) in buffer.chars().enumerate() {
         if idx >= cursor {
@@ -16317,6 +16315,9 @@ fn playbook_newline_action(buffer: &str, cursor: usize) -> PlaybookNewline {
 }
 
 fn playbook_list_marker_cursor(buffer: &str, cursor: usize) -> Option<usize> {
+    if crate::playbook_markdown::playbook_offset_is_fenced(buffer, cursor) {
+        return None;
+    }
     let mut line_start = 0usize;
     for (idx, ch) in buffer.chars().enumerate() {
         if idx >= cursor {
@@ -16341,6 +16342,9 @@ fn playbook_normalize_playbook_cursor(buffer: &str, cursor: usize) -> usize {
 }
 
 fn playbook_smart_clip_query(popup: &PlaybookPopup, trigger_start: usize) -> Option<String> {
+    if crate::playbook_markdown::playbook_offset_is_fenced(&popup.buffer, trigger_start) {
+        return None;
+    }
     if popup.cursor <= trigger_start {
         return None;
     }
@@ -16448,21 +16452,12 @@ fn playbook_search_add_clip_label_matches(
     query: &str,
     matches: &mut Vec<(usize, usize)>,
 ) {
-    let mut char_offset = 0usize;
-    let mut byte_offset = 0usize;
-    while byte_offset < buffer.len() {
-        let rest = &buffer[byte_offset..];
-        let Some(at_pos) = rest.find("@{") else { break };
-        let before_bytes = &rest[..at_pos];
-        let before_chars = before_bytes.chars().count();
-        let clip_char_start = char_offset + before_chars;
-        let after_marker = &rest[at_pos + 2..];
-        let Some(end_pos) = after_marker.find('}') else {
-            break;
-        };
-        let raw_clip = &after_marker[..end_pos];
-        let raw_clip_chars = raw_clip.chars().count();
-        let clip_char_end = clip_char_start + 2 + raw_clip_chars + 1;
+    for range in playbook_smart_clip_ranges(buffer) {
+        let clip_char_start = range.start;
+        let clip_char_end = range.end;
+        let body_start = byte_pos(buffer, range.start + 2);
+        let body_end = byte_pos(buffer, range.end.saturating_sub(1));
+        let raw_clip = &buffer[body_start..body_end];
         let already_covered = matches
             .iter()
             .any(|&(ms, me)| ms < clip_char_end && me > clip_char_start);
@@ -16472,9 +16467,6 @@ fn playbook_search_add_clip_label_matches(
                 matches.push((clip_char_start, clip_char_end));
             }
         }
-        let full_clip_bytes = 2 + end_pos + 1;
-        byte_offset += at_pos + full_clip_bytes;
-        char_offset = clip_char_end;
     }
 }
 
@@ -16693,27 +16685,35 @@ fn playbook_smart_clip_range_before_or_containing(
 }
 
 fn playbook_smart_clip_ranges(buffer: &str) -> Vec<PlaybookSmartClipRange> {
-    let chars: Vec<char> = buffer.chars().collect();
     let mut ranges = Vec::new();
-    let mut idx = 0usize;
-    while idx + 1 < chars.len() {
-        if chars[idx] != '@' || chars[idx + 1] != '{' {
-            idx += 1;
-            continue;
+    let mut classifier = crate::playbook_markdown::PlaybookLineClassifier::default();
+    let mut line_start = 0usize;
+    for raw in buffer.split('\n') {
+        let kind = classifier.classify(raw);
+        if kind.is_markdown() {
+            let chars: Vec<char> = raw.chars().collect();
+            let mut idx = 0usize;
+            while idx + 1 < chars.len() {
+                if chars[idx] != '@' || chars[idx + 1] != '{' {
+                    idx += 1;
+                    continue;
+                }
+                let mut end = idx + 2;
+                while end < chars.len() && chars[end] != '}' {
+                    end += 1;
+                }
+                if end < chars.len() {
+                    ranges.push(PlaybookSmartClipRange {
+                        start: line_start + idx,
+                        end: line_start + end + 1,
+                    });
+                    idx = end + 1;
+                } else {
+                    idx += 2;
+                }
+            }
         }
-        let mut end = idx + 2;
-        while end < chars.len() && chars[end] != '}' {
-            end += 1;
-        }
-        if end < chars.len() {
-            ranges.push(PlaybookSmartClipRange {
-                start: idx,
-                end: end + 1,
-            });
-            idx = end + 1;
-        } else {
-            idx += 2;
-        }
+        line_start += raw.chars().count() + 1;
     }
     ranges
 }
@@ -31910,6 +31910,10 @@ mod tests {
                 ":::clip session:abc123\nbody line inside\n:::\nafter fence line\nZEND",
             ),
             (
+                "backtick-fenced-code",
+                "before\n```rust\n# literal heading\n- literal bullet with @{session:abc123}\n[Run](agentd:action/example)\n```\nafter fence\nZEND",
+            ),
+            (
                 "timeline",
                 ":::timeline\n- [x] step one done\n- [ ] step two\n:::\nafter timeline\nZEND",
             ),
@@ -32270,6 +32274,89 @@ mod tests {
             vec!["s3".to_string(), "s7".to_string()]
         );
         assert!(playbook_referenced_session_ids("no clips here").is_empty());
+    }
+
+    #[test]
+    fn playbook_backtick_fence_keeps_smart_clips_literal() {
+        let md = "@{session:outside}\n```md\n@{session:literal}\n```\n@{harness:codex}";
+        assert_eq!(
+            playbook_referenced_session_ids(md),
+            vec!["outside".to_string()]
+        );
+        let ranges = playbook_smart_clip_ranges(md);
+        assert_eq!(ranges.len(), 2, "the fenced clip must not be active");
+        let clips = ranges
+            .into_iter()
+            .map(|range| {
+                let start = byte_pos(md, range.start);
+                let end = byte_pos(md, range.end);
+                &md[start..end]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(clips, ["@{session:outside}", "@{harness:codex}"]);
+
+        let code_list = "```\n- literal item\n```";
+        let cursor = code_list.find("\n```").unwrap();
+        assert_eq!(
+            playbook_newline_action(code_list, cursor),
+            PlaybookNewline::Plain,
+            "Enter must not continue a Markdown list inside raw code"
+        );
+        assert_eq!(
+            playbook_list_marker_cursor(code_list, 5),
+            None,
+            "the caret must be able to enter a literal list marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn playbook_backtick_fence_renders_literal_source_without_interactions() {
+        let (mut app, _dir, server) = empty_app().await;
+        let md = "```rust\n# not a heading\n- not a bullet\n@{session:literal}\n![shot](/tmp/shot.png)\n[Run](agentd:action/example)\n```";
+        app.playbook_popup = Some(playbook_popup_for_test("s1", md, 0));
+
+        let lines = crate::ui::render_playbook_markdown_lines_for_test(&app, md);
+        let painted = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(painted, md.lines().collect::<Vec<_>>());
+        assert_eq!(lines[0].spans[0].style.fg, Some(app.theme.dim));
+        assert_eq!(lines[1].spans[0].style.fg, Some(app.theme.accent_alt));
+        assert_eq!(
+            lines[1].spans[0].style.bg,
+            Some(app.theme.inactive_highlight_bg)
+        );
+
+        let area = Rect::new(0, 0, 80, 20);
+        assert!(crate::ui::playbook_session_clip_hits(Some(&app), md, 0, area).is_empty());
+        assert!(crate::ui::playbook_attachment_chip_hits(Some(&app), md, 0, area).is_empty());
+        assert!(crate::ui::playbook_attachment_instances(md).is_empty());
+        assert!(crate::ui::playbook_action_link_hits(Some(&app), md, "s1", 0, area).is_empty());
+
+        let literal_at = md.find("@{").unwrap();
+        app.playbook_popup.as_mut().unwrap().cursor = literal_at;
+        app.insert_playbook_text("@");
+        assert!(
+            !app.playbook_smart_clip_active(),
+            "typing @ inside fenced code must remain ordinary source editing"
+        );
+
+        let code_list = "```\n- literal item\n```";
+        app.playbook_popup = Some(playbook_popup_for_test("s1", code_list, 18));
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.playbook_popup.as_ref().unwrap().buffer,
+            code_list,
+            "Tab must not apply Markdown list indentation inside raw code"
+        );
+        server.abort();
     }
 
     #[tokio::test]

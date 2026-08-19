@@ -12,6 +12,7 @@ use crate::app::{
     PLAYBOOK_REVEAL_MS,
 };
 use crate::keymap::{KeyAction, Profile};
+use crate::playbook_markdown::{PlaybookLineClassifier, PlaybookLineKind};
 use crate::text_util::wrap_to_width;
 use crate::theme::Theme;
 use construct_protocol::{
@@ -16542,12 +16543,15 @@ fn render_playbook_attachment_images(
     let mut blocks: Vec<((u64, usize), String, usize, u16)> = Vec::new();
     let mut row_base = 0usize;
     let mut dups = std::collections::HashMap::new();
+    let mut classifier = PlaybookLineClassifier::default();
     for raw in popup.buffer.lines() {
         if row_base >= viewport_end {
             break;
         }
+        let kind = classifier.classify(raw);
         let li = playbook_line_instance(&mut dups, raw);
-        let (rendered, clips) = playbook_rendered_line_with_clips(Some(app), raw, width, li);
+        let (rendered, clips) =
+            playbook_rendered_line_with_clips(Some(app), raw, width, li, kind);
         let starts = playbook_wrap_row_starts(&rendered, width);
         for clip in &clips {
             let LineClipKind::Attachment {
@@ -18683,12 +18687,15 @@ fn playbook_block_visual_rows(
     let mut first = None;
     let mut last = None;
     let mut dups = std::collections::HashMap::new();
+    let mut classifier = PlaybookLineClassifier::default();
     for (i, raw) in markdown.lines().enumerate() {
         if i >= end_line {
             break;
         }
+        let kind = classifier.classify(raw);
         let li = playbook_line_instance(&mut dups, raw);
-        let (rendered, _clips) = playbook_rendered_line_with_clips(app, raw, width, li);
+        let (rendered, _clips) =
+            playbook_rendered_line_with_clips(app, raw, width, li, kind);
         let rows = playbook_wrap_row_starts(&rendered, width).len().max(1);
         if i >= start_line {
             first.get_or_insert(visual_row_base);
@@ -18723,9 +18730,12 @@ fn playbook_shimmer_block_at(
     let mut visual_row_base = 0usize;
     let mut source_line = None;
     let mut dups = std::collections::HashMap::new();
+    let mut classifier = PlaybookLineClassifier::default();
     for (i, raw) in markdown.lines().enumerate() {
+        let kind = classifier.classify(raw);
         let li = playbook_line_instance(&mut dups, raw);
-        let (rendered, _clips) = playbook_rendered_line_with_clips(app, raw, width, li);
+        let (rendered, _clips) =
+            playbook_rendered_line_with_clips(app, raw, width, li, kind);
         let rows = playbook_wrap_row_starts(&rendered, width).len();
         let next_base = visual_row_base.saturating_add(rows);
         if target_abs_row >= visual_row_base && target_abs_row < next_base {
@@ -20221,17 +20231,24 @@ pub(crate) fn playbook_cursor_visual_pos(
     // drifts the moment a line wraps mid-word and compounds for lines below.
     let mut visual_row = 0usize;
     let mut dups = std::collections::HashMap::new();
-    for raw in markdown.lines().take(line) {
+    let mut classifier = PlaybookLineClassifier::default();
+    let mut current = ("", 0, PlaybookLineKind::Markdown);
+    for (idx, raw) in markdown.split('\n').enumerate() {
+        let kind = classifier.classify(raw);
         let li = playbook_line_instance(&mut dups, raw);
-        let text = playbook_rendered_line_text(app, raw, width, li);
+        if idx == line {
+            current = (raw, li, kind);
+            break;
+        }
+        let text = playbook_rendered_line_text_in_context(app, raw, width, li, kind);
         visual_row = visual_row.saturating_add(playbook_wrap_row_starts(&text, width).len());
     }
 
-    let cur_raw = markdown.lines().nth(line).unwrap_or("");
-    let cur_li = playbook_line_instance(&mut dups, cur_raw);
-    let visual_col = playbook_visual_col_for_line(app, cur_raw, col, width, cur_li);
+    let (cur_raw, cur_li, cur_kind) = current;
+    let visual_col =
+        playbook_visual_col_for_line_in_context(app, cur_raw, col, width, cur_li, cur_kind);
     let starts = playbook_wrap_row_starts(
-        &playbook_rendered_line_text(app, cur_raw, width, cur_li),
+        &playbook_rendered_line_text_in_context(app, cur_raw, width, cur_li, cur_kind),
         width,
     );
     let (row_in_line, col_in_row) = playbook_wrap_locate(&starts, visual_col, width);
@@ -20310,21 +20327,23 @@ pub(crate) fn playbook_visual_to_cursor(
     // wrapped-row count until the line that owns `target_row` is found.
     let mut rows_before = 0usize;
     let mut line_start = 0usize; // char offset of the current line's first char
-    let mut owner: Option<(usize, Vec<usize>, &str, usize, u64)> = None;
+    let mut owner: Option<(usize, Vec<usize>, &str, usize, u64, PlaybookLineKind)> = None;
     let mut dups = std::collections::HashMap::new();
+    let mut classifier = PlaybookLineClassifier::default();
     for raw in markdown.split('\n') {
+        let kind = classifier.classify(raw);
         let li = playbook_line_instance(&mut dups, raw);
-        let rendered = playbook_rendered_line_text(app, raw, width, li);
+        let rendered = playbook_rendered_line_text_in_context(app, raw, width, li, kind);
         let starts = playbook_wrap_row_starts(&rendered, width);
         let row_count = starts.len();
         if target_row < rows_before + row_count {
-            owner = Some((line_start, starts, raw, rows_before, li));
+            owner = Some((line_start, starts, raw, rows_before, li, kind));
             break;
         }
         rows_before += row_count;
         line_start += raw.chars().count() + 1; // + the '\n'
     }
-    let Some((line_start, starts, raw, rows_before, owner_li)) = owner else {
+    let Some((line_start, starts, raw, rows_before, owner_li, owner_kind)) = owner else {
         // Below all content → end of buffer.
         return markdown.chars().count();
     };
@@ -20335,7 +20354,14 @@ pub(crate) fn playbook_visual_to_cursor(
     let line_len = raw.chars().count();
     let mut best_col = 0usize;
     for raw_col in 0..=line_len {
-        let visual_col = playbook_visual_col_for_line(app, raw, raw_col, width, owner_li);
+        let visual_col = playbook_visual_col_for_line_in_context(
+            app,
+            raw,
+            raw_col,
+            width,
+            owner_li,
+            owner_kind,
+        );
         let (r, c) = playbook_wrap_locate(&starts, visual_col, width);
         if r < row_in_line || (r == row_in_line && c <= target_col) {
             best_col = raw_col;
@@ -20621,6 +20647,25 @@ fn playbook_rendered_line_text(
     width: usize,
     line_instance: u64,
 ) -> String {
+    playbook_rendered_line_text_in_context(
+        app,
+        raw,
+        width,
+        line_instance,
+        PlaybookLineKind::Markdown,
+    )
+}
+
+fn playbook_rendered_line_text_in_context(
+    app: Option<&App>,
+    raw: &str,
+    width: usize,
+    line_instance: u64,
+    kind: PlaybookLineKind,
+) -> String {
+    if !kind.is_markdown() {
+        return playbook_painted_indent_line(raw);
+    }
     let trimmed = raw.trim();
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
     if trimmed.is_empty() {
@@ -20863,10 +20908,13 @@ pub(crate) fn playbook_line_instance(
 pub(crate) fn playbook_attachment_instances(markdown: &str) -> Vec<((u64, usize), String)> {
     let mut out = Vec::new();
     let mut dups = std::collections::HashMap::new();
+    let mut classifier = PlaybookLineClassifier::default();
     for raw in markdown.lines() {
+        let kind = classifier.classify(raw);
         let li = playbook_line_instance(&mut dups, raw);
         let trimmed = raw.trim();
-        if playbook_heading_content(raw).is_some()
+        if !kind.is_markdown()
+            || playbook_heading_content(raw).is_some()
             || trimmed.starts_with(":::clip")
             || trimmed == ":::"
         {
@@ -20897,9 +20945,12 @@ pub(crate) fn playbook_skip_attachment_rows(
     let width = width.max(1);
     let mut row_base = 0usize;
     let mut dups = std::collections::HashMap::new();
+    let mut classifier = PlaybookLineClassifier::default();
     for raw in markdown.lines() {
+        let kind = classifier.classify(raw);
         let li = playbook_line_instance(&mut dups, raw);
-        let (rendered, clips) = playbook_rendered_line_with_clips(app, raw, width, li);
+        let (rendered, clips) =
+            playbook_rendered_line_with_clips(app, raw, width, li, kind);
         let starts = playbook_wrap_row_starts(&rendered, width);
         let rows = starts.len().max(1);
         if target_row < row_base + rows {
@@ -21173,7 +21224,14 @@ fn playbook_rendered_line_with_clips(
     raw: &str,
     width: usize,
     line_instance: u64,
+    kind: PlaybookLineKind,
 ) -> (String, Vec<LineClip>) {
+    if !kind.is_markdown() {
+        return (
+            playbook_rendered_line_text_in_context(app, raw, width, line_instance, kind),
+            Vec::new(),
+        );
+    }
     let trimmed = raw.trim();
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
     let (text, clips) = if trimmed.is_empty() {
@@ -21186,7 +21244,7 @@ fn playbook_rendered_line_with_clips(
         // fence lines paint fixed chip text — neither carries clickable clip
         // spans, so both report the rendered text with no clips.
         (
-            playbook_rendered_line_text(app, raw, width, line_instance),
+            playbook_rendered_line_text_in_context(app, raw, width, line_instance, kind),
             Vec::new(),
         )
     } else if let Some((_, rest)) = playbook_list_item_content(raw) {
@@ -21229,12 +21287,15 @@ pub(crate) fn playbook_session_clip_hits(
     let viewport_end = scroll_offset.saturating_add(area.height as usize);
     let mut visual_row_base = 0usize;
     let mut dups = std::collections::HashMap::new();
+    let mut classifier = PlaybookLineClassifier::default();
     for raw in markdown.lines() {
         if visual_row_base >= viewport_end {
             break;
         }
+        let kind = classifier.classify(raw);
         let li = playbook_line_instance(&mut dups, raw);
-        let (rendered, clips) = playbook_rendered_line_with_clips(app, raw, width, li);
+        let (rendered, clips) =
+            playbook_rendered_line_with_clips(app, raw, width, li, kind);
         let starts = playbook_wrap_row_starts(&rendered, width);
         for clip in &clips {
             let LineClipKind::Smart(raw_clip) = &clip.kind else {
@@ -21285,12 +21346,15 @@ pub(crate) fn playbook_attachment_chip_hits(
     let viewport_end = scroll_offset.saturating_add(area.height as usize);
     let mut visual_row_base = 0usize;
     let mut dups = std::collections::HashMap::new();
+    let mut classifier = PlaybookLineClassifier::default();
     for raw in markdown.lines() {
         if visual_row_base >= viewport_end {
             break;
         }
+        let kind = classifier.classify(raw);
         let li = playbook_line_instance(&mut dups, raw);
-        let (rendered, clips) = playbook_rendered_line_with_clips(app, raw, width, li);
+        let (rendered, clips) =
+            playbook_rendered_line_with_clips(app, raw, width, li, kind);
         let starts = playbook_wrap_row_starts(&rendered, width);
         for clip in &clips {
             let LineClipKind::Attachment {
@@ -21403,13 +21467,19 @@ pub(crate) fn playbook_action_link_hits(
     let viewport_end = scroll_offset.saturating_add(area.height as usize);
     let mut visual_row_base = 0usize;
     let mut dups = std::collections::HashMap::new();
+    let mut classifier = PlaybookLineClassifier::default();
     for raw in markdown.lines() {
         if visual_row_base >= viewport_end {
             break;
         }
+        let kind = classifier.classify(raw);
         let li = playbook_line_instance(&mut dups, raw);
-        let rendered = playbook_rendered_line_text(app, raw, width, li);
+        let rendered = playbook_rendered_line_text_in_context(app, raw, width, li, kind);
         let starts = playbook_wrap_row_starts(&rendered, width);
+        if !kind.is_markdown() {
+            visual_row_base = visual_row_base.saturating_add(starts.len());
+            continue;
+        }
         for link in scan_agentd_action_links(&rendered) {
             let visual_start = UnicodeWidthStr::width(&rendered[..link.start]);
             let visual_width = UnicodeWidthStr::width(&rendered[link.start..link.end]);
@@ -21467,6 +21537,27 @@ fn playbook_visual_col_for_line(
     width: usize,
     line_instance: u64,
 ) -> usize {
+    playbook_visual_col_for_line_in_context(
+        app,
+        raw,
+        raw_col,
+        width,
+        line_instance,
+        PlaybookLineKind::Markdown,
+    )
+}
+
+fn playbook_visual_col_for_line_in_context(
+    app: Option<&App>,
+    raw: &str,
+    raw_col: usize,
+    width: usize,
+    line_instance: u64,
+    kind: PlaybookLineKind,
+) -> usize {
+    if !kind.is_markdown() {
+        return playbook_prefix_display_width(&playbook_painted_indent_line(raw), raw_col);
+    }
     let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
     let col = raw_col.saturating_sub(leading);
     let trimmed = raw.trim();
@@ -21482,7 +21573,13 @@ fn playbook_visual_col_for_line(
         // 1:1 to the source chars; measure the source column literally and
         // clamp it into the painted width so the caret stays on the line (and
         // end-of-line clicks resolve to the line's last offset).
-        let rendered = playbook_rendered_line_text(app, raw, 0, line_instance);
+        let rendered = playbook_rendered_line_text_in_context(
+            app,
+            raw,
+            0,
+            line_instance,
+            kind,
+        );
         playbook_prefix_display_width(raw, raw_col).min(UnicodeWidthStr::width(rendered.as_str()))
     } else if let Some((_, rest)) = playbook_list_item_content(raw) {
         // Mirror the proportional indent rendered for nested bullets: the bullet
@@ -21588,7 +21685,9 @@ fn render_playbook_markdown_lines<'a>(
     let mut out = Vec::new();
     let mut line_start = 0usize;
     let mut dups = std::collections::HashMap::new();
+    let mut classifier = PlaybookLineClassifier::default();
     for raw in markdown.lines() {
+        let kind = classifier.classify(raw);
         let trimmed = raw.trim();
         let leading = raw.chars().take_while(|ch| ch.is_whitespace()).count();
         // `[label](agentd:action/…)` char ranges on this line, in absolute
@@ -21596,13 +21695,41 @@ fn render_playbook_markdown_lines<'a>(
         // an interactive span (never collapsing it, so cursor math and
         // editing stay untouched) and registers click hits separately via
         // `playbook_action_link_hits`.
-        let action_ranges: Vec<(usize, usize)> = if action_links_enabled {
+        let action_ranges: Vec<(usize, usize)> = if action_links_enabled && kind.is_markdown() {
             playbook_line_action_link_char_ranges(raw, line_start)
         } else {
             Vec::new()
         };
         let li = playbook_line_instance(&mut dups, raw);
-        if trimmed.is_empty() {
+        if matches!(kind, PlaybookLineKind::CodeFence | PlaybookLineKind::Code) {
+            // Fenced code remains a source editor: delimiters and body paint
+            // character-for-character, while the body receives a restrained
+            // code treatment and no Markdown/clip/link transformations run.
+            let painted = playbook_painted_indent_line(raw);
+            let style = if kind == PlaybookLineKind::CodeFence {
+                Style::default()
+                    .fg(app.theme.dim)
+                    .bg(app.theme.inactive_highlight_bg)
+            } else {
+                Style::default()
+                    .fg(app.theme.accent_alt)
+                    .bg(app.theme.inactive_highlight_bg)
+            };
+            let spans = playbook_text_spans(
+                &app.theme,
+                &painted,
+                line_start,
+                style,
+                selection,
+                search_matches,
+                search_selected,
+                &[],
+            )
+            .into_iter()
+            .map(|span| Span::styled(span.content.into_owned(), span.style))
+            .collect::<Vec<_>>();
+            out.push(Line::from(spans));
+        } else if trimmed.is_empty() {
             out.push(Line::from(""));
         } else if let Some(level) = playbook_heading_level(trimmed) {
             // Slice the heading text from the raw line (leading indent stripped,

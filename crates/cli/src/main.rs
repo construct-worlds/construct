@@ -16,6 +16,7 @@ mod matrix_rain;
 mod midi;
 mod mouse_forward;
 mod plugin_cmd;
+mod playbook_markdown;
 mod project_dashboard;
 mod pty_render;
 mod text_util;

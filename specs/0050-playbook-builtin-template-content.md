@@ -17,14 +17,14 @@ The built-in set is Blank (empty), Tasks (a Todo / Progress / Done board), Inves
 
 The empty-state placeholder surfaces these templates as one-click starting points, so they are many users' first contact with the playbook. A bare set of headings does not convey that the playbook is an execution surface or that smart clips exist. A small amount of in-document guidance turns each template into onboarding without a separate tutorial. Because playbook execution feeds the document prose to the owning agent, the guidance also orients the agent, while the canonical smart-clip syntax is still injected by the run-context tool rather than relied upon from the template.
 
-The clip constraint exists because playbook rendering scans for clip syntax everywhere, including inside code fences and inline code — there is no "raw" region. A literal example clip with a non-existent target would render as a broken chip in a brand-new playbook. Restricting templates to resolvable clips keeps a freshly applied template clean.
+The clip constraint exists because ordinary prose and inline code are scanned for clip syntax. Triple-backtick fenced code is a raw, source-preserving region: clip syntax there stays literal and non-interactive. A literal example clip outside such a fence with a non-existent target would render as a broken chip in a brand-new playbook. Restricting active template clips to resolvable targets keeps a freshly applied template clean.
 
 ## Consequences
 
-- Editing a built-in template, or authoring a user template, must keep every embedded clip resolvable. To show non-resolvable syntax (a specific session, a `:::clip` block), describe it in prose instead of embedding it.
+- Editing a built-in template, or authoring a user template, must keep every active embedded clip resolvable. Non-resolvable syntax may be shown literally inside triple-backtick fenced code; outside a fence, describe it in prose instead of embedding it.
 - Template guidance should stay short and clearly read as orientation, so it does not read as a task when the playbook is run.
 - Renaming or adding a built-in template changes its stable `id`; the empty-state placeholder and any id-based references must be updated together. Template selection copies Markdown into the playbook and is not live-linked, so changing a template does not alter playbookes already created from it.
-- Built-in templates should only use Markdown constructs the playbook renderer styles (headings, list items, smart clips, `:::clip` blocks); emphasis, inline code, and fenced code render as literal characters and should be avoided in template bodies.
+- Built-in templates should only use Markdown constructs the playbook renderer styles (headings, list items, smart clips, `:::clip` blocks, and fenced code); emphasis and inline code render as literal characters and should be avoided in template bodies.
 
 ## Non-Goals
 
