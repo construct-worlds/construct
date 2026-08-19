@@ -3,7 +3,7 @@
 Status: accepted
 Date: 2026-08-18
 Area: tui
-Scope: Keyboard focus acquisition is acknowledged by a brief directional highlight on the newly focused pane's visible border chrome.
+Scope: Keyboard focus acquisition is acknowledged by a brief directional highlight around the newly focused pane's full perimeter.
 
 ## Decision
 
@@ -11,7 +11,9 @@ When keyboard focus moves to a different TUI pane or focusable sidebar section, 
 
 Focus identity includes the session-list rows, the lineage section, and each split window independently. Moving between sibling split windows therefore retriggers the animation even though both use the same general view-focus route. The initial pane at TUI startup does not animate.
 
-The effect changes style only. It must not change border glyphs, pane geometry, content layout, terminal size, or input routing. When side and bottom borders are hidden, or a section exposes only a header rule, the sweep follows that visible top chrome and must not resurrect hidden edges. Edge-to-edge borderless zoom views do not animate.
+The sweep temporarily draws all four border edges, including their corners, even when the pane's steady chrome hides its side and bottom borders or exposes only a header rule. The highlight changes the border line's foreground color and weight; it does not fill or reverse the cells' backgrounds. Once the sweep passes, the pane immediately returns to its configured steady border visibility.
+
+The effect must not change pane geometry, content layout, terminal size, or input routing. Edge-to-edge borderless zoom views do not animate.
 
 ## Reason
 
@@ -27,5 +29,5 @@ Static border-color changes are easy to miss when focus jumps among similarly sh
 ## Non-Goals
 
 - Animating selection changes within a focused pane.
-- Adding borders to borderless or intentionally hidden-edge layouts.
+- Persistently adding borders to borderless or intentionally hidden-edge layouts.
 - Changing focus order, keybindings, or mouse behavior.

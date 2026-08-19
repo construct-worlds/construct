@@ -15109,10 +15109,10 @@ fn pane_border_style(theme: &Theme, focused: bool) -> Style {
 }
 
 /// Paint the moving bright band for a newly focused pane after that pane and
-/// its title chrome are fully composited. A full frame uses `(x + y) / 2` as
-/// its phase, so the band intersects the top/left edges first and the
-/// bottom/right edges last: a diagonal top-left → bottom-right sweep without
-/// changing any border glyphs or pane geometry.
+/// its title chrome are fully composited. The overlay temporarily draws all
+/// four edges even when the steady pane chrome hides some of them. `(x + y) /
+/// 2` supplies the phase, so the band intersects the top/left edges first and
+/// the bottom/right edges last: a diagonal top-left → bottom-right sweep.
 fn render_focus_border_sweep(f: &mut Frame, app: &mut App, now: Instant) {
     let target = app.focused_border_target();
     let rect = match target {
@@ -15134,33 +15134,18 @@ fn render_focus_border_sweep(f: &mut Frame, app: &mut App, now: Instant) {
     };
     app.request_tick_redraw();
 
-    // Lineage owns a header rule rather than a four-sided frame. Pane side
-    // borders are also user-hideable (and hidden by default); in both cases
-    // keep the sweep on the visible top chrome instead of resurrecting glyphs
-    // the layout intentionally omitted.
-    let top_only = target == FocusBorderTarget::Lineage || app.hide_pane_side_borders;
     paint_focus_border_sweep(
         f,
         rect,
         progress,
-        top_only,
         Style::default()
             .fg(app.theme.accent)
-            // Reverse makes the tracer a filled, theme-colored highlight
-            // instead of a barely different green line in the Matrix theme;
-            // it also remains legible on low-color terminals.
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-            .remove_modifier(Modifier::DIM),
+            .add_modifier(Modifier::BOLD)
+            .remove_modifier(Modifier::DIM | Modifier::REVERSED),
     );
 }
 
-fn paint_focus_border_sweep(
-    f: &mut Frame,
-    rect: Rect,
-    progress: f32,
-    top_only: bool,
-    highlight: Style,
-) {
+fn paint_focus_border_sweep(f: &mut Frame, rect: Rect, progress: f32, highlight: Style) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
@@ -15170,25 +15155,38 @@ fn paint_focus_border_sweep(
     for y in rect.top()..rect.bottom() {
         for x in rect.left()..rect.right() {
             let on_edge = y == rect.top()
-                || (!top_only
-                    && (y == rect.bottom().saturating_sub(1)
-                        || x == rect.left()
-                        || x == rect.right().saturating_sub(1)));
+                || y == rect.bottom().saturating_sub(1)
+                || x == rect.left()
+                || x == rect.right().saturating_sub(1);
             if !on_edge {
                 continue;
             }
             let nx = x.saturating_sub(rect.left()) as f32 / x_denom;
-            let phase = if top_only {
-                nx
-            } else {
-                let ny = y.saturating_sub(rect.top()) as f32 / y_denom;
-                (nx + ny) * 0.5
-            };
+            let ny = y.saturating_sub(rect.top()) as f32 / y_denom;
+            let phase = (nx + ny) * 0.5;
             if (phase - progress).abs() > BAND_HALF_WIDTH {
                 continue;
             }
             if let Some(cell) = f.buffer_mut().cell_mut(Position { x, y }) {
-                cell.set_style(cell.style().patch(highlight));
+                let symbol = match (
+                    x == rect.left(),
+                    x == rect.right().saturating_sub(1),
+                    y == rect.top(),
+                    y == rect.bottom().saturating_sub(1),
+                ) {
+                    (true, _, true, _) => "┌",
+                    (_, true, true, _) => "┐",
+                    (true, _, _, true) => "└",
+                    (_, true, _, true) => "┘",
+                    (_, _, true, _) | (_, _, _, true) => "─",
+                    _ => "│",
+                };
+                cell.set_symbol(symbol);
+                cell.set_style(highlight);
+                // `Cell::set_style` patches the existing cell and therefore
+                // cannot clear a modifier inherited from the pane beneath it.
+                // The focus cue is the glyph foreground, never reverse video.
+                cell.modifier.remove(Modifier::DIM | Modifier::REVERSED);
             }
         }
     }
@@ -15209,7 +15207,6 @@ mod focus_border_paint_tests {
                     f,
                     Rect::new(0, 0, 11, 11),
                     0.5,
-                    false,
                     Style::default().fg(Color::Red),
                 );
             })
@@ -15222,7 +15219,40 @@ mod focus_border_paint_tests {
     }
 
     #[test]
-    fn top_only_band_traverses_visible_chrome_without_painting_hidden_sides() {
+    fn sweep_draws_full_foreground_border_over_hidden_edges() {
+        let backend = TestBackend::new(12, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                f.buffer_mut()
+                    .cell_mut(Position { x: 0, y: 5 })
+                    .expect("left edge")
+                    .set_style(
+                        Style::default()
+                            .fg(Color::Green)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::REVERSED),
+                    );
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    0.25,
+                    Style::default().fg(Color::Blue),
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(5, 0)].symbol(), "─");
+        assert_eq!(buffer[(5, 0)].fg, Color::Blue);
+        assert_eq!(buffer[(0, 5)].symbol(), "│");
+        assert_eq!(buffer[(0, 5)].fg, Color::Blue);
+        assert_eq!(buffer[(0, 5)].bg, Color::Yellow);
+        assert!(!buffer[(0, 5)].modifier.contains(Modifier::REVERSED));
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn sweep_draws_corner_glyphs_at_both_diagonal_endpoints() {
         let backend = TestBackend::new(12, 12);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
@@ -15230,16 +15260,24 @@ mod focus_border_paint_tests {
                 paint_focus_border_sweep(
                     f,
                     Rect::new(0, 0, 11, 11),
-                    0.5,
-                    true,
-                    Style::default().fg(Color::Blue),
+                    0.0,
+                    Style::default().fg(Color::Cyan),
                 );
             })
-            .expect("draw");
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(5, 0)].fg, Color::Blue);
-        assert_ne!(buffer[(0, 5)].fg, Color::Blue);
-        assert_ne!(buffer[(5, 10)].fg, Color::Blue);
+            .expect("draw first endpoint");
+        assert_eq!(terminal.backend().buffer()[(0, 0)].symbol(), "┌");
+
+        terminal
+            .draw(|f| {
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    1.0,
+                    Style::default().fg(Color::Cyan),
+                );
+            })
+            .expect("draw second endpoint");
+        assert_eq!(terminal.backend().buffer()[(10, 10)].symbol(), "┘");
     }
 }
 

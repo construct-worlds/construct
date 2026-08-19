@@ -740,7 +740,13 @@ impl FocusBorderSweep {
             self.started_at = None;
             return None;
         }
-        Some(elapsed.as_secs_f32() / Duration::from_millis(FOCUS_BORDER_SWEEP_MS).as_secs_f32())
+        // Reach the bottom-right endpoint on the final scheduled visible
+        // frame. The following cadence tick clears the overlay at 200 ms.
+        Some(
+            (elapsed.as_secs_f32()
+                / Duration::from_millis(FOCUS_BORDER_SWEEP_TRAVEL_MS).as_secs_f32())
+            .min(1.0),
+        )
     }
 
     /// Keep target tracking current when its surface has no border (the
@@ -777,10 +783,18 @@ mod focus_border_sweep_tests {
         let halfway = sweep
             .observe(
                 FocusBorderTarget::SessionList,
-                t0 + Duration::from_millis(100),
+                t0 + Duration::from_millis(80),
             )
             .expect("sweep is active");
         assert!((halfway - 0.5).abs() < f32::EPSILON);
+        assert_eq!(
+            sweep.observe(
+                FocusBorderTarget::SessionList,
+                t0 + Duration::from_millis(160),
+            ),
+            Some(1.0),
+            "the last visible cadence frame reaches the bottom-right corner"
+        );
         assert_eq!(
             sweep.observe(
                 FocusBorderTarget::SessionList,
@@ -5278,6 +5292,8 @@ pub const SPINNER_FRAME_MS: u128 = 120;
 /// while a sweep is actually visible.
 pub const FOCUS_BORDER_SWEEP_MS: u64 = 200;
 const FOCUS_BORDER_SWEEP_FRAME_MS: u64 = 40;
+const FOCUS_BORDER_SWEEP_TRAVEL_MS: u64 =
+    FOCUS_BORDER_SWEEP_MS - FOCUS_BORDER_SWEEP_FRAME_MS;
 /// Pulsing-star spinner: a 4-glyph sparkle whose size "breathes" via a
 /// palindromic frame schedule (small → big → small). Single cell wide so
 /// it slots into the same column as the static state glyph.
