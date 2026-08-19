@@ -45,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SlackPersonalConfig {
     pub(super) mcp_command: String,
-    pub(super) poll_interval: std::time::Duration,
+    pub(super) idle_poll_ceiling: std::time::Duration,
     pub(super) trigger: SlackPersonalTrigger,
     pub(super) response: SlackPersonalResponse,
     pub(super) disclosure: bool,
@@ -58,6 +58,44 @@ pub(crate) struct SlackPersonalConfig {
 /// The channel speaks as the user; recipients deserve to know when it was the
 /// agent talking (spec 0202).
 const DISCLOSURE_SUFFIX: &str = "\n\n_\u{1F916} sent by an agent_";
+
+/// Bounded polling cadence for a connected backend.
+///
+/// A newly connected channel has no evidence that Slack is active, so it
+/// starts at the configured idle ceiling. Accepted ingress resets the next
+/// wait to the global backend-safe floor; every idle sweep doubles that wait
+/// until it reaches the ceiling. Traffic outside this channel's accepted
+/// scope does not keep the backend on its hottest cadence.
+struct PollSchedule {
+    active_floor: std::time::Duration,
+    idle_ceiling: std::time::Duration,
+    next_interval: std::time::Duration,
+}
+
+impl PollSchedule {
+    fn new(idle_ceiling: std::time::Duration) -> Self {
+        let active_floor =
+            std::time::Duration::from_secs(construct_protocol::SLACK_PERSONAL_POLL_MIN_SECS);
+        let idle_ceiling = idle_ceiling.max(active_floor);
+        Self {
+            active_floor,
+            idle_ceiling,
+            next_interval: idle_ceiling,
+        }
+    }
+
+    fn next_interval(&self) -> std::time::Duration {
+        self.next_interval
+    }
+
+    fn after_sweep(&mut self, accepted_activity: bool) {
+        self.next_interval = if accepted_activity {
+            self.active_floor
+        } else {
+            self.next_interval.saturating_mul(2).min(self.idle_ceiling)
+        };
+    }
+}
 
 /// One message returned by a sweep. Unknown fields are ignored so a backend
 /// can carry extras; missing booleans default to the conservative reading.
@@ -185,10 +223,11 @@ pub(super) async fn serve(
             channel = %ingress.channel_id(),
             "slack-personal channel connected to its MCP backend"
         );
+        let mut poll_schedule = PollSchedule::new(config.idle_poll_ceiling);
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
-                _ = tokio::time::sleep(config.poll_interval) => {}
+                _ = tokio::time::sleep(poll_schedule.next_interval()) => {}
             }
             let swept = client
                 .call_tool("slack_sweep_messages", json!({"after_ts": cursor}))
@@ -211,6 +250,7 @@ pub(super) async fn serve(
                 plan_deliveries(messages, &config, &cursor, &sent)
             };
             cursor = next_cursor;
+            poll_schedule.after_sweep(!accepted.is_empty());
             for message in accepted {
                 let (ingress, config, cancel, backend, sent) = (
                     ingress.clone(),
@@ -587,7 +627,7 @@ mod tests {
     fn config() -> SlackPersonalConfig {
         SlackPersonalConfig {
             mcp_command: "fake".into(),
-            poll_interval: std::time::Duration::from_secs(20),
+            idle_poll_ceiling: std::time::Duration::from_secs(20),
             trigger: SlackPersonalTrigger::Dm,
             response: SlackPersonalResponse::Draft,
             disclosure: true,
@@ -595,6 +635,73 @@ mod tests {
             allowed_channels: Vec::new(),
             thread_context: 50,
         }
+    }
+
+    #[test]
+    fn polling_starts_idle_then_backs_off_progressively_after_activity() {
+        let mut schedule = PollSchedule::new(std::time::Duration::from_secs(20));
+        assert_eq!(schedule.next_interval(), std::time::Duration::from_secs(20));
+
+        schedule.after_sweep(true);
+        assert_eq!(schedule.next_interval(), std::time::Duration::from_secs(5));
+
+        schedule.after_sweep(false);
+        assert_eq!(schedule.next_interval(), std::time::Duration::from_secs(10));
+        schedule.after_sweep(false);
+        assert_eq!(schedule.next_interval(), std::time::Duration::from_secs(20));
+        schedule.after_sweep(false);
+        assert_eq!(
+            schedule.next_interval(),
+            std::time::Duration::from_secs(20),
+            "idle polling stays bounded by the configured ceiling"
+        );
+    }
+
+    #[test]
+    fn accepted_activity_always_resets_polling_to_the_safe_floor() {
+        let mut schedule = PollSchedule::new(std::time::Duration::from_secs(30));
+        schedule.after_sweep(true);
+        schedule.after_sweep(false);
+        schedule.after_sweep(false);
+        assert_eq!(schedule.next_interval(), std::time::Duration::from_secs(20));
+
+        schedule.after_sweep(true);
+        assert_eq!(schedule.next_interval(), std::time::Duration::from_secs(5));
+        schedule.after_sweep(true);
+        assert_eq!(
+            schedule.next_interval(),
+            std::time::Duration::from_secs(5),
+            "continued activity remains at the floor"
+        );
+    }
+
+    #[test]
+    fn a_floor_sized_idle_ceiling_remains_fixed() {
+        let mut schedule = PollSchedule::new(std::time::Duration::from_secs(5));
+        schedule.after_sweep(true);
+        assert_eq!(schedule.next_interval(), std::time::Duration::from_secs(5));
+        schedule.after_sweep(false);
+        assert_eq!(schedule.next_interval(), std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn out_of_scope_messages_do_not_keep_polling_hot() {
+        let mut schedule = PollSchedule::new(std::time::Duration::from_secs(20));
+        schedule.after_sweep(true);
+        assert_eq!(schedule.next_interval(), std::time::Duration::from_secs(5));
+
+        let (accepted, _) = plan_deliveries(
+            vec![message("C-unlisted", "2.0")],
+            &config(),
+            "1.0",
+            &HashSet::new(),
+        );
+        schedule.after_sweep(!accepted.is_empty());
+        assert_eq!(
+            schedule.next_interval(),
+            std::time::Duration::from_secs(10),
+            "rejected account traffic counts as idle for this channel"
+        );
     }
 
     fn message(channel: &str, ts: &str) -> SweptMessage {
