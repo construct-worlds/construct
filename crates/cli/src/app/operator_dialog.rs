@@ -249,15 +249,15 @@ pub(crate) const SLACK_FIELD_FOLLOW_UP: usize = 7;
 pub(crate) const SLACK_FIELD_THREAD_CONTEXT: usize = 8;
 pub(crate) const SLACK_FIELD_STATE: usize = 9;
 /// The slack-personal editor's field indexes, after ID (0), Kind (1),
-/// MCP command (2), Workspaces (3), and Channels (4).
-pub(crate) const PERSONAL_FIELD_TRIGGER: usize = 5;
-pub(crate) const PERSONAL_FIELD_RESPONSE: usize = 6;
-pub(crate) const PERSONAL_FIELD_RESPONSE_OVERRIDES: usize = 7;
-pub(crate) const PERSONAL_FIELD_AUTO_AFTER: usize = 8;
-pub(crate) const PERSONAL_FIELD_DISCLOSURE: usize = 9;
-pub(crate) const PERSONAL_FIELD_POLL: usize = 10;
-pub(crate) const PERSONAL_FIELD_THREAD_CONTEXT: usize = 11;
-pub(crate) const PERSONAL_FIELD_STATE: usize = 12;
+/// Workspaces (2), and Channels (3).
+pub(crate) const PERSONAL_FIELD_TRIGGER: usize = 4;
+pub(crate) const PERSONAL_FIELD_RESPONSE: usize = 5;
+pub(crate) const PERSONAL_FIELD_RESPONSE_OVERRIDES: usize = 6;
+pub(crate) const PERSONAL_FIELD_AUTO_AFTER: usize = 7;
+pub(crate) const PERSONAL_FIELD_DISCLOSURE: usize = 8;
+pub(crate) const PERSONAL_FIELD_POLL: usize = 9;
+pub(crate) const PERSONAL_FIELD_THREAD_CONTEXT: usize = 10;
+pub(crate) const PERSONAL_FIELD_STATE: usize = 11;
 const HTTP_FIELD_STATE: usize = 3;
 
 fn channel_field_count(editor: &OperatorChannelDialog) -> usize {
@@ -282,7 +282,7 @@ pub fn channel_field_is_text(kind: &str, field: usize) -> bool {
         "slack" => matches!(field, 2..=5 | SLACK_FIELD_THREAD_CONTEXT),
         "slack-personal" => matches!(
             field,
-            2..=4
+            2..=3
                 | PERSONAL_FIELD_RESPONSE_OVERRIDES
                 | PERSONAL_FIELD_AUTO_AFTER
                 | PERSONAL_FIELD_POLL
@@ -293,13 +293,11 @@ pub fn channel_field_is_text(kind: &str, field: usize) -> bool {
 }
 
 /// The two Slack kinds share the allowlist fields but at different indexes,
-/// because the bot kind spends 2–3 on its tokens and slack-personal spends 2
-/// on its MCP command.
 fn workspace_field(kind: &str) -> usize {
     if kind == "slack" {
         4
     } else {
-        3
+        2
     }
 }
 
@@ -307,7 +305,7 @@ fn channel_allowlist_field(kind: &str) -> usize {
     if kind == "slack" {
         5
     } else {
-        4
+        3
     }
 }
 
@@ -894,7 +892,6 @@ impl App {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                mcp_command: None,
                 trigger: None,
                 response_mode: None,
                 response_mode_overrides: None,
@@ -1281,10 +1278,6 @@ impl App {
             edit(&mut channel.app_token);
         } else if kind == "slack" && field == 3 {
             edit(&mut channel.bot_token);
-        } else if kind == "slack-personal" && field == 2 {
-            let mut value = channel.channel.mcp_command.clone().unwrap_or_default();
-            edit(&mut value);
-            channel.channel.mcp_command = Some(value);
         } else if slack_kind && field == workspace_field(&kind) {
             let mut value = channel.channel.allowed_workspaces.join(",");
             edit(&mut value);
@@ -1403,16 +1396,6 @@ impl App {
         } else if personal
             && editor_snapshot
                 .channel
-                .mcp_command
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or("")
-                .is_empty()
-        {
-            Some("slack-personal channels need an MCP command that starts their backend.".into())
-        } else if personal
-            && editor_snapshot
-                .channel
                 .poll_interval_secs
                 .is_some_and(|secs| secs < construct_protocol::SLACK_PERSONAL_POLL_MIN_SECS)
         {
@@ -1451,9 +1434,6 @@ impl App {
                     follow_up: slack.then_some(editor_snapshot.channel.follow_up).flatten(),
                     thread_context: (slack || personal)
                         .then_some(editor_snapshot.channel.thread_context)
-                        .flatten(),
-                    mcp_command: personal
-                        .then_some(editor_snapshot.channel.mcp_command)
                         .flatten(),
                     trigger: personal.then_some(editor_snapshot.channel.trigger).flatten(),
                     response_mode: personal
@@ -2230,7 +2210,6 @@ impl App {
                             slack.then(|| construct_protocol::SLACK_FOLLOW_UP_DEFAULT.to_string());
                         editor.channel.thread_context = (slack || personal)
                             .then_some(construct_protocol::SLACK_THREAD_CONTEXT_DEFAULT);
-                        editor.channel.mcp_command = personal.then(String::new);
                         editor.channel.trigger = personal
                             .then(|| construct_protocol::SLACK_PERSONAL_TRIGGER_DEFAULT.to_string());
                         editor.channel.response_mode = personal

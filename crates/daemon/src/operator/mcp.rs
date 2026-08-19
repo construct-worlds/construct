@@ -1,19 +1,33 @@
 //! Minimal MCP client for channel backends.
 //!
-//! A slack-personal channel reaches Slack through an MCP server the user
-//! configures (spec 0201). The daemon is a classic program, not an agent, so
-//! this client speaks the protocol's plain JSON-RPC framing over stdio:
-//! `initialize`, `notifications/initialized`, then `tools/call`. Nothing
-//! model-shaped is involved, and no tool schema discovery is needed — the
-//! channel knows exactly which contract tools it calls.
+//! A slack-personal channel reaches Slack through Slack's hosted MCP server.
+//! The daemon owns the fixed endpoint and OAuth proxy setup (spec 0201); the
+//! user never supplies a shell command. The daemon is a classic program, not
+//! an agent, so this client speaks the protocol's plain JSON-RPC framing over
+//! stdio: `initialize`, `notifications/initialized`, then `tools/call`.
+//! Nothing model-shaped is involved, and no tool schema discovery is needed —
+//! the channel knows exactly which contract tools it calls.
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
+
+const SLACK_MCP_URL: &str = "https://mcp.slack.com/mcp";
+const SLACK_MCP_REMOTE_PACKAGE: &str = "mcp-remote@0.1.38";
+// Slack publishes this desktop OAuth client in its official MCP plugin. The
+// corresponding redirect is localhost:3118 and authorization uses PKCE.
+const SLACK_MCP_CLIENT_ID: &str = "1601185624273.8899143856786";
+const SLACK_MCP_CALLBACK_PORT: &str = "3118";
+const SLACK_MCP_SCOPES: &str = concat!(
+    "search:read.public search:read.private search:read.im search:read.mpim ",
+    "channels:history channels:read groups:history groups:read ",
+    "im:history im:read mpim:history mpim:read chat:write"
+);
 
 /// Ceiling on one response line. A backend that streams megabytes into a tool
 /// result is misbehaving; bounding the read keeps it from ballooning memory.
@@ -21,6 +35,40 @@ const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 /// How long one request may wait for its response.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+pub(crate) fn slack_auth_dir() -> PathBuf {
+    construct_protocol::paths::Paths::discover()
+        .data_dir
+        .join("operators")
+        .join("slack-mcp-auth")
+}
+
+/// Whether mcp-remote has persisted a non-empty OAuth token record. This is a
+/// storage fact, not a connectivity claim: the token may still need refresh or
+/// workspace-admin approval when the backend next starts.
+pub(crate) fn slack_oauth_credentials_saved() -> bool {
+    oauth_tokens_saved_under(&slack_auth_dir(), 4)
+}
+
+fn oauth_tokens_saved_under(directory: &Path, remaining_depth: usize) -> bool {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        let Ok(file_type) = entry.file_type() else {
+            return false;
+        };
+        if file_type.is_dir() && remaining_depth > 0 {
+            return oauth_tokens_saved_under(&entry.path(), remaining_depth - 1);
+        }
+        file_type.is_file()
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with("_tokens.json"))
+            && entry.metadata().is_ok_and(|metadata| metadata.len() > 0)
+    })
+}
 
 /// Requests waiting on a response, or `None` once the backend's stream has
 /// ended — after which registering a new request must fail immediately
@@ -49,11 +97,47 @@ impl Drop for McpClient {
 }
 
 impl McpClient {
+    /// Start Construct's built-in Slack MCP backend. `mcp-remote` owns the
+    /// first-run browser OAuth flow and refresh-token persistence; pinning its
+    /// package and every argument here keeps channel configuration free of
+    /// executable input.
+    pub(crate) async fn spawn_slack() -> Result<Self> {
+        let auth_dir = slack_auth_dir();
+        tokio::fs::create_dir_all(&auth_dir)
+            .await
+            .with_context(|| format!("create Slack MCP auth directory {}", auth_dir.display()))?;
+        let client_info = format!(r#"{{"client_id":"{SLACK_MCP_CLIENT_ID}"}}"#);
+        let client_metadata = format!(r#"{{"scope":"{SLACK_MCP_SCOPES}"}}"#);
+        let mut command = tokio::process::Command::new("npx");
+        command
+            .args([
+                "-y",
+                SLACK_MCP_REMOTE_PACKAGE,
+                SLACK_MCP_URL,
+                SLACK_MCP_CALLBACK_PORT,
+                "--transport",
+                "http-only",
+                "--auth-timeout",
+                "300",
+                "--static-oauth-client-info",
+                &client_info,
+                "--static-oauth-client-metadata",
+                &client_metadata,
+            ])
+            .env("MCP_REMOTE_CONFIG_DIR", auth_dir);
+        Self::spawn_process(command, "Slack MCP backend").await
+    }
+
     /// Spawn `command` with the user's shell and complete the MCP handshake.
+    #[cfg(test)]
     pub(crate) async fn spawn(command: &str) -> Result<Self> {
-        let mut child = tokio::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(command)
+        let mut process = tokio::process::Command::new("/bin/sh");
+        process.arg("-c").arg(command);
+        Self::spawn_process(process, "test MCP backend").await
+    }
+
+    async fn spawn_process(mut command: tokio::process::Command, label: &str) -> Result<Self> {
+        let mut child = command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             // Backends log to stderr; letting it flow to the daemon's own
@@ -61,7 +145,7 @@ impl McpClient {
             .stderr(std::process::Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("spawn MCP backend `{command}`"))?;
+            .with_context(|| format!("spawn {label}"))?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("MCP backend has no stdin"))?;
         let stdout = child
             .stdout
@@ -142,12 +226,21 @@ impl McpClient {
         Ok(client)
     }
 
-    /// Call one tool and return the JSON its single text content block holds.
-    ///
-    /// The channel's tool contract (spec 0201) is JSON-in-text: a conforming
-    /// backend answers every contract tool with one `text` content block whose
-    /// body parses as JSON. Anything else is treated as a backend error.
+    /// Test helper for tools that return JSON encoded in a text block.
+    #[cfg(test)]
     pub(crate) async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value> {
+        let value = self.call_tool_value(name, arguments).await?;
+        match value {
+            Value::String(text) => serde_json::from_str(&text)
+                .with_context(|| format!("MCP tool `{name}` returned text that is not JSON")),
+            value => Ok(value),
+        }
+    }
+
+    /// Call a tool while accepting both modern `structuredContent` results
+    /// and ordinary text blocks. Slack's hosted server currently returns JSON
+    /// encoded as text for reads and plain text links for writes.
+    pub(crate) async fn call_tool_value(&self, name: &str, arguments: Value) -> Result<Value> {
         let response = self
             .request("tools/call", json!({"name": name, "arguments": arguments}))
             .await
@@ -164,10 +257,12 @@ impl McpClient {
                 first_text(result).unwrap_or_default()
             ));
         }
+        if let Some(structured) = result.get("structuredContent") {
+            return Ok(structured.clone());
+        }
         let text = first_text(result)
             .ok_or_else(|| anyhow!("MCP tool `{name}` returned no text content"))?;
-        serde_json::from_str(&text)
-            .with_context(|| format!("MCP tool `{name}` returned text that is not JSON"))
+        Ok(Value::String(text))
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
@@ -283,19 +378,57 @@ mod tests {
     use super::*;
     use tokio::io::{duplex, AsyncBufReadExt, BufReader};
 
+    #[test]
+    fn oauth_readiness_requires_a_nonempty_persisted_token_record() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(!oauth_tokens_saved_under(directory.path(), 4));
+
+        let version = directory.path().join("0.1.38");
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::write(version.join("server_tokens.json"), "").unwrap();
+        assert!(!oauth_tokens_saved_under(directory.path(), 4));
+
+        std::fs::write(version.join("server_tokens.json"), r#"{"access_token":"saved"}"#)
+            .unwrap();
+        assert!(oauth_tokens_saved_under(directory.path(), 4));
+    }
+
+    #[test]
+    fn unrelated_auth_files_do_not_report_oauth_readiness() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("client_info.json"), "{}").unwrap();
+        assert!(!oauth_tokens_saved_under(directory.path(), 4));
+    }
+
     #[tokio::test]
     async fn handshake_then_tool_call_round_trips_json() {
         let (reader, writer) = fake_server(|name, args| {
-            assert_eq!(name, "slack_sweep_messages");
-            assert_eq!(args["after_ts"], "1.000000");
-            text_result(json!({"messages": [{"channel": "D1", "ts": "2.000000"}]}))
+            assert_eq!(name, "slack_search_public_and_private");
+            assert_eq!(args["query"], "after:2026-08-18");
+            text_result(json!({"results": "none", "pagination_info": "none"}))
         });
         let client = McpClient::connect(reader, writer, None).await.expect("handshake");
         let result = client
-            .call_tool("slack_sweep_messages", json!({"after_ts": "1.000000"}))
+            .call_tool(
+                "slack_search_public_and_private",
+                json!({"query": "after:2026-08-18"}),
+            )
             .await
             .expect("tool call");
-        assert_eq!(result["messages"][0]["channel"], "D1");
+        assert_eq!(result["results"], "none");
+    }
+
+    #[tokio::test]
+    async fn structured_content_is_returned_without_text_coercion() {
+        let (reader, writer) = fake_server(|_, _| {
+            json!({"structuredContent": {"message_link": "https://example.slack.com/archives/C1/p1234567890123456"}})
+        });
+        let client = McpClient::connect(reader, writer, None).await.expect("handshake");
+        let result = client
+            .call_tool_value("slack_send_message", json!({}))
+            .await
+            .expect("structured result");
+        assert_eq!(result["message_link"], "https://example.slack.com/archives/C1/p1234567890123456");
     }
 
     #[tokio::test]
@@ -319,7 +452,10 @@ mod tests {
             json!({"content": [{"type": "text", "text": "# Search Results\nnothing"}]})
         });
         let client = McpClient::connect(reader, writer, None).await.expect("handshake");
-        assert!(client.call_tool("slack_sweep_messages", json!({})).await.is_err());
+        assert!(client
+            .call_tool("slack_search_public_and_private", json!({}))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -360,7 +496,7 @@ mod tests {
           done"#;
         let client = McpClient::spawn(script).await.expect("spawn shell backend");
         let result = client
-            .call_tool("slack_sweep_messages", json!({"after_ts": "0"}))
+            .call_tool("slack_search_public_and_private", json!({"query": "test"}))
             .await
             .expect("tool call over a real pipe");
         assert_eq!(result["pong"], true);
@@ -391,7 +527,7 @@ mod tests {
             .await
             .expect("handshake");
         let error = client
-            .call_tool("slack_sweep_messages", json!({}))
+            .call_tool("slack_search_public_and_private", json!({}))
             .await
             .expect_err("a closed stream must fail the pending call");
         // The failure must be the fast "closed" path, never the 60s timeout.

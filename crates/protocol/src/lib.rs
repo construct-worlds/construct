@@ -3555,11 +3555,9 @@ pub struct OperatorChannelSummary {
     pub follow_up: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_context: Option<usize>,
-    /// slack-personal options, `None` on every other kind. The MCP command is
-    /// configuration rather than a credential, so unlike tokens it is
-    /// reported back for editing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_command: Option<String>,
+    /// slack-personal options, `None` on every other kind. Its Slack OAuth
+    /// credentials belong to the daemon-managed MCP backend and are never
+    /// returned through this summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4030,11 +4028,6 @@ pub struct OperatorChannelPut {
     pub follow_up: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_context: Option<usize>,
-    /// slack-personal only. Shell command that starts the channel's MCP
-    /// backend on stdio. Not a secret — credentials belong in the backend's
-    /// own configuration — but omitted values preserve the stored command.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_command: Option<String>,
     /// slack-personal behavior options; an omitted option keeps the stored
     /// value, like the Slack bot options above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4073,7 +4066,6 @@ impl Default for OperatorChannelPut {
             progress: None,
             follow_up: None,
             thread_context: None,
-            mcp_command: None,
             trigger: None,
             response_mode: None,
             response_mode_overrides: None,
@@ -5575,6 +5567,42 @@ mod cost_model_tests {
 #[cfg(test)]
 mod operator_protocol_tests {
     use super::*;
+
+    #[test]
+    fn slack_personal_auto_after_round_trips_without_a_backend_command() {
+        let channel = OperatorChannelPut {
+            id: "me".into(),
+            kind: "slack-personal".into(),
+            response_mode: Some("auto-after".into()),
+            response_mode_overrides: Some(BTreeMap::from([(
+                "CHANNEL".into(),
+                "auto-after".into(),
+            )])),
+            auto_after_secs: Some(45),
+            poll_interval_secs: Some(20),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&channel).expect("serialize personal channel");
+        assert_eq!(value["response_mode"], "auto-after");
+        assert_eq!(value["response_mode_overrides"]["CHANNEL"], "auto-after");
+        assert_eq!(value["auto_after_secs"], 45);
+        assert!(value.get("mcp_command").is_none());
+
+        let decoded: OperatorChannelPut =
+            serde_json::from_value(value).expect("deserialize personal channel");
+        assert_eq!(decoded.response_mode.as_deref(), Some("auto-after"));
+        assert_eq!(
+            decoded
+                .response_mode_overrides
+                .as_ref()
+                .and_then(|overrides| overrides.get("CHANNEL"))
+                .map(String::as_str),
+            Some("auto-after")
+        );
+        assert_eq!(decoded.auto_after_secs, Some(45));
+        assert_eq!(decoded.poll_interval_secs, Some(20));
+    }
 
     #[test]
     fn legacy_operator_summary_defaults_to_headless() {

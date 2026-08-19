@@ -54,7 +54,6 @@ async fn web_operator_editor_round_trips_slack_personal_response_mode_overrides(
                 id: "personal".into(),
                 kind: "slack-personal".into(),
                 enabled: false,
-                mcp_command: Some("fake-mcp".into()),
                 response_mode: Some("draft".into()),
                 response_mode_overrides: Some(std::collections::BTreeMap::from([
                     ("C-sensitive".into(), "auto-after".into()),
