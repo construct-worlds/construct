@@ -15168,6 +15168,15 @@ fn paint_focus_border_sweep(f: &mut Frame, rect: Rect, progress: f32, highlight:
                 continue;
             }
             if let Some(cell) = f.buffer_mut().cell_mut(Position { x, y }) {
+                let is_corner = (x == rect.left() || x == rect.right().saturating_sub(1))
+                    && (y == rect.top() || y == rect.bottom().saturating_sub(1));
+                // Pane titles and their live edit controls occupy the top
+                // border row. Highlight only actual horizontal-rule cells
+                // there; hidden side/bottom edges are blank and deliberately
+                // receive transient glyphs below. Corners always participate.
+                if y == rect.top() && !is_corner && cell.symbol() != "─" {
+                    continue;
+                }
                 let symbol = match (
                     x == rect.left(),
                     x == rect.right().saturating_sub(1),
@@ -15225,6 +15234,10 @@ mod focus_border_paint_tests {
         terminal
             .draw(|f| {
                 f.buffer_mut()
+                    .cell_mut(Position { x: 5, y: 0 })
+                    .expect("top rule")
+                    .set_symbol("─");
+                f.buffer_mut()
                     .cell_mut(Position { x: 0, y: 5 })
                     .expect("left edge")
                     .set_style(
@@ -15278,6 +15291,32 @@ mod focus_border_paint_tests {
             })
             .expect("draw second endpoint");
         assert_eq!(terminal.backend().buffer()[(10, 10)].symbol(), "┘");
+    }
+
+    #[test]
+    fn sweep_does_not_overwrite_title_text_in_top_border() {
+        let backend = TestBackend::new(22, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                f.buffer_mut().set_string(
+                    1,
+                    0,
+                    " rename me ",
+                    Style::default().fg(Color::Yellow),
+                );
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 21, 11),
+                    0.25,
+                    Style::default().fg(Color::Cyan),
+                );
+            })
+            .expect("draw");
+        let title = (1..12)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect::<String>();
+        assert_eq!(title, " rename me ");
     }
 }
 
