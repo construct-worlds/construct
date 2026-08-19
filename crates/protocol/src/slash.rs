@@ -433,6 +433,7 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     "deepseek:deepseek-v4-flash",
     // Local Ollama examples.
     "ollama:llama3.1",
+    "ollama:qwen3.8",
     "ollama:qwen3-coder",
     // xAI platform API path. Same models as the OAuth path below, billed
     // against an API key instead of a Grok subscription.
@@ -617,6 +618,10 @@ mod tests {
         assert_eq!(
             models_for_provider("meta"),
             vec!["muse-spark-1.2", "muse-spark-1.1"]
+        );
+        assert_eq!(
+            models_for_provider("ollama"),
+            vec!["llama3.1", "qwen3.8", "qwen3-coder"]
         );
         assert_eq!(
             models_for_provider("grok"),
