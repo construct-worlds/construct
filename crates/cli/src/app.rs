@@ -4231,6 +4231,16 @@ impl OperatorChannelRowHit {
 }
 
 /// Last-frame geometry for hit-testing mouse clicks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModalOwner {
+    Playbook,
+    Tasks,
+    RemoteControl,
+    Help,
+    SessionPicker,
+    Configure,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LayoutSnapshot {
     pub list_area: Option<ratatui::layout::Rect>,
@@ -4329,6 +4339,10 @@ pub struct LayoutSnapshot {
     /// Mouse clicks outside this rect dismiss the modal instead of
     /// falling through to panes underneath it.
     pub modal_area: Option<ratatui::layout::Rect>,
+    /// Identity of the surface that wrote `modal_area` last. Input routing
+    /// must follow the same topmost order as rendering; checking whether an
+    /// underlying modal merely exists is insufficient when modals overlap.
+    pub modal_owner: Option<ModalOwner>,
     /// Clickable controls inside the `/remote-control` dialog (tunnel-type
     /// buttons, `[ back ]`/`[ stop ]`, and the `Enter`/`Esc`/`o` key hints).
     /// Populated by `render_remote_control_popup`; empty whenever the dialog
@@ -4776,6 +4790,7 @@ impl LayoutSnapshot {
             prompt_turn_hits: _,
             remote_control_hits: _,
             configure_tab_hits: _,
+            modal_owner: _,
             // Consumed inside the main block's own render pass (or carries no
             // geometry at all), so it stays in main-block coordinates.
             frame_area: _,
@@ -7154,6 +7169,33 @@ impl App {
             return;
         }
 
+        // True topmost modals get the same precedence for terminal paste
+        // events as for individual keys. The session picker owns paste as its
+        // typeahead; configure's auto-open semantics close and reroute the
+        // unclaimed text; Help closes and consumes; remote control consumes
+        // the paste (and its name form accepts the same valid characters as
+        // ordinary key events).
+        if self.session_picker_insert_text(&text) {
+            return;
+        }
+        if self.configure_popup.is_some() {
+            self.configure_popup = None;
+        }
+        if self.help_visible {
+            self.help_visible = false;
+            return;
+        }
+        if self.remote_control_popup.is_some() {
+            for ch in text.chars() {
+                self.handle_remote_control_key(KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::NONE,
+                ))
+                .await;
+            }
+            return;
+        }
+
         // An inline title edit has the same modal precedence for terminal
         // paste events as it does for ordinary keys. Consume the whole paste
         // at the edit cursor instead of leaking it into the pane's PTY.
@@ -7167,13 +7209,6 @@ impl App {
 
         if self.playbook_search_active() {
             self.append_playbook_search_query_text(&text);
-            return;
-        }
-
-        // The session picker owns paste events at the same precedence as
-        // ordinary key events. Without this, `C-x b` accepted typed text in
-        // its search line but sent pasted text to the previously focused PTY.
-        if self.session_picker_insert_text(&text) {
             return;
         }
 
@@ -11501,9 +11536,37 @@ impl App {
                     if self.configure_click_tab(ev.column, ev.row) {
                         return;
                     }
+                    // The popup closed and this same click must continue
+                    // through ordinary routing (spec 0069). Clear last-frame
+                    // modal ownership so the stale rectangle cannot consume
+                    // the re-dispatched click below.
+                    self.layout.modal_area = None;
+                    self.layout.modal_owner = None;
                 }
                 _ => return,
             }
+        }
+        // A rendered modal above the Playbook owns pointer input before any
+        // pane-level hit test or drag can start. Mouse-up is where ordinary
+        // clicks dispatch; consume the matching down event so it cannot focus,
+        // rename, resize, or select text on the covered surface. The session
+        // picker remains keyboard-only by design (spec 0063), so it consumes
+        // every mouse event without acting on it.
+        match self.layout.modal_owner {
+            Some(ModalOwner::RemoteControl) if self.remote_control_popup.is_some() => {
+                if matches!(ev.kind, MouseEventKind::Up(MouseButton::Left)) {
+                    self.handle_left_click(ev.column, ev.row).await;
+                }
+                return;
+            }
+            Some(ModalOwner::Tasks) if self.tasks_popup.is_some() => {
+                if matches!(ev.kind, MouseEventKind::Up(MouseButton::Left)) {
+                    self.handle_left_click(ev.column, ev.row).await;
+                }
+                return;
+            }
+            Some(ModalOwner::SessionPicker) if self.session_picker_active() => return,
+            _ => {}
         }
         // The harness completion menu is painted above the underlying panes,
         // so vertical wheel events within its bounds navigate its highlight
@@ -11589,7 +11652,11 @@ impl App {
             && self.dragging_lineage_scrollbar.is_none()
             && self.text_selection.is_none()
             && self.mouse_over_tutorial_card(ev.column, ev.row);
-        if !card_owns_event && self.handle_playbook_mouse(&ev).await {
+        let playbook_is_top_modal = self.layout.modal_owner == Some(ModalOwner::Playbook)
+            || (self.layout.modal_owner.is_none()
+                && self.layout.modal_area.is_some()
+                && self.playbook_popup.is_some());
+        if !card_owns_event && playbook_is_top_modal && self.handle_playbook_mouse(&ev).await {
             return;
         }
         // URL clicks must be intercepted before the child-mouse-forward path so
@@ -12186,7 +12253,14 @@ impl App {
             return;
         }
         if let Some(modal) = self.layout.modal_area {
-            if self.playbook_popup.is_some() {
+            let owner = self.layout.modal_owner.or_else(|| {
+                // Compatibility for tests and the brief pre-first-frame state
+                // that fabricate only the historical `modal_area` field.
+                self.playbook_popup
+                    .is_some()
+                    .then_some(ModalOwner::Playbook)
+            });
+            if owner == Some(ModalOwner::Playbook) {
                 if contains(modal, col, row) {
                     self.place_playbook_cursor(modal, col, row);
                     return;
@@ -12197,24 +12271,20 @@ impl App {
                 // a session / focuses a pane; the playbook then follows the new
                 // selection (the prior playbook is stashed, not destroyed) via
                 // sync_playbook_popup_with_selection.
+            } else if owner == Some(ModalOwner::SessionPicker) {
+                // Keyboard-only in v1 (spec 0063): the topmost dialog still
+                // blocks clicks from reaching the Playbook or panes below.
+                return;
             } else if !contains(modal, col, row) {
                 self.dismiss_modal();
                 return;
             } else {
-                if let Some(dialog) = self.operator_dialog.as_mut() {
-                    // The definition rows start immediately inside the
-                    // one-cell border. Clicking a row selects it; keyboard
-                    // typing/cycling then edits that field.
-                    let field = row.saturating_sub(modal.y.saturating_add(1)) as usize;
-                    if field < OPERATOR_FIELD_COUNT {
-                        dialog.focus = OperatorDialogFocus::Field(field);
-                    }
-                    return;
-                }
                 // The /remote-control dialog is the one informational modal
                 // with live controls: dispatch a click that lands on one of
                 // its registered buttons / key hints before the swallow below.
-                if self.remote_control_popup.is_some() {
+                if owner == Some(ModalOwner::RemoteControl)
+                    && self.remote_control_popup.is_some()
+                {
                     if let Some(action) = self
                         .layout
                         .remote_control_hits
@@ -12505,24 +12575,27 @@ impl App {
         // The operator editor is deliberately absent here: it is the operator
         // view itself, not a modal over it, and Esc inside it reverts edits
         // rather than closing anything (spec 0175).
-        if self.configure_popup.take().is_some() {
-            return;
+        match self.layout.modal_owner {
+            Some(ModalOwner::Configure) => self.configure_popup = None,
+            Some(ModalOwner::Playbook) => {
+                // Remember caret + scroll so reopening restores them, matching
+                // the toggle-close path.
+                self.remember_playbook_view_state();
+                self.playbook_popup = None;
+            }
+            Some(ModalOwner::Tasks) => self.tasks_popup = None,
+            Some(ModalOwner::RemoteControl) => self.close_remote_control_popup(),
+            Some(ModalOwner::Help) => self.help_visible = false,
+            Some(ModalOwner::SessionPicker) => {}
+            None if self.configure_popup.take().is_some() => {}
+            None if self.remote_control_popup.is_some() => self.close_remote_control_popup(),
+            None if self.tasks_popup.take().is_some() => {}
+            None if self.playbook_popup.is_some() => {
+                self.remember_playbook_view_state();
+                self.playbook_popup = None;
+            }
+            None => self.help_visible = false,
         }
-        if self.playbook_popup.is_some() {
-            // Remember caret + scroll so reopening restores them, matching the
-            // toggle-close path.
-            self.remember_playbook_view_state();
-            self.playbook_popup = None;
-            return;
-        }
-        if self.tasks_popup.take().is_some() {
-            return;
-        }
-        if self.remote_control_popup.is_some() {
-            self.close_remote_control_popup();
-            return;
-        }
-        self.help_visible = false;
     }
 
     pub fn hovered_url(&self) -> Option<UrlHit> {
@@ -13103,6 +13176,14 @@ impl App {
         if self.configure_popup.is_some() && self.handle_configure_key(key).await {
             return;
         }
+        // The remote-control dialog is rendered above pane surfaces and owns
+        // every key, including keys it does not use. Keep it in the same
+        // precedence tier as the other explicit topmost dialogs, before
+        // lineage, tasks fallthrough, pinned terminals, and the Playbook.
+        if self.remote_control_popup.is_some() {
+            self.handle_remote_control_key(key).await;
+            return;
+        }
         // The sidebar's lineage section, keyboard-focused (bare `Tab` from
         // the list pane — spec 0081): owns
         // navigation/merge/discard/jump keys while focused; anything else
@@ -13159,13 +13240,6 @@ impl App {
                 return;
             }
             self.handle_playbook_key(key).await;
-            return;
-        }
-        // /remote-control modal: arrow keys pick a tunnel provider,
-        // Enter starts it, Esc closes. Every key is consumed while it's
-        // open — see `handle_remote_control_key`.
-        if self.remote_control_popup.is_some() {
-            self.handle_remote_control_key(key).await;
             return;
         }
         // Prompt captures all input when open — with one exception:
@@ -17467,6 +17541,7 @@ mod tests {
             prompt_turn_hits: Vec::new(),
             prompt_choice_hits: Vec::new(),
             modal_area: None,
+            modal_owner: None,
             remote_control_hits: Vec::new(),
             session_title_name_hits: Vec::new(),
             session_harness_hits: Vec::new(),
@@ -39852,6 +39927,106 @@ mod tests {
         server.abort();
     }
 
+    /// Regression: the rolled-down Playbook used to take keyboard and mouse
+    /// input before the remote-control dialog painted above it. Exercise the
+    /// real frame snapshot plus top-level event dispatch with and without the
+    /// underlying Playbook so both states keep identical dialog behavior.
+    #[tokio::test]
+    async fn remote_control_events_have_same_precedence_over_rolled_down_playbook() {
+        use construct_protocol::{RemoteProviderInfo, TunnelProvider};
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        for playbook_open in [false, true] {
+            let (mut app, _dir, server) = captured_app().await;
+            if playbook_open {
+                app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 2));
+                app.focus = PaneFocus::View;
+            }
+            app.remote_control_popup = Some(RemoteControlPopup::Choose(RemoteControlChoose {
+                base: remote_ok_fixture(false),
+                options: vec![
+                    RemoteProviderInfo {
+                        provider: TunnelProvider::Cloudflare,
+                        available: true,
+                        detail: None,
+                    },
+                    RemoteProviderInfo {
+                        provider: TunnelProvider::Construct,
+                        available: true,
+                        detail: None,
+                    },
+                ],
+                selected: 0,
+                active: None,
+            }));
+
+            let backend = ratatui::backend::TestBackend::new(120, 40);
+            let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|f| crate::ui::render(f, &mut app))
+                .expect("draw remote over base surface");
+            assert_eq!(
+                app.layout.modal_owner,
+                Some(ModalOwner::RemoteControl),
+                "rendered remote dialog must identify itself as topmost"
+            );
+
+            app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+                .await;
+            let selected = app
+                .remote_control_popup
+                .as_ref()
+                .and_then(|popup| match popup {
+                    RemoteControlPopup::Choose(choose) => Some(choose.selected),
+                    _ => None,
+                });
+            assert_eq!(selected, Some(1));
+            if let Some(playbook) = app.playbook_popup.as_ref() {
+                assert_eq!(playbook.buffer, "draft");
+            }
+            app.on_paste("pasted".to_string()).await;
+            if let Some(playbook) = app.playbook_popup.as_ref() {
+                assert_eq!(playbook.buffer, "draft");
+            }
+
+            if let Some(RemoteControlPopup::Choose(choose)) =
+                app.remote_control_popup.as_mut()
+            {
+                choose.selected = 0;
+            }
+            let hit = app
+                .layout
+                .remote_control_hits
+                .iter()
+                .find(|hit| matches!(hit.action, RemoteControlHitAction::SelectProvider(1)))
+                .cloned()
+                .expect("second provider hit from rendered frame");
+            let event = |kind| MouseEvent {
+                kind,
+                column: hit.x_start,
+                row: hit.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            app.on_mouse(event(MouseEventKind::Down(MouseButton::Left)))
+                .await;
+            app.on_mouse(event(MouseEventKind::Up(MouseButton::Left)))
+                .await;
+
+            let selected = app
+                .remote_control_popup
+                .as_ref()
+                .and_then(|popup| match popup {
+                    RemoteControlPopup::Choose(choose) => Some(choose.selected),
+                    _ => None,
+                });
+            assert_eq!(selected, Some(1));
+            if let Some(playbook) = app.playbook_popup.as_ref() {
+                assert_eq!(playbook.cursor, 2);
+            }
+            server.abort();
+        }
+    }
+
     #[tokio::test]
     async fn remote_ready_view_back_stop_and_hints_are_clickable() {
         use crossterm::event::KeyCode;
@@ -41543,6 +41718,13 @@ mod tests {
         app.focus = PaneFocus::View;
         app.help_visible = true;
 
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw help over Playbook");
+        assert_eq!(app.layout.modal_owner, Some(ModalOwner::Help));
+
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .await;
 
@@ -41553,6 +41735,44 @@ mod tests {
                 .map(|popup| popup.buffer.as_str()),
             Some("draft"),
             "the dismissing key must not leak into the focused playbook"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn keyboard_only_session_picker_blocks_playbook_mouse_after_render() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = captured_app().await;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 2));
+        app.focus = PaneFocus::View;
+        app.open_session_picker(SessionPickerPurpose::Switch);
+
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw picker over Playbook");
+        assert_eq!(
+            app.layout.modal_owner,
+            Some(ModalOwner::SessionPicker)
+        );
+        let modal = app.layout.modal_area.expect("session-picker area");
+        let click = |kind| MouseEvent {
+            kind,
+            column: modal.x + 2,
+            row: modal.y + 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.on_mouse(click(MouseEventKind::Down(MouseButton::Left)))
+            .await;
+        app.on_mouse(click(MouseEventKind::Up(MouseButton::Left)))
+            .await;
+
+        assert!(app.session_picker_active());
+        assert_eq!(
+            app.playbook_popup.as_ref().map(|popup| popup.cursor),
+            Some(2)
         );
         server.abort();
     }
@@ -41636,6 +41856,8 @@ mod tests {
         use crossterm::event::MouseButton;
 
         let (mut app, _dir, server) = captured_app().await;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "draft", 2));
+        app.focus = PaneFocus::View;
         app.help_visible = true;
         let backend = ratatui::backend::TestBackend::new(120, 15);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
@@ -41671,6 +41893,11 @@ mod tests {
         })
         .await;
         assert!(!app.help_visible, "a click should still close help");
+        assert_eq!(
+            app.playbook_popup.as_ref().map(|popup| popup.cursor),
+            Some(2),
+            "Help mouse input must not reach the covered Playbook"
+        );
 
         server.abort();
     }

@@ -19,6 +19,8 @@ use std::time::Duration;
 
 use construct_e2e::{Daemon, Tui};
 
+const OPEN_PLAYBOOK: &[u8] = b"\x18 ";
+
 /// Minimal smoke: TUI starts, draws the modeline (IPC + render
 /// path), and quits cleanly on `q`. Keeps the bar low for the
 /// first TUI e2e — assertions on the slash-command popup go in
@@ -123,6 +125,126 @@ async fn tui_remote_control_popup_via_palette() {
         "TUI exited with non-success status: {:?}",
         status
     );
+}
+
+/// Full PTY regression for modal precedence: open a real session Playbook,
+/// place the remote-control dialog over it, then prove keyboard text does not
+/// edit the document and a mouse click on the Construct provider reaches the
+/// dialog's next step.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tui_remote_control_owns_keyboard_and_mouse_over_playbook() {
+    let d = Daemon::spawn().await.expect("spawn daemon");
+    let cwd = d.socket.parent().unwrap().to_string_lossy().to_string();
+    let session = d
+        .client
+        .create(shell_session_params(&cwd, "modal-routing"))
+        .await
+        .expect("create session");
+    d.client
+        .playbook_update(construct_protocol::PlaybookUpdateParams {
+            session_id: session.clone(),
+            markdown: "modal-routing-sentinel\n".to_string(),
+            base_version: None,
+            actor: construct_protocol::PlaybookUpdateActor::Human,
+            template_id: None,
+            note: None,
+            shimmer: None,
+            shimmer_tooltips: None,
+        })
+        .await
+        .expect("seed playbook");
+
+    let mut tui = Tui::spawn_with_recording(
+        &d.socket,
+        "tui_remote_control_owns_keyboard_and_mouse_over_playbook",
+    )
+    .expect("spawn TUI");
+    tui.wait_for("construct  focus:", Duration::from_secs(15))
+        .await
+        .expect("modeline never rendered");
+    tui.send(b"\x1b").expect("dismiss first-run configure if present");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    tui.send(OPEN_PLAYBOOK).expect("open Playbook");
+    tui.wait_for("modal-routing-sentinel", Duration::from_secs(10))
+        .await
+        .expect("Playbook never rendered");
+
+    tui.send(b"\x18x").expect("open command palette");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    tui.send(b"remote-control\r").expect("open remote control");
+    tui.wait_for("/remote-connect", Duration::from_secs(15))
+        .await
+        .expect("remote dialog never rendered over Playbook");
+
+    // This key is unused by the chooser but still belongs to the explicit
+    // modal. Before the fix it was inserted into the Playbook underneath.
+    tui.send(b"z").expect("send unused dialog key");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let stored = d
+        .client
+        .playbook_get(&session)
+        .await
+        .expect("read Playbook after key")
+        .playbook
+        .markdown;
+    assert_eq!(stored, "modal-routing-sentinel\n");
+
+    // Move focus to Cloudflare first. The pointer click below must move it
+    // back to the stable provider; otherwise Enter cannot reach the name form.
+    tui.send(b"\x1b[C").expect("select next provider");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let screen = tui.screen();
+    let (row, col) = screen
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.find("tunnel.zarvis.ai")
+                .map(|byte_col| (row, line[..byte_col].chars().count()))
+        })
+        .expect("stable provider coordinates");
+    let mouse_down = format!("\x1b[<0;{};{}M", col + 1, row + 1);
+    let mouse_up = format!("\x1b[<0;{};{}m", col + 1, row + 1);
+    tui.send(mouse_down.as_bytes()).expect("provider mouse down");
+    tui.send(mouse_up.as_bytes()).expect("provider mouse up");
+    tui.send(b"\r").expect("activate clicked provider");
+    tui.wait_for("Choose your tunnel name", Duration::from_secs(5))
+        .await
+        .expect("provider click did not reach remote-control dialog");
+
+    tui.send(b"\x1b").expect("return to remote chooser");
+    tui.wait_for_absence("Choose your tunnel name", Duration::from_secs(5))
+        .await
+        .expect("remote name form did not go back");
+    tui.send(b"\x1b").expect("close remote chooser");
+    tui.wait_for_absence("/remote-connect", Duration::from_secs(5))
+        .await
+        .expect("remote chooser did not close");
+    tui.send(b"\x18\x03").expect("quit TUI");
+    let status = tui
+        .wait_exit(Duration::from_secs(5))
+        .await
+        .expect("TUI did not exit");
+    assert!(status.success(), "TUI exited unsuccessfully: {status:?}");
+}
+
+fn shell_session_params(cwd: &str, title: &str) -> construct_protocol::CreateSessionParams {
+    construct_protocol::CreateSessionParams {
+        harness: "shell".to_string(),
+        cwd: cwd.to_string(),
+        prompt: None,
+        model: None,
+        title: Some(title.to_string()),
+        mode: None,
+        pty_size: None,
+        worktree: false,
+        env: std::collections::HashMap::new(),
+        args: Vec::new(),
+        kind: Default::default(),
+        parent_session_id: None,
+        group_id: None,
+        position_after_session_id: None,
+        forked_from: None,
+    }
 }
 
 /// The stopped remote-control status is a mouse-first discovery path. Clicking
