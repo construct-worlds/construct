@@ -34,6 +34,16 @@ explicit reply binding are shared with the `slack` kind; the two kinds are
 two transports over one Slack-conversation model. "Unread" means newer than
 the channel's own cursor; Slack's human read-markers are never consulted.
 
+Polling is adaptive within explicit bounds. The configured poll interval is
+the idle ceiling, and five seconds is the active floor. Startup and backend
+reconnection begin at the idle ceiling. A sweep that accepts at least one
+message resets the next interval to the active floor; each sweep with no
+accepted messages doubles the following interval until the idle ceiling is
+reached. Activity outside the configured scope does not reset the cadence.
+With the default 20-second ceiling, activity produces the sequence 5, 10, 20
+seconds across subsequent idle sweeps; further accepted activity resets it to
+5 seconds again.
+
 Because the operator and the user share one identity, the channel records the
 timestamp of every message it posts and excludes those from ingress. Messages
 authored by the user themself are legitimate triggers and are never filtered
@@ -63,9 +73,11 @@ the embedded MCP client a reusable primitive for future MCP-backed channels.
 
 ## Consequences
 
-- Latency is poll interval plus backend indexing lag; the kind must not
-  promise Socket Mode's push latency, and turn-running indication (0178)
-  applies from the moment ingress forwards a message.
+- Latency is the current adaptive interval plus backend indexing lag: up to
+  the configured ceiling while idle and the five-second floor after accepted
+  activity. The kind must not promise Socket Mode's push latency, and
+  turn-running indication (0178) applies from the moment ingress forwards a
+  message.
 - Sweeps that read search indexes may return conversations of every type,
   including direct messages; the configured allowlists gate what ingress may
   forward, and an unconfigured scope is not forwarded.

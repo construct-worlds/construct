@@ -9183,7 +9183,7 @@ pub(crate) fn render_operator_channel_editor(
                 },
             ),
             (
-                "Poll interval",
+                "Idle poll ceiling",
                 editor
                     .channel
                     .poll_interval_secs

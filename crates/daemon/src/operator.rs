@@ -1540,7 +1540,7 @@ pub(crate) fn slack_personal_config(
         .max(SLACK_PERSONAL_POLL_MIN_SECS);
     Some(slack_personal::SlackPersonalConfig {
         mcp_command,
-        poll_interval: std::time::Duration::from_secs(poll_secs),
+        idle_poll_ceiling: std::time::Duration::from_secs(poll_secs),
         trigger: channel.trigger.unwrap_or_default(),
         response: channel.response_mode.unwrap_or_default(),
         disclosure: channel.disclosure.unwrap_or(true),
@@ -3203,7 +3203,10 @@ mod tests {
         assert_eq!(config.trigger, SlackPersonalTrigger::Dm);
         assert_eq!(config.response, SlackPersonalResponse::Draft);
         assert!(config.disclosure);
-        assert_eq!(config.poll_interval, std::time::Duration::from_secs(20));
+        assert_eq!(
+            config.idle_poll_ceiling,
+            std::time::Duration::from_secs(20)
+        );
 
         // Disabled channels and channels without a command produce no task.
         let disabled = OperatorChannelConfig {
@@ -3223,6 +3226,9 @@ mod tests {
             ..channel
         };
         let config = slack_personal_config("chat", "me", &fast).expect("config");
-        assert_eq!(config.poll_interval, std::time::Duration::from_secs(5));
+        assert_eq!(
+            config.idle_poll_ceiling,
+            std::time::Duration::from_secs(5)
+        );
     }
 }
