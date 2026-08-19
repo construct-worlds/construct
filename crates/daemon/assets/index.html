@@ -3207,6 +3207,12 @@
   .playbook-input ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
   /* One source line. Empty lines keep height via a <br>. */
   .playbook-line { min-height: 1.6em; }
+  .playbook-inline-code {
+    color: var(--fg-strong, var(--fg));
+    background: color-mix(in srgb, var(--accent) 16%, var(--bg-elev));
+    border-radius: 4px;
+    padding: 0 2px;
+  }
   .playbook-selection-menu {
     position: absolute;
     z-index: 8;
@@ -9282,6 +9288,23 @@ function playbookLineClipRanges(line) {
   return ranges;
 }
 
+// Completed single-backtick spans. Backtick runs are left alone for fenced
+// code and literal Markdown; an unmatched opening delimiter stays visible as
+// source until the user completes it.
+function playbookLineCodeRanges(line) {
+  const ranges = [];
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] !== "`" || line[i - 1] === "`" || line[i + 1] === "`") continue;
+    for (let j = i + 1; j < line.length; j++) {
+      if (line[j] !== "`" || line[j - 1] === "`" || line[j + 1] === "`") continue;
+      if (j > i + 1) ranges.push([i, j + 1]);
+      i = j;
+      break;
+    }
+  }
+  return ranges;
+}
+
 // All construct-dialect inline tokens in one source line, in order: typed
 // `@{…}` references ("clip") and `[label](agentd:action/…)` action links
 // ("action"). Shared by the Playbook editor and the widget renderer (spec
@@ -9304,7 +9327,10 @@ function playbookMdLinkParse(raw) {
 }
 
 function playbookLineInlineTokens(line) {
-  const tokens = playbookLineClipRanges(line).map(([s, e]) => ({ start: s, end: e, kind: "clip" }));
+  const tokens = playbookLineCodeRanges(line).map(([s, e]) => ({ start: s, end: e, kind: "code" }));
+  for (const [start, end] of playbookLineClipRanges(line)) {
+    if (!tokens.some((t) => start < t.end && end > t.start)) tokens.push({ start, end, kind: "clip" });
+  }
   PLAYBOOK_ACTION_LINK_RE.lastIndex = 0;
   let m;
   while ((m = PLAYBOOK_ACTION_LINK_RE.exec(line))) {
@@ -9473,6 +9499,18 @@ function playbookAttachmentChipEl(raw) {
   label.textContent = `Image: ${shown}`;
   span.appendChild(label);
   span.title = (link && link.path) || raw;
+  return span;
+}
+
+// Atomic presentation for completed inline code. The exact source remains in
+// data-raw; Backspace at the right edge replaces this with ` + content so the
+// opening delimiter and text become directly editable again.
+function playbookInlineCodeEl(raw) {
+  const span = document.createElement("span");
+  span.className = "playbook-inline-code";
+  span.setAttribute("contenteditable", "false");
+  span.dataset.raw = raw;
+  span.textContent = raw.slice(1, -1);
   return span;
 }
 
@@ -9810,7 +9848,9 @@ function playbookFillLine(div, text) {
   for (const t of tokens) {
     if (t.start > pos) playbookAppendLineText(div, text.slice(pos, t.start), pos === 0);
     const raw = text.slice(t.start, t.end);
-    const chip = t.kind === "action"
+    const chip = t.kind === "code"
+      ? playbookInlineCodeEl(raw)
+      : t.kind === "action"
       ? playbookActionChipEl(raw)
       : t.kind === "attachment"
         ? playbookAttachmentChipEl(raw)
@@ -9890,7 +9930,7 @@ function playbookSerializeInline(el) {
   for (const node of el.childNodes) {
     if (node.nodeType === 3) out += node.data;
     else if (node.nodeType === 1) {
-      if (node.classList && node.classList.contains("playbook-clip")) out += node.dataset.raw || "";
+      if (node.classList && (node.classList.contains("playbook-clip") || node.classList.contains("playbook-inline-code"))) out += node.dataset.raw || "";
       else if (node.tagName === "BR") out += "";
       else out += playbookSerializeInline(node);
     }
@@ -10013,7 +10053,7 @@ function playbookDomPointToOffset(targetNode, targetOffset) {
 function playbookNodeRawLength(node) {
   if (!node) return 0;
   if (node.nodeType === 3) return playbookCharCount(node.data);
-  if (node.nodeType === 1 && node.classList && node.classList.contains("playbook-clip")) return playbookCharCount(node.dataset.raw || "");
+  if (node.nodeType === 1 && node.classList && (node.classList.contains("playbook-clip") || node.classList.contains("playbook-inline-code"))) return playbookCharCount(node.dataset.raw || "");
   if (node.nodeType === 1 && node.tagName === "BR") return 0;
   if (node.nodeType === 1) return playbookCharCount(playbookSerializeInline(node));
   return 0;
@@ -11511,8 +11551,78 @@ function playbookFindMove(delta) {
 
 // --- input / key handling ---
 
+function playbookLineAncestor(node) {
+  if (node && node.nodeType === 3) node = node.parentNode;
+  return node && node.closest ? node.closest(".playbook-line") : null;
+}
+
+// Turn a just-completed `text` sequence into its source-preserving formatted
+// span without rebuilding the whole contenteditable on ordinary keystrokes.
+function playbookFormatInlineCodeAtCaret() {
+  const offsets = playbookSelectionOffsets();
+  const sel = window.getSelection();
+  if (!offsets || offsets.anchor !== offsets.head || !sel || sel.rangeCount === 0) return;
+  const line = playbookLineAncestor(sel.getRangeAt(0).startContainer);
+  if (!line) return;
+  let lineStart = 0;
+  for (const candidate of playbookInputEl.childNodes) {
+    if (candidate === line) break;
+    if (candidate.nodeType === 1) lineStart += playbookNodeRawLength(candidate) + 1;
+  }
+  const localHead = offsets.head - lineStart;
+  const raw = playbookSerializeInline(line);
+  const completed = playbookLineInlineTokens(raw).some((t) =>
+    t.kind === "code" && playbookCharCount(raw.slice(0, t.end)) === localHead);
+  if (!completed) return;
+  playbookFillLine(line, raw);
+  const range = playbookRangeForOffset(offsets.head);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function playbookInlineCodeImmediatelyBeforeCaret() {
+  const sel = window.getSelection();
+  if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  let node = range.startContainer;
+  let offset = range.startOffset;
+  if (node.nodeType === 3) {
+    if (offset !== 0) return null;
+    node = node.previousSibling;
+  } else if (node.nodeType === 1) {
+    node = node.childNodes[offset - 1] || null;
+  }
+  return node && node.nodeType === 1 && node.classList.contains("playbook-inline-code") ? node : null;
+}
+
+function playbookRevealInlineCodeForBackspace() {
+  const code = playbookInlineCodeImmediatelyBeforeCaret();
+  if (!code) return false;
+  const raw = code.dataset.raw || "";
+  const sel = window.getSelection();
+  const replacement = document.createRange();
+  replacement.selectNode(code);
+  sel.removeAllRanges();
+  sel.addRange(replacement);
+  // Keep the replacement in the browser's native contenteditable undo stack.
+  if (document.execCommand("insertText", false, raw.slice(0, -1))) return true;
+
+  // Older engines may reject execCommand across a contenteditable=false node.
+  // Preserve the behavior there and publish the edit through the normal path.
+  const text = document.createTextNode(raw.slice(0, -1));
+  code.replaceWith(text);
+  const range = document.createRange();
+  range.setStart(text, text.data.length);
+  range.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(range);
+  playbookOnInput();
+  return true;
+}
+
 function playbookOnInput() {
   playbookNormalizeLines();
+  playbookFormatInlineCodeAtCaret();
   playbookApplyLineDecorations();
   playbookRefreshEmptyState();
   playbookUpdateDirty();
@@ -11547,6 +11657,10 @@ function playbookOnKeyDown(e) {
   }
   if (mod && (e.key === "s" || e.key === "S")) { e.preventDefault(); playbookSave(); return; }
   if (mod && e.key === "Enter") { e.preventDefault(); playbookRun(e.shiftKey); return; }
+  if (!mod && e.key === "Backspace" && playbookRevealInlineCodeForBackspace()) {
+    e.preventDefault();
+    return;
+  }
   // Emacs C-f: move the caret forward one character, matching the TUI's
   // Playbook binding. Must preventDefault or the browser opens its Find bar.
   if (mod && (e.key === "f" || e.key === "F")) {
