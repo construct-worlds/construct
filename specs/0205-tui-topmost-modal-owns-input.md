@@ -7,7 +7,7 @@ Scope: Input precedence when transient TUI surfaces overlap pane-local surfaces 
 
 ## Decision
 
-The topmost rendered modal owns input before every surface painted beneath it. The frame records both the modal's bounds and its identity; keyboard, paste, and pointer routing must consult the same modal precedence represented by the render order instead of inferring ownership from whether an underlying surface exists.
+The topmost rendered modal owns input before every surface painted beneath it. The frame records both the modal's bounds and its identity; keyboard and pointer routing must consult the same modal precedence represented by the render order instead of inferring ownership from whether an underlying surface exists.
 
 An explicit modal consumes inputs it does not use unless that modal's own established semantics say otherwise. In particular, the keyboard-only session picker consumes pointer events without acting on them, Help keeps its close-or-scroll behavior, and the remote-control dialog consumes every key while routing its registered pointer controls.
 

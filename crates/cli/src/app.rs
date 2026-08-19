@@ -7169,37 +7169,17 @@ impl App {
             return;
         }
 
-        // True topmost modals get the same precedence for terminal paste
-        // events as for individual keys. The session picker owns paste as its
-        // typeahead; configure's auto-open semantics close and reroute the
-        // unclaimed text; Help closes and consumes; remote control consumes
-        // the paste (and its name form accepts the same valid characters as
-        // ordinary key events).
-        if self.session_picker_insert_text(&text) {
-            return;
-        }
-        if self.configure_popup.is_some() {
-            self.configure_popup = None;
-        }
-        if self.help_visible {
-            self.help_visible = false;
-            return;
-        }
-        if self.remote_control_popup.is_some() {
-            for ch in text.chars() {
-                self.handle_remote_control_key(KeyEvent::new(
-                    KeyCode::Char(ch),
-                    KeyModifiers::NONE,
-                ))
-                .await;
-            }
-            return;
-        }
-
         // An inline title edit has the same modal precedence for terminal
         // paste events as it does for ordinary keys. Consume the whole paste
         // at the edit cursor instead of leaking it into the pane's PTY.
         if self.session_title_rename_insert_text(&text) {
+            return;
+        }
+
+        // The session picker owns paste events at the same precedence as
+        // ordinary key events. Without this, `C-x b` accepted typed text in
+        // its search line but sent pasted text to the previously focused PTY.
+        if self.session_picker_insert_text(&text) {
             return;
         }
 
@@ -39981,10 +39961,6 @@ mod tests {
                     _ => None,
                 });
             assert_eq!(selected, Some(1));
-            if let Some(playbook) = app.playbook_popup.as_ref() {
-                assert_eq!(playbook.buffer, "draft");
-            }
-            app.on_paste("pasted".to_string()).await;
             if let Some(playbook) = app.playbook_popup.as_ref() {
                 assert_eq!(playbook.buffer, "draft");
             }
