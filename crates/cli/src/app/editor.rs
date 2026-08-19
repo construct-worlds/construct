@@ -1691,6 +1691,11 @@ impl App {
             return;
         };
         let lines: Vec<String> = popup.buffer.split('\n').map(str::to_string).collect();
+        let mut classifier = crate::playbook_markdown::PlaybookLineClassifier::default();
+        let line_kinds = lines
+            .iter()
+            .map(|line| classifier.classify(line))
+            .collect::<Vec<_>>();
 
         // The inclusive band of lines to touch: the selection's lines, or just
         // the cursor's line. A selection that ends exactly at a line start does
@@ -1709,6 +1714,9 @@ impl App {
         let mut deltas = vec![(0usize, 0usize); lines.len()];
         let mut changed = false;
         for i in start_line..=end_line.min(lines.len().saturating_sub(1)) {
+            if !line_kinds[i].is_markdown() {
+                continue;
+            }
             let line = &lines[i];
             let stripped = line.trim_start();
             let is_list = stripped.starts_with("- ") || stripped.starts_with("* ");
@@ -2751,7 +2759,9 @@ impl App {
         let Some(popup) = self.playbook_popup.as_mut() else {
             return;
         };
-        let trigger_start = if text == "@" {
+        let trigger_start = if text == "@"
+            && !crate::playbook_markdown::playbook_offset_is_fenced(&popup.buffer, popup.cursor)
+        {
             Some(popup.cursor)
         } else {
             None
@@ -3013,6 +3023,13 @@ impl App {
             return;
         }
         let (char_start, char_end) = if let Some(range) =
+            crate::playbook_markdown::playbook_closing_inline_fence_before_cursor(
+                &popup.buffer,
+                popup.cursor,
+            )
+        {
+            (range.start, range.end)
+        } else if let Some(range) =
             playbook_smart_clip_range_before_or_containing(&popup.buffer, popup.cursor)
         {
             (range.start, range.end)

@@ -189,6 +189,88 @@ async fn web_playbook_view_full_parity() {
     assert_eq!(inline_code["sourceAfterRetype"], "run `cargo test` now\n", "{inline_code:?}");
     assert_eq!(inline_code["formattedAfterRetype"], true, "{inline_code:?}");
 
+    // --- 2b. Exact triple-backtick spans share the inline editing contract;
+    //          multiline and incomplete fences remain literal and inert. ----
+    let fenced_code: serde_json::Value = page
+        .evaluate(
+            r###"
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-fenced", markdown: "run ```cargo 界 test``` now\n```\n@{session:literal}\n```\n```unfinished\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
+              "playbook.edit": () => ({ applied: true }),
+              "playbook.cursor": () => ({ cursor: null }),
+            }, async () => {
+              setSession("s-fenced", "shell");
+              await switchCurrentViewMode("playbook");
+              const code = playbookInputEl.querySelector(".playbook-inline-code.is-fenced");
+              const sourceBefore = playbookSerialize();
+              const visibleBefore = code ? code.textContent : null;
+              const rawLength = code ? playbookNodeRawLength(code) : null;
+              const multilineEls = Array.from(playbookInputEl.querySelectorAll(".is-fenced-source"));
+              const multiline = multilineEls.map((el) => el.textContent);
+              const multilineHasClip = !!playbookInputEl.querySelector(".is-fenced-source .playbook-clip");
+              const sel = window.getSelection();
+              const literalRange = document.createRange();
+              literalRange.setStart(multilineEls[1].firstChild, 1); literalRange.collapse(true);
+              sel.removeAllRanges(); sel.addRange(literalRange);
+              const multilineOpensClipMenu = !!playbookClipContext();
+              const range = document.createRange();
+              range.setStartAfter(code); range.collapse(true);
+              sel.removeAllRanges(); sel.addRange(range);
+              const sourceBoundary = playbookSelectionOffsets().head;
+              playbookInputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }));
+              const sourceAfterBackspace = playbookSerialize();
+              const lineAfterBackspace = playbookInputEl.querySelector(".playbook-line").textContent;
+              const formattedAfterBackspace = !!playbookInputEl.querySelector(".playbook-inline-code.is-fenced");
+              document.execCommand("insertText", false, "```");
+              return {
+                sourceBefore, visibleBefore, rawLength, multiline, multilineHasClip, multilineOpensClipMenu, sourceBoundary,
+                sourceAfterBackspace, lineAfterBackspace, formattedAfterBackspace,
+                sourceAfterRetype: playbookSerialize(),
+                formattedAfterRetype: !!playbookInputEl.querySelector(".playbook-inline-code.is-fenced"),
+              };
+            })
+            "###,
+        )
+        .await
+        .expect("evaluate fenced code editing")
+        .into_value()
+        .expect("json");
+    assert_eq!(
+        fenced_code["visibleBefore"], "cargo 界 test",
+        "{fenced_code:?}"
+    );
+    assert_eq!(fenced_code["rawLength"], 18, "{fenced_code:?}");
+    assert_eq!(fenced_code["sourceBoundary"], 22, "{fenced_code:?}");
+    assert_eq!(
+        fenced_code["multiline"],
+        serde_json::json!(["```", "@{session:literal}", "```", "```unfinished", ""]),
+        "{fenced_code:?}"
+    );
+    assert_eq!(fenced_code["multilineHasClip"], false, "{fenced_code:?}");
+    assert_eq!(
+        fenced_code["multilineOpensClipMenu"], false,
+        "{fenced_code:?}"
+    );
+    assert_eq!(
+        fenced_code["sourceAfterBackspace"],
+        "run ```cargo 界 test now\n```\n@{session:literal}\n```\n```unfinished\n",
+        "{fenced_code:?}"
+    );
+    assert_eq!(
+        fenced_code["lineAfterBackspace"], "run ```cargo 界 test now",
+        "{fenced_code:?}"
+    );
+    assert_eq!(
+        fenced_code["formattedAfterBackspace"], false,
+        "{fenced_code:?}"
+    );
+    assert_eq!(
+        fenced_code["sourceAfterRetype"], fenced_code["sourceBefore"],
+        "{fenced_code:?}"
+    );
+    assert_eq!(fenced_code["formattedAfterRetype"], true, "{fenced_code:?}");
+
     // --- 3. Empty playbook shows templates; clicking one seeds the doc. -------
     let templates: serde_json::Value = page
         .evaluate(
