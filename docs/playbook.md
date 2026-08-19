@@ -57,12 +57,14 @@ IME) with the same capabilities, plus `Ctrl+S` to save, `Ctrl+F` for
 Emacs-style cursor-forward (click the Find button to search), and
 `Ctrl+Enter` to run.
 
-Completed triple-backtick spans on one line render as highlighted code with
-their delimiters hidden while preserving the exact Markdown source. Backspace
-at the rendered right edge removes the closing three backticks and reveals the
-source; retyping them restores the formatting. Multiline and incomplete fences
-remain visible literal source, with Markdown syntax, smart clips, attachments,
-and action links inside them kept non-interactive.
+Completed triple-backtick spans and multiline fences render as highlighted
+code with delimiter glyphs hidden while preserving the exact Markdown source.
+Multiline opening and closing lines keep their editor rows, so delimiter-only
+lines appear as highlighted blank rows. Backspace at a closing boundary removes
+the complete closing run and reveals the literal source; retyping it restores
+the formatting. Incomplete fences remain visible literal source. Markdown
+syntax, smart clips, attachments, and action links stay non-interactive inside
+both complete and incomplete fences.
 
 ## Smart clips
 

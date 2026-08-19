@@ -32365,7 +32365,7 @@ mod tests {
             ),
             (
                 "backtick-fenced-code",
-                "before\n```rust\n# literal heading\n- literal bullet with @{session:abc123}\n[Run](agentd:action/example)\n```\nafter fence\nZEND",
+                "before\n```rust\n# literal 界🙂 heading\n- literal bullet with @{session:abc123}\n[Run](agentd:action/example)\n```\nafter fence\nZEND",
             ),
             (
                 "timeline",
@@ -32869,9 +32869,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playbook_backtick_fence_formats_inline_and_keeps_multiline_literal() {
+    async fn playbook_backtick_fence_formats_multiline_and_preserves_source_rows() {
         let (mut app, _dir, server) = empty_app().await;
-        let md = "```rust\n# not a heading\n- not a bullet\n@{session:literal}\n![shot](/tmp/shot.png)\n[Run](agentd:action/example)\n```";
+        let md = "```rust\n# 界🙂 not a heading\n- not a bullet\n@{session:literal}\n![shot](/tmp/shot.png)\n[Run](agentd:action/example)\n```";
         app.playbook_popup = Some(playbook_popup_for_test("s1", md, 0));
 
         let lines = crate::ui::render_playbook_markdown_lines_for_test(&app, md);
@@ -32884,11 +32884,22 @@ mod tests {
                     .collect::<String>()
             })
             .collect::<Vec<_>>();
-        assert_eq!(painted, md.lines().collect::<Vec<_>>());
+        assert_eq!(
+            painted,
+            [
+                "rust",
+                "# 界🙂 not a heading",
+                "- not a bullet",
+                "@{session:literal}",
+                "![shot](/tmp/shot.png)",
+                "[Run](agentd:action/example)",
+                "",
+            ]
+        );
         assert!(lines
             .iter()
             .flat_map(|line| &line.spans)
-            .all(|span| span.style.bg.is_none()));
+            .all(|span| span.style.bg == Some(app.theme.inactive_highlight_bg)));
 
         let area = Rect::new(0, 0, 80, 20);
         assert!(crate::ui::playbook_session_clip_hits(Some(&app), md, 0, area).is_empty());
@@ -32912,6 +32923,57 @@ mod tests {
             app.playbook_popup.as_ref().unwrap().buffer,
             code_list,
             "Tab must not apply Markdown list indentation inside raw code"
+        );
+
+        let closing_boundary = md.chars().count();
+        app.playbook_popup = Some(playbook_popup_for_test("s1", md, closing_boundary));
+        let cjk_start = "```rust\n# ".chars().count();
+        assert_eq!(
+            crate::ui::playbook_cursor_visual_pos(Some(&app), md, cjk_start, 80),
+            (1, 2)
+        );
+        assert_eq!(
+            crate::ui::playbook_cursor_visual_pos(Some(&app), md, cjk_start + 1, 80),
+            (1, 4),
+            "a CJK source character inside the fence advances by two cells"
+        );
+        assert_eq!(
+            crate::ui::playbook_cursor_visual_pos(Some(&app), md, closing_boundary, 80),
+            (6, 0),
+            "the hidden closer stays on its own source row"
+        );
+        assert_eq!(
+            crate::ui::playbook_visual_to_cursor(Some(&app), md, 6, 0, 80),
+            closing_boundary,
+            "clicking the hidden closing boundary resolves to its source end"
+        );
+        app.delete_playbook_back();
+        assert_eq!(
+            app.playbook_popup.as_ref().unwrap().buffer,
+            md.strip_suffix("```").unwrap(),
+            "Backspace at the hidden closing boundary removes the complete run"
+        );
+        let revealed = crate::ui::render_playbook_markdown_lines_for_test(
+            &app,
+            &app.playbook_popup.as_ref().unwrap().buffer,
+        );
+        assert_eq!(
+            revealed[0]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "```rust"
+        );
+        app.insert_playbook_text("```");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, md);
+        assert_eq!(
+            crate::ui::render_playbook_markdown_lines_for_test(&app, md)[0]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "rust"
         );
 
         let boundary_source = "before ```界🙂 @{session:literal}```";

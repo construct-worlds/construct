@@ -3217,6 +3217,20 @@
     background: color-mix(in srgb, var(--accent-alt) 22%, var(--bg-elev));
   }
   .playbook-line.is-fenced-source { color: var(--fg); }
+  .playbook-line.is-fenced-code {
+    color: var(--fg);
+    background: color-mix(in srgb, var(--accent-alt) 22%, var(--bg-elev));
+    border-radius: 3px;
+  }
+  /* Keeps the delimiter in the DOM/source-offset model without consuming a
+     glyph or collapsing its source row. */
+  .playbook-fence-delimiter {
+    display: inline-block;
+    width: 0;
+    height: 1em;
+    overflow: hidden;
+    vertical-align: text-bottom;
+  }
   .playbook-selection-menu {
     position: absolute;
     z-index: 8;
@@ -9936,24 +9950,56 @@ function playbookApplyLineDecorations() {
 function playbookMultilineFenceKinds(markdown) {
   const lines = markdown.split("\n");
   const kinds = new Array(lines.length).fill("markdown");
-  let open = 0;
+  let open = null;
   for (let i = 0; i < lines.length; i++) {
     const m = /^( {0,3})(`{3,})(.*)$/.exec(lines[i]);
     if (open) {
-      kinds[i] = m && m[2].length >= open && m[3].trim() === "" ? "fence" : "code";
-      if (kinds[i] === "fence") open = 0;
+      kinds[i] = "literal-code";
+      if (m && m[2].length >= open.ticks && m[3].trim() === "") {
+        kinds[open.line] = "fence-open";
+        for (let j = open.line + 1; j < i; j++) kinds[j] = "fence-code";
+        kinds[i] = "fence-close";
+        open = null;
+      }
     } else if (m && !m[3].includes("`")) {
-      kinds[i] = "fence";
-      open = m[2].length;
+      kinds[i] = "literal-fence";
+      open = { line: i, ticks: m[2].length };
     }
   }
   return kinds;
 }
 
-function playbookLineDiv(text, fencedSource = false) {
+function playbookFenceDelimiterEl(raw, closing) {
+  const span = document.createElement("span");
+  span.className = "playbook-fence-delimiter" + (closing ? " is-closing" : " is-opening");
+  span.setAttribute("contenteditable", "false");
+  span.dataset.raw = raw;
+  span.setAttribute("aria-hidden", "true");
+  return span;
+}
+
+function playbookFillMultilineFenceDelimiter(div, text, closing) {
+  const m = /^( {0,3})(`{3,})(.*)$/.exec(text);
+  if (!m) {
+    div.appendChild(document.createTextNode(text));
+    return div;
+  }
+  if (m[1]) div.appendChild(document.createTextNode(m[1]));
+  div.appendChild(playbookFenceDelimiterEl(m[2], closing));
+  if (m[3]) div.appendChild(document.createTextNode(m[3]));
+  return div;
+}
+
+function playbookLineDiv(text, fenceKind = "markdown") {
   const div = document.createElement("div");
-  div.className = "playbook-line" + (fencedSource ? " is-fenced-source" : "");
-  if (!fencedSource) return playbookFillLine(div, text);
+  div.className = "playbook-line";
+  div.dataset.fenceKind = fenceKind;
+  if (fenceKind === "markdown") return playbookFillLine(div, text);
+  if (fenceKind === "fence-open" || fenceKind === "fence-close") {
+    div.classList.add("is-fenced-code", "is-fence-delimiter");
+    return playbookFillMultilineFenceDelimiter(div, text, fenceKind === "fence-close");
+  }
+  div.classList.add(fenceKind === "fence-code" ? "is-fenced-code" : "is-fenced-source");
   if (text === "") div.appendChild(document.createElement("br"));
   else div.appendChild(document.createTextNode(text));
   return div;
@@ -9966,7 +10012,7 @@ function playbookRenderDoc(markdown) {
   while (playbookInputEl.firstChild) playbookInputEl.removeChild(playbookInputEl.firstChild);
   const lines = markdown.split("\n");
   const kinds = playbookMultilineFenceKinds(markdown);
-  lines.forEach((line, i) => playbookInputEl.appendChild(playbookLineDiv(line, kinds[i] !== "markdown")));
+  lines.forEach((line, i) => playbookInputEl.appendChild(playbookLineDiv(line, kinds[i])));
   playbookApplyLineDecorations();
   playbookApplyShimmer();
   playbookRenderCursors();
@@ -9981,7 +10027,7 @@ function playbookSerializeInline(el) {
   for (const node of el.childNodes) {
     if (node.nodeType === 3) out += node.data;
     else if (node.nodeType === 1) {
-      if (node.classList && (node.classList.contains("playbook-clip") || node.classList.contains("playbook-inline-code"))) out += node.dataset.raw || "";
+      if (node.classList && (node.classList.contains("playbook-clip") || node.classList.contains("playbook-inline-code") || node.classList.contains("playbook-fence-delimiter"))) out += node.dataset.raw || "";
       else if (node.tagName === "BR") out += "";
       else out += playbookSerializeInline(node);
     }
@@ -10104,7 +10150,7 @@ function playbookDomPointToOffset(targetNode, targetOffset) {
 function playbookNodeRawLength(node) {
   if (!node) return 0;
   if (node.nodeType === 3) return playbookCharCount(node.data);
-  if (node.nodeType === 1 && node.classList && (node.classList.contains("playbook-clip") || node.classList.contains("playbook-inline-code"))) return playbookCharCount(node.dataset.raw || "");
+  if (node.nodeType === 1 && node.classList && (node.classList.contains("playbook-clip") || node.classList.contains("playbook-inline-code") || node.classList.contains("playbook-fence-delimiter"))) return playbookCharCount(node.dataset.raw || "");
   if (node.nodeType === 1 && node.tagName === "BR") return 0;
   if (node.nodeType === 1) return playbookCharCount(playbookSerializeInline(node));
   return 0;
@@ -11637,6 +11683,7 @@ function playbookFormatInlineCodeAtCaret() {
   if (!offsets || offsets.anchor !== offsets.head || !sel || sel.rangeCount === 0) return;
   const line = playbookLineAncestor(sel.getRangeAt(0).startContainer);
   if (!line) return;
+  if ((line.dataset.fenceKind || "markdown") !== "markdown") return;
   let lineStart = 0;
   for (const candidate of playbookInputEl.childNodes) {
     if (candidate === line) break;
@@ -11653,16 +11700,16 @@ function playbookFormatInlineCodeAtCaret() {
   sel.addRange(range);
 }
 
-// Multiline fences stay literal and inert. Rebuild only when a delimiter edit
-// changes which source lines belong to such a fence, then restore the source
-// caret offset. Completed one-line triple spans use the inline token above.
+// Rebuild only when a delimiter edit changes which source lines belong to a
+// multiline fence, then restore the exact source caret offset. Completed
+// fences retain one DOM line per source line and hide only delimiter glyphs.
 function playbookSyncFencedSourcePresentation() {
   const markdown = playbookSerialize();
   const lines = markdown.split("\n");
   const kinds = playbookMultilineFenceKinds(markdown);
   const elements = Array.from(playbookInputEl.children);
   const mismatch = elements.length !== lines.length || elements.some((el, i) =>
-    el.classList.contains("is-fenced-source") !== (kinds[i] !== "markdown"));
+    (el.dataset.fenceKind || "markdown") !== kinds[i]);
   if (!mismatch) return false;
   const offsets = playbookSelectionOffsets();
   playbookRenderDoc(markdown);
@@ -11675,7 +11722,7 @@ function playbookSyncFencedSourcePresentation() {
   return true;
 }
 
-function playbookInlineCodeImmediatelyBeforeCaret() {
+function playbookCodeBoundaryImmediatelyBeforeCaret() {
   const sel = window.getSelection();
   if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return null;
   const range = sel.getRangeAt(0);
@@ -11687,25 +11734,31 @@ function playbookInlineCodeImmediatelyBeforeCaret() {
   } else if (node.nodeType === 1) {
     node = node.childNodes[offset - 1] || null;
   }
-  return node && node.nodeType === 1 && node.classList.contains("playbook-inline-code") ? node : null;
+  if (!node || node.nodeType !== 1) return null;
+  if (node.classList.contains("playbook-inline-code")) return node;
+  if (node.classList.contains("playbook-fence-delimiter") && node.classList.contains("is-closing")) return node;
+  return null;
 }
 
 function playbookRevealInlineCodeForBackspace() {
-  const code = playbookInlineCodeImmediatelyBeforeCaret();
+  const code = playbookCodeBoundaryImmediatelyBeforeCaret();
   if (!code) return false;
   const raw = code.dataset.raw || "";
-  const delimiter = Math.max(1, Number(code.dataset.delimiter || 1));
+  const replacementText = code.classList.contains("playbook-fence-delimiter")
+    ? ""
+    : raw.slice(0, -Math.max(1, Number(code.dataset.delimiter || 1)));
   const sel = window.getSelection();
   const replacement = document.createRange();
   replacement.selectNode(code);
   sel.removeAllRanges();
   sel.addRange(replacement);
   // Keep the replacement in the browser's native contenteditable undo stack.
-  if (document.execCommand("insertText", false, raw.slice(0, -delimiter))) return true;
+  const command = code.classList.contains("playbook-fence-delimiter") ? "delete" : "insertText";
+  if (document.execCommand(command, false, replacementText)) return true;
 
   // Older engines may reject execCommand across a contenteditable=false node.
   // Preserve the behavior there and publish the edit through the normal path.
-  const text = document.createTextNode(raw.slice(0, -delimiter));
+  const text = document.createTextNode(replacementText);
   code.replaceWith(text);
   const range = document.createRange();
   range.setStart(text, text.data.length);
