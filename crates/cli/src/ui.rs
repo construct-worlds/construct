@@ -19558,14 +19558,13 @@ fn render_playbook_selection_context_menu(
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border));
-    // While the menu is passive, advertise the key that focuses it
-    // (issues #1106/#1092): every editing key — including Tab / S-Tab
-    // list nesting on the selected lines — keeps reaching the editor
-    // until C-o hands the menu focus, and nothing else on screen says so.
+    // While the menu is passive, advertise the primary key that focuses it.
+    // Esc dismisses this menu layer while preserving the selection, after
+    // which Tab / S-Tab reach selected-list indentation (spec 0196).
     if !menu.focused {
         block = block.title_bottom(
             Line::from(Span::styled(
-                " C-o menu ",
+                " Tab menu ",
                 Style::default()
                     .fg(app.theme.dim)
                     .add_modifier(Modifier::ITALIC),
