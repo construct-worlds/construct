@@ -3220,7 +3220,13 @@
   .playbook-line.is-fenced-code {
     color: var(--fg);
     background: color-mix(in srgb, var(--accent-alt) 22%, var(--bg-elev));
-    border-radius: 3px;
+    border-radius: 0;
+  }
+  .playbook-line.is-fenced-code[data-fence-kind="fence-open"] {
+    border-radius: 5px 5px 0 0;
+  }
+  .playbook-line.is-fenced-code[data-fence-kind="fence-close"] {
+    border-radius: 0 0 5px 5px;
   }
   /* Keeps the delimiter in the DOM/source-offset model without consuming a
      glyph or collapsing its source row. */
