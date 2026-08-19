@@ -233,48 +233,55 @@ fn first_text(result: &Value) -> Option<String> {
         })
 }
 
+/// In-process MCP server shared by adapter tests that need to exercise the
+/// real JSON-RPC client and inspect tool-call ordering.
+#[cfg(test)]
+pub(crate) fn fake_server(
+    handler: impl Fn(&str, &Value) -> Value + Send + 'static,
+) -> (
+    impl AsyncRead + Send + Unpin,
+    impl AsyncWrite + Send + Unpin,
+) {
+    let (client_reader, mut server_writer) = tokio::io::duplex(256 * 1024);
+    let (server_reader, client_writer) = tokio::io::duplex(256 * 1024);
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(server_reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let method = message["method"].as_str().unwrap_or_default().to_string();
+            let Some(id) = message.get("id").and_then(Value::as_u64) else {
+                continue;
+            };
+            let result = match method.as_str() {
+                "initialize" => {
+                    json!({"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "fake"}})
+                }
+                "tools/call" => {
+                    let name = message["params"]["name"].as_str().unwrap_or_default();
+                    handler(name, &message["params"]["arguments"])
+                }
+                _ => json!({}),
+            };
+            let response = json!({"jsonrpc": "2.0", "id": id, "result": result});
+            let mut line = serde_json::to_vec(&response).unwrap();
+            line.push(b'\n');
+            let _ = server_writer.write_all(&line).await;
+        }
+    });
+    (client_reader, client_writer)
+}
+
+#[cfg(test)]
+pub(crate) fn text_result(body: Value) -> Value {
+    json!({"content": [{"type": "text", "text": body.to_string()}]})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{duplex, AsyncBufReadExt, BufReader};
-
-    /// An in-process fake MCP server good for one connection: answers
-    /// `initialize`, then serves `tools/call` from the provided handler.
-    fn fake_server(
-        handler: impl Fn(&str, &Value) -> Value + Send + 'static,
-    ) -> (impl AsyncRead + Send + Unpin, impl AsyncWrite + Send + Unpin) {
-        let (client_reader, mut server_writer) = duplex(256 * 1024);
-        let (server_reader, client_writer) = duplex(256 * 1024);
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(server_reader).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(message) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                let method = message["method"].as_str().unwrap_or_default().to_string();
-                let Some(id) = message.get("id").and_then(Value::as_u64) else {
-                    continue; // notifications need no reply
-                };
-                let result = match method.as_str() {
-                    "initialize" => json!({"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "fake"}}),
-                    "tools/call" => {
-                        let name = message["params"]["name"].as_str().unwrap_or_default();
-                        handler(name, &message["params"]["arguments"])
-                    }
-                    _ => json!({}),
-                };
-                let response = json!({"jsonrpc": "2.0", "id": id, "result": result});
-                let mut line = serde_json::to_vec(&response).unwrap();
-                line.push(b'\n');
-                let _ = server_writer.write_all(&line).await;
-            }
-        });
-        (client_reader, client_writer)
-    }
-
-    fn text_result(body: Value) -> Value {
-        json!({"content": [{"type": "text", "text": body.to_string()}]})
-    }
 
     #[tokio::test]
     async fn handshake_then_tool_call_round_trips_json() {
