@@ -19571,14 +19571,13 @@ fn render_playbook_selection_context_menu(
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.border));
-    // While the menu is passive, advertise the key that focuses it
-    // (issues #1106/#1092): every editing key — including Tab / S-Tab
-    // list nesting on the selected lines — keeps reaching the editor
-    // until C-o hands the menu focus, and nothing else on screen says so.
+    // While the menu is passive, advertise the primary key that focuses it.
+    // Esc dismisses this menu layer while preserving the selection, after
+    // which Tab / S-Tab reach selected-list indentation (spec 0196).
     if !menu.focused {
         block = block.title_bottom(
             Line::from(Span::styled(
-                " C-o menu ",
+                " Tab menu ",
                 Style::default()
                     .fg(app.theme.dim)
                     .add_modifier(Modifier::ITALIC),
@@ -22355,9 +22354,7 @@ fn render_playbook_inline_spans<'a>(
                 delimiter_len,
                 ..
             } => {
-                let code_style = base_style
-                    .fg(app.theme.highlight_fg)
-                    .bg(app.theme.inactive_highlight_bg);
+                let code_style = playbook_inline_code_style(&app.theme, base_style);
                 spans.extend(playbook_text_spans(
                     &app.theme,
                     content,
@@ -22386,6 +22383,12 @@ fn render_playbook_inline_spans<'a>(
         ));
     }
     spans
+}
+
+fn playbook_inline_code_style(theme: &Theme, base_style: Style) -> Style {
+    base_style
+        .fg(theme.text)
+        .bg(theme.inactive_highlight_bg)
 }
 
 /// Attachment chip painter (spec 0099): the compact `[Image: name]` /
@@ -24018,6 +24021,22 @@ mod tests {
             playbook_inline_rendered_text(None, "before ```界🙂", None, 80),
             "before ```界🙂"
         );
+    }
+
+    #[test]
+    fn playbook_inline_code_uses_readable_inactive_highlight_pair_across_themes() {
+        for theme in [
+            Theme::dark(),
+            Theme::light(),
+            Theme::basic_dark(),
+            Theme::basic_light(),
+            Theme::dark_ui(),
+            Theme::light_ui(),
+        ] {
+            let style = playbook_inline_code_style(&theme, Style::default());
+            assert_eq!(style.fg, Some(theme.text));
+            assert_eq!(style.bg, Some(theme.inactive_highlight_bg));
+        }
     }
 
     /// Without expansion state the chip keeps its collapsed label; when

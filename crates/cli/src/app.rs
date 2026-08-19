@@ -127,9 +127,9 @@ pub const MINIBUFFER_PANEL_H_MAX: u16 = 80;
 pub(crate) const PLAYBOOK_REVEAL_MS: u64 = 240;
 pub(crate) const PLAYBOOK_CONTENT_PADDING_X: u16 = 1;
 pub(crate) const PLAYBOOK_CONTENT_PADDING_Y: u16 = 1;
-/// Hard cap on how long a playbook Run shimmer animates without an observed
-/// output signal. A missed first-output transition must never strand the
-/// animation; a timeout backstop is mandatory (spec 0042).
+/// Safety cap for an optimistic Playbook Run that no agent declaration ever
+/// adopts. Managed runs ignore this deadline and settle from declarations and
+/// terminal lifecycle signals (spec 0042).
 pub(crate) const PLAYBOOK_RUN_MAX_MS: u64 = 10 * 60 * 1000;
 /// How long an identical Run (same session, scope, and executed body) is
 /// suppressed after a successful dispatch (spec 0042 consequence): long
@@ -3349,8 +3349,11 @@ pub struct PlaybookRun {
     /// Daemon-derived run-level fallback for pending blocks with no
     /// agent-authored tooltip.
     pub system_status: Option<String>,
-    /// Absolute backstop: clear no later than this regardless of signals.
+    /// Safety backstop for an optimistic/unmanaged run. Ignored once
+    /// `agent_managed` is true.
     pub deadline: Instant,
+    /// Whether explicit agent declarations own this run's pending set.
+    pub agent_managed: bool,
     /// Whether the first output has been observed.
     pub first_output_seen: bool,
     /// Compact run-pipeline stage derived by the daemon, or Pressed for this
@@ -3377,7 +3380,7 @@ impl PlaybookRun {
             .duration_since(UNIX_EPOCH)
             .ok()?
             .as_millis() as i64;
-        if progress.expires_at_ms <= now_ms
+        if (!progress.agent_managed && progress.expires_at_ms <= now_ms)
             || (progress.pending_block_refs.is_empty() && progress.pending_block_ids.is_empty())
         {
             return None;
@@ -3387,7 +3390,11 @@ impl PlaybookRun {
         } else {
             now
         };
-        let deadline = now + Duration::from_millis((progress.expires_at_ms - now_ms) as u64);
+        let deadline = if progress.expires_at_ms > now_ms {
+            now + Duration::from_millis((progress.expires_at_ms - now_ms) as u64)
+        } else {
+            now
+        };
         let mut pending: HashSet<String> = progress.pending_block_refs.into_iter().collect();
         pending.extend(progress.pending_block_ids);
         // Callers (`adopt_daemon_playbook_run`/`adopt_playbook_state_run`) merge
@@ -3402,6 +3409,7 @@ impl PlaybookRun {
             pending_since,
             system_status: progress.system_status,
             deadline,
+            agent_managed: progress.agent_managed,
             first_output_seen: progress.first_output_seen,
             stage: progress.stage,
             daemon_confirmed: true,
@@ -20244,6 +20252,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(30),
+                agent_managed: false,
                 first_output_seen: false,
                 stage: construct_protocol::PlaybookRunStage::Delivered,
                 daemon_confirmed: true,
@@ -22431,7 +22440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playbook_escape_clears_active_selection() {
+    async fn playbook_escape_clears_active_selection_after_dismissing_menu() {
         let (mut app, _dir, server) = empty_app().await;
         app.playbook_popup = Some(playbook_popup_for_test("s1", "abcdef", 2));
         app.begin_playbook_selection();
@@ -22445,13 +22454,26 @@ mod tests {
             .await;
 
         let popup = app.playbook_popup.as_ref().unwrap();
-        assert!(popup.selection.is_none(), "Esc should clear the selection");
+        assert!(
+            popup.selection.is_some(),
+            "first Esc preserves the selection"
+        );
+        assert!(
+            popup.selection_menu.is_none(),
+            "first Esc dismisses the menu"
+        );
+
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert!(popup.selection.is_none(), "second Esc clears the selection");
         // Cancelling the mark must not mutate the buffer or move text around.
         assert_eq!(popup.buffer, "abcdef");
         assert_eq!(
             app.status.as_ref().map(|(status, _)| status.as_str()),
             Some("playbook selection canceled"),
-            "Esc should replace the stale selection-started status"
+            "second Esc should replace the menu-dismissed status"
         );
         assert_eq!(app.playbook_clipboard, None);
         server.abort();
@@ -23582,14 +23604,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playbook_tab_indents_every_line_of_a_multi_line_selection() {
+    async fn playbook_tab_focuses_selection_menu_then_indents_after_escape() {
         let (mut app, _dir, server) = empty_app().await;
         app.playbook_popup = Some(playbook_popup_for_test("s1", "- one\n- two\n- three\n", 0));
         // Select from the start of the buffer through the end of the second
         // list line (char offset 11), so the first two lines fall inside the
-        // selection and the (unfocused) selection menu is showing — issue
-        // #1106's repro. The head is set directly because cursor stepping
-        // treats list markers as atomic, which makes step counts opaque here.
+        // selection. The head is set directly because cursor stepping treats
+        // list markers as atomic, which makes step counts opaque here.
         app.begin_playbook_selection();
         {
             let popup = app.playbook_popup.as_mut().unwrap();
@@ -23602,48 +23623,120 @@ mod tests {
 
         let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
-            popup.buffer, "  - one\n  - two\n- three\n",
-            "Tab nests every list line the selection spans (spec 0094)"
+            popup.buffer, "- one\n- two\n- three\n",
+            "the entry Tab only focuses the menu"
         );
         assert!(
             popup
                 .selection_menu
                 .as_ref()
-                .is_some_and(|menu| !menu.focused),
-            "the selection menu stays visible but must not steal Tab to focus itself"
+                .is_some_and(|menu| menu.focused),
+            "Tab focuses the visible selection menu"
         );
 
-        // S-Tab is the symmetric outdent over the same (remapped) selection.
+        // Focused Tab/S-Tab cycle symmetrically through the action rows.
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        assert_eq!(
+            app.playbook_popup
+                .as_ref()
+                .and_then(|popup| popup.selection_menu.as_ref())
+                .map(|menu| menu.selected_action),
+            Some(PlaybookSelectionAction::Run)
+        );
         app.handle_playbook_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .await;
+        assert_eq!(
+            app.playbook_popup
+                .as_ref()
+                .and_then(|popup| popup.selection_menu.as_ref())
+                .map(|menu| menu.selected_action),
+            Some(PlaybookSelectionAction::Comment)
+        );
+
+        // Esc dismisses only the menu, preserving the selected text. Tab now
+        // reaches the editor and nests every selected list line (spec 0094).
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert!(popup.selection_menu.is_none());
+        assert_eq!(App::playbook_selection_range(popup), Some((0, 11)));
+
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(
+            popup.buffer, "  - one\n  - two\n- three\n",
+            "Tab nests every list line after the menu is dismissed"
+        );
+        assert!(popup.selection_menu.is_none());
+        assert!(App::playbook_selection_range(popup).is_some());
+
+        // Some terminals report S-Tab as Shift+Tab rather than BackTab; that
+        // form must still un-nest the same remapped selection.
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT))
             .await;
         let popup = app.playbook_popup.as_ref().unwrap();
         assert_eq!(
             popup.buffer, "- one\n- two\n- three\n",
-            "S-Tab un-nests the same selected lines"
+            "Shift+Tab un-nests the same selected lines"
         );
         server.abort();
     }
 
     #[tokio::test]
-    async fn playbook_ctrl_o_focuses_selection_menu_without_editing() {
+    async fn playbook_escape_dismisses_selection_menu_before_clearing_selection() {
         let (mut app, _dir, server) = empty_app().await;
         app.playbook_popup = Some(playbook_popup_for_test("s1", "- one\n- two", 0));
         app.begin_playbook_selection();
         app.move_playbook_cursor(11);
 
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert!(
+            popup.selection_menu.is_none(),
+            "first Esc dismisses the menu"
+        );
+        assert_eq!(
+            App::playbook_selection_range(popup),
+            Some((0, 11)),
+            "first Esc preserves the text selection"
+        );
+
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert!(popup.selection.is_none(), "second Esc clears the selection");
+        assert_eq!(popup.buffer, "- one\n- two");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn playbook_ctrl_o_reopens_selection_menu_as_compatibility_alias() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "- one\n- two", 0));
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(11);
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+
         app.handle_playbook_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
             .await;
 
         let popup = app.playbook_popup.as_ref().unwrap();
-        assert_eq!(
-            popup.buffer, "- one\n- two",
-            "C-o only moves focus; the document is untouched"
+        assert_eq!(popup.buffer, "- one\n- two");
+        assert_eq!(App::playbook_selection_range(popup), Some((0, 11)));
+        assert!(
+            popup
+                .selection_menu
+                .as_ref()
+                .is_some_and(|menu| menu.focused),
+            "C-o reopens and focuses the dismissed menu"
         );
-        let menu = popup
-            .selection_menu
-            .as_ref()
-            .expect("selection run menu should be present");
-        assert!(menu.focused, "C-o should focus the selection run menu");
         server.abort();
     }
 
@@ -23824,16 +23917,16 @@ mod tests {
             !text.contains("reduce to the minimum")
                 && !text.contains("Execute the selection")
                 && !text.contains("Free-text guidance"),
-            "no description shows before C-o focuses the menu: {text:?}"
+            "no description shows before Tab focuses the menu: {text:?}"
         );
         assert!(
-            text.contains("C-o menu"),
-            "the unfocused menu must advertise its focus key (issue #1106): {text:?}"
+            text.contains("Tab menu"),
+            "the unfocused menu must advertise its focus key: {text:?}"
         );
         server.abort();
     }
 
-    /// spec 0089: once C-o focuses the menu, the highlighted row's
+    /// spec 0089/0196: once Tab focuses the menu, the highlighted row's
     /// description appears, and it updates as Up/Down moves the highlight
     /// to a different row instead of getting stuck on the first one shown.
     #[tokio::test]
@@ -24382,10 +24475,10 @@ mod tests {
         assert_ne!(
             run_cell.style().bg,
             Some(app.theme.accent),
-            "Run button should not be highlighted before C-o focuses the menu"
+            "Run button should not be highlighted before Tab focuses the menu"
         );
 
-        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
         term.draw(|f| crate::ui::render(f, &mut app))
             .expect("playbook should render after focus");
@@ -24396,11 +24489,11 @@ mod tests {
             .expect("selection menu hit registered");
         let focused_run_cell = buf
             .cell((hit.1.saturating_sub(3), hit.2))
-            .expect("Run text cell right after C-o");
+            .expect("Run text cell right after Tab");
         assert_ne!(
             focused_run_cell.style().bg,
             Some(app.theme.accent),
-            "C-o focuses the comment row by default (spec 0089) — Run stays plain until Down selects it"
+            "Tab focuses the comment row by default (spec 0089) — Run stays plain until Down selects it"
         );
 
         // Down moves keyboard selection off Comment onto Run (spec 0089).
@@ -25936,6 +26029,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
+                agent_managed: false,
                 first_output_seen: true,
                 stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
@@ -27177,6 +27271,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
+                agent_managed: false,
                 first_output_seen: true,
                 stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
@@ -27271,6 +27366,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
+                agent_managed: false,
                 first_output_seen: true,
                 stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
@@ -27350,6 +27446,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
+                agent_managed: false,
                 first_output_seen: true,
                 stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
@@ -28096,7 +28193,7 @@ mod tests {
         app.begin_playbook_selection();
         app.move_playbook_cursor(5);
 
-        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
         for ch in "focus tests".chars() {
             app.handle_playbook_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
@@ -28136,7 +28233,7 @@ mod tests {
         app.begin_playbook_selection();
         app.move_playbook_cursor(5);
 
-        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
         for ch in "abcd".chars() {
             app.handle_playbook_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
@@ -28218,12 +28315,12 @@ mod tests {
                 .selected_action
         };
 
-        app.handle_playbook_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
+        app.handle_playbook_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await;
         assert_eq!(
             selected_action(&app),
             PlaybookSelectionAction::Comment,
-            "C-o focuses the menu with Comment selected by default"
+            "Tab focuses the menu with Comment selected by default"
         );
 
         app.handle_playbook_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
@@ -30483,6 +30580,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_playbook_run_ignores_optimistic_deadline() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.start_playbook_run("s1", "# Todo\n", false, "");
+        let run = app.playbook_runs.get_mut("s1").unwrap();
+        run.agent_managed = true;
+        run.deadline = Instant::now() - Duration::from_millis(1);
+
+        app.expire_playbook_runs(Instant::now());
+        assert!(
+            app.playbook_runs.contains_key("s1"),
+            "managed shimmer is lifecycle-driven, not timer-driven"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn playbook_settle_flourish_tracks_pending_diff_and_expires() {
         let (mut app, _dir, server) = empty_app().await;
         let now = Instant::now();
@@ -30530,6 +30643,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
+                agent_managed: true,
                 first_output_seen: true,
                 stage: construct_protocol::PlaybookRunStage::default(),
                 daemon_confirmed: true,
