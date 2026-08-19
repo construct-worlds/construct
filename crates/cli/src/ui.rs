@@ -22193,9 +22193,7 @@ fn render_playbook_inline_spans<'a>(
                 link_idx += 1;
             }
             PlaybookInlineToken::Code { content, .. } => {
-                let code_style = base_style
-                    .fg(app.theme.highlight_fg)
-                    .bg(app.theme.inactive_highlight_bg);
+                let code_style = playbook_inline_code_style(&app.theme, base_style);
                 spans.extend(playbook_text_spans(
                     &app.theme,
                     content,
@@ -22224,6 +22222,12 @@ fn render_playbook_inline_spans<'a>(
         ));
     }
     spans
+}
+
+fn playbook_inline_code_style(theme: &Theme, base_style: Style) -> Style {
+    base_style
+        .fg(theme.text)
+        .bg(theme.inactive_highlight_bg)
 }
 
 /// Attachment chip painter (spec 0099): the compact `[Image: name]` /
@@ -23843,6 +23847,22 @@ mod tests {
             playbook_inline_rendered_text(None, "```rust", None, 80),
             "```rust"
         );
+    }
+
+    #[test]
+    fn playbook_inline_code_uses_readable_inactive_highlight_pair_across_themes() {
+        for theme in [
+            Theme::dark(),
+            Theme::light(),
+            Theme::basic_dark(),
+            Theme::basic_light(),
+            Theme::dark_ui(),
+            Theme::light_ui(),
+        ] {
+            let style = playbook_inline_code_style(&theme, Style::default());
+            assert_eq!(style.fg, Some(theme.text));
+            assert_eq!(style.bg, Some(theme.inactive_highlight_bg));
+        }
     }
 
     /// Without expansion state the chip keeps its collapsed label; when

@@ -136,6 +136,19 @@ async fn web_playbook_view_full_parity() {
               const sourceBefore = playbookSerialize();
               const visibleBefore = code ? code.textContent : null;
               const lineTextBefore = playbookInputEl.querySelector(".playbook-line").textContent;
+              const stylesByTheme = {};
+              for (const themeName of Object.keys(WEB_THEMES)) {
+                applyWebTheme(themeName, { persist: false });
+                const codeStyle = getComputedStyle(code);
+                const editorStyle = getComputedStyle(playbookInputEl);
+                stylesByTheme[themeName] = {
+                  foreground: codeStyle.color,
+                  editorForeground: editorStyle.color,
+                  background: codeStyle.backgroundColor,
+                  editorBackground: editorStyle.backgroundColor,
+                };
+              }
+              applyWebTheme("dark", { persist: false });
               const sel = window.getSelection();
               const range = document.createRange();
               range.setStartAfter(code); range.collapse(true);
@@ -145,7 +158,7 @@ async fn web_playbook_view_full_parity() {
               const formattedAfterBackspace = !!playbookInputEl.querySelector(".playbook-inline-code");
               document.execCommand("insertText", false, "`");
               return {
-                sourceBefore, visibleBefore, lineTextBefore,
+                sourceBefore, visibleBefore, lineTextBefore, stylesByTheme,
                 sourceAfterBackspace, formattedAfterBackspace,
                 sourceAfterRetype: playbookSerialize(),
                 formattedAfterRetype: !!playbookInputEl.querySelector(".playbook-inline-code"),
@@ -160,6 +173,17 @@ async fn web_playbook_view_full_parity() {
     assert_eq!(inline_code["sourceBefore"], "run `cargo test` now\n", "{inline_code:?}");
     assert_eq!(inline_code["visibleBefore"], "cargo test", "{inline_code:?}");
     assert_eq!(inline_code["lineTextBefore"], "run cargo test now", "{inline_code:?}");
+    for theme in ["dark", "light", "matrix"] {
+        let style = &inline_code["stylesByTheme"][theme];
+        assert_eq!(
+            style["foreground"], style["editorForeground"],
+            "{theme} inline code should use the editor's readable foreground: {style:?}"
+        );
+        assert_ne!(
+            style["background"], style["editorBackground"],
+            "{theme} inline code should retain its highlighted background: {style:?}"
+        );
+    }
     assert_eq!(inline_code["sourceAfterBackspace"], "run `cargo test now\n", "{inline_code:?}");
     assert_eq!(inline_code["formattedAfterBackspace"], false, "{inline_code:?}");
     assert_eq!(inline_code["sourceAfterRetype"], "run `cargo test` now\n", "{inline_code:?}");
