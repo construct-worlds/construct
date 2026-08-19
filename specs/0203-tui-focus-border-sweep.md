@@ -1,0 +1,31 @@
+# 0203-tui-focus-border-sweep
+
+Status: accepted
+Date: 2026-08-18
+Area: tui
+Scope: Keyboard focus acquisition is acknowledged by a brief directional highlight on the newly focused pane's visible border chrome.
+
+## Decision
+
+When keyboard focus moves to a different TUI pane or focusable sidebar section, that surface plays a roughly 200 ms border highlight sweeping from its top-left toward its bottom-right, then settles into the ordinary focused-border appearance.
+
+Focus identity includes the session-list rows, the lineage section, and each split window independently. Moving between sibling split windows therefore retriggers the animation even though both use the same general view-focus route. The initial pane at TUI startup does not animate.
+
+The effect changes style only. It must not change border glyphs, pane geometry, content layout, terminal size, or input routing. When side and bottom borders are hidden, or a section exposes only a header rule, the sweep follows that visible top chrome and must not resurrect hidden edges. Edge-to-edge borderless zoom views do not animate.
+
+## Reason
+
+Static border-color changes are easy to miss when focus jumps among similarly shaped panes, especially in a split layout. A short directional motion gives the eye a clear acquisition cue without becoming a persistent distraction or delaying interaction.
+
+## Consequences
+
+- Every keyboard, mouse, or external-controller path that changes the existing focus state receives the same affordance because rendering derives it from focus identity rather than from individual input handlers.
+- The animation uses monotonic time and requests frames only while visible; an otherwise idle TUI keeps its normal redraw cadence.
+- Focus changes during an active sweep restart the effect on the newest target.
+- Pane-specific border hues and steady focused/unfocused semantics remain authoritative after the sweep ends.
+
+## Non-Goals
+
+- Animating selection changes within a focused pane.
+- Adding borders to borderless or intentionally hidden-edge layouts.
+- Changing focus order, keybindings, or mouse behavior.

@@ -2,8 +2,8 @@
 
 use crate::app::{
     feature_guidance, harness_guidance, harness_picker_entries, smith_method_guidance, App,
-    ConfigureTab, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Prompt,
-    PromptChoiceAction, PromptChoiceHit, PromptIntent, PaneFocus, RemoteControlHit,
+    ConfigureTab, FocusBorderTarget, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree,
+    PaneFocus, Prompt, PromptChoiceAction, PromptChoiceHit, PromptIntent, RemoteControlHit,
     RemoteControlHitAction, ScreenPoint, Selection, OperatorTitleMenuAction, SessionTitleMenuAction,
     TextSelectionRange, TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit,
     WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS,
@@ -457,6 +457,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // them after Playbooks and transitions so a rolled-down document cannot
     // cover the badge at its owning pane's top-left corner.
     paint_main_window_ordinal_badges(f, app);
+    render_focus_border_sweep(f, app, Instant::now());
 
     // The block is complete: slide it, translate everything it recorded into
     // screen coordinates, and hand the pointer back. Everything below paints
@@ -2387,6 +2388,9 @@ fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
             ViewMode::Chat => render_chat(f, main_area, app),
         }
     }
+    // Zoomed views are deliberately borderless. Sync the focus identity so
+    // returning to a bordered layout cannot replay a stale transition.
+    render_focus_border_sweep(f, app, Instant::now());
     apply_main_block_slide(f, app, &slide);
     app.mouse_pos = screen_mouse;
     render_prompt(f, prompt_area, app);
@@ -2417,6 +2421,7 @@ fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.list_scroll_offset = 0;
 
     render_sessions(f, main_area, app);
+    render_focus_border_sweep(f, app, Instant::now());
     apply_main_block_slide(f, app, &slide);
     app.mouse_pos = screen_mouse;
     render_prompt(f, prompt_area, app);
@@ -15100,6 +15105,141 @@ fn pane_border_style(theme: &Theme, focused: bool) -> Style {
         Style::default().fg(theme.border_focused)
     } else {
         Style::default().fg(theme.border)
+    }
+}
+
+/// Paint the moving bright band for a newly focused pane after that pane and
+/// its title chrome are fully composited. A full frame uses `(x + y) / 2` as
+/// its phase, so the band intersects the top/left edges first and the
+/// bottom/right edges last: a diagonal top-left → bottom-right sweep without
+/// changing any border glyphs or pane geometry.
+fn render_focus_border_sweep(f: &mut Frame, app: &mut App, now: Instant) {
+    let target = app.focused_border_target();
+    let rect = match target {
+        FocusBorderTarget::SessionList => app.layout.list_area,
+        FocusBorderTarget::Lineage => app.layout.lineage_area,
+        FocusBorderTarget::MainWindow(id) => app
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|pane| pane.id == id)
+            .map(|pane| pane.area),
+    };
+    let Some(rect) = rect.filter(|rect| rect.width > 0 && rect.height > 0) else {
+        app.focus_border_sweep.sync(target);
+        return;
+    };
+    let Some(progress) = app.focus_border_sweep.observe(target, now) else {
+        return;
+    };
+    app.request_tick_redraw();
+
+    // Lineage owns a header rule rather than a four-sided frame. Pane side
+    // borders are also user-hideable (and hidden by default); in both cases
+    // keep the sweep on the visible top chrome instead of resurrecting glyphs
+    // the layout intentionally omitted.
+    let top_only = target == FocusBorderTarget::Lineage || app.hide_pane_side_borders;
+    paint_focus_border_sweep(
+        f,
+        rect,
+        progress,
+        top_only,
+        Style::default()
+            .fg(app.theme.accent)
+            // Reverse makes the tracer a filled, theme-colored highlight
+            // instead of a barely different green line in the Matrix theme;
+            // it also remains legible on low-color terminals.
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            .remove_modifier(Modifier::DIM),
+    );
+}
+
+fn paint_focus_border_sweep(
+    f: &mut Frame,
+    rect: Rect,
+    progress: f32,
+    top_only: bool,
+    highlight: Style,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    const BAND_HALF_WIDTH: f32 = 0.14;
+    let x_denom = rect.width.saturating_sub(1).max(1) as f32;
+    let y_denom = rect.height.saturating_sub(1).max(1) as f32;
+    for y in rect.top()..rect.bottom() {
+        for x in rect.left()..rect.right() {
+            let on_edge = y == rect.top()
+                || (!top_only
+                    && (y == rect.bottom().saturating_sub(1)
+                        || x == rect.left()
+                        || x == rect.right().saturating_sub(1)));
+            if !on_edge {
+                continue;
+            }
+            let nx = x.saturating_sub(rect.left()) as f32 / x_denom;
+            let phase = if top_only {
+                nx
+            } else {
+                let ny = y.saturating_sub(rect.top()) as f32 / y_denom;
+                (nx + ny) * 0.5
+            };
+            if (phase - progress).abs() > BAND_HALF_WIDTH {
+                continue;
+            }
+            if let Some(cell) = f.buffer_mut().cell_mut(Position { x, y }) {
+                cell.set_style(cell.style().patch(highlight));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod focus_border_paint_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn full_border_band_crosses_top_right_and_bottom_left_halfway() {
+        let backend = TestBackend::new(12, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    0.5,
+                    false,
+                    Style::default().fg(Color::Red),
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(10, 0)].fg, Color::Red);
+        assert_eq!(buffer[(0, 10)].fg, Color::Red);
+        assert_ne!(buffer[(0, 0)].fg, Color::Red);
+        assert_ne!(buffer[(10, 10)].fg, Color::Red);
+    }
+
+    #[test]
+    fn top_only_band_traverses_visible_chrome_without_painting_hidden_sides() {
+        let backend = TestBackend::new(12, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    0.5,
+                    true,
+                    Style::default().fg(Color::Blue),
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(5, 0)].fg, Color::Blue);
+        assert_ne!(buffer[(0, 5)].fg, Color::Blue);
+        assert_ne!(buffer[(5, 10)].fg, Color::Blue);
     }
 }
 
