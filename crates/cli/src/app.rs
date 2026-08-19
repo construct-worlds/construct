@@ -23727,11 +23727,15 @@ mod tests {
 
         app.on_term_event(mouse(MouseEventKind::Down(MouseButton::Left), body.x))
             .await;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render mouse-down selection anchor");
         app.on_term_event(mouse(
             MouseEventKind::Drag(MouseButton::Left),
             body.x.saturating_add(5),
         ))
         .await;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render live drag selection");
         app.on_term_event(mouse(
             MouseEventKind::Up(MouseButton::Left),
             body.x.saturating_add(5),
@@ -23831,6 +23835,121 @@ mod tests {
         assert!(
             app.playbook_popup.as_ref().unwrap().selection.is_none(),
             "second Esc clears the selection"
+        );
+        server.abort();
+    }
+
+    /// A C-Space mark is deliberately zero-width until the next movement
+    /// key. The selection-menu handler runs before that movement, so it must
+    /// preserve the pending menu across the zero-width frame instead of
+    /// confusing it with a fully-cleared selection. Otherwise the movement
+    /// paints selected text with `selection_menu == None`, and the renderer's
+    /// no-ghost rule correctly leaves the user with no action menu at all.
+    #[tokio::test]
+    async fn playbook_live_keyboard_mark_opens_menu_after_motion_and_escapes_in_two_layers() {
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.sync_active_window_selection();
+        app.focus = PaneFocus::View;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("initial playbook render");
+
+        app.on_term_event(CtEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )))
+        .await;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render zero-width keyboard mark");
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert!(popup.selection.is_some(), "C-Space creates a pending mark");
+        assert_eq!(App::playbook_selection_range(popup), None);
+        assert!(
+            popup.selection_menu.is_some(),
+            "the pending menu survives until motion makes the mark visible"
+        );
+        assert!(
+            app.layout.playbook_selection_run_hit.is_none(),
+            "a zero-width mark does not paint a menu"
+        );
+
+        app.on_term_event(CtEvent::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )))
+        .await;
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(App::playbook_selection_range(popup), Some((0, 1)));
+        assert!(
+            popup.selection_menu.is_some(),
+            "the movement key must not discard the pending menu"
+        );
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render keyboard selection menu");
+        let passive_frame = rendered_text(term.backend().buffer());
+        assert!(
+            passive_frame.contains("Tab menu")
+                && passive_frame.contains("type additional instruction"),
+            "a keyboard-created selection visibly opens the passive menu: {passive_frame:?}"
+        );
+
+        app.on_term_event(CtEvent::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        )))
+        .await;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render focused keyboard selection menu");
+        let focused_frame = rendered_text(term.backend().buffer());
+        assert!(
+            !focused_frame.contains("Tab menu")
+                && focused_frame.contains("type additional instruction"),
+            "Tab visibly focuses the keyboard selection menu: {focused_frame:?}"
+        );
+
+        app.on_term_event(CtEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )))
+        .await;
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert!(popup.selection_menu.is_none(), "first Esc dismisses the menu");
+        assert_eq!(
+            App::playbook_selection_range(popup),
+            Some((0, 1)),
+            "first Esc preserves the keyboard selection"
+        );
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render dismissed keyboard selection menu");
+        let dismissed_frame = rendered_text(term.backend().buffer());
+        assert!(
+            !dismissed_frame.contains("Tab menu")
+                && !dismissed_frame.contains("type additional instruction"),
+            "selection_menu == None must not paint a ghost: {dismissed_frame:?}"
+        );
+        assert!(
+            app.layout.playbook_selection_run_hit.is_none()
+                && app.layout.playbook_selection_verb_hits.is_empty(),
+            "dismissal clears every menu hit target"
+        );
+
+        app.on_term_event(CtEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )))
+        .await;
+        assert!(
+            app.playbook_popup.as_ref().unwrap().selection.is_none(),
+            "second Esc clears the keyboard selection"
         );
         server.abort();
     }

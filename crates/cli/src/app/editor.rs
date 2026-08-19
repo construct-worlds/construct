@@ -1181,7 +1181,16 @@ impl App {
             .and_then(Self::playbook_selection_range)
             .is_some();
         if !selection_active {
-            if let Some(popup) = self.playbook_popup.as_mut() {
+            // C-Space creates a zero-width mark that the next movement key
+            // extends. This handler runs before that movement, so preserve
+            // the mark's pending menu until the range becomes non-empty.
+            // A genuinely cleared selection still clears stale menu state;
+            // a dismissed non-empty selection never reaches this branch.
+            if let Some(popup) = self
+                .playbook_popup
+                .as_mut()
+                .filter(|popup| popup.selection.is_none())
+            {
                 popup.selection_menu = None;
             }
             return false;
