@@ -3568,6 +3568,8 @@ pub struct OperatorChannelSummary {
     pub auto_after_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disclosure: Option<bool>,
+    /// slack-personal idle polling ceiling in seconds. Accepted activity
+    /// temporarily drives the cadence lower before idle sweeps back off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_interval_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4041,6 +4043,8 @@ pub struct OperatorChannelPut {
     pub auto_after_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disclosure: Option<bool>,
+    /// slack-personal idle polling ceiling in seconds. Accepted activity
+    /// temporarily drives the cadence lower before idle sweeps back off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_interval_secs: Option<u64>,
 }
@@ -4097,8 +4101,9 @@ pub const SLACK_PERSONAL_TRIGGER_DEFAULT: &str = "dm";
 pub const SLACK_PERSONAL_RESPONSE_DEFAULT: &str = "draft";
 pub const SLACK_PERSONAL_AUTO_AFTER_DEFAULT_SECS: u64 = 60;
 pub const SLACK_PERSONAL_AUTO_AFTER_MIN_SECS: u64 = 1;
+/// Default ceiling reached after the channel has been idle.
 pub const SLACK_PERSONAL_POLL_DEFAULT_SECS: u64 = 20;
-/// Floor on the poll interval, protecting the backend from a typo'd `1`.
+/// Active polling floor, also protecting the backend from a typo'd `1`.
 pub const SLACK_PERSONAL_POLL_MIN_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
