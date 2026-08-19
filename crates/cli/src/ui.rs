@@ -3,8 +3,9 @@
 use crate::app::{
     feature_guidance, harness_guidance, harness_picker_entries, smith_method_guidance, App,
     ConfigureTab, FocusBorderTarget, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree,
-    PaneFocus, Prompt, PromptChoiceAction, PromptChoiceHit, PromptIntent, RemoteControlHit,
-    RemoteControlHitAction, ScreenPoint, Selection, OperatorTitleMenuAction, SessionTitleMenuAction,
+    ModalOwner, PaneFocus, Prompt, PromptChoiceAction, PromptChoiceHit, PromptIntent,
+    RemoteControlHit, RemoteControlHitAction, ScreenPoint, Selection, OperatorTitleMenuAction,
+    SessionTitleMenuAction,
     TextSelectionRange, TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit,
     WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS,
     PLAYBOOK_CLIP_HOVER_PREVIEW_COLS, PLAYBOOK_CLIP_HOVER_PREVIEW_ROWS,
@@ -421,6 +422,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.matrix_rain_area = None;
     app.layout.prompt_area = Some(prompt_area);
     app.layout.modal_area = None;
+    app.layout.modal_owner = None;
     app.layout.list_row_count = app.list_items().len();
     app.layout.list_items_area = None;
     app.layout.list_scroll_offset = 0;
@@ -477,6 +479,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if app.help_visible {
         let help_popup = render_help(f, area, app);
         app.layout.modal_area = Some(help_popup);
+        app.layout.modal_owner = Some(ModalOwner::Help);
     }
     render_session_title_menu(f, app);
     render_operator_title_menu(f, app);
@@ -2380,6 +2383,7 @@ fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.matrix_rain_area = None;
     app.layout.prompt_area = Some(prompt_area);
     app.layout.modal_area = None;
+    app.layout.modal_owner = None;
     app.layout.list_items_area = None;
     app.layout.list_scroll_offset = 0;
 
@@ -2401,6 +2405,7 @@ fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
     if app.help_visible {
         let help_popup = render_help(f, area, app);
         app.layout.modal_area = Some(help_popup);
+        app.layout.modal_owner = Some(ModalOwner::Help);
     }
 }
 
@@ -2420,6 +2425,7 @@ fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.matrix_rain_area = None;
     app.layout.prompt_area = Some(prompt_area);
     app.layout.modal_area = None;
+    app.layout.modal_owner = None;
     app.layout.list_row_count = app.list_items().len();
     app.layout.list_items_area = None;
     app.layout.list_scroll_offset = 0;
@@ -2432,6 +2438,7 @@ fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
     if app.help_visible {
         let help_popup = render_help(f, area, app);
         app.layout.modal_area = Some(help_popup);
+        app.layout.modal_owner = Some(ModalOwner::Help);
     }
 }
 
@@ -14203,6 +14210,7 @@ fn render_configure_popup(f: &mut Frame, app: &mut App) {
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
     app.layout.modal_area = Some(popup_area);
+    app.layout.modal_owner = Some(ModalOwner::Configure);
 
     let sections = Layout::default()
         .direction(Direction::Vertical)
@@ -16316,6 +16324,7 @@ fn render_tasks_popup(f: &mut Frame, app: &mut App) {
         height: h,
     };
     app.layout.modal_area = Some(rect);
+    app.layout.modal_owner = Some(ModalOwner::Tasks);
     let title = format!(
         " tasks — session {} ({} entries) — Esc to close ",
         short_id(&popup.session_id),
@@ -17850,6 +17859,7 @@ fn render_playbook_popup_at(
         // is visible there (a neighboring split, the exposed terminal).
         let pane_right = base_rect.right();
         app.layout.modal_area = Some(rect.intersection(base_rect));
+        app.layout.modal_owner = Some(ModalOwner::Playbook);
         app.layout.playbook_base_area = Some(base_rect);
         app.layout.playbook_resize_hit = Some(
             Rect {
@@ -20207,6 +20217,8 @@ fn render_session_picker(f: &mut Frame, app: &mut App) {
     let inner = block.inner(rect);
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
+    app.layout.modal_area = Some(rect);
+    app.layout.modal_owner = Some(ModalOwner::SessionPicker);
 
     // The switcher splits its inner area into search / separator / body / footer;
     // the anchored variant is body-only.
@@ -22925,6 +22937,7 @@ fn render_remote_control_popup(f: &mut Frame, app: &mut App) {
         height: h,
     };
     app.layout.modal_area = Some(rect);
+    app.layout.modal_owner = Some(ModalOwner::RemoteControl);
 
     let block = Block::default()
         .borders(Borders::ALL)
