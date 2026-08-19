@@ -119,6 +119,52 @@ async fn web_playbook_view_full_parity() {
     assert_eq!(enter["mode"], "playbook", "{enter:?}");
     assert_eq!(enter["mounted"], "s-prog", "{enter:?}");
 
+    // --- 2a. Inline code paints without delimiters; Backspace at its right
+    //          edge reveals the opening delimiter and editable text. ---------
+    let inline_code: serde_json::Value = page
+        .evaluate(
+            r###"
+            withMockPlaybook({
+              "playbook.get": () => ({ playbook: { session_id: "s-code", markdown: "run `cargo test` now\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.list_templates": () => ({ templates: [] }),
+              "playbook.edit": () => ({ applied: true }),
+              "playbook.cursor": () => ({ cursor: null }),
+            }, async () => {
+              setSession("s-code", "shell");
+              await switchCurrentViewMode("playbook");
+              const code = playbookInputEl.querySelector(".playbook-inline-code");
+              const sourceBefore = playbookSerialize();
+              const visibleBefore = code ? code.textContent : null;
+              const lineTextBefore = playbookInputEl.querySelector(".playbook-line").textContent;
+              const sel = window.getSelection();
+              const range = document.createRange();
+              range.setStartAfter(code); range.collapse(true);
+              sel.removeAllRanges(); sel.addRange(range);
+              playbookInputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }));
+              const sourceAfterBackspace = playbookSerialize();
+              const formattedAfterBackspace = !!playbookInputEl.querySelector(".playbook-inline-code");
+              document.execCommand("insertText", false, "`");
+              return {
+                sourceBefore, visibleBefore, lineTextBefore,
+                sourceAfterBackspace, formattedAfterBackspace,
+                sourceAfterRetype: playbookSerialize(),
+                formattedAfterRetype: !!playbookInputEl.querySelector(".playbook-inline-code"),
+              };
+            })
+            "###,
+        )
+        .await
+        .expect("evaluate inline code editing")
+        .into_value()
+        .expect("json");
+    assert_eq!(inline_code["sourceBefore"], "run `cargo test` now\n", "{inline_code:?}");
+    assert_eq!(inline_code["visibleBefore"], "cargo test", "{inline_code:?}");
+    assert_eq!(inline_code["lineTextBefore"], "run cargo test now", "{inline_code:?}");
+    assert_eq!(inline_code["sourceAfterBackspace"], "run `cargo test now\n", "{inline_code:?}");
+    assert_eq!(inline_code["formattedAfterBackspace"], false, "{inline_code:?}");
+    assert_eq!(inline_code["sourceAfterRetype"], "run `cargo test` now\n", "{inline_code:?}");
+    assert_eq!(inline_code["formattedAfterRetype"], true, "{inline_code:?}");
+
     // --- 3. Empty playbook shows templates; clicking one seeds the doc. -------
     let templates: serde_json::Value = page
         .evaluate(

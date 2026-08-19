@@ -31651,6 +31651,19 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn playbook_backspace_after_inline_code_reveals_source_editing_form() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "run `cargo test`", 16));
+
+        app.delete_playbook_back();
+
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "run `cargo test");
+        assert_eq!(popup.cursor, 15);
+        server.abort();
+    }
+
     /// Fixture for the shimmer-range tests: a heading, a multiline list item
     /// (bullet + continuation line), a sibling item, a blank separator, and a
     /// two-line paragraph. Lines: 0 heading / 1 item1 / 2 item1 continuation /
@@ -31937,6 +31950,10 @@ mod tests {
             (
                 "plain-with-clip",
                 "plain with @{session:abc123} chip and trailing words\nZEND",
+            ),
+            (
+                "inline-code",
+                "plain `cargo test` and more words that wrap\n- bullet with `inline code` after it\nZEND",
             ),
             (
                 "lone-bullets",

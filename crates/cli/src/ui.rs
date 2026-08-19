@@ -20972,6 +20972,45 @@ enum PlaybookInlineToken<'a> {
         src_len: usize,
     },
     Link(PlaybookMdLink<'a>),
+    /// A completed single-backtick inline-code span. The delimiters stay in
+    /// the source buffer but are omitted from the painted form.
+    Code {
+        content: &'a str,
+        src_len: usize,
+    },
+}
+
+fn find_playbook_inline_code(text: &str) -> Option<(usize, PlaybookInlineToken<'_>)> {
+    let bytes = text.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find('`') {
+        let start = from + rel;
+        if (start > 0 && bytes[start - 1] == b'`')
+            || bytes.get(start + 1).is_some_and(|b| *b == b'`')
+        {
+            from = start + 1;
+            continue;
+        }
+        let content_start = start + 1;
+        let mut close_from = content_start;
+        while let Some(close_rel) = text[close_from..].find('`') {
+            let close = close_from + close_rel;
+            let single = (close == 0 || bytes[close - 1] != b'`')
+                && bytes.get(close + 1).is_none_or(|b| *b != b'`');
+            if single && close > content_start {
+                return Some((
+                    start,
+                    PlaybookInlineToken::Code {
+                        content: &text[content_start..close],
+                        src_len: close + 1 - start,
+                    },
+                ));
+            }
+            close_from = close + 1;
+        }
+        return None;
+    }
+    None
 }
 
 fn next_playbook_inline_token(text: &str) -> Option<(usize, PlaybookInlineToken<'_>)> {
@@ -20988,10 +21027,14 @@ fn next_playbook_inline_token(text: &str) -> Option<(usize, PlaybookInlineToken<
         })
     });
     let link = find_playbook_md_link(text).map(|l| (l.start, PlaybookInlineToken::Link(l)));
-    match (clip, link) {
-        (Some(c), Some(l)) => Some(if c.0 <= l.0 { c } else { l }),
-        (c, l) => c.or(l),
+    let code = find_playbook_inline_code(text);
+    let mut next = clip;
+    for candidate in [link, code].into_iter().flatten() {
+        if next.as_ref().is_none_or(|current| candidate.0 < current.0) {
+            next = Some(candidate);
+        }
     }
+    next
 }
 
 /// Expand inline smart-clip chips (`@{…}`) and attachment links (`![…](…)`,
@@ -21033,6 +21076,10 @@ fn playbook_inline_rendered_text(
                 }
                 link_idx += 1;
                 link.end - link.start
+            }
+            PlaybookInlineToken::Code { content, src_len } => {
+                out.push_str(content);
+                src_len
             }
         };
         rest = &rest[start + src_len..];
@@ -21156,6 +21203,11 @@ fn playbook_inline_with_clips(
                 }
                 link_idx += 1;
                 link.end - link.start
+            }
+            PlaybookInlineToken::Code { content, src_len } => {
+                out.push_str(content);
+                visual += UnicodeWidthStr::width(content);
+                src_len
             }
         };
         rest = &rest[start + src_len..];
@@ -21536,6 +21588,20 @@ fn playbook_inline_visual_width(
         visual += UnicodeWidthStr::width(before);
         raw += before_len;
 
+        if let PlaybookInlineToken::Code { content, src_len } = &token {
+            let src_chars = rest[start_b..start_b + src_len].chars().count();
+            if raw_col <= raw + src_chars {
+                let content_col = raw_col
+                    .saturating_sub(raw + 1)
+                    .min(content.chars().count());
+                return visual + playbook_prefix_display_width(content, content_col);
+            }
+            visual += UnicodeWidthStr::width(*content);
+            raw += src_chars;
+            rest = &rest[start_b + src_len..];
+            continue;
+        }
+
         let (chip_width, src_len) = match &token {
             PlaybookInlineToken::Clip {
                 raw: raw_clip,
@@ -21553,6 +21619,7 @@ fn playbook_inline_visual_width(
                 link_idx += 1;
                 (w, link.end - link.start)
             }
+            PlaybookInlineToken::Code { .. } => unreachable!(),
         };
         let src_chars = rest[start_b..start_b + src_len].chars().count();
         if raw_col <= raw + src_chars {
@@ -21862,6 +21929,7 @@ fn render_playbook_inline_spans<'a>(
         let src_len = match &token {
             PlaybookInlineToken::Clip { src_len, .. } => *src_len,
             PlaybookInlineToken::Link(link) => link.end - link.start,
+            PlaybookInlineToken::Code { src_len, .. } => *src_len,
         };
         let src_chars = rest[start..start + src_len].chars().count();
         let chip_char_start = base + offset + before_chars;
@@ -21894,6 +21962,21 @@ fn render_playbook_inline_spans<'a>(
                     chip_is_active_match,
                 ));
                 link_idx += 1;
+            }
+            PlaybookInlineToken::Code { content, .. } => {
+                let code_style = base_style
+                    .fg(app.theme.highlight_fg)
+                    .bg(app.theme.inactive_highlight_bg);
+                spans.extend(playbook_text_spans(
+                    &app.theme,
+                    content,
+                    chip_char_start + 1,
+                    code_style,
+                    selection,
+                    search_matches,
+                    search_selected,
+                    action_ranges,
+                ));
             }
         }
         offset += before_chars + src_chars;
@@ -23509,6 +23592,27 @@ mod tests {
         assert_eq!(
             clips[0].visual_width,
             UnicodeWidthStr::width(playbook_md_link_label("n", true).as_str()) + 2
+        );
+    }
+
+    #[test]
+    fn playbook_inline_code_hides_delimiters_and_preserves_content_width() {
+        let raw = "before `cargo test` after";
+        assert_eq!(
+            playbook_inline_rendered_text(None, raw, None, 80),
+            "before cargo test after"
+        );
+        assert_eq!(
+            playbook_visual_col_for_line(None, raw, raw.chars().count(), 80, 0),
+            "before cargo test after".chars().count()
+        );
+        assert_eq!(
+            playbook_inline_rendered_text(None, "before `unfinished", None, 80),
+            "before `unfinished"
+        );
+        assert_eq!(
+            playbook_inline_rendered_text(None, "```rust", None, 80),
+            "```rust"
         );
     }
 
