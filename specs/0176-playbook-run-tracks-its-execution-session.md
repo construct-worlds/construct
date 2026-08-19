@@ -58,14 +58,17 @@ local machine, purely on which of two microsecond-apart orderings won.
   session it went to and that session's state at the moment it went out.
   Delivery paths that skip this leave the run armed but never started: it will
   shimmer until it is settled by a declaration, by the executing session dying,
-  or by the inactivity backstop. That is the safe direction to fail; a run that
+  or, while still unmanaged, by the optimistic safety backstop. A managed run
+  has no wall-clock expiry. That is the safe direction to fail; a run that
   reads the wrong session's lifecycle is not.
 - The state must be sampled *before* the prompt goes out. Sampling after it can
   observe the turn the prompt itself started and mistake it for a turn already
   in flight.
 - A dispatch that fans out (one subagent per selected item) binds no execution
-  session; such runs are settled by the agent's own declarations, by the
-  dispatched sessions closing, or by the backstop.
+  session; such runs are settled by the agent's own declarations, by terminal
+  session clips settling the blocks that name them, or by the owning session
+  terminating. The optimistic safety deadline remains only until the run is
+  agent-managed.
 - Progress signals other than state — first output, for instance — follow the
   same rule: they count for the run only from its execution session, and only
   after dispatch.

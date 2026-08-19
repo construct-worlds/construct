@@ -828,6 +828,7 @@ impl App {
                 pending_since,
                 system_status: None,
                 deadline: now + Duration::from_millis(PLAYBOOK_RUN_MAX_MS),
+                agent_managed: false,
                 first_output_seen: false,
                 stage: construct_protocol::PlaybookRunStage::Pressed,
                 daemon_confirmed: false,
@@ -837,10 +838,12 @@ impl App {
         );
     }
 
-    /// Reap Run shimmers that have outlived their backstop deadline, so a
-    /// missed first-output signal can never strand the animation (spec 0042).
+    /// Reap only unmanaged optimistic shimmers that outlive their safety
+    /// deadline. Managed runs settle from declarations and terminal lifecycle
+    /// signals instead of elapsed wall time (spec 0042).
     pub(super) fn expire_playbook_runs(&mut self, now: Instant) {
-        self.playbook_runs.retain(|_, run| now < run.deadline);
+        self.playbook_runs
+            .retain(|_, run| run.agent_managed || now < run.deadline);
         self.expire_playbook_settle_flourishes(now);
         self.expire_playbook_run_dispatch_guard(now);
     }

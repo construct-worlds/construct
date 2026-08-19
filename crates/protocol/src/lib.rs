@@ -1850,6 +1850,10 @@ impl Default for PlaybookRunStage {
 pub struct PlaybookRunProgress {
     pub run_id: String,
     pub started_at_ms: i64,
+    /// Safety deadline for an untouched optimistic/unmanaged run. Once
+    /// `agent_managed` is true, lifecycle signals and explicit block
+    /// declarations own settlement and clients must ignore this deadline.
+    /// Keeping the field numeric preserves compatibility with older payloads.
     pub expires_at_ms: i64,
     /// Daemon-derived run-level fallback status for shimmering blocks whose
     /// agent-authored tooltip is missing (optimistic/legacy/keep_pending).
@@ -1903,13 +1907,15 @@ pub struct PlaybookRunProgress {
     /// True once an in-run playbook declaration/edit has narrowed this run —
     /// i.e. the run is actively managed via per-block declarations rather than
     /// riding the untouched optimistic full-playbook shimmer. A managed run is
-    /// cleared by its pending set emptying, a terminal owning-session state, or
-    /// the inactivity backstop — NOT by its execution session merely returning
+    /// cleared by explicit settlement or a terminal owning-session state — NOT
+    /// by an inactivity deadline or by its execution session merely returning
     /// to awaiting-input (a self-scheduling agent goes idle while delegated or
-    /// background work is still in flight). An unmanaged run that no
-    /// declaration has narrowed still clears when its execution session goes
-    /// idle after being seen running; spec 0176 decides which transitions count
-    /// as this run's. See `specs/0042-playbook-run-progress-affordance.md`.
+    /// background work is still in flight). A terminal session clip settles the
+    /// pending block that names it. An unmanaged run that no declaration has
+    /// narrowed still clears when its execution session goes idle after being
+    /// seen running or when its safety deadline expires; spec 0176 decides
+    /// which transitions count as this run's. See
+    /// `specs/0042-playbook-run-progress-affordance.md`.
     #[serde(default)]
     pub agent_managed: bool,
     /// Derived compact stage for clients to render next to the Run control.

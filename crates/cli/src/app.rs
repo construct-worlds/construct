@@ -127,9 +127,9 @@ pub const MINIBUFFER_PANEL_H_MAX: u16 = 80;
 pub(crate) const PLAYBOOK_REVEAL_MS: u64 = 240;
 pub(crate) const PLAYBOOK_CONTENT_PADDING_X: u16 = 1;
 pub(crate) const PLAYBOOK_CONTENT_PADDING_Y: u16 = 1;
-/// Hard cap on how long a playbook Run shimmer animates without an observed
-/// output signal. A missed first-output transition must never strand the
-/// animation; a timeout backstop is mandatory (spec 0042).
+/// Safety cap for an optimistic Playbook Run that no agent declaration ever
+/// adopts. Managed runs ignore this deadline and settle from declarations and
+/// terminal lifecycle signals (spec 0042).
 pub(crate) const PLAYBOOK_RUN_MAX_MS: u64 = 10 * 60 * 1000;
 /// How long an identical Run (same session, scope, and executed body) is
 /// suppressed after a successful dispatch (spec 0042 consequence): long
@@ -3349,8 +3349,11 @@ pub struct PlaybookRun {
     /// Daemon-derived run-level fallback for pending blocks with no
     /// agent-authored tooltip.
     pub system_status: Option<String>,
-    /// Absolute backstop: clear no later than this regardless of signals.
+    /// Safety backstop for an optimistic/unmanaged run. Ignored once
+    /// `agent_managed` is true.
     pub deadline: Instant,
+    /// Whether explicit agent declarations own this run's pending set.
+    pub agent_managed: bool,
     /// Whether the first output has been observed.
     pub first_output_seen: bool,
     /// Compact run-pipeline stage derived by the daemon, or Pressed for this
@@ -3377,7 +3380,7 @@ impl PlaybookRun {
             .duration_since(UNIX_EPOCH)
             .ok()?
             .as_millis() as i64;
-        if progress.expires_at_ms <= now_ms
+        if (!progress.agent_managed && progress.expires_at_ms <= now_ms)
             || (progress.pending_block_refs.is_empty() && progress.pending_block_ids.is_empty())
         {
             return None;
@@ -3387,7 +3390,11 @@ impl PlaybookRun {
         } else {
             now
         };
-        let deadline = now + Duration::from_millis((progress.expires_at_ms - now_ms) as u64);
+        let deadline = if progress.expires_at_ms > now_ms {
+            now + Duration::from_millis((progress.expires_at_ms - now_ms) as u64)
+        } else {
+            now
+        };
         let mut pending: HashSet<String> = progress.pending_block_refs.into_iter().collect();
         pending.extend(progress.pending_block_ids);
         // Callers (`adopt_daemon_playbook_run`/`adopt_playbook_state_run`) merge
@@ -3402,6 +3409,7 @@ impl PlaybookRun {
             pending_since,
             system_status: progress.system_status,
             deadline,
+            agent_managed: progress.agent_managed,
             first_output_seen: progress.first_output_seen,
             stage: progress.stage,
             daemon_confirmed: true,
@@ -20226,6 +20234,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(30),
+                agent_managed: false,
                 first_output_seen: false,
                 stage: construct_protocol::PlaybookRunStage::Delivered,
                 daemon_confirmed: true,
@@ -25918,6 +25927,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
+                agent_managed: false,
                 first_output_seen: true,
                 stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
@@ -27159,6 +27169,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
+                agent_managed: false,
                 first_output_seen: true,
                 stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
@@ -27253,6 +27264,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
+                agent_managed: false,
                 first_output_seen: true,
                 stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
@@ -27332,6 +27344,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
+                agent_managed: false,
                 first_output_seen: true,
                 stage: construct_protocol::PlaybookRunStage::FirstOutput,
                 daemon_confirmed: true,
@@ -30465,6 +30478,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_playbook_run_ignores_optimistic_deadline() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.start_playbook_run("s1", "# Todo\n", false, "");
+        let run = app.playbook_runs.get_mut("s1").unwrap();
+        run.agent_managed = true;
+        run.deadline = Instant::now() - Duration::from_millis(1);
+
+        app.expire_playbook_runs(Instant::now());
+        assert!(
+            app.playbook_runs.contains_key("s1"),
+            "managed shimmer is lifecycle-driven, not timer-driven"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn playbook_settle_flourish_tracks_pending_diff_and_expires() {
         let (mut app, _dir, server) = empty_app().await;
         let now = Instant::now();
@@ -30512,6 +30541,7 @@ mod tests {
                 pending_since: HashMap::new(),
                 system_status: None,
                 deadline: Instant::now() + Duration::from_secs(60),
+                agent_managed: true,
                 first_output_seen: true,
                 stage: construct_protocol::PlaybookRunStage::default(),
                 daemon_confirmed: true,
