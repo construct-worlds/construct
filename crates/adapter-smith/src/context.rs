@@ -118,16 +118,7 @@ impl PromptSections {
         messages: &[Message],
     ) -> Vec<construct_protocol::ContextSegment> {
         use construct_protocol::ContextSegment;
-        let tool_chars: usize = tool_specs
-            .iter()
-            .map(|s| {
-                s.name.len()
-                    + s.description.len()
-                    + serde_json::to_string(&s.schema)
-                        .map(|j| j.len())
-                        .unwrap_or(0)
-            })
-            .sum();
+        let tool_tokens = estimate_tool_tokens(tool_specs);
         let mut segments = vec![ContextSegment::new(
             "system prompt",
             estimate_tokens_str(&self.prompt[..self.base_chars]),
@@ -147,11 +138,7 @@ impl PromptSections {
                 true,
             ));
         }
-        segments.push(ContextSegment::new(
-            "tools",
-            (tool_chars as f64 / 3.5) as u64,
-            true,
-        ));
+        segments.push(ContextSegment::new("tools", tool_tokens, true));
         segments.push(ContextSegment::new(
             "messages",
             estimate_tokens(messages) as u64,
@@ -159,6 +146,33 @@ impl PromptSections {
         ));
         segments
     }
+
+    /// Estimated tokens that every request pays before conversation
+    /// messages: Smith's complete system prompt plus tool schemas.
+    pub fn fixed_tokens(&self, tool_specs: &[crate::provider::ToolSpec]) -> u64 {
+        estimate_tokens_str(&self.prompt).saturating_add(estimate_tool_tokens(tool_specs))
+    }
+}
+
+fn estimate_tool_tokens(tool_specs: &[crate::provider::ToolSpec]) -> u64 {
+    let chars: usize = tool_specs
+        .iter()
+        .map(|s| {
+            s.name.len()
+                + s.description.len()
+                + serde_json::to_string(&s.schema)
+                    .map(|j| j.len())
+                    .unwrap_or(0)
+        })
+        .sum();
+    (chars as f64 / 3.5) as u64
+}
+
+/// Convert a whole-window utilization target into the portion available to
+/// conversation messages after the fixed prompt and tool overhead is paid.
+pub fn message_budget(window_tokens: u64, utilization: f64, fixed_tokens: u64) -> usize {
+    let total_budget = (window_tokens as f64 * utilization) as u64;
+    usize::try_from(total_budget.saturating_sub(fixed_tokens)).unwrap_or(usize::MAX)
 }
 
 /// Rough token estimate (chars / 3.5). Safe to overestimate.
@@ -400,6 +414,12 @@ mod tests {
             context_window_tokens("deepseek", "some-future-model") > 8_000,
             "an unrecognized DeepSeek model must not fall to the generic default"
         );
+    }
+
+    #[test]
+    fn message_budget_subtracts_fixed_overhead_after_utilization() {
+        assert_eq!(message_budget(32_768, 0.7, 20_000), 2_937);
+        assert_eq!(message_budget(8_000, 0.7, 20_000), 0);
     }
 
     #[test]

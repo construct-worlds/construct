@@ -12813,7 +12813,7 @@ fn modeline_context_usage_text(used: Option<u64>, window: Option<u64>) -> Option
         "  {}/{} {}% ",
         crate::lineage::format_token_count(used),
         crate::lineage::format_token_count(window),
-        used.saturating_mul(100) / window,
+        (used.saturating_mul(100) / window).min(100),
     );
     // The first space separates the gauge from the model name. The next and
     // final spaces are padding within the bar itself.
@@ -24931,6 +24931,10 @@ mod tests {
         assert_eq!(
             modeline_context_usage_text(Some(500), Some(0)),
             Some(("  500 used ".to_string(), 0))
+        );
+        assert_eq!(
+            modeline_context_usage_text(Some(20_106), Some(8_000)),
+            Some(("  20k/8.0k 100% ".to_string(), 15))
         );
         assert_eq!(modeline_context_usage_text(None, Some(258_400)), None);
     }

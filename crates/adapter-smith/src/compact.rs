@@ -164,16 +164,18 @@ pub async fn compact(
 /// history). Errors are non-fatal — the caller logs and proceeds to
 /// the rolling-prune path.
 ///
-/// `effective_cap` is the per-model input-token cap the caller is
-/// using for budget math (learned limit or hardcoded default). The
-/// trigger is `est_tokens > AUTO_COMPACT_RATIO * effective_cap`.
+/// `effective_cap` is the per-model input-token cap the caller is using for
+/// budget math. `fixed_tokens` is the system/tool prefix paid on every call.
+/// The trigger compares their sum with the whole-window threshold so a large
+/// fixed prefix cannot make Smith believe the context is emptier than it is.
 pub async fn maybe_auto_compact(
     messages: &mut Vec<Message>,
     effective_cap: u64,
+    fixed_tokens: u64,
     provider: &dyn LlmProvider,
     model: &str,
 ) -> Result<Option<CompactOutcome>> {
-    let est = context::estimate_tokens(messages) as u64;
+    let est = fixed_tokens.saturating_add(context::estimate_tokens(messages) as u64);
     let trigger = ((effective_cap as f64) * AUTO_COMPACT_RATIO) as u64;
     if est < trigger {
         return Ok(None);
@@ -607,7 +609,7 @@ mod tests {
         let provider = StubProvider::new("unused");
         // cap = 100k tokens; conversation is ~10 tokens; way under
         // threshold.
-        let outcome = maybe_auto_compact(&mut messages, 100_000, &provider, "stub")
+        let outcome = maybe_auto_compact(&mut messages, 100_000, 0, &provider, "stub")
             .await
             .unwrap();
         assert!(outcome.is_none());
@@ -628,7 +630,7 @@ mod tests {
         messages.push(user("recent"));
         messages.push(asst("latest"));
         let provider = StubProvider::new("auto-summary");
-        let outcome = maybe_auto_compact(&mut messages, 1000, &provider, "stub")
+        let outcome = maybe_auto_compact(&mut messages, 1000, 0, &provider, "stub")
             .await
             .unwrap()
             .expect("should auto-compact");
@@ -658,10 +660,32 @@ mod tests {
         assert!(est < prune_budget);
 
         let provider = StubProvider::new("pre-prune-summary");
-        let outcome = maybe_auto_compact(&mut messages, effective_cap as u64, &provider, "stub")
+        let outcome = maybe_auto_compact(&mut messages, effective_cap as u64, 0, &provider, "stub")
             .await
             .unwrap()
             .expect("should auto-compact before rolling prune would fire");
+        assert!(outcome.dropped_turn_pairs > 0);
+    }
+
+    #[tokio::test]
+    async fn auto_compact_counts_fixed_overhead_toward_trigger() {
+        let mut messages = Vec::new();
+        for _ in 0..5 {
+            messages.push(user(&"x".repeat(500)));
+            messages.push(asst(&"x".repeat(500)));
+        }
+        messages.push(user("recent"));
+        messages.push(asst("latest"));
+
+        let message_tokens = context::estimate_tokens(&messages) as u64;
+        let effective_cap = 10_000;
+        assert!(message_tokens < (effective_cap as f64 * AUTO_COMPACT_RATIO) as u64);
+
+        let provider = StubProvider::new("fixed-overhead-summary");
+        let outcome = maybe_auto_compact(&mut messages, effective_cap, 6_000, &provider, "stub")
+            .await
+            .unwrap()
+            .expect("fixed overhead should push the total over the trigger");
         assert!(outcome.dropped_turn_pairs > 0);
     }
 }
