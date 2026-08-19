@@ -2,8 +2,8 @@
 
 use crate::app::{
     feature_guidance, harness_guidance, harness_picker_entries, smith_method_guidance, App,
-    ConfigureTab, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Prompt,
-    PromptChoiceAction, PromptChoiceHit, PromptIntent, PaneFocus, RemoteControlHit,
+    ConfigureTab, FocusBorderTarget, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree,
+    PaneFocus, Prompt, PromptChoiceAction, PromptChoiceHit, PromptIntent, RemoteControlHit,
     RemoteControlHitAction, ScreenPoint, Selection, OperatorTitleMenuAction, SessionTitleMenuAction,
     TextSelectionRange, TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit,
     WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS,
@@ -457,6 +457,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // them after Playbooks and transitions so a rolled-down document cannot
     // cover the badge at its owning pane's top-left corner.
     paint_main_window_ordinal_badges(f, app);
+    render_focus_border_sweep(f, app, Instant::now());
 
     // The block is complete: slide it, translate everything it recorded into
     // screen coordinates, and hand the pointer back. Everything below paints
@@ -2387,6 +2388,9 @@ fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
             ViewMode::Chat => render_chat(f, main_area, app),
         }
     }
+    // Zoomed views are deliberately borderless. Sync the focus identity so
+    // returning to a bordered layout cannot replay a stale transition.
+    render_focus_border_sweep(f, app, Instant::now());
     apply_main_block_slide(f, app, &slide);
     app.mouse_pos = screen_mouse;
     render_prompt(f, prompt_area, app);
@@ -2417,6 +2421,7 @@ fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.list_scroll_offset = 0;
 
     render_sessions(f, main_area, app);
+    render_focus_border_sweep(f, app, Instant::now());
     apply_main_block_slide(f, app, &slide);
     app.mouse_pos = screen_mouse;
     render_prompt(f, prompt_area, app);
@@ -15100,6 +15105,218 @@ fn pane_border_style(theme: &Theme, focused: bool) -> Style {
         Style::default().fg(theme.border_focused)
     } else {
         Style::default().fg(theme.border)
+    }
+}
+
+/// Paint the moving bright band for a newly focused pane after that pane and
+/// its title chrome are fully composited. The overlay temporarily draws all
+/// four edges even when the steady pane chrome hides some of them. `(x + y) /
+/// 2` supplies the phase, so the band intersects the top/left edges first and
+/// the bottom/right edges last: a diagonal top-left → bottom-right sweep.
+fn render_focus_border_sweep(f: &mut Frame, app: &mut App, now: Instant) {
+    let target = app.focused_border_target();
+    let rect = match target {
+        FocusBorderTarget::SessionList => app.layout.list_area,
+        FocusBorderTarget::Lineage => app.layout.lineage_area,
+        FocusBorderTarget::MainWindow(id) => app
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|pane| pane.id == id)
+            .map(|pane| pane.area),
+    };
+    let Some(rect) = rect.filter(|rect| rect.width > 0 && rect.height > 0) else {
+        app.focus_border_sweep.sync(target);
+        return;
+    };
+    let Some(progress) = app.focus_border_sweep.observe(target, now) else {
+        return;
+    };
+    app.request_tick_redraw();
+
+    paint_focus_border_sweep(
+        f,
+        rect,
+        progress,
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+            .remove_modifier(Modifier::DIM | Modifier::REVERSED),
+    );
+}
+
+fn paint_focus_border_sweep(f: &mut Frame, rect: Rect, progress: f32, highlight: Style) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    const BAND_HALF_WIDTH: f32 = 0.14;
+    let x_denom = rect.width.saturating_sub(1).max(1) as f32;
+    let y_denom = rect.height.saturating_sub(1).max(1) as f32;
+    for y in rect.top()..rect.bottom() {
+        for x in rect.left()..rect.right() {
+            let on_edge = y == rect.top()
+                || y == rect.bottom().saturating_sub(1)
+                || x == rect.left()
+                || x == rect.right().saturating_sub(1);
+            if !on_edge {
+                continue;
+            }
+            let nx = x.saturating_sub(rect.left()) as f32 / x_denom;
+            let ny = y.saturating_sub(rect.top()) as f32 / y_denom;
+            let phase = (nx + ny) * 0.5;
+            if (phase - progress).abs() > BAND_HALF_WIDTH {
+                continue;
+            }
+            if let Some(cell) = f.buffer_mut().cell_mut(Position { x, y }) {
+                let is_corner = (x == rect.left() || x == rect.right().saturating_sub(1))
+                    && (y == rect.top() || y == rect.bottom().saturating_sub(1));
+                // Pane titles and their live edit controls occupy the top
+                // border row. Highlight only actual horizontal-rule cells
+                // there; hidden side/bottom edges are blank and deliberately
+                // receive transient glyphs below. Corners always participate.
+                if y == rect.top() && !is_corner && cell.symbol() != "─" {
+                    continue;
+                }
+                let symbol = match (
+                    x == rect.left(),
+                    x == rect.right().saturating_sub(1),
+                    y == rect.top(),
+                    y == rect.bottom().saturating_sub(1),
+                ) {
+                    (true, _, true, _) => "┌",
+                    (_, true, true, _) => "┐",
+                    (true, _, _, true) => "└",
+                    (_, true, _, true) => "┘",
+                    (_, _, true, _) | (_, _, _, true) => "─",
+                    _ => "│",
+                };
+                cell.set_symbol(symbol);
+                cell.set_style(highlight);
+                // `Cell::set_style` patches the existing cell and therefore
+                // cannot clear a modifier inherited from the pane beneath it.
+                // The focus cue is the glyph foreground, never reverse video.
+                cell.modifier.remove(Modifier::DIM | Modifier::REVERSED);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod focus_border_paint_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn full_border_band_crosses_top_right_and_bottom_left_halfway() {
+        let backend = TestBackend::new(12, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    0.5,
+                    Style::default().fg(Color::Red),
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(10, 0)].fg, Color::Red);
+        assert_eq!(buffer[(0, 10)].fg, Color::Red);
+        assert_ne!(buffer[(0, 0)].fg, Color::Red);
+        assert_ne!(buffer[(10, 10)].fg, Color::Red);
+    }
+
+    #[test]
+    fn sweep_draws_full_foreground_border_over_hidden_edges() {
+        let backend = TestBackend::new(12, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                f.buffer_mut()
+                    .cell_mut(Position { x: 5, y: 0 })
+                    .expect("top rule")
+                    .set_symbol("─");
+                f.buffer_mut()
+                    .cell_mut(Position { x: 0, y: 5 })
+                    .expect("left edge")
+                    .set_style(
+                        Style::default()
+                            .fg(Color::Green)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::REVERSED),
+                    );
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    0.25,
+                    Style::default().fg(Color::Blue),
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(5, 0)].symbol(), "─");
+        assert_eq!(buffer[(5, 0)].fg, Color::Blue);
+        assert_eq!(buffer[(0, 5)].symbol(), "│");
+        assert_eq!(buffer[(0, 5)].fg, Color::Blue);
+        assert_eq!(buffer[(0, 5)].bg, Color::Yellow);
+        assert!(!buffer[(0, 5)].modifier.contains(Modifier::REVERSED));
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn sweep_draws_corner_glyphs_at_both_diagonal_endpoints() {
+        let backend = TestBackend::new(12, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    0.0,
+                    Style::default().fg(Color::Cyan),
+                );
+            })
+            .expect("draw first endpoint");
+        assert_eq!(terminal.backend().buffer()[(0, 0)].symbol(), "┌");
+
+        terminal
+            .draw(|f| {
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    1.0,
+                    Style::default().fg(Color::Cyan),
+                );
+            })
+            .expect("draw second endpoint");
+        assert_eq!(terminal.backend().buffer()[(10, 10)].symbol(), "┘");
+    }
+
+    #[test]
+    fn sweep_does_not_overwrite_title_text_in_top_border() {
+        let backend = TestBackend::new(22, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                f.buffer_mut().set_string(
+                    1,
+                    0,
+                    " rename me ",
+                    Style::default().fg(Color::Yellow),
+                );
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 21, 11),
+                    0.25,
+                    Style::default().fg(Color::Cyan),
+                );
+            })
+            .expect("draw");
+        let title = (1..12)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect::<String>();
+        assert_eq!(title, " rename me ");
     }
 }
 

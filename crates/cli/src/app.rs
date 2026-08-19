@@ -696,6 +696,132 @@ pub enum PaneFocus {
     View,
 }
 
+/// Stable identity of the bordered TUI surface that currently owns keyboard
+/// focus. `PaneFocus` alone cannot distinguish sibling split windows or the
+/// lineage section nested inside the list pane, both of which need their own
+/// focus-acquisition affordance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FocusBorderTarget {
+    SessionList,
+    Lineage,
+    MainWindow(u64),
+}
+
+/// Transient state for the focused-pane border sweep. The first observed
+/// target establishes the baseline without animating; only a real focus
+/// transition starts a sweep.
+#[derive(Debug, Default)]
+pub(crate) struct FocusBorderSweep {
+    target: Option<FocusBorderTarget>,
+    started_at: Option<Instant>,
+}
+
+impl FocusBorderSweep {
+    pub(crate) fn observe(
+        &mut self,
+        target: FocusBorderTarget,
+        now: Instant,
+    ) -> Option<f32> {
+        match self.target {
+            None => {
+                self.target = Some(target);
+                return None;
+            }
+            Some(previous) if previous != target => {
+                self.target = Some(target);
+                self.started_at = Some(now);
+            }
+            Some(_) => {}
+        }
+
+        let started_at = self.started_at?;
+        let elapsed = now.saturating_duration_since(started_at);
+        if elapsed >= Duration::from_millis(FOCUS_BORDER_SWEEP_MS) {
+            self.started_at = None;
+            return None;
+        }
+        // Reach the bottom-right endpoint on the final scheduled visible
+        // frame. The following cadence tick clears the overlay at 200 ms.
+        Some(
+            (elapsed.as_secs_f32()
+                / Duration::from_millis(FOCUS_BORDER_SWEEP_TRAVEL_MS).as_secs_f32())
+            .min(1.0),
+        )
+    }
+
+    /// Keep target tracking current when its surface has no border (the
+    /// edge-to-edge zoomed view), without scheduling an invisible animation.
+    pub(crate) fn sync(&mut self, target: FocusBorderTarget) {
+        self.target = Some(target);
+        self.started_at = None;
+    }
+
+    pub(crate) fn is_animating(&self, now: Instant) -> bool {
+        self.started_at.is_some_and(|started_at| {
+            now.saturating_duration_since(started_at)
+                < Duration::from_millis(FOCUS_BORDER_SWEEP_MS)
+        })
+    }
+}
+
+#[cfg(test)]
+mod focus_border_sweep_tests {
+    use super::*;
+
+    #[test]
+    fn first_focus_is_baseline_then_changes_sweep_for_two_hundred_ms() {
+        let mut sweep = FocusBorderSweep::default();
+        let t0 = Instant::now();
+        assert_eq!(
+            sweep.observe(FocusBorderTarget::MainWindow(1), t0),
+            None,
+            "startup focus should not flash"
+        );
+
+        assert_eq!(sweep.observe(FocusBorderTarget::SessionList, t0), Some(0.0));
+        assert!(sweep.is_animating(t0 + Duration::from_millis(199)));
+        let halfway = sweep
+            .observe(
+                FocusBorderTarget::SessionList,
+                t0 + Duration::from_millis(80),
+            )
+            .expect("sweep is active");
+        assert!((halfway - 0.5).abs() < f32::EPSILON);
+        assert_eq!(
+            sweep.observe(
+                FocusBorderTarget::SessionList,
+                t0 + Duration::from_millis(160),
+            ),
+            Some(1.0),
+            "the last visible cadence frame reaches the bottom-right corner"
+        );
+        assert_eq!(
+            sweep.observe(
+                FocusBorderTarget::SessionList,
+                t0 + Duration::from_millis(200),
+            ),
+            None
+        );
+        assert!(!sweep.is_animating(t0 + Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn changing_split_windows_restarts_an_in_flight_sweep() {
+        let mut sweep = FocusBorderSweep::default();
+        let t0 = Instant::now();
+        sweep.sync(FocusBorderTarget::SessionList);
+        assert_eq!(sweep.observe(FocusBorderTarget::MainWindow(1), t0), Some(0.0));
+        assert_eq!(
+            sweep.observe(
+                FocusBorderTarget::MainWindow(2),
+                t0 + Duration::from_millis(150),
+            ),
+            Some(0.0),
+            "the newly focused sibling starts at its own top-left corner"
+        );
+    }
+}
+
 /// A spatial direction for moving keyboard focus between split panes
 /// (emacs `windmove`). Used by the `Shift+Arrow` bindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2034,6 +2160,9 @@ pub struct App {
     /// frame. The 120 ms timer still drives animation and maintenance, but a
     /// static frame can leave its tick unpainted instead of rebuilding the TUI.
     tick_redraw_requested: Cell<bool>,
+    /// Brief directional highlight that identifies the pane which just took
+    /// keyboard focus.
+    pub(crate) focus_border_sweep: FocusBorderSweep,
     /// Set by `on_notification` to report whether the just-handled
     /// notification changed something currently *visible* (a focused /
     /// split pane, the minibuffer panel, or any structural /
@@ -5158,6 +5287,13 @@ pub const PTY_QUIESCENCE: Duration = Duration::from_millis(600);
 /// Spinner frame cadence — fast enough to feel alive, slow enough to keep
 /// the TUI tick loop cheap.
 pub const SPINNER_FRAME_MS: u128 = 120;
+/// Duration and dedicated frame cadence for the pane focus-border sweep. The
+/// ordinary spinner tick stays at 120 ms; this faster timer is polled only
+/// while a sweep is actually visible.
+pub const FOCUS_BORDER_SWEEP_MS: u64 = 200;
+const FOCUS_BORDER_SWEEP_FRAME_MS: u64 = 40;
+const FOCUS_BORDER_SWEEP_TRAVEL_MS: u64 =
+    FOCUS_BORDER_SWEEP_MS - FOCUS_BORDER_SWEEP_FRAME_MS;
 /// Pulsing-star spinner: a 4-glyph sparkle whose size "breathes" via a
 /// palindromic frame schedule (small → big → small). Single cell wide so
 /// it slots into the same column as the static state glyph.
@@ -5538,6 +5674,7 @@ async fn run_with_socket_initial_selection(
         operator_view_scroll: 0,
         skip_redraw_after_event: false,
         tick_redraw_requested: Cell::new(false),
+        focus_border_sweep: FocusBorderSweep::default(),
         notification_dirtied_view: true,
         hydrating_sessions: HashSet::new(),
         minibuffer_scrollback: 0,
@@ -5921,6 +6058,12 @@ async fn run_loop(
     // Tick at the spinner frame boundary. Visible animations request paints;
     // static frames use the same wakeup only for maintenance.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
+    // A focus sweep needs more than the spinner tick's one intermediate frame
+    // to read as directional. This timer is gated off outside the 200 ms
+    // animation window, so idle/static TUIs retain the existing wake cadence.
+    let mut focus_border_tick =
+        tokio::time::interval(Duration::from_millis(FOCUS_BORDER_SWEEP_FRAME_MS));
+    focus_border_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Lineage preview, keyboard-focused mode (spec 0080; supersedes the old
     // `C-x q` / `q` popup, spec 0139): its per-node elapsed-time/cost stats
     // are recomputed at render time from `SessionSummary` fields that are
@@ -6398,6 +6541,10 @@ async fn run_loop(
                     }
                 }
             }
+            _ = focus_border_tick.tick(), if app.focus_border_sweep.is_animating(Instant::now()) => {
+                // Waking the loop is sufficient: the next iteration paints
+                // the sweep at its current monotonic-clock position.
+            }
             // Gate on `reconnect.is_none()`: once the daemon drops, the
             // old `notifications` channel is closed, so `recv()` is
             // *immediately* ready with `None` on every poll. Left
@@ -6816,6 +6963,14 @@ fn op_xy_slot_state_masks(sessions: &[SessionSummary], slots: &[Option<String>])
 }
 
 impl App {
+    pub(crate) fn focused_border_target(&self) -> FocusBorderTarget {
+        match self.focus {
+            PaneFocus::List if self.lineage_focused => FocusBorderTarget::Lineage,
+            PaneFocus::List => FocusBorderTarget::SessionList,
+            PaneFocus::View => FocusBorderTarget::MainWindow(self.active_window_id),
+        }
+    }
+
     async fn reconnect(
         &mut self,
         socket: &std::path::Path,
@@ -17538,6 +17693,7 @@ mod tests {
             operator_view_scroll: 0,
             skip_redraw_after_event: false,
             tick_redraw_requested: Cell::new(false),
+            focus_border_sweep: FocusBorderSweep::default(),
             notification_dirtied_view: true,
             hydrating_sessions: HashSet::new(),
             minibuffer_scrollback: 0,
