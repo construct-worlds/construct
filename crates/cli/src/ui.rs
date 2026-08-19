@@ -19457,6 +19457,17 @@ fn render_playbook_selection_context_menu(
         app.layout.playbook_selection_verb_hits.clear();
         return;
     }
+    let Some(menu) = popup.selection_menu.as_ref().cloned() else {
+        // The selection and its transient action menu are deliberately
+        // separate states (spec 0196). After the first Esc the selection
+        // remains active, but the dismissed menu must neither paint nor
+        // retain click targets. Falling back to a default menu here made the
+        // dismissed layer look open even though keyboard routing correctly
+        // treated it as absent.
+        app.layout.playbook_selection_run_hit = None;
+        app.layout.playbook_selection_verb_hits.clear();
+        return;
+    };
     let Some(pos) = playbook_cursor_position(
         Some(app),
         &popup.buffer,
@@ -19468,7 +19479,6 @@ fn render_playbook_selection_context_menu(
         app.layout.playbook_selection_verb_hits.clear();
         return;
     };
-    let menu = popup.selection_menu.as_ref().cloned().unwrap_or_default();
     // Verb buttons (spec 0089) render as a vertical list below the
     // comment/Run row, one row per verb, ordered as advertised by the daemon.
     let verbs = app.playbook_verbs.clone();

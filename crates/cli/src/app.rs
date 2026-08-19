@@ -23684,6 +23684,157 @@ mod tests {
         server.abort();
     }
 
+    /// Regression for the live path behind #1285's follow-up report. The
+    /// focused helper tests only exercised `handle_playbook_key` against
+    /// hand-built selection state; the real interaction starts from rendered
+    /// mouse geometry and routes both mouse and key events through the TUI
+    /// ingress. After the first Esc, the renderer used to synthesize a
+    /// default menu from `selection_menu == None`, leaving a visible ghost:
+    /// Tab could not focus it and the next Esc appeared to dismiss the menu
+    /// and selection together.
+    #[tokio::test]
+    async fn playbook_live_mouse_selection_tabs_into_menu_then_escapes_in_two_layers() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = empty_app().await;
+        let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+        session.id = "s1".into();
+        app.sessions = vec![session];
+        app.selection = Selection::Session("s1".into());
+        app.sync_active_window_selection();
+        app.focus = PaneFocus::View;
+        app.mouse_capture_enabled = true;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "alpha beta", 0));
+        app.playbook_popup.as_mut().unwrap().revealed_at =
+            Instant::now() - Duration::from_millis(PLAYBOOK_REVEAL_MS);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("initial playbook render");
+        let body = app
+            .layout
+            .playbook_inner_area
+            .expect("render publishes live playbook body geometry");
+        let mouse = |kind, column| {
+            CtEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row: body.y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        app.on_term_event(mouse(MouseEventKind::Down(MouseButton::Left), body.x))
+            .await;
+        app.on_term_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x.saturating_add(5),
+        ))
+        .await;
+        app.on_term_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            body.x.saturating_add(5),
+        ))
+        .await;
+
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(App::playbook_selection_range(popup), Some((0, 5)));
+        assert!(popup.selection_menu.is_some(), "mouse selection opens menu");
+
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("selection menu render");
+        let menu_frame = rendered_text(term.backend().buffer());
+        assert!(
+            menu_frame.contains("Tab menu")
+                && menu_frame.contains("type additional instruction"),
+            "the passive selection menu must be visibly present before Tab: {menu_frame:?}"
+        );
+        assert!(
+            app.layout.playbook_selection_run_hit.is_some(),
+            "the live menu publishes its Run hit target"
+        );
+
+        app.on_term_event(CtEvent::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        )))
+        .await;
+        assert!(
+            app.playbook_popup
+                .as_ref()
+                .and_then(|popup| popup.selection_menu.as_ref())
+                .is_some_and(|menu| menu.focused),
+            "Tab entering through the terminal event path focuses the menu"
+        );
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render focused selection menu");
+        let focused_frame = rendered_text(term.backend().buffer());
+        assert!(
+            !focused_frame.contains("Tab menu")
+                && focused_frame.contains("type additional instruction"),
+            "Tab must visibly focus the still-open menu by removing its passive hint: \
+             {focused_frame:?}"
+        );
+        let focused_comment_row = app
+            .layout
+            .playbook_selection_run_hit
+            .expect("focused menu retains its Run hit target")
+            .2;
+        use ratatui::backend::Backend as _;
+        let focused_cursor = term
+            .backend_mut()
+            .get_cursor_position()
+            .expect("focused menu cursor position");
+        assert_eq!(
+            focused_cursor.y, focused_comment_row,
+            "Tab visibly places the terminal cursor on the focused Comment row"
+        );
+
+        app.on_term_event(CtEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )))
+        .await;
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert!(popup.selection_menu.is_none(), "first Esc dismisses menu state");
+        assert_eq!(
+            App::playbook_selection_range(popup),
+            Some((0, 5)),
+            "first Esc preserves the mouse selection"
+        );
+
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render after menu dismissal");
+        let dismissed_frame = rendered_text(term.backend().buffer());
+        assert!(
+            !dismissed_frame.contains("Tab menu")
+                && !dismissed_frame.contains("type additional instruction"),
+            "first Esc must remove the menu from the rendered frame: {dismissed_frame:?}"
+        );
+        assert!(
+            app.layout.playbook_selection_run_hit.is_none()
+                && app.layout.playbook_selection_verb_hits.is_empty(),
+            "a dismissed menu must not repaint as a default ghost or retain hit targets"
+        );
+        assert_eq!(
+            App::playbook_selection_range(app.playbook_popup.as_ref().unwrap()),
+            Some((0, 5)),
+            "rendering the menu-less selection must preserve it"
+        );
+
+        app.on_term_event(CtEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )))
+        .await;
+        assert!(
+            app.playbook_popup.as_ref().unwrap().selection.is_none(),
+            "second Esc clears the selection"
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn playbook_escape_dismisses_selection_menu_before_clearing_selection() {
         let (mut app, _dir, server) = empty_app().await;
