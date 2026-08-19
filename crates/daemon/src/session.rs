@@ -1474,8 +1474,8 @@ pub struct SessionManager {
     /// Live selection-Run fork dispatches, keyed by fork session id (spec
     /// 0076): closing a tracked fork settles its dispatched blocks'
     /// shimmer. In-memory only, like `pending_verb_merges` — a daemon
-    /// restart drops the backstop for forks already in flight, and the
-    /// run's inactivity expiry then remains the last-resort clear.
+    /// restart drops this content-anchor fallback for forks already in flight;
+    /// terminal session clips remain the durable lifecycle relationship.
     run_fork_dispatches: std::sync::Mutex<HashMap<String, RunForkDispatch>>,
     playbook_cursors: std::sync::Mutex<HashMap<u64, construct_protocol::PlaybookCursor>>,
     /// Reserved pseudo-connection id for each session's agent-authored
@@ -5512,6 +5512,10 @@ impl SessionManager {
             s.pending_input = false;
             s.clone()
         };
+        // Archiving is a terminal lifecycle transition. Clear this session's
+        // own managed run and settle pending blocks which delegate to it before
+        // the adapter's eventual Closed event races in (spec 0042).
+        self.note_session_state_for_playbook_run(id, snapshot.state);
         let _ = self.storage.save_summary(&snapshot);
         let _ = self
             .broadcast
@@ -5642,6 +5646,9 @@ impl SessionManager {
         // like an archived one (spec 0137); consuming the tracking entry
         // here also makes an archive-then-delete sequence settle once.
         self.settle_run_fork_dispatch(id).await;
+        // Deletion may remove the session before its adapter can publish a
+        // terminal event. Apply the same owner/worker orphan cleanup eagerly.
+        self.note_session_state_for_playbook_run(id, SessionState::Done);
         // Release the session's routing credential so a deleted session's
         // token can never be reused to reach a route.
         self.router.detach_session(id);
@@ -12866,8 +12873,8 @@ mod tests {
     ///
     /// Every stop signal used to be gated on `seen_running`, so a harness that
     /// crashed, rejected the prompt, or was killed left the whole playbook
-    /// shimmering for the full inactivity backstop — with nothing alive that
-    /// could ever settle it.
+    /// shimmering until its safety deadline — with nothing alive that could
+    /// ever settle it.
     #[tokio::test]
     async fn playbook_run_clears_when_the_session_dies_before_running() {
         let body = "# T\n\n- alpha\n";
@@ -12948,7 +12955,7 @@ mod tests {
         assert!(
             mgr.playbook_run_snapshot(&id).is_none(),
             "a dispatch that never produced a turn has no other stop signal; \
-             it must not ride the inactivity backstop"
+             it must not wait for the unmanaged safety deadline"
         );
     }
 
@@ -15850,7 +15857,7 @@ done
     }
 
     // An empty managed run is reaped when the owning session goes idle, so an
-    // empty record does not linger to the backstop — and a later declaration no
+    // empty record does not linger indefinitely — and a later declaration no
     // longer revives it (contrast with the mid-turn survival above).
     #[tokio::test]
     async fn playbook_run_empty_clears_when_owning_session_idle() {
@@ -16165,6 +16172,167 @@ done
             mgr.playbook_run_snapshot(&id).is_none(),
             "a terminal state clears a managed run"
         );
+    }
+
+    /// A planning declaration transfers ownership from the optimistic safety
+    /// timer to explicit block/session lifecycle. Long delegated work must not
+    /// lose its shimmer merely because no Playbook text changed for ten
+    /// minutes (spec 0042).
+    #[tokio::test]
+    async fn playbook_run_managed_ignores_expired_safety_deadline() {
+        let body = "# Work\n\n- delegated @{session:sworker}\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        mgr.start_playbook_run(&id, body, false, None)
+            .expect("start");
+        mgr.narrow_playbook_run(&id, body, &[]);
+        {
+            let mut runs = mgr.playbook_runs.lock().expect("runs");
+            let run = runs.get_mut(&id).expect("managed run");
+            assert!(run.agent_managed);
+            run.expires_at_ms = 0;
+        }
+
+        let run = mgr
+            .playbook_run_snapshot(&id)
+            .expect("managed run survives its former deadline");
+        assert_eq!(run.pending_block_count(), 2);
+        let get = mgr.playbook_get(&id).await.expect("playbook get");
+        assert!(
+            get.blocks.iter().all(|block| block.shimmer),
+            "managed pending blocks remain projected after the safety deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn playbook_run_unmanaged_still_expires_at_safety_deadline() {
+        let body = "# Work\n\n- task\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        mgr.start_playbook_run(&id, body, false, None)
+            .expect("start");
+        mgr.playbook_runs
+            .lock()
+            .expect("runs")
+            .get_mut(&id)
+            .expect("unmanaged run")
+            .expires_at_ms = 0;
+
+        assert!(
+            mgr.playbook_run_snapshot(&id).is_none(),
+            "an untouched optimistic run keeps the safety backstop"
+        );
+    }
+
+    /// Terminal session clips are the orphan signal for ordinary full-run
+    /// delegation. Closing one worker settles only its own pending block; the
+    /// remaining live worker keeps shimmering (spec 0042).
+    #[tokio::test]
+    async fn terminal_worker_clip_settles_only_its_pending_block() {
+        use construct_protocol::SessionState;
+
+        let body = "# Work\n\n- alpha @{session:sworker-a}\n\n- beta @{session:sworker-b}\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        mgr.start_playbook_run(&id, body, false, None)
+            .expect("start");
+        let blocks = mgr.playbook_get(&id).await.expect("get").blocks;
+        let alpha = blocks
+            .iter()
+            .find(|block| block.text.contains("alpha"))
+            .expect("alpha")
+            .id
+            .clone();
+        let beta = blocks
+            .iter()
+            .find(|block| block.text.contains("beta"))
+            .expect("beta")
+            .id
+            .clone();
+        mgr.set_playbook_run_pending(
+            &id,
+            body,
+            std::collections::HashMap::from([
+                (alpha.clone(), None),
+                (beta.clone(), None),
+            ]),
+        );
+
+        mgr.note_session_state_for_playbook_run("sunrelated", SessionState::Done);
+        assert!(
+            mgr.playbook_run_snapshot(&id)
+                .expect("unrelated close leaves run")
+                .pending_block_refs
+                .contains(&alpha)
+        );
+
+        mgr.note_session_state_for_playbook_run("sworker-a", SessionState::Done);
+        let run = mgr
+            .playbook_run_snapshot(&id)
+            .expect("beta worker remains live");
+        assert!(!run.pending_block_refs.contains(&alpha));
+        assert_eq!(run.pending_block_refs, vec![beta]);
+
+        mgr.note_session_state_for_playbook_run("sworker-b", SessionState::Errored);
+        assert!(
+            mgr.playbook_run_snapshot(&id).is_none(),
+            "all delegated blocks settle once their referenced workers terminate"
+        );
+        assert!(
+            !mgr.playbook_runs.lock().expect("runs").contains_key(&id),
+            "the terminal lifecycle signal is authoritative when it settles the last block"
+        );
+    }
+
+    #[tokio::test]
+    async fn archiving_and_deleting_workers_settle_their_pending_blocks() {
+        let body = "# Work\n\n- alpha @{session:sworker-a}\n\n- beta @{session:sworker-b}\n";
+        let (mgr, _storage, id) = playbook_test_mgr(body).await;
+        {
+            let mut sessions = mgr.sessions.write().await;
+            sessions.insert(
+                "sworker-a".into(),
+                synthetic_entry("sworker-a", construct_protocol::SessionKind::User, 0),
+            );
+            sessions.insert(
+                "sworker-b".into(),
+                synthetic_entry("sworker-b", construct_protocol::SessionKind::User, 0),
+            );
+        }
+        mgr.start_playbook_run(&id, body, false, None)
+            .expect("start");
+        let blocks = mgr.playbook_get(&id).await.expect("get").blocks;
+        let alpha = blocks
+            .iter()
+            .find(|block| block.text.contains("alpha"))
+            .expect("alpha")
+            .id
+            .clone();
+        let beta = blocks
+            .iter()
+            .find(|block| block.text.contains("beta"))
+            .expect("beta")
+            .id
+            .clone();
+        mgr.set_playbook_run_pending(
+            &id,
+            body,
+            std::collections::HashMap::from([
+                (alpha.clone(), None),
+                (beta.clone(), None),
+            ]),
+        );
+
+        mgr.archive("sworker-a").await.expect("archive worker");
+        let run = mgr
+            .playbook_run_snapshot(&id)
+            .expect("beta worker remains pending");
+        assert!(!run.pending_block_refs.contains(&alpha));
+        assert_eq!(run.pending_block_refs, vec![beta]);
+
+        mgr.delete("sworker-b").await.expect("delete worker");
+        assert!(
+            mgr.playbook_run_snapshot(&id).is_none(),
+            "archive and delete must not orphan managed shimmer"
+        );
+        assert!(!mgr.playbook_runs.lock().expect("runs").contains_key(&id));
     }
 
     #[tokio::test]

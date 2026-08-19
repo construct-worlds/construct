@@ -124,7 +124,7 @@ impl SessionManager {
         let mut runs = self.playbook_runs.lock().ok()?;
         let expired = runs
             .get(session_id)
-            .is_some_and(|run| run.expires_at_ms <= now_ms);
+            .is_some_and(|run| !run.agent_managed && run.expires_at_ms <= now_ms);
         if expired {
             runs.remove(session_id);
             return None;
@@ -134,7 +134,8 @@ impl SessionManager {
         // it within the same turn (spec 0053): a move/annotate that changes a
         // still-pending block transiently empties the set before the new id is
         // declared, and that must not destroy the run. The record is reaped when
-        // the owning session goes idle/terminal or the inactivity backstop fires.
+        // the owning session goes idle/terminal. Managed runs have no inactivity
+        // deadline; unmanaged optimistic runs still retain the safety backstop.
         match runs.get(session_id) {
             Some(run)
                 if !run.pending_block_refs.is_empty() || !run.pending_block_ids.is_empty() =>
@@ -175,7 +176,7 @@ impl SessionManager {
             .lock()
             .ok()
             .and_then(|runs| runs.get(session_id).cloned())
-            .filter(|run| run.expires_at_ms > Utc::now().timestamp_millis());
+            .filter(|run| run.agent_managed || run.expires_at_ms > Utc::now().timestamp_millis());
         let pending_refs: std::collections::HashSet<String> = run
             .as_ref()
             .map(|run| run.pending_block_refs.iter().cloned().collect())
@@ -346,7 +347,9 @@ impl SessionManager {
                         }
                     }
                     run.total_block_count = run.total_block_count.saturating_add(added);
-                    run.expires_at_ms = now_ms + PLAYBOOK_RUN_MAX_MS;
+                    if !run.agent_managed {
+                        run.expires_at_ms = now_ms + PLAYBOOK_RUN_MAX_MS;
+                    }
                     run.refresh_stage();
                     return Some(project_playbook_run_status(run.clone()));
                 }
@@ -403,7 +406,6 @@ impl SessionManager {
         markdown: &str,
         decls: &[construct_protocol::PlaybookShimmerDecl],
     ) {
-        let now_ms = Utc::now().timestamp_millis();
         let blocks = self.playbook_blocks_projection(session_id, markdown);
         let current = playbook_block_ids(&blocks);
         let by_decl: std::collections::HashMap<String, String> = blocks
@@ -419,13 +421,11 @@ impl SessionManager {
                 return;
             };
             // A declaration/edit during the run means the agent is actively
-            // managing it: from here on, trust the declarations and the
-            // inactivity backstop to clear it, not the owning session's idle
+            // managing it: from here on, trust explicit settlement and terminal
+            // lifecycle signals, not a timer or the owning session's idle
             // transition (a self-scheduling agent goes idle while delegated or
             // background work is still in flight). See spec 0042.
             run.agent_managed = true;
-            // Refresh the inactivity backstop — the run is still being worked.
-            run.expires_at_ms = now_ms + PLAYBOOK_RUN_MAX_MS;
             run.pending_block_refs.retain(|id| current.contains(id));
             run.pending_block_ids.retain(|id| current.contains(id));
             for decl in decls {
@@ -454,14 +454,11 @@ impl SessionManager {
                 run.pending_block_refs.contains(id) || run.pending_block_ids.contains(id)
             });
             run.pending_block_ids.clear();
-            // Reap only on the inactivity backstop. An empty pending set does
-            // NOT remove the run mid-turn (spec 0053): a still-running agent may
-            // re-declare a moved block's new id next, and destroying the run
-            // would make that revival a no-op. Idle/terminal reaping is owned by
+            // An empty pending set does NOT remove the run mid-turn (spec
+            // 0053): a still-running agent may re-declare a moved block's new
+            // id next, and destroying the run would make that revival a no-op.
+            // Idle/terminal reaping is owned by
             // note_session_state_for_playbook_run.
-            if run.expires_at_ms <= now_ms {
-                runs.remove(session_id);
-            }
         }
     }
 
@@ -475,7 +472,6 @@ impl SessionManager {
         markdown: &str,
         pending: std::collections::HashMap<String, Option<String>>,
     ) {
-        let now_ms = Utc::now().timestamp_millis();
         let blocks = self.playbook_blocks_projection(session_id, markdown);
         let current = playbook_block_ids(&blocks);
         let by_decl: std::collections::HashMap<String, String> = blocks
@@ -491,9 +487,8 @@ impl SessionManager {
                 return;
             };
             // A complete declaration is active management (spec 0042): keep the
-            // run alive past owning-session idle and refresh the backstop.
+            // run alive past owning-session idle with no inactivity deadline.
             run.agent_managed = true;
-            run.expires_at_ms = now_ms + PLAYBOOK_RUN_MAX_MS;
             let pending: Vec<(String, Option<String>)> = pending
                 .into_iter()
                 .filter_map(|(id, tip)| {
@@ -514,11 +509,70 @@ impl SessionManager {
                 .collect();
             run.pending_block_refs = pending.into_iter().map(|(id, _)| id).collect();
             run.pending_block_ids.clear();
-            // Reap only on the inactivity backstop (spec 0053); an empty
-            // declaration mid-turn keeps the run alive for revival.
-            if run.expires_at_ms <= now_ms {
-                runs.remove(session_id);
+            // An empty declaration mid-turn keeps the run alive for revival
+            // until an authoritative lifecycle signal settles it (spec 0053).
+        }
+    }
+
+    /// Settle pending blocks that explicitly delegate work to a session which
+    /// has reached a terminal lifecycle state. This is the orphan cleanup for
+    /// ordinary full-Playbook delegation: selection-Run forks have additional
+    /// dispatch tracking, but a normal managed run expresses responsibility by
+    /// carrying `@{session:<id>}` on the pending block itself.
+    fn settle_playbook_blocks_for_terminal_clip(&self, terminal_session_id: &str) {
+        let owners: Vec<String> = self
+            .playbook_runs
+            .lock()
+            .map(|runs| runs.keys().cloned().collect())
+            .unwrap_or_default();
+        let mut matches = Vec::new();
+        for owner in owners {
+            let Ok((playbook, blocks)) = self.storage.read_playbook_with_blocks(&owner) else {
+                continue;
+            };
+            let terminal_refs: Vec<(String, String)> = blocks
+                .iter()
+                .filter(|block| {
+                    construct_protocol::playbook_scan_smart_clips(&block.text)
+                        .iter()
+                        .any(|clip| {
+                            clip.type_name == "session" && clip.target == terminal_session_id
+                        })
+                })
+                .map(|block| (block_ref_or_id(block), block.content_id.clone()))
+                .collect();
+            if !terminal_refs.is_empty() {
+                matches.push((owner, playbook, terminal_refs));
             }
+        }
+
+        let mut changed = Vec::new();
+        if let Ok(mut runs) = self.playbook_runs.lock() {
+            for (owner, playbook, terminal_refs) in matches {
+                let mut settled_last_block = false;
+                let Some(run) = runs.get_mut(&owner) else {
+                    continue;
+                };
+                let before = run.pending_block_count();
+                for (block_ref, content_id) in terminal_refs {
+                    run.pending_block_refs.retain(|id| id != &block_ref);
+                    run.pending_block_ids
+                        .retain(|id| id != &block_ref && id != &content_id);
+                    run.pending_block_tooltips.remove(&block_ref);
+                    run.pending_block_tooltips.remove(&content_id);
+                }
+                if run.pending_block_count() != before {
+                    run.refresh_stage();
+                    settled_last_block = run.pending_block_count() == 0;
+                    changed.push(playbook);
+                }
+                if settled_last_block {
+                    runs.remove(&owner);
+                }
+            }
+        }
+        for playbook in changed {
+            self.broadcast_playbook_state(playbook);
         }
     }
 
@@ -670,6 +724,12 @@ impl SessionManager {
         state: construct_protocol::SessionState,
     ) {
         use construct_protocol::SessionState;
+        // A terminal worker may not execute or own the run at all; its smart
+        // clip is the relationship to the pending block. Process that orphan
+        // cleanup before the execution-session lookup can return early.
+        if state.is_terminal() {
+            self.settle_playbook_blocks_for_terminal_clip(session_id);
+        }
         let now_ms = Utc::now().timestamp_millis();
         let mut clear = false;
         let mut updated = false;
@@ -728,8 +788,8 @@ impl SessionManager {
                         // session that died before its first Running
                         // transition (a crashed harness, a rejected prompt, a
                         // killed session) left the whole playbook shimmering
-                        // for the full inactivity backstop, with nothing left
-                        // alive that could ever settle it (#1090).
+                        // until its unmanaged safety deadline, with nothing
+                        // left alive that could ever settle it (#1090).
                         clear = true;
                     }
                     SessionState::AwaitingInput => {
@@ -742,8 +802,8 @@ impl SessionManager {
                         // with nothing pending has either finished or only
                         // transiently emptied, and an idle turn means there is no
                         // pending declaration to revive — so reap it rather than
-                        // letting an empty record linger to the backstop. See
-                        // specs 0042 and 0053.
+                        // letting an empty managed record linger indefinitely.
+                        // See specs 0042 and 0053.
                         if run.seen_running
                             && (!run.agent_managed
                                 || (run.pending_block_refs.is_empty()

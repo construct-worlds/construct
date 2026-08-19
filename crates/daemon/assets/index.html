@@ -4931,7 +4931,7 @@ const state = {
     // daemon — the dirty-check baseline and the 3-way-merge ancestor.
     docById: new Map(),
     // In-flight run shimmer per session id:
-    // { pendingIds:Set, tooltips:Map, startPerf, deadlinePerf }.
+    // { pendingIds:Set, tooltips:Map, startPerf, deadlinePerf, agentManaged }.
     runById: new Map(),
     // Run overlap/idempotency guard (spec 0042 consequence), keyed by
     // `${sessionId}::${hasSel}::${bodyHash}`. Value is "inflight" while
@@ -9130,7 +9130,8 @@ function playbookRunFromProgress(progress) {
   if (!progress) return null;
   const nowMs = Date.now();
   const ids = playbookPendingIdsFromProgress(progress);
-  if (progress.expires_at_ms <= nowMs || !ids || ids.size === 0) return null;
+  const agentManaged = !!progress.agent_managed;
+  if ((!agentManaged && progress.expires_at_ms <= nowMs) || !ids || ids.size === 0) return null;
   const perf = performance.now();
   const startPerf = progress.started_at_ms <= nowMs ? perf - (nowMs - progress.started_at_ms) : perf;
   const pendingCount = (progress.pending_block_refs && progress.pending_block_refs.length)
@@ -9149,7 +9150,8 @@ function playbookRunFromProgress(progress) {
     tooltips: new Map(Object.entries(progress.pending_block_tooltips || {})),
     systemStatus: String(progress.system_status || "").trim(),
     startPerf,
-    deadlinePerf: perf + (progress.expires_at_ms - nowMs),
+    deadlinePerf: agentManaged ? Infinity : perf + (progress.expires_at_ms - nowMs),
+    agentManaged,
     firstOutputSeen: !!progress.first_output_seen,
     stage,
     daemonConfirmed: true,
@@ -10441,7 +10443,9 @@ function playbookStartShimmer(id) {
   if (state.playbook.mountedId === id) playbookRefreshRunButton();
   const run = state.playbook.runById.get(id);
   if (!run) return;
-  // Clear the highlight when the run's backstop deadline passes.
+  // Managed runs settle from declarations and terminal lifecycle signals.
+  if (run.agentManaged) return;
+  // Clear an unmanaged optimistic highlight at its safety deadline.
   const ms = Math.max(0, run.deadlinePerf - performance.now());
   state.playbook.raf = setTimeout(() => {
     state.playbook.raf = 0;
@@ -10884,6 +10888,7 @@ function playbookStartOptimisticRun(id, body, isSelection, selectedBlockIds, pre
     systemStatus: "",
     startPerf: perf,
     deadlinePerf: perf + PLAYBOOK_RUN_MAX_MS,
+    agentManaged: false,
     firstOutputSeen: false,
     stage: "pressed",
     daemonConfirmed: false,
