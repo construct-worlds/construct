@@ -59,12 +59,14 @@ Emacs-style cursor-forward (click the Find button to search), and
 
 Completed triple-backtick spans and multiline fences render as highlighted
 code with delimiter glyphs hidden while preserving the exact Markdown source.
-Multiline opening and closing lines keep their editor rows, so delimiter-only
-lines appear as highlighted blank rows. Backspace at a closing boundary removes
-the complete closing run and reveals the literal source; retyping it restores
-the formatting. Incomplete fences remain visible literal source. Markdown
-syntax, smart clips, attachments, and action links stay non-interactive inside
-both complete and incomplete fences.
+Completed multiline fences form one continuous full-width code block from the
+opening row through the closing row, including wrapped body rows. The opening
+and closing lines keep their editor rows, so delimiter-only lines appear as
+blank rows within that block. Backspace at a closing boundary removes the
+complete closing run and reveals the literal source; retyping it restores the
+formatting. Incomplete fences remain visible literal source. Markdown syntax,
+smart clips, attachments, and action links stay non-interactive inside both
+complete and incomplete fences.
 
 ## Smart clips
 

@@ -212,8 +212,44 @@ async fn web_playbook_view_full_parity() {
               const multilineHasClip = !!playbookInputEl.querySelector(".is-fenced-code .playbook-clip");
               const closing = playbookInputEl.querySelector(".playbook-fence-delimiter.is-closing");
               const closingRawLength = playbookNodeRawLength(closing);
+              const openingLine = multilineEls[0];
+              const bodyLine = multilineEls[1];
+              const closingLine = multilineEls[2];
+              const openingRect = openingLine.getBoundingClientRect();
+              const bodyRect = bodyLine.getBoundingClientRect();
+              const closingRect = closingLine.getBoundingClientRect();
+              const openingStyle = getComputedStyle(openingLine);
               const bodyStyle = getComputedStyle(multilineEls[1]);
+              const closingStyle = getComputedStyle(closingLine);
               const editorStyle = getComputedStyle(playbookInputEl);
+              const editorRect = playbookInputEl.getBoundingClientRect();
+              // Capture computed values before the Backspace step removes these
+              // nodes. CSSStyleDeclaration is live and becomes empty after the
+              // line leaves the document.
+              const openingBackground = openingStyle.backgroundColor;
+              const bodyBackground = bodyStyle.backgroundColor;
+              const closingBackground = closingStyle.backgroundColor;
+              const bodyHighlighted = bodyBackground !== editorStyle.backgroundColor;
+              const continuousBlock =
+                openingBackground === bodyBackground &&
+                bodyBackground === closingBackground &&
+                Math.abs(openingRect.bottom - bodyRect.top) < 0.5 &&
+                Math.abs(bodyRect.bottom - closingRect.top) < 0.5 &&
+                Math.abs(openingRect.left - bodyRect.left) < 0.5 &&
+                Math.abs(bodyRect.left - closingRect.left) < 0.5 &&
+                Math.abs(openingRect.right - bodyRect.right) < 0.5 &&
+                Math.abs(bodyRect.right - closingRect.right) < 0.5;
+              const fillsEditorWidth =
+                Math.abs(openingRect.left - (editorRect.left + parseFloat(editorStyle.paddingLeft))) < 0.5 &&
+                Math.abs(openingRect.right - (editorRect.right - parseFloat(editorStyle.paddingRight))) < 0.5;
+              const blockCorners = {
+                openingTop: openingStyle.getPropertyValue("border-top-left-radius"),
+                openingBottom: openingStyle.getPropertyValue("border-bottom-left-radius"),
+                bodyTop: bodyStyle.getPropertyValue("border-top-left-radius"),
+                bodyBottom: bodyStyle.getPropertyValue("border-bottom-left-radius"),
+                closingTop: closingStyle.getPropertyValue("border-top-left-radius"),
+                closingBottom: closingStyle.getPropertyValue("border-bottom-left-radius"),
+              };
               const sel = window.getSelection();
               const literalRange = document.createRange();
               literalRange.setStart(multilineEls[1].firstChild, 1); literalRange.collapse(true);
@@ -244,7 +280,7 @@ async fn web_playbook_view_full_parity() {
               return {
                 sourceBefore, visibleBefore, rawLength, multiline, multilineKinds, multilineHasClip,
                 multilineOpensClipMenu, bodySourceOffset, sourceBoundary, closingRawLength,
-                bodyHighlighted: bodyStyle.backgroundColor !== editorStyle.backgroundColor,
+                bodyHighlighted, continuousBlock, fillsEditorWidth, blockCorners,
                 sourceAfterMultilineBackspace, multilineFormattedAfterBackspace, revealedOpening,
                 sourceAfterMultilineRetype, multilineFormattedAfterRetype,
                 sourceAfterBackspace, lineAfterBackspace, formattedAfterBackspace,
@@ -282,6 +318,20 @@ async fn web_playbook_view_full_parity() {
     );
     assert_eq!(fenced_code["multilineHasClip"], false, "{fenced_code:?}");
     assert_eq!(fenced_code["bodyHighlighted"], true, "{fenced_code:?}");
+    assert_eq!(fenced_code["continuousBlock"], true, "{fenced_code:?}");
+    assert_eq!(fenced_code["fillsEditorWidth"], true, "{fenced_code:?}");
+    assert_eq!(
+        fenced_code["blockCorners"],
+        serde_json::json!({
+            "openingTop": "5px",
+            "openingBottom": "0px",
+            "bodyTop": "0px",
+            "bodyBottom": "0px",
+            "closingTop": "0px",
+            "closingBottom": "5px",
+        }),
+        "{fenced_code:?}"
+    );
     assert_eq!(
         fenced_code["multilineOpensClipMenu"], false,
         "{fenced_code:?}"
@@ -1392,6 +1442,7 @@ async fn web_playbook_view_full_parity() {
           state.sessions = list;
           state.currentId = sid;
           await switchCurrentViewMode("playbook");
+          playbookTestSet(playbookSerialize() + "\n```rust\nfn main() { println!(\"界🙂\"); }\n```\n");
           return true;
         })()
         "###,

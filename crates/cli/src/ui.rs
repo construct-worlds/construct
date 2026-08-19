@@ -17956,6 +17956,13 @@ fn render_playbook_popup_at(
         let mut popup_buffer = Buffer::empty(rect);
         Clear.render(rect, &mut popup_buffer);
         block.render(rect, &mut popup_buffer);
+        render_playbook_fenced_code_background(
+            &mut popup_buffer,
+            app,
+            &popup.buffer,
+            inner,
+            scroll_offset,
+        );
         para.render(inner, &mut popup_buffer);
         render_playbook_scroll_indicator_to_buffer(
             &mut popup_buffer,
@@ -17970,6 +17977,13 @@ fn render_playbook_popup_at(
     } else {
         f.render_widget(Clear, paint_rect);
         f.render_widget(block, paint_rect);
+        render_playbook_fenced_code_background(
+            f.buffer_mut(),
+            app,
+            &popup.buffer,
+            inner,
+            scroll_offset,
+        );
         f.render_widget(para, inner);
         render_playbook_scroll_indicator(
             f,
@@ -22261,6 +22275,63 @@ fn render_playbook_markdown_lines<'a>(
     out
 }
 
+/// Paint completed multiline fences as one continuous, full-width code
+/// surface behind the source-stable text rows.
+///
+/// This is deliberately a buffer-layer treatment instead of padding the
+/// rendered [`Line`]s: adding glyphs would change wrapping and cursor geometry.
+/// The source lines, hidden delimiters, and every collaboration offset keep the
+/// exact model used by the text renderer; only the otherwise-empty cells on
+/// each wrapped fence row receive the code background.
+fn render_playbook_fenced_code_background(
+    buffer: &mut Buffer,
+    app: &App,
+    markdown: &str,
+    area: Rect,
+    scroll_offset: usize,
+) {
+    if area.is_empty() {
+        return;
+    }
+
+    let width = area.width as usize;
+    let mut visual_row = 0usize;
+    let mut dups = std::collections::HashMap::new();
+    let style = Style::default().bg(app.theme.inactive_highlight_bg);
+
+    for (raw, kind) in markdown.split('\n').zip(playbook_line_kinds(markdown)) {
+        let line_instance = playbook_line_instance(&mut dups, raw);
+        let rendered =
+            playbook_rendered_line_text_in_context(Some(app), raw, width, line_instance, kind);
+        let row_count = playbook_wrap_row_starts(&rendered, width).len();
+
+        if kind.is_formatted_code() {
+            for row in visual_row..visual_row.saturating_add(row_count) {
+                let Some(viewport_row) = row.checked_sub(scroll_offset) else {
+                    continue;
+                };
+                if viewport_row >= area.height as usize {
+                    break;
+                }
+                buffer.set_style(
+                    Rect::new(
+                        area.x,
+                        area.y.saturating_add(viewport_row as u16),
+                        area.width,
+                        1,
+                    ),
+                    style,
+                );
+            }
+        }
+
+        visual_row = visual_row.saturating_add(row_count);
+        if visual_row >= scroll_offset.saturating_add(area.height as usize) {
+            break;
+        }
+    }
+}
+
 /// Absolute buffer char ranges (matching the selection/search coordinate
 /// space) of every `[label](agentd:action/…)` construct on `raw`, whose
 /// first char sits at buffer char offset `line_start`.
@@ -22281,6 +22352,17 @@ pub(crate) fn render_playbook_markdown_lines_for_test<'a>(
     markdown: &'a str,
 ) -> Vec<Line<'a>> {
     render_playbook_markdown_lines(app, markdown, 80, None, None, None)
+}
+
+#[cfg(test)]
+pub(crate) fn render_playbook_fenced_code_background_for_test(
+    buffer: &mut Buffer,
+    app: &App,
+    markdown: &str,
+    area: Rect,
+    scroll_offset: usize,
+) {
+    render_playbook_fenced_code_background(buffer, app, markdown, area, scroll_offset);
 }
 
 /// Widget-surface renderer entry point for tests outside this module (the

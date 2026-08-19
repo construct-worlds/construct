@@ -9,8 +9,11 @@ Scope: Source-preserving inline and multiline backtick-code editing in Playbook 
 
 A completed single-backtick span, exact triple-backtick span on one source
 line, or multiline backtick fence renders in the Playbook editor as
-highlighted code text without visible delimiter glyphs. The stored document
-remains the exact source Markdown, including every delimiter run and newline.
+highlighted code text without visible delimiter glyphs. A completed multiline
+fence is presented as one continuous code-block surface spanning the full
+editor width from its opening row through its closing row, including wrapped
+body rows. The stored document remains the exact source Markdown, including
+every delimiter run and newline.
 
 Multiline fences preserve a one-source-line/one-editor-line model. Opening and
 closing delimiter lines keep their rows even when hiding the backtick run;
@@ -55,8 +58,8 @@ synchronization.
 - A completed one-line triple-backtick span is atomic in the web editor and
   source-addressable in the TUI, matching the existing single-backtick model.
 - Multiline fenced regions preserve every source line, hide delimiter glyphs
-  only when complete, and suppress interactive Markdown extensions in both
-  clients.
+  only when complete, suppress interactive Markdown extensions, and paint one
+  continuous full-width block surface in both clients.
 - A delimiter-only opening or closing line appears as a highlighted blank row.
   Multiple source offsets within hidden delimiter glyphs necessarily share one
   visual caret position; their collaboration offsets remain distinct.

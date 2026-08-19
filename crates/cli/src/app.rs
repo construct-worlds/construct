@@ -32869,6 +32869,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn playbook_fenced_code_frame_paints_one_continuous_full_width_block() {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::{Paragraph, Widget, Wrap};
+
+        let (app, _dir, server) = empty_app().await;
+        let markdown = "before\n```rust\n界🙂 alpha beta gamma\n```\nafter";
+        let area = Rect::new(0, 0, 18, 6);
+        let mut buffer = Buffer::empty(area);
+
+        crate::ui::render_playbook_fenced_code_background_for_test(
+            &mut buffer,
+            &app,
+            markdown,
+            area,
+            0,
+        );
+        Paragraph::new(crate::ui::render_playbook_markdown_lines_for_test(
+            &app, markdown,
+        ))
+        .wrap(Wrap { trim: false })
+        .render(area, &mut buffer);
+
+        let code_background = app.theme.inactive_highlight_bg;
+        for row in 1..=4 {
+            for col in 0..area.width {
+                assert_eq!(
+                    buffer.cell((col, row)).expect("code-block cell").bg,
+                    code_background,
+                    "every cell on fenced visual row {row} must belong to the same block"
+                );
+            }
+        }
+        for row in [0, 5] {
+            assert!(
+                (0..area.width).all(|col| buffer
+                    .cell((col, row))
+                    .expect("adjacent markdown cell")
+                    .bg
+                    != code_background),
+                "ordinary Markdown row {row} must remain outside the code block"
+            );
+        }
+        assert_eq!(
+            (0..4)
+                .map(|col| buffer.cell((col, 1)).unwrap().symbol())
+                .collect::<String>(),
+            "rust",
+            "the opener's hidden delimiter must not add block padding or glyphs"
+        );
+        assert!(
+            (0..area.width).all(|col| buffer.cell((col, 4)).unwrap().symbol() == " "),
+            "the hidden closer keeps a blank source row inside the block"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn playbook_backtick_fence_formats_multiline_and_preserves_source_rows() {
         let (mut app, _dir, server) = empty_app().await;
         let md = "```rust\n# 界🙂 not a heading\n- not a bullet\n@{session:literal}\n![shot](/tmp/shot.png)\n[Run](agentd:action/example)\n```";
