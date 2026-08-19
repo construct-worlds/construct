@@ -1585,7 +1585,7 @@ pub(crate) fn slack_personal_config(
         .max(SLACK_PERSONAL_POLL_MIN_SECS);
     Some(slack_personal::SlackPersonalConfig {
         mcp_command,
-        poll_interval: std::time::Duration::from_secs(poll_secs),
+        idle_poll_ceiling: std::time::Duration::from_secs(poll_secs),
         trigger: channel.trigger.unwrap_or_default(),
         default_response: channel.response_mode.unwrap_or_default(),
         response_overrides: channel.response_mode_overrides.clone(),
@@ -3320,7 +3320,10 @@ mod tests {
         assert_eq!(config.default_response, SlackPersonalResponse::Draft);
         assert!(config.response_overrides.is_empty());
         assert!(config.disclosure);
-        assert_eq!(config.poll_interval, std::time::Duration::from_secs(20));
+        assert_eq!(
+            config.idle_poll_ceiling,
+            std::time::Duration::from_secs(20)
+        );
 
         let overridden = OperatorChannelConfig {
             response_mode: Some(SlackPersonalResponse::Auto),
@@ -3355,6 +3358,9 @@ mod tests {
             ..channel
         };
         let config = slack_personal_config("chat", "me", &fast).expect("config");
-        assert_eq!(config.poll_interval, std::time::Duration::from_secs(5));
+        assert_eq!(
+            config.idle_poll_ceiling,
+            std::time::Duration::from_secs(5)
+        );
     }
 }

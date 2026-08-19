@@ -1391,7 +1391,7 @@ impl App {
                 .poll_interval_secs
                 .is_some_and(|secs| secs < construct_protocol::SLACK_PERSONAL_POLL_MIN_SECS)
         {
-            Some("Poll interval must be at least 5 seconds.".into())
+            Some("Idle poll ceiling must be at least 5 seconds.".into())
         } else if personal {
             parsed_response_mode_overrides.as_ref().err().cloned()
         } else {

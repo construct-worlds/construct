@@ -9187,7 +9187,7 @@ pub(crate) fn render_operator_channel_editor(
                 },
             ),
             (
-                "Poll interval",
+                "Idle poll ceiling",
                 editor
                     .channel
                     .poll_interval_secs
@@ -9328,7 +9328,7 @@ pub(crate) fn render_operator_channel_editor(
             6 => ("Response", "How visibly it answers: draft composes the reply in your Slack drafts for you to review and send; auto posts directly — as you.", "Space or → next · ← previous · applies on save."),
             7 => ("Response overrides", "Optional comma-separated exact Slack channel-ID overrides. Each entry replaces the default response mode for every thread in that channel; it does not widen the trigger or allowlists.", "Type entries like C123=auto,D456=draft · empty inherits the default everywhere."),
             8 => ("Disclosure", "Whether an auto-sent reply carries a marker telling recipients an agent wrote it. It posts under your name, so turning this off means undisclosed impersonation of you.", "Space or ←/→ toggles · applies on save."),
-            9 => ("Poll interval", "Seconds between sweeps for new messages. Latency is this plus the backend's own lag; there is no push.", "Type a number of seconds, at least 5."),
+            9 => ("Idle poll ceiling", "Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling; traffic outside this channel's accepted scope does not keep polling hot.", "Type a number of seconds, at least 5."),
             10 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. This is text written by everyone in the thread, put in front of a session that holds tools.", "Type a number up to 1000 · applies on save."),
             11 => ("State", "Disabled slack-personal channels stop their MCP backend and polling while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
             _ => ("Channel", "", ""),
