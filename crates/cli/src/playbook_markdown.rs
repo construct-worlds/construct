@@ -1,8 +1,10 @@
 //! Source-preserving Markdown context needed by the Playbook editor.
 //!
 //! Completed one-line triple-backtick spans are presented like completed
-//! inline code. Multiline and incomplete fences remain literal and inert. A
-//! shared classifier keeps painting, hit-testing, and editing in agreement.
+//! inline code. Completed multiline fences keep one rendered row per source
+//! line while hiding only their delimiter glyphs; incomplete fences remain
+//! literal and inert. A shared classifier keeps painting, hit-testing, and
+//! editing in agreement.
 
 use std::ops::Range;
 
@@ -11,11 +13,21 @@ pub(crate) enum PlaybookLineKind {
     Markdown,
     CodeFence,
     Code,
+    FormattedCodeFence,
+    FormattedCode,
 }
 
 impl PlaybookLineKind {
     pub(crate) fn is_markdown(self) -> bool {
         matches!(self, Self::Markdown)
+    }
+
+    pub(crate) fn is_formatted_code(self) -> bool {
+        matches!(self, Self::FormattedCodeFence | Self::FormattedCode)
+    }
+
+    pub(crate) fn is_formatted_fence(self) -> bool {
+        matches!(self, Self::FormattedCodeFence)
     }
 }
 
@@ -161,6 +173,67 @@ fn closing_backtick_fence(raw: &str, opening_len: usize) -> Option<(usize, usize
     (ticks >= opening_len && tail.trim().is_empty()).then_some((spaces, ticks))
 }
 
+/// Presentation kind for every source line. A multiline fence is promoted to
+/// the formatted variants only after a valid closer is present; this lets an
+/// incomplete fence remain literal while still suppressing Markdown features.
+pub(crate) fn playbook_line_kinds(markdown: &str) -> Vec<PlaybookLineKind> {
+    let lines = markdown.split('\n').collect::<Vec<_>>();
+    let mut kinds = vec![PlaybookLineKind::Markdown; lines.len()];
+    let mut open: Option<(usize, usize)> = None;
+
+    for (index, raw) in lines.iter().enumerate() {
+        if let Some((open_index, open_len)) = open {
+            if closing_backtick_fence(raw, open_len).is_some() {
+                kinds[open_index] = PlaybookLineKind::FormattedCodeFence;
+                for kind in &mut kinds[open_index + 1..index] {
+                    *kind = PlaybookLineKind::FormattedCode;
+                }
+                kinds[index] = PlaybookLineKind::FormattedCodeFence;
+                open = None;
+            } else {
+                kinds[index] = PlaybookLineKind::Code;
+            }
+        } else if let Some((_, ticks)) = opening_backtick_fence(raw) {
+            kinds[index] = PlaybookLineKind::CodeFence;
+            open = Some((index, ticks));
+        }
+    }
+
+    kinds
+}
+
+/// Byte range of the backtick run on a multiline fence delimiter line.
+pub(crate) fn playbook_fence_delimiter(raw: &str) -> Option<Range<usize>> {
+    let (spaces, ticks, _) = backtick_fence(raw)?;
+    Some(spaces..spaces + ticks)
+}
+
+/// Closing multiline-fence delimiter immediately before the source cursor.
+/// Returned offsets are Unicode character offsets in the full document.
+pub(crate) fn playbook_closing_multiline_fence_before_cursor(
+    markdown: &str,
+    cursor: usize,
+) -> Option<Range<usize>> {
+    let cursor = cursor.min(markdown.chars().count());
+    let mut line_start = 0usize;
+    let mut open_len = None;
+    for raw in markdown.split('\n') {
+        if let Some(required) = open_len {
+            if let Some((spaces, ticks)) = closing_backtick_fence(raw, required) {
+                let delimiter_end = line_start + spaces + ticks;
+                if cursor == delimiter_end {
+                    return Some(line_start + spaces..delimiter_end);
+                }
+                open_len = None;
+            }
+        } else if let Some((_, ticks)) = opening_backtick_fence(raw) {
+            open_len = Some(ticks);
+        }
+        line_start += raw.chars().count() + 1;
+    }
+    None
+}
+
 /// Whether the source character at `offset` belongs to a fence delimiter or
 /// fenced body. This includes incomplete fences so extensions remain inert
 /// while their literal source is visible.
@@ -193,7 +266,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_multiline_fences_as_literal_inert_source() {
+    fn classifies_multiline_fences_as_inert_source() {
         let mut classifier = PlaybookLineClassifier::default();
         let kinds = ["before", "```rust", "# literal", "```", "after"]
             .into_iter()
@@ -209,6 +282,40 @@ mod tests {
                 PlaybookLineKind::Markdown,
             ]
         );
+    }
+
+    #[test]
+    fn completed_multiline_fence_gets_row_stable_formatted_kinds() {
+        assert_eq!(
+            playbook_line_kinds("before\n```rust\n界🙂\n```\nafter"),
+            [
+                PlaybookLineKind::Markdown,
+                PlaybookLineKind::FormattedCodeFence,
+                PlaybookLineKind::FormattedCode,
+                PlaybookLineKind::FormattedCodeFence,
+                PlaybookLineKind::Markdown,
+            ]
+        );
+        assert_eq!(
+            playbook_line_kinds("```rust\nstill open"),
+            [PlaybookLineKind::CodeFence, PlaybookLineKind::Code]
+        );
+    }
+
+    #[test]
+    fn multiline_closing_boundary_is_source_offset_and_cjk_safe() {
+        let markdown = "前\n```rust\n界🙂\n  ```  \nafter";
+        let cursor = "前\n```rust\n界🙂\n  ```".chars().count();
+        let closing = playbook_closing_multiline_fence_before_cursor(markdown, cursor).unwrap();
+        assert_eq!(
+            markdown
+                .chars()
+                .skip(closing.start)
+                .take(closing.len())
+                .collect::<String>(),
+            "```"
+        );
+        assert!(playbook_closing_multiline_fence_before_cursor(markdown, cursor - 1).is_none());
     }
 
     #[test]

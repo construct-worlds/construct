@@ -189,13 +189,13 @@ async fn web_playbook_view_full_parity() {
     assert_eq!(inline_code["sourceAfterRetype"], "run `cargo test` now\n", "{inline_code:?}");
     assert_eq!(inline_code["formattedAfterRetype"], true, "{inline_code:?}");
 
-    // --- 2b. Exact triple-backtick spans share the inline editing contract;
-    //          multiline and incomplete fences remain literal and inert. ----
+    // --- 2b. Exact triple-backtick spans and multiline fences preserve source;
+    //          complete multiline fences keep rows and hide delimiters. ------
     let fenced_code: serde_json::Value = page
         .evaluate(
             r###"
             withMockPlaybook({
-              "playbook.get": () => ({ playbook: { session_id: "s-fenced", markdown: "run ```cargo 界 test``` now\n```\n@{session:literal}\n```\n```unfinished\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
+              "playbook.get": () => ({ playbook: { session_id: "s-fenced", markdown: "run ```cargo 界 test``` now\n```\n界🙂 @{session:literal} ![shot](/tmp/x.png) [Run](agentd:action/x)\n```\n```unfinished\n", version: 1, template_id: null }, active_run: null, blocks: [], revisions: [] }),
               "playbook.list_templates": () => ({ templates: [] }),
               "playbook.edit": () => ({ applied: true }),
               "playbook.cursor": () => ({ cursor: null }),
@@ -206,25 +206,47 @@ async fn web_playbook_view_full_parity() {
               const sourceBefore = playbookSerialize();
               const visibleBefore = code ? code.textContent : null;
               const rawLength = code ? playbookNodeRawLength(code) : null;
-              const multilineEls = Array.from(playbookInputEl.querySelectorAll(".is-fenced-source"));
+              const multilineEls = Array.from(playbookInputEl.querySelectorAll(".is-fenced-code"));
               const multiline = multilineEls.map((el) => el.textContent);
-              const multilineHasClip = !!playbookInputEl.querySelector(".is-fenced-source .playbook-clip");
+              const multilineKinds = multilineEls.map((el) => el.dataset.fenceKind);
+              const multilineHasClip = !!playbookInputEl.querySelector(".is-fenced-code .playbook-clip");
+              const closing = playbookInputEl.querySelector(".playbook-fence-delimiter.is-closing");
+              const closingRawLength = playbookNodeRawLength(closing);
+              const bodyStyle = getComputedStyle(multilineEls[1]);
+              const editorStyle = getComputedStyle(playbookInputEl);
               const sel = window.getSelection();
               const literalRange = document.createRange();
               literalRange.setStart(multilineEls[1].firstChild, 1); literalRange.collapse(true);
               sel.removeAllRanges(); sel.addRange(literalRange);
+              const bodySourceOffset = playbookSelectionOffsets().head;
               const multilineOpensClipMenu = !!playbookClipContext();
               const range = document.createRange();
-              range.setStartAfter(code); range.collapse(true);
+              range.setStartAfter(closing); range.collapse(true);
               sel.removeAllRanges(); sel.addRange(range);
               const sourceBoundary = playbookSelectionOffsets().head;
+              playbookInputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }));
+              const sourceAfterMultilineBackspace = playbookSerialize();
+              const multilineFormattedAfterBackspace = !!playbookInputEl.querySelector(".is-fenced-code");
+              const revealedOpening = playbookInputEl.children[1].textContent;
+              document.execCommand("insertText", false, "```");
+              const sourceAfterMultilineRetype = playbookSerialize();
+              const multilineFormattedAfterRetype = !!playbookInputEl.querySelector(".is-fenced-code");
+
+              const restoredCode = playbookInputEl.querySelector(".playbook-inline-code.is-fenced");
+              const inlineRange = document.createRange();
+              inlineRange.setStartAfter(restoredCode); inlineRange.collapse(true);
+              sel.removeAllRanges(); sel.addRange(inlineRange);
               playbookInputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }));
               const sourceAfterBackspace = playbookSerialize();
               const lineAfterBackspace = playbookInputEl.querySelector(".playbook-line").textContent;
               const formattedAfterBackspace = !!playbookInputEl.querySelector(".playbook-inline-code.is-fenced");
               document.execCommand("insertText", false, "```");
               return {
-                sourceBefore, visibleBefore, rawLength, multiline, multilineHasClip, multilineOpensClipMenu, sourceBoundary,
+                sourceBefore, visibleBefore, rawLength, multiline, multilineKinds, multilineHasClip,
+                multilineOpensClipMenu, bodySourceOffset, sourceBoundary, closingRawLength,
+                bodyHighlighted: bodyStyle.backgroundColor !== editorStyle.backgroundColor,
+                sourceAfterMultilineBackspace, multilineFormattedAfterBackspace, revealedOpening,
+                sourceAfterMultilineRetype, multilineFormattedAfterRetype,
                 sourceAfterBackspace, lineAfterBackspace, formattedAfterBackspace,
                 sourceAfterRetype: playbookSerialize(),
                 formattedAfterRetype: !!playbookInputEl.querySelector(".playbook-inline-code.is-fenced"),
@@ -241,20 +263,50 @@ async fn web_playbook_view_full_parity() {
         "{fenced_code:?}"
     );
     assert_eq!(fenced_code["rawLength"], 18, "{fenced_code:?}");
-    assert_eq!(fenced_code["sourceBoundary"], 22, "{fenced_code:?}");
+    assert_eq!(fenced_code["bodySourceOffset"], 32, "{fenced_code:?}");
+    assert_eq!(fenced_code["sourceBoundary"], 99, "{fenced_code:?}");
+    assert_eq!(fenced_code["closingRawLength"], 3, "{fenced_code:?}");
     assert_eq!(
         fenced_code["multiline"],
-        serde_json::json!(["```", "@{session:literal}", "```", "```unfinished", ""]),
+        serde_json::json!([
+            "",
+            "界🙂 @{session:literal} ![shot](/tmp/x.png) [Run](agentd:action/x)",
+            ""
+        ]),
+        "{fenced_code:?}"
+    );
+    assert_eq!(
+        fenced_code["multilineKinds"],
+        serde_json::json!(["fence-open", "fence-code", "fence-close"]),
         "{fenced_code:?}"
     );
     assert_eq!(fenced_code["multilineHasClip"], false, "{fenced_code:?}");
+    assert_eq!(fenced_code["bodyHighlighted"], true, "{fenced_code:?}");
     assert_eq!(
         fenced_code["multilineOpensClipMenu"], false,
         "{fenced_code:?}"
     );
     assert_eq!(
+        fenced_code["sourceAfterMultilineBackspace"],
+        "run ```cargo 界 test``` now\n```\n界🙂 @{session:literal} ![shot](/tmp/x.png) [Run](agentd:action/x)\n\n```unfinished\n",
+        "{fenced_code:?}"
+    );
+    assert_eq!(
+        fenced_code["multilineFormattedAfterBackspace"], false,
+        "{fenced_code:?}"
+    );
+    assert_eq!(fenced_code["revealedOpening"], "```", "{fenced_code:?}");
+    assert_eq!(
+        fenced_code["sourceAfterMultilineRetype"], fenced_code["sourceBefore"],
+        "{fenced_code:?}"
+    );
+    assert_eq!(
+        fenced_code["multilineFormattedAfterRetype"], true,
+        "{fenced_code:?}"
+    );
+    assert_eq!(
         fenced_code["sourceAfterBackspace"],
-        "run ```cargo 界 test now\n```\n@{session:literal}\n```\n```unfinished\n",
+        "run ```cargo 界 test now\n```\n界🙂 @{session:literal} ![shot](/tmp/x.png) [Run](agentd:action/x)\n```\n```unfinished\n",
         "{fenced_code:?}"
     );
     assert_eq!(
