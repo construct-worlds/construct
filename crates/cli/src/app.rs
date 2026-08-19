@@ -696,6 +696,132 @@ pub enum PaneFocus {
     View,
 }
 
+/// Stable identity of the bordered TUI surface that currently owns keyboard
+/// focus. `PaneFocus` alone cannot distinguish sibling split windows or the
+/// lineage section nested inside the list pane, both of which need their own
+/// focus-acquisition affordance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FocusBorderTarget {
+    SessionList,
+    Lineage,
+    MainWindow(u64),
+}
+
+/// Transient state for the focused-pane border sweep. The first observed
+/// target establishes the baseline without animating; only a real focus
+/// transition starts a sweep.
+#[derive(Debug, Default)]
+pub(crate) struct FocusBorderSweep {
+    target: Option<FocusBorderTarget>,
+    started_at: Option<Instant>,
+}
+
+impl FocusBorderSweep {
+    pub(crate) fn observe(
+        &mut self,
+        target: FocusBorderTarget,
+        now: Instant,
+    ) -> Option<f32> {
+        match self.target {
+            None => {
+                self.target = Some(target);
+                return None;
+            }
+            Some(previous) if previous != target => {
+                self.target = Some(target);
+                self.started_at = Some(now);
+            }
+            Some(_) => {}
+        }
+
+        let started_at = self.started_at?;
+        let elapsed = now.saturating_duration_since(started_at);
+        if elapsed >= Duration::from_millis(FOCUS_BORDER_SWEEP_MS) {
+            self.started_at = None;
+            return None;
+        }
+        // Reach the bottom-right endpoint on the final scheduled visible
+        // frame. The following cadence tick clears the overlay at 200 ms.
+        Some(
+            (elapsed.as_secs_f32()
+                / Duration::from_millis(FOCUS_BORDER_SWEEP_TRAVEL_MS).as_secs_f32())
+            .min(1.0),
+        )
+    }
+
+    /// Keep target tracking current when its surface has no border (the
+    /// edge-to-edge zoomed view), without scheduling an invisible animation.
+    pub(crate) fn sync(&mut self, target: FocusBorderTarget) {
+        self.target = Some(target);
+        self.started_at = None;
+    }
+
+    pub(crate) fn is_animating(&self, now: Instant) -> bool {
+        self.started_at.is_some_and(|started_at| {
+            now.saturating_duration_since(started_at)
+                < Duration::from_millis(FOCUS_BORDER_SWEEP_MS)
+        })
+    }
+}
+
+#[cfg(test)]
+mod focus_border_sweep_tests {
+    use super::*;
+
+    #[test]
+    fn first_focus_is_baseline_then_changes_sweep_for_two_hundred_ms() {
+        let mut sweep = FocusBorderSweep::default();
+        let t0 = Instant::now();
+        assert_eq!(
+            sweep.observe(FocusBorderTarget::MainWindow(1), t0),
+            None,
+            "startup focus should not flash"
+        );
+
+        assert_eq!(sweep.observe(FocusBorderTarget::SessionList, t0), Some(0.0));
+        assert!(sweep.is_animating(t0 + Duration::from_millis(199)));
+        let halfway = sweep
+            .observe(
+                FocusBorderTarget::SessionList,
+                t0 + Duration::from_millis(80),
+            )
+            .expect("sweep is active");
+        assert!((halfway - 0.5).abs() < f32::EPSILON);
+        assert_eq!(
+            sweep.observe(
+                FocusBorderTarget::SessionList,
+                t0 + Duration::from_millis(160),
+            ),
+            Some(1.0),
+            "the last visible cadence frame reaches the bottom-right corner"
+        );
+        assert_eq!(
+            sweep.observe(
+                FocusBorderTarget::SessionList,
+                t0 + Duration::from_millis(200),
+            ),
+            None
+        );
+        assert!(!sweep.is_animating(t0 + Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn changing_split_windows_restarts_an_in_flight_sweep() {
+        let mut sweep = FocusBorderSweep::default();
+        let t0 = Instant::now();
+        sweep.sync(FocusBorderTarget::SessionList);
+        assert_eq!(sweep.observe(FocusBorderTarget::MainWindow(1), t0), Some(0.0));
+        assert_eq!(
+            sweep.observe(
+                FocusBorderTarget::MainWindow(2),
+                t0 + Duration::from_millis(150),
+            ),
+            Some(0.0),
+            "the newly focused sibling starts at its own top-left corner"
+        );
+    }
+}
+
 /// A spatial direction for moving keyboard focus between split panes
 /// (emacs `windmove`). Used by the `Shift+Arrow` bindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2034,6 +2160,9 @@ pub struct App {
     /// frame. The 120 ms timer still drives animation and maintenance, but a
     /// static frame can leave its tick unpainted instead of rebuilding the TUI.
     tick_redraw_requested: Cell<bool>,
+    /// Brief directional highlight that identifies the pane which just took
+    /// keyboard focus.
+    pub(crate) focus_border_sweep: FocusBorderSweep,
     /// Set by `on_notification` to report whether the just-handled
     /// notification changed something currently *visible* (a focused /
     /// split pane, the minibuffer panel, or any structural /
@@ -5153,6 +5282,13 @@ pub const PTY_QUIESCENCE: Duration = Duration::from_millis(600);
 /// Spinner frame cadence — fast enough to feel alive, slow enough to keep
 /// the TUI tick loop cheap.
 pub const SPINNER_FRAME_MS: u128 = 120;
+/// Duration and dedicated frame cadence for the pane focus-border sweep. The
+/// ordinary spinner tick stays at 120 ms; this faster timer is polled only
+/// while a sweep is actually visible.
+pub const FOCUS_BORDER_SWEEP_MS: u64 = 200;
+const FOCUS_BORDER_SWEEP_FRAME_MS: u64 = 40;
+const FOCUS_BORDER_SWEEP_TRAVEL_MS: u64 =
+    FOCUS_BORDER_SWEEP_MS - FOCUS_BORDER_SWEEP_FRAME_MS;
 /// Pulsing-star spinner: a 4-glyph sparkle whose size "breathes" via a
 /// palindromic frame schedule (small → big → small). Single cell wide so
 /// it slots into the same column as the static state glyph.
@@ -5533,6 +5669,7 @@ async fn run_with_socket_initial_selection(
         operator_view_scroll: 0,
         skip_redraw_after_event: false,
         tick_redraw_requested: Cell::new(false),
+        focus_border_sweep: FocusBorderSweep::default(),
         notification_dirtied_view: true,
         hydrating_sessions: HashSet::new(),
         minibuffer_scrollback: 0,
@@ -5916,6 +6053,12 @@ async fn run_loop(
     // Tick at the spinner frame boundary. Visible animations request paints;
     // static frames use the same wakeup only for maintenance.
     let mut tick = tokio::time::interval(Duration::from_millis(SPINNER_FRAME_MS as u64));
+    // A focus sweep needs more than the spinner tick's one intermediate frame
+    // to read as directional. This timer is gated off outside the 200 ms
+    // animation window, so idle/static TUIs retain the existing wake cadence.
+    let mut focus_border_tick =
+        tokio::time::interval(Duration::from_millis(FOCUS_BORDER_SWEEP_FRAME_MS));
+    focus_border_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Lineage preview, keyboard-focused mode (spec 0080; supersedes the old
     // `C-x q` / `q` popup, spec 0139): its per-node elapsed-time/cost stats
     // are recomputed at render time from `SessionSummary` fields that are
@@ -6393,6 +6536,10 @@ async fn run_loop(
                     }
                 }
             }
+            _ = focus_border_tick.tick(), if app.focus_border_sweep.is_animating(Instant::now()) => {
+                // Waking the loop is sufficient: the next iteration paints
+                // the sweep at its current monotonic-clock position.
+            }
             // Gate on `reconnect.is_none()`: once the daemon drops, the
             // old `notifications` channel is closed, so `recv()` is
             // *immediately* ready with `None` on every poll. Left
@@ -6811,6 +6958,14 @@ fn op_xy_slot_state_masks(sessions: &[SessionSummary], slots: &[Option<String>])
 }
 
 impl App {
+    pub(crate) fn focused_border_target(&self) -> FocusBorderTarget {
+        match self.focus {
+            PaneFocus::List if self.lineage_focused => FocusBorderTarget::Lineage,
+            PaneFocus::List => FocusBorderTarget::SessionList,
+            PaneFocus::View => FocusBorderTarget::MainWindow(self.active_window_id),
+        }
+    }
+
     async fn reconnect(
         &mut self,
         socket: &std::path::Path,
@@ -17538,6 +17693,7 @@ mod tests {
             operator_view_scroll: 0,
             skip_redraw_after_event: false,
             tick_redraw_requested: Cell::new(false),
+            focus_border_sweep: FocusBorderSweep::default(),
             notification_dirtied_view: true,
             hydrating_sessions: HashSet::new(),
             minibuffer_scrollback: 0,
@@ -31651,6 +31807,19 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn playbook_backspace_after_inline_code_reveals_source_editing_form() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "run `cargo test`", 16));
+
+        app.delete_playbook_back();
+
+        let popup = app.playbook_popup.as_ref().unwrap();
+        assert_eq!(popup.buffer, "run `cargo test");
+        assert_eq!(popup.cursor, 15);
+        server.abort();
+    }
+
     /// Fixture for the shimmer-range tests: a heading, a multiline list item
     /// (bullet + continuation line), a sibling item, a blank separator, and a
     /// two-line paragraph. Lines: 0 heading / 1 item1 / 2 item1 continuation /
@@ -31853,16 +32022,18 @@ mod tests {
     }
 
     /// Differential regression harness for playbook-editor cursor/selection
-    /// drift: for every alphanumeric char in each corpus doc, paint the real
-    /// pipeline (`render_playbook_markdown_lines` + ratatui
+    /// drift: for every alphanumeric char (including CJK) in each corpus doc,
+    /// paint the real pipeline (`render_playbook_markdown_lines` + ratatui
     /// `Wrap { trim: false }`) into a TestBackend and assert the glyph at the
     /// cell where `playbook_cursor_visual_pos` places that char's cursor is the
     /// char itself. Any divergence between the wrap/cursor math and what
     /// ratatui actually paints — the drift the user sees as "the caret is not
     /// where edits land" — shows up as a mismatch. The corpus deliberately
     /// covers the classes that have drifted before: VS16/ZWJ emoji, tabs,
-    /// NBSP, CJK at wrap boundaries, `:::` clip fences, and smart-clip chips
-    /// in heading/bullet/plain lines.
+    /// NBSP, CJK glyphs at wrap boundaries, `:::` clip fences, and smart-clip
+    /// chips in heading/bullet/plain lines. Checking Unicode alphanumerics is
+    /// intentional: an ASCII-only predicate would notice downstream drift but
+    /// never verify the wide CJK cell under the caret itself.
     #[tokio::test]
     async fn playbook_cursor_math_matches_painted_buffer_differential() {
         let (app, _dir, server) = empty_app().await;
@@ -31903,7 +32074,7 @@ mod tests {
             ("emoji-basic", "smile \u{1f600} wide and \u{1f44d} thumb\nZEND"),
             (
                 "cjk",
-                "\u{6df7}\u{5408} CJK \u{6587}\u{5b57} mixed with latin words that wrap somewhere\nZEND",
+                "混合 CJK 文字 mixed with latin words that wrap somewhere\n日本語の長い行は狭い幅で複数行に折り返される\n- 中文列表項目也折り返す\nZEND",
             ),
             (
                 "clip-fences",
@@ -31941,6 +32112,10 @@ mod tests {
             (
                 "plain-with-clip",
                 "plain with @{session:abc123} chip and trailing words\nZEND",
+            ),
+            (
+                "inline-code",
+                "plain `cargo test` and more words that wrap\n- bullet with `inline code` after it\nZEND",
             ),
             (
                 "lone-bullets",
@@ -31985,7 +32160,7 @@ mod tests {
                 let buffer = term.backend().buffer();
 
                 for (offset, ch) in doc.chars().enumerate() {
-                    if !ch.is_ascii_alphanumeric() || in_clip[offset] {
+                    if !ch.is_alphanumeric() || in_clip[offset] {
                         continue;
                     }
                     let (row, col) =
@@ -32032,6 +32207,107 @@ mod tests {
             failures.len(),
             failures.join("\n")
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn playbook_cjk_edits_keep_the_caret_on_the_painted_character() {
+        fn assert_caret_glyph(app: &App, expected: &str, width: u16) {
+            let popup = app.playbook_popup.as_ref().expect("playbook popup");
+            let rows = crate::ui::playbook_total_visual_rows(
+                Some(app),
+                &popup.buffer,
+                width as usize,
+            );
+            let height = (rows + 2) as u16;
+            let backend = ratatui::backend::TestBackend::new(width, height);
+            let mut term = ratatui::Terminal::new(backend).expect("terminal");
+            term.draw(|f| {
+                let lines =
+                    crate::ui::render_playbook_markdown_lines_for_test(app, &popup.buffer);
+                let para = ratatui::widgets::Paragraph::new(lines)
+                    .wrap(ratatui::widgets::Wrap { trim: false });
+                f.render_widget(para, Rect::new(0, 0, width, height));
+            })
+            .expect("draw");
+
+            let (row, col) = crate::ui::playbook_cursor_visual_pos(
+                Some(app),
+                &popup.buffer,
+                popup.cursor,
+                width as usize,
+            );
+            let painted = term
+                .backend()
+                .buffer()
+                .cell((col as u16, row as u16))
+                .map(|cell| cell.symbol())
+                .unwrap_or_default();
+            assert_eq!(
+                painted, expected,
+                "buffer {:?}, cursor {} mapped to ({row}, {col})",
+                popup.buffer, popup.cursor
+            );
+        }
+
+        let (mut app, _dir, server) = empty_app().await;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "計画進捗報告", 2));
+        app.layout.playbook_inner_area = Some(Rect::new(0, 0, 5, 12));
+
+        // Width 5 fits only two CJK glyphs per row. The initial cursor is at
+        // the first glyph of the continuation row.
+        assert_caret_glyph(&app, "進", 5);
+
+        app.insert_playbook_text("新");
+        {
+            let popup = app.playbook_popup.as_ref().unwrap();
+            assert_eq!(popup.buffer, "計画新進捗報告");
+            assert_eq!(popup.cursor, 3);
+        }
+        assert_caret_glyph(&app, "進", 5);
+
+        app.move_playbook_cursor(-1);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 2);
+        assert_caret_glyph(&app, "新", 5);
+
+        app.move_playbook_cursor(1);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 3);
+        assert_caret_glyph(&app, "進", 5);
+
+        app.delete_playbook_back();
+        {
+            let popup = app.playbook_popup.as_ref().unwrap();
+            assert_eq!(popup.buffer, "計画進捗報告");
+            assert_eq!(popup.cursor, 2);
+        }
+        assert_caret_glyph(&app, "進", 5);
+
+        app.delete_playbook_forward();
+        {
+            let popup = app.playbook_popup.as_ref().unwrap();
+            assert_eq!(popup.buffer, "計画捗報告");
+            assert_eq!(popup.cursor, 2);
+        }
+        assert_caret_glyph(&app, "捗", 5);
+
+        app.insert_playbook_text("界");
+        app.move_playbook_cursor(-1);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(1);
+        assert_eq!(
+            App::selected_playbook_text(app.playbook_popup.as_ref().unwrap()).as_deref(),
+            Some("界")
+        );
+        assert_caret_glyph(&app, "捗", 5);
+
+        app.cut_playbook_selection();
+        {
+            let popup = app.playbook_popup.as_ref().unwrap();
+            assert_eq!(popup.buffer, "計画捗報告");
+            assert_eq!(popup.cursor, 2);
+        }
+        assert_caret_glyph(&app, "捗", 5);
+
         server.abort();
     }
 
@@ -42846,9 +43122,9 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                response_mode_overrides: None,
                 auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
@@ -43352,9 +43628,9 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                response_mode_overrides: None,
                 auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
@@ -44600,15 +44876,20 @@ mod tests {
         // disclosure on — shown rather than left as blanks.
         assert_eq!(editor.channel.trigger.as_deref(), Some("dm"));
         assert_eq!(editor.channel.response_mode.as_deref(), Some("draft"));
+        assert_eq!(
+            editor.channel.response_mode_overrides,
+            Some(std::collections::BTreeMap::new())
+        );
+        assert!(editor.response_mode_overrides.is_empty());
         assert_eq!(editor.channel.auto_after_secs, Some(60));
         assert_eq!(editor.channel.disclosure, Some(true));
         assert_eq!(editor.channel.poll_interval_secs, Some(20));
-        assert_eq!(editor.channel.mcp_command.as_deref(), Some(""));
+        assert!(!editor.channel.has_credential, "OAuth is pending before first use");
 
-        // The MCP command is a plain text field on row 2.
+        // Row 2 is now the workspace allowlist; there is no executable input.
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
-        assert!(app.insert_operator_dialog_text("npx my-slack-mcp"));
+        assert!(app.insert_operator_dialog_text("acme.slack.com"));
         let editor = app
             .operator_dialog
             .as_ref()
@@ -44616,7 +44897,7 @@ mod tests {
             .channel_editor
             .as_ref()
             .unwrap();
-        assert_eq!(editor.channel.mcp_command.as_deref(), Some("npx my-slack-mcp"));
+        assert_eq!(editor.channel.allowed_workspaces, ["acme.slack.com"]);
 
         // draft → auto → auto-after, using the protocol-published order.
         app.operator_dialog
@@ -44641,6 +44922,127 @@ mod tests {
                 .response_mode
                 .as_deref(),
             Some("auto-after")
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn slack_personal_override_editor_text_round_trips_exact_channel_ids() {
+        use crate::app::operator_dialog::{
+            format_response_mode_overrides, parse_response_mode_overrides,
+        };
+
+        let expected = std::collections::BTreeMap::from([
+            ("C-sensitive".to_string(), "auto-after".to_string()),
+            ("D-Private".to_string(), "auto".to_string()),
+        ]);
+        let text = format_response_mode_overrides(Some(&expected));
+        assert_eq!(text, "C-sensitive=auto-after,D-Private=auto");
+        assert_eq!(parse_response_mode_overrides(&text), Ok(expected));
+        assert!(parse_response_mode_overrides("C1=auto,C1=draft")
+            .unwrap_err()
+            .contains("duplicate"));
+        assert!(parse_response_mode_overrides("C1=unknown")
+            .unwrap_err()
+            .contains("draft or auto or auto-after"));
+    }
+
+    #[tokio::test]
+    async fn slack_personal_tui_editor_sends_response_mode_overrides_on_save() {
+        use construct_client::Client;
+        use construct_protocol::ipc_method;
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&socket).expect("bind mock daemon");
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    break;
+                }
+                let request: Value = serde_json::from_str(&line).expect("request JSON");
+                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+                let result = match method {
+                    ipc_method::OPERATOR_CHANNEL_PUT => {
+                        let params: construct_protocol::OperatorChannelPutParams =
+                            serde_json::from_value(request["params"].clone()).expect("put params");
+                        request_tx.send(params.clone()).expect("capture put");
+                        serde_json::json!({
+                            "channel": {
+                                "id": params.channel.id,
+                                "kind": params.channel.kind,
+                                "enabled": params.channel.enabled,
+                                "trigger": params.channel.trigger,
+                                "response_mode": params.channel.response_mode,
+                                "response_mode_overrides": params.channel.response_mode_overrides,
+                            },
+                            "applied": {
+                                "reloaded": true,
+                                "started": 0,
+                                "stopped": 0,
+                                "rebound": 1,
+                            }
+                        })
+                    }
+                    ipc_method::OPERATOR_LIST | ipc_method::OPERATOR_CHANNEL_CATALOG_LIST => {
+                        serde_json::json!([])
+                    }
+                    other => panic!("unexpected mock method {other}"),
+                };
+                let response = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+                writer
+                    .write_all((response.to_string() + "\n").as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+        let client = Client::connect(&socket).await.expect("client connects");
+        let mut app = test_app(client, vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )]);
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = app.operators[0].channels.clone();
+        app.open_edit_operator_view("assistant");
+        app.open_new_operator_channel();
+        {
+            let editor = app
+                .operator_dialog
+                .as_mut()
+                .unwrap()
+                .channel_editor
+                .as_mut()
+                .unwrap();
+            editor.channel.kind = "slack-personal".into();
+            editor.channel.port = None;
+            editor.channel.trigger = Some("dm".into());
+            editor.channel.response_mode = Some("draft".into());
+            editor.response_mode_overrides = "C-sensitive=auto-after,D-Private=draft".into();
+        }
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        let params = request_rx.recv().await.expect("put request");
+        assert_eq!(
+            params.channel.response_mode_overrides,
+            Some(std::collections::BTreeMap::from([
+                ("C-sensitive".into(), "auto-after".into()),
+                ("D-Private".into(), "draft".into()),
+            ]))
+        );
+        assert_eq!(
+            channel_editor(&app).response_mode_overrides,
+            "C-sensitive=auto-after,D-Private=draft",
+            "the daemon summary is formatted back into the editor"
         );
         server.abort();
     }
@@ -44922,9 +45324,9 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                response_mode_overrides: None,
                 auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
@@ -44946,9 +45348,9 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                response_mode_overrides: None,
                 auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,

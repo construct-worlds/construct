@@ -24,7 +24,7 @@ The clip constraint exists because ordinary prose and inline code are scanned fo
 - Editing a built-in template, or authoring a user template, must keep every active embedded clip resolvable. Non-resolvable syntax may be shown literally inside triple-backtick fenced code; outside a fence, describe it in prose instead of embedding it.
 - Template guidance should stay short and clearly read as orientation, so it does not read as a task when the playbook is run.
 - Renaming or adding a built-in template changes its stable `id`; the empty-state placeholder and any id-based references must be updated together. Template selection copies Markdown into the playbook and is not live-linked, so changing a template does not alter playbookes already created from it.
-- Built-in templates should only use Markdown constructs the playbook renderer styles (headings, list items, smart clips, `:::clip` blocks, and fenced code); emphasis and inline code render as literal characters and should be avoided in template bodies.
+- Built-in templates should only use Markdown constructs the playbook renderer styles (headings, list items, inline and fenced code, smart clips, and `:::clip` blocks); emphasis renders as literal characters and should be avoided in template bodies.
 
 ## Non-Goals
 

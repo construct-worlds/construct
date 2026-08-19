@@ -2134,6 +2134,19 @@ pub(crate) async fn dispatch(
 mod tests {
     use super::*;
 
+    #[test]
+    fn web_slack_personal_editor_uses_embedded_oauth_and_all_current_behaviors() {
+        assert!(REMOTE_INDEX_HTML.contains("Save to start browser OAuth"));
+        assert!(REMOTE_INDEX_HTML.contains("OAuth credentials saved"));
+        assert!(REMOTE_INDEX_HTML.contains("auto-after"));
+        assert!(
+            REMOTE_INDEX_HTML.contains("data-channel-field=\"response_mode_overrides_text\"")
+        );
+        assert!(REMOTE_INDEX_HTML.contains("data-channel-field=\"auto_after_secs\""));
+        assert!(REMOTE_INDEX_HTML.contains("data-channel-field=\"poll_interval_secs\""));
+        assert!(!REMOTE_INDEX_HTML.contains("data-channel-field=\"mcp_command\""));
+    }
+
     fn test_playbook_cursor(session_id: &str, client_id: &str) -> construct_protocol::PlaybookCursor {
         construct_protocol::PlaybookCursor {
             session_id: session_id.to_string(),

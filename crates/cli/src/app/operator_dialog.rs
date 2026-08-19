@@ -182,6 +182,9 @@ pub struct OperatorChannelDialog {
     pub confirm_delete: bool,
     pub app_token: String,
     pub bot_token: String,
+    /// Editable `CHANNEL=MODE` list for slack-personal overrides. Kept as
+    /// text so partially typed entries survive until save-time validation.
+    pub response_mode_overrides: String,
     /// Suggested channel ID, shown dimmed while the created channel's ID is
     /// still empty and adopted by a save that never typed one.
     pub id_placeholder: String,
@@ -246,9 +249,10 @@ pub(crate) const SLACK_FIELD_FOLLOW_UP: usize = 7;
 pub(crate) const SLACK_FIELD_THREAD_CONTEXT: usize = 8;
 pub(crate) const SLACK_FIELD_STATE: usize = 9;
 /// The slack-personal editor's field indexes, after ID (0), Kind (1),
-/// MCP command (2), Workspaces (3), and Channels (4).
-pub(crate) const PERSONAL_FIELD_TRIGGER: usize = 5;
-pub(crate) const PERSONAL_FIELD_RESPONSE: usize = 6;
+/// Workspaces (2), and Channels (3).
+pub(crate) const PERSONAL_FIELD_TRIGGER: usize = 4;
+pub(crate) const PERSONAL_FIELD_RESPONSE: usize = 5;
+pub(crate) const PERSONAL_FIELD_RESPONSE_OVERRIDES: usize = 6;
 pub(crate) const PERSONAL_FIELD_AUTO_AFTER: usize = 7;
 pub(crate) const PERSONAL_FIELD_DISCLOSURE: usize = 8;
 pub(crate) const PERSONAL_FIELD_POLL: usize = 9;
@@ -278,20 +282,22 @@ pub fn channel_field_is_text(kind: &str, field: usize) -> bool {
         "slack" => matches!(field, 2..=5 | SLACK_FIELD_THREAD_CONTEXT),
         "slack-personal" => matches!(
             field,
-            2..=4 | PERSONAL_FIELD_AUTO_AFTER | PERSONAL_FIELD_POLL | PERSONAL_FIELD_THREAD_CONTEXT
+            2..=3
+                | PERSONAL_FIELD_RESPONSE_OVERRIDES
+                | PERSONAL_FIELD_AUTO_AFTER
+                | PERSONAL_FIELD_POLL
+                | PERSONAL_FIELD_THREAD_CONTEXT
         ),
         _ => field == 2,
     }
 }
 
 /// The two Slack kinds share the allowlist fields but at different indexes,
-/// because the bot kind spends 2–3 on its tokens and slack-personal spends 2
-/// on its MCP command.
 fn workspace_field(kind: &str) -> usize {
     if kind == "slack" {
         4
     } else {
-        3
+        2
     }
 }
 
@@ -299,7 +305,7 @@ fn channel_allowlist_field(kind: &str) -> usize {
     if kind == "slack" {
         5
     } else {
-        4
+        3
     }
 }
 
@@ -332,6 +338,50 @@ fn cycle_option(values: &[&str], current: Option<&str>, forward: bool) -> String
         index.checked_sub(1).unwrap_or(values.len() - 1)
     };
     values[next].to_string()
+}
+
+pub(crate) fn format_response_mode_overrides(
+    overrides: Option<&std::collections::BTreeMap<String, String>>,
+) -> String {
+    overrides
+        .into_iter()
+        .flat_map(|overrides| overrides.iter())
+        .map(|(channel, mode)| format!("{channel}={mode}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+pub(crate) fn parse_response_mode_overrides(
+    value: &str,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let mut overrides = std::collections::BTreeMap::new();
+    for entry in value.split(',').map(str::trim).filter(|entry| !entry.is_empty()) {
+        let Some((channel, mode)) = entry.split_once('=') else {
+            return Err(format!(
+                "Response overrides must use CHANNEL=MODE entries; {entry:?} has no `=`."
+            ));
+        };
+        let channel = channel.trim();
+        let mode = mode.trim();
+        if channel.is_empty() {
+            return Err("Response override channel IDs must not be empty.".to_string());
+        }
+        if !construct_protocol::SLACK_PERSONAL_RESPONSE_VALUES.contains(&mode) {
+            return Err(format!(
+                "Response override for {channel} must be {}.",
+                construct_protocol::SLACK_PERSONAL_RESPONSE_VALUES.join(" or ")
+            ));
+        }
+        if overrides
+            .insert(channel.to_string(), mode.to_string())
+            .is_some()
+        {
+            return Err(format!(
+                "Response overrides contain duplicate channel ID {channel}."
+            ));
+        }
+    }
+    Ok(overrides)
 }
 
 fn canonical_operator_model(model: &str) -> String {
@@ -842,9 +892,9 @@ impl App {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                response_mode_overrides: None,
                 auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
@@ -857,6 +907,7 @@ impl App {
             confirm_delete: false,
             app_token: String::new(),
             bot_token: String::new(),
+            response_mode_overrides: String::new(),
             id_placeholder: id,
         });
         true
@@ -881,6 +932,8 @@ impl App {
             return false;
         }
         dialog.focus = OperatorDialogFocus::Channel(index);
+        let response_mode_overrides =
+            format_response_mode_overrides(channel.response_mode_overrides.as_ref());
         dialog.channel_editor = Some(OperatorChannelDialog {
             mode: OperatorChannelDialogMode::Edit,
             operator_name: dialog.operator.name.clone(),
@@ -895,6 +948,7 @@ impl App {
             confirm_delete: false,
             app_token: String::new(),
             bot_token: String::new(),
+            response_mode_overrides,
             id_placeholder: String::new(),
         });
         true
@@ -1224,10 +1278,6 @@ impl App {
             edit(&mut channel.app_token);
         } else if kind == "slack" && field == 3 {
             edit(&mut channel.bot_token);
-        } else if kind == "slack-personal" && field == 2 {
-            let mut value = channel.channel.mcp_command.clone().unwrap_or_default();
-            edit(&mut value);
-            channel.channel.mcp_command = Some(value);
         } else if slack_kind && field == workspace_field(&kind) {
             let mut value = channel.channel.allowed_workspaces.join(",");
             edit(&mut value);
@@ -1238,6 +1288,8 @@ impl App {
             edit(&mut value);
             channel.channel.allowed_channels = split_allowlist(&value);
             channel.channel.allowed_channel_count = channel.channel.allowed_channels.len();
+        } else if kind == "slack-personal" && field == PERSONAL_FIELD_RESPONSE_OVERRIDES {
+            edit(&mut channel.response_mode_overrides);
         } else if kind == "slack-personal" && field == PERSONAL_FIELD_AUTO_AFTER {
             let mut value = channel
                 .channel
@@ -1317,52 +1369,46 @@ impl App {
         let editor_snapshot = editor.clone();
         let slack = editor_snapshot.channel.kind == "slack";
         let personal = editor_snapshot.channel.kind == "slack-personal";
+        let parsed_response_mode_overrides =
+            parse_response_mode_overrides(&editor_snapshot.response_mode_overrides);
         let valid_id = valid_operator_name(&editor_snapshot.channel.id);
-        let validation_error = if !valid_id {
-            Some("Channel ID must be 1–32 lowercase letters, digits, or interior hyphens.")
+        let validation_error: Option<String> = if !valid_id {
+            Some("Channel ID must be 1–32 lowercase letters, digits, or interior hyphens.".into())
         } else if editor_snapshot.channel.kind == "http" && editor_snapshot.channel.port.is_none() {
-            Some("HTTP port must be between 1 and 65535.")
+            Some("HTTP port must be between 1 and 65535.".into())
         } else if editor_snapshot.channel.kind == "slack"
             && editor_snapshot.mode == OperatorChannelDialogMode::Create
             && !editor_snapshot.app_token.starts_with("xapp-")
         {
-            Some("Slack app token must start with xapp-.")
+            Some("Slack app token must start with xapp-.".into())
         } else if editor_snapshot.channel.kind == "slack"
             && editor_snapshot.mode == OperatorChannelDialogMode::Create
             && !editor_snapshot.bot_token.starts_with("xoxb-")
         {
-            Some("Slack bot token must start with xoxb-.")
+            Some("Slack bot token must start with xoxb-.".into())
         } else if personal
             && editor_snapshot
                 .channel
                 .auto_after_secs
                 .is_some_and(|secs| secs < construct_protocol::SLACK_PERSONAL_AUTO_AFTER_MIN_SECS)
         {
-            Some("Auto-after delay must be at least 1 second.")
-        } else if personal
-            && editor_snapshot
-                .channel
-                .mcp_command
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or("")
-                .is_empty()
-        {
-            Some("slack-personal channels need an MCP command that starts their backend.")
+            Some("Auto-after delay must be at least 1 second.".into())
         } else if personal
             && editor_snapshot
                 .channel
                 .poll_interval_secs
                 .is_some_and(|secs| secs < construct_protocol::SLACK_PERSONAL_POLL_MIN_SECS)
         {
-            Some("Idle poll ceiling must be at least 5 seconds.")
+            Some("Idle poll ceiling must be at least 5 seconds.".into())
+        } else if personal {
+            parsed_response_mode_overrides.as_ref().err().cloned()
         } else {
             None
         };
         if let Some(message) = validation_error {
             if let Some(parent) = self.operator_dialog.as_mut() {
                 if let Some(editor) = parent.channel_editor.as_mut() {
-                    editor.note = Some(message.to_string());
+                    editor.note = Some(message);
                 }
             }
             return;
@@ -1389,13 +1435,13 @@ impl App {
                     thread_context: (slack || personal)
                         .then_some(editor_snapshot.channel.thread_context)
                         .flatten(),
-                    mcp_command: personal
-                        .then_some(editor_snapshot.channel.mcp_command)
-                        .flatten(),
                     trigger: personal.then_some(editor_snapshot.channel.trigger).flatten(),
                     response_mode: personal
                         .then_some(editor_snapshot.channel.response_mode)
                         .flatten(),
+                    response_mode_overrides: personal.then_some(
+                        parsed_response_mode_overrides.unwrap_or_default(),
+                    ),
                     auto_after_secs: personal
                         .then_some(editor_snapshot.channel.auto_after_secs)
                         .flatten(),
@@ -1425,6 +1471,9 @@ impl App {
                     }
                     if let Some(editor) = parent.channel_editor.as_mut() {
                         editor.mode = OperatorChannelDialogMode::Edit;
+                        editor.response_mode_overrides = format_response_mode_overrides(
+                            result.channel.response_mode_overrides.as_ref(),
+                        );
                         editor.channel = result.channel;
                         editor.app_token.clear();
                         editor.bot_token.clear();
@@ -2161,11 +2210,13 @@ impl App {
                             slack.then(|| construct_protocol::SLACK_FOLLOW_UP_DEFAULT.to_string());
                         editor.channel.thread_context = (slack || personal)
                             .then_some(construct_protocol::SLACK_THREAD_CONTEXT_DEFAULT);
-                        editor.channel.mcp_command = personal.then(String::new);
                         editor.channel.trigger = personal
                             .then(|| construct_protocol::SLACK_PERSONAL_TRIGGER_DEFAULT.to_string());
                         editor.channel.response_mode = personal
                             .then(|| construct_protocol::SLACK_PERSONAL_RESPONSE_DEFAULT.to_string());
+                        editor.channel.response_mode_overrides =
+                            personal.then(std::collections::BTreeMap::new);
+                        editor.response_mode_overrides.clear();
                         editor.channel.auto_after_secs = personal
                             .then_some(construct_protocol::SLACK_PERSONAL_AUTO_AFTER_DEFAULT_SECS);
                         editor.channel.disclosure = personal.then_some(true);

@@ -2,8 +2,8 @@
 
 use crate::app::{
     feature_guidance, harness_guidance, harness_picker_entries, smith_method_guidance, App,
-    ConfigureTab, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree, Prompt,
-    PromptChoiceAction, PromptChoiceHit, PromptIntent, PaneFocus, RemoteControlHit,
+    ConfigureTab, FocusBorderTarget, HarnessHit, HintZone, ListItem as AppListItem, MainWindowTree,
+    PaneFocus, Prompt, PromptChoiceAction, PromptChoiceHit, PromptIntent, RemoteControlHit,
     RemoteControlHitAction, ScreenPoint, Selection, OperatorTitleMenuAction, SessionTitleMenuAction,
     TextSelectionRange, TurnRowHit, ViewMode, WindowDividerHit, WindowPaneHit,
     WindowSplitDirection, ZoomMode, CONFIGURE_TABS, PLAYBOOK_AGENT_COLLAB_CURSOR_TTL_MS,
@@ -458,6 +458,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // them after Playbooks and transitions so a rolled-down document cannot
     // cover the badge at its owning pane's top-left corner.
     paint_main_window_ordinal_badges(f, app);
+    render_focus_border_sweep(f, app, Instant::now());
 
     // The block is complete: slide it, translate everything it recorded into
     // screen coordinates, and hand the pointer back. Everything below paints
@@ -2388,6 +2389,9 @@ fn render_zoomed_view(f: &mut Frame, area: Rect, app: &mut App) {
             ViewMode::Chat => render_chat(f, main_area, app),
         }
     }
+    // Zoomed views are deliberately borderless. Sync the focus identity so
+    // returning to a bordered layout cannot replay a stale transition.
+    render_focus_border_sweep(f, app, Instant::now());
     apply_main_block_slide(f, app, &slide);
     app.mouse_pos = screen_mouse;
     render_prompt(f, prompt_area, app);
@@ -2418,6 +2422,7 @@ fn render_zoomed_list(f: &mut Frame, area: Rect, app: &mut App) {
     app.layout.list_scroll_offset = 0;
 
     render_sessions(f, main_area, app);
+    render_focus_border_sweep(f, app, Instant::now());
     apply_main_block_slide(f, app, &slide);
     app.mouse_pos = screen_mouse;
     render_prompt(f, prompt_area, app);
@@ -8879,10 +8884,17 @@ fn render_operator_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, fo
             } else {
                 "disabled"
             };
-            let endpoint = channel
-                .port
-                .map(|port| format!("127.0.0.1:{port}"))
-                .unwrap_or_else(|| "no port".to_string());
+            let endpoint = match channel.kind.as_str() {
+                "slack" => "Socket Mode".to_string(),
+                "slack-personal" if channel.has_credential => {
+                    "Slack MCP · OAuth credentials saved".to_string()
+                }
+                "slack-personal" => "Slack MCP · OAuth credentials missing".to_string(),
+                _ => channel
+                    .port
+                    .map(|port| format!("127.0.0.1:{port}"))
+                    .unwrap_or_else(|| "no port".to_string()),
+            };
             let owner = channel
                 .attached_to
                 .as_deref()
@@ -8912,7 +8924,13 @@ fn render_operator_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, fo
                         ),
                     }
                 })
-                .unwrap_or_else(|| if attached { "  loopback".to_string() } else { String::new() });
+                .unwrap_or_else(|| {
+                    if attached && channel.kind == "http" {
+                        "  loopback".to_string()
+                    } else {
+                        String::new()
+                    }
+                });
             let style = if selected {
                 Style::default()
                     .fg(app.theme.highlight_fg)
@@ -9161,10 +9179,6 @@ pub(crate) fn render_operator_channel_editor(
         vec![
             ("Channel ID", editor.channel.id.clone()),
             ("Kind", editor.channel.kind.clone()),
-            (
-                "MCP command",
-                editor.channel.mcp_command.clone().unwrap_or_default(),
-            ),
             ("Workspaces", editor.channel.allowed_workspaces.join(",")),
             ("Channels", editor.channel.allowed_channels.join(",")),
             (
@@ -9174,6 +9188,10 @@ pub(crate) fn render_operator_channel_editor(
             (
                 "Response",
                 editor.channel.response_mode.clone().unwrap_or_default(),
+            ),
+            (
+                "Overrides",
+                editor.response_mode_overrides.clone(),
             ),
             (
                 "Auto-after delay",
@@ -9325,15 +9343,15 @@ pub(crate) fn render_operator_channel_editor(
     let (title, body, hint) = if editor.channel.kind == "slack-personal" {
         match editor.selected_field {
             0 => ("Channel ID", "Stable local name for this channel; locked after creation.", "Type to edit when creating."),
-            1 => ("Kind", "slack-personal acts through your own Slack account via an MCP backend — no Slack app, no bot. Everything it posts appears as you.", "←/→ or Space switches kind when creating."),
-            2 => ("MCP command", "Shell command that starts the channel's MCP backend on stdio, e.g. a Slack MCP server authenticated as your account. The daemon polls it for new messages and posts replies through it.", "Type the command · restarts the backend on save."),
-            3 => ("Workspace allowlist", "Optional comma-separated Slack team IDs. Empty accepts messages from any workspace the backend can see.", "Type workspace IDs separated by commas."),
-            4 => ("Channel allowlist", "Channels the operator may read when the trigger is `all`. Unlike the bot kind, empty means no channels at all — only DMs are in scope by default.", "Type channel IDs separated by commas."),
-            5 => ("Trigger", "What enters the operator: dm forwards only your direct messages; all also forwards every message in an allowlisted channel. Your own messages trigger it only in your DM with yourself.", "Space or → next · ← previous · applies on save."),
-            6 => ("Response", "How visibly it answers: draft composes a Slack draft; auto posts immediately; auto-after waits the configured grace period and posts only if you have not replied.", "Space or → next · ← previous · applies on save."),
-            7 => ("Auto-after delay", "Seconds auto-after waits once the agent has prepared a reply. At the end it rechecks the thread and yields if you answered first.", "Type a number of seconds, at least 1."),
+            1 => ("Kind", "slack-personal acts through your own Slack account via Slack's hosted MCP server. Everything it posts appears as you.", "Saving starts browser OAuth on first use; no MCP command or Slack token is required."),
+            2 => ("Workspace allowlist", "Optional comma-separated Slack workspace hosts, such as acme.slack.com. Empty accepts the workspace authorized in browser OAuth.", "Type workspace hosts separated by commas."),
+            3 => ("Channel allowlist", "Channels the operator may read when the trigger is `all`. Unlike the bot kind, empty means no channels at all — only DMs are in scope by default.", "Type channel IDs separated by commas."),
+            4 => ("Trigger", "What enters the operator: dm forwards incoming direct messages; all also forwards every message from others in an allowlisted channel. Hosted search marks your own messages but cannot safely identify a self-DM, so they are ignored.", "Space or → next · ← previous · applies on save."),
+            5 => ("Response", "How visibly it answers: draft composes a Slack draft; auto posts immediately; auto-after waits the configured grace period and posts only if you have not replied.", "Space or → next · ← previous · applies on save."),
+            6 => ("Response overrides", "Optional comma-separated exact Slack channel-ID overrides. Each entry replaces the default response mode for every thread in that channel; it does not widen the trigger or allowlists.", "Type entries like C123=auto-after,D456=draft · empty inherits the default everywhere."),
+            7 => ("Auto-after delay", "Seconds auto-after waits once the agent has prepared a reply. At the end it searches for your newer reply and yields if you answered first.", "Type a number of seconds, at least 1."),
             8 => ("Disclosure", "Whether an auto-sent reply carries a marker telling recipients an agent wrote it. It posts under your name, so turning this off means undisclosed impersonation of you.", "Space or ←/→ toggles · applies on save."),
-            9 => ("Idle poll ceiling", "Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling.", "Type a number of seconds, at least 5."),
+            9 => ("Idle poll ceiling", "Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling; traffic outside this channel's accepted scope does not keep polling hot.", "Type a number of seconds, at least 5."),
             10 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. This is text written by everyone in the thread, put in front of a session that holds tools.", "Type a number up to 1000 · applies on save."),
             11 => ("State", "Disabled slack-personal channels stop their MCP backend and polling while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
             _ => ("Channel", "", ""),
@@ -15088,6 +15106,218 @@ fn pane_border_style(theme: &Theme, focused: bool) -> Style {
         Style::default().fg(theme.border_focused)
     } else {
         Style::default().fg(theme.border)
+    }
+}
+
+/// Paint the moving bright band for a newly focused pane after that pane and
+/// its title chrome are fully composited. The overlay temporarily draws all
+/// four edges even when the steady pane chrome hides some of them. `(x + y) /
+/// 2` supplies the phase, so the band intersects the top/left edges first and
+/// the bottom/right edges last: a diagonal top-left → bottom-right sweep.
+fn render_focus_border_sweep(f: &mut Frame, app: &mut App, now: Instant) {
+    let target = app.focused_border_target();
+    let rect = match target {
+        FocusBorderTarget::SessionList => app.layout.list_area,
+        FocusBorderTarget::Lineage => app.layout.lineage_area,
+        FocusBorderTarget::MainWindow(id) => app
+            .layout
+            .main_window_areas
+            .iter()
+            .find(|pane| pane.id == id)
+            .map(|pane| pane.area),
+    };
+    let Some(rect) = rect.filter(|rect| rect.width > 0 && rect.height > 0) else {
+        app.focus_border_sweep.sync(target);
+        return;
+    };
+    let Some(progress) = app.focus_border_sweep.observe(target, now) else {
+        return;
+    };
+    app.request_tick_redraw();
+
+    paint_focus_border_sweep(
+        f,
+        rect,
+        progress,
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD)
+            .remove_modifier(Modifier::DIM | Modifier::REVERSED),
+    );
+}
+
+fn paint_focus_border_sweep(f: &mut Frame, rect: Rect, progress: f32, highlight: Style) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    const BAND_HALF_WIDTH: f32 = 0.14;
+    let x_denom = rect.width.saturating_sub(1).max(1) as f32;
+    let y_denom = rect.height.saturating_sub(1).max(1) as f32;
+    for y in rect.top()..rect.bottom() {
+        for x in rect.left()..rect.right() {
+            let on_edge = y == rect.top()
+                || y == rect.bottom().saturating_sub(1)
+                || x == rect.left()
+                || x == rect.right().saturating_sub(1);
+            if !on_edge {
+                continue;
+            }
+            let nx = x.saturating_sub(rect.left()) as f32 / x_denom;
+            let ny = y.saturating_sub(rect.top()) as f32 / y_denom;
+            let phase = (nx + ny) * 0.5;
+            if (phase - progress).abs() > BAND_HALF_WIDTH {
+                continue;
+            }
+            if let Some(cell) = f.buffer_mut().cell_mut(Position { x, y }) {
+                let is_corner = (x == rect.left() || x == rect.right().saturating_sub(1))
+                    && (y == rect.top() || y == rect.bottom().saturating_sub(1));
+                // Pane titles and their live edit controls occupy the top
+                // border row. Highlight only actual horizontal-rule cells
+                // there; hidden side/bottom edges are blank and deliberately
+                // receive transient glyphs below. Corners always participate.
+                if y == rect.top() && !is_corner && cell.symbol() != "─" {
+                    continue;
+                }
+                let symbol = match (
+                    x == rect.left(),
+                    x == rect.right().saturating_sub(1),
+                    y == rect.top(),
+                    y == rect.bottom().saturating_sub(1),
+                ) {
+                    (true, _, true, _) => "┌",
+                    (_, true, true, _) => "┐",
+                    (true, _, _, true) => "└",
+                    (_, true, _, true) => "┘",
+                    (_, _, true, _) | (_, _, _, true) => "─",
+                    _ => "│",
+                };
+                cell.set_symbol(symbol);
+                cell.set_style(highlight);
+                // `Cell::set_style` patches the existing cell and therefore
+                // cannot clear a modifier inherited from the pane beneath it.
+                // The focus cue is the glyph foreground, never reverse video.
+                cell.modifier.remove(Modifier::DIM | Modifier::REVERSED);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod focus_border_paint_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn full_border_band_crosses_top_right_and_bottom_left_halfway() {
+        let backend = TestBackend::new(12, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    0.5,
+                    Style::default().fg(Color::Red),
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(10, 0)].fg, Color::Red);
+        assert_eq!(buffer[(0, 10)].fg, Color::Red);
+        assert_ne!(buffer[(0, 0)].fg, Color::Red);
+        assert_ne!(buffer[(10, 10)].fg, Color::Red);
+    }
+
+    #[test]
+    fn sweep_draws_full_foreground_border_over_hidden_edges() {
+        let backend = TestBackend::new(12, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                f.buffer_mut()
+                    .cell_mut(Position { x: 5, y: 0 })
+                    .expect("top rule")
+                    .set_symbol("─");
+                f.buffer_mut()
+                    .cell_mut(Position { x: 0, y: 5 })
+                    .expect("left edge")
+                    .set_style(
+                        Style::default()
+                            .fg(Color::Green)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::REVERSED),
+                    );
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    0.25,
+                    Style::default().fg(Color::Blue),
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(5, 0)].symbol(), "─");
+        assert_eq!(buffer[(5, 0)].fg, Color::Blue);
+        assert_eq!(buffer[(0, 5)].symbol(), "│");
+        assert_eq!(buffer[(0, 5)].fg, Color::Blue);
+        assert_eq!(buffer[(0, 5)].bg, Color::Yellow);
+        assert!(!buffer[(0, 5)].modifier.contains(Modifier::REVERSED));
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn sweep_draws_corner_glyphs_at_both_diagonal_endpoints() {
+        let backend = TestBackend::new(12, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    0.0,
+                    Style::default().fg(Color::Cyan),
+                );
+            })
+            .expect("draw first endpoint");
+        assert_eq!(terminal.backend().buffer()[(0, 0)].symbol(), "┌");
+
+        terminal
+            .draw(|f| {
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 11, 11),
+                    1.0,
+                    Style::default().fg(Color::Cyan),
+                );
+            })
+            .expect("draw second endpoint");
+        assert_eq!(terminal.backend().buffer()[(10, 10)].symbol(), "┘");
+    }
+
+    #[test]
+    fn sweep_does_not_overwrite_title_text_in_top_border() {
+        let backend = TestBackend::new(22, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                f.buffer_mut().set_string(
+                    1,
+                    0,
+                    " rename me ",
+                    Style::default().fg(Color::Yellow),
+                );
+                paint_focus_border_sweep(
+                    f,
+                    Rect::new(0, 0, 21, 11),
+                    0.25,
+                    Style::default().fg(Color::Cyan),
+                );
+            })
+            .expect("draw");
+        let title = (1..12)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect::<String>();
+        assert_eq!(title, " rename me ");
     }
 }
 
@@ -21023,6 +21253,45 @@ enum PlaybookInlineToken<'a> {
         src_len: usize,
     },
     Link(PlaybookMdLink<'a>),
+    /// A completed single-backtick inline-code span. The delimiters stay in
+    /// the source buffer but are omitted from the painted form.
+    Code {
+        content: &'a str,
+        src_len: usize,
+    },
+}
+
+fn find_playbook_inline_code(text: &str) -> Option<(usize, PlaybookInlineToken<'_>)> {
+    let bytes = text.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find('`') {
+        let start = from + rel;
+        if (start > 0 && bytes[start - 1] == b'`')
+            || bytes.get(start + 1).is_some_and(|b| *b == b'`')
+        {
+            from = start + 1;
+            continue;
+        }
+        let content_start = start + 1;
+        let mut close_from = content_start;
+        while let Some(close_rel) = text[close_from..].find('`') {
+            let close = close_from + close_rel;
+            let single = (close == 0 || bytes[close - 1] != b'`')
+                && bytes.get(close + 1).is_none_or(|b| *b != b'`');
+            if single && close > content_start {
+                return Some((
+                    start,
+                    PlaybookInlineToken::Code {
+                        content: &text[content_start..close],
+                        src_len: close + 1 - start,
+                    },
+                ));
+            }
+            close_from = close + 1;
+        }
+        return None;
+    }
+    None
 }
 
 fn next_playbook_inline_token(text: &str) -> Option<(usize, PlaybookInlineToken<'_>)> {
@@ -21039,10 +21308,14 @@ fn next_playbook_inline_token(text: &str) -> Option<(usize, PlaybookInlineToken<
         })
     });
     let link = find_playbook_md_link(text).map(|l| (l.start, PlaybookInlineToken::Link(l)));
-    match (clip, link) {
-        (Some(c), Some(l)) => Some(if c.0 <= l.0 { c } else { l }),
-        (c, l) => c.or(l),
+    let code = find_playbook_inline_code(text);
+    let mut next = clip;
+    for candidate in [link, code].into_iter().flatten() {
+        if next.as_ref().is_none_or(|current| candidate.0 < current.0) {
+            next = Some(candidate);
+        }
     }
+    next
 }
 
 /// Expand inline smart-clip chips (`@{…}`) and attachment links (`![…](…)`,
@@ -21084,6 +21357,10 @@ fn playbook_inline_rendered_text(
                 }
                 link_idx += 1;
                 link.end - link.start
+            }
+            PlaybookInlineToken::Code { content, src_len } => {
+                out.push_str(content);
+                src_len
             }
         };
         rest = &rest[start + src_len..];
@@ -21207,6 +21484,11 @@ fn playbook_inline_with_clips(
                 }
                 link_idx += 1;
                 link.end - link.start
+            }
+            PlaybookInlineToken::Code { content, src_len } => {
+                out.push_str(content);
+                visual += UnicodeWidthStr::width(content);
+                src_len
             }
         };
         rest = &rest[start + src_len..];
@@ -21633,6 +21915,20 @@ fn playbook_inline_visual_width(
         visual += UnicodeWidthStr::width(before);
         raw += before_len;
 
+        if let PlaybookInlineToken::Code { content, src_len } = &token {
+            let src_chars = rest[start_b..start_b + src_len].chars().count();
+            if raw_col <= raw + src_chars {
+                let content_col = raw_col
+                    .saturating_sub(raw + 1)
+                    .min(content.chars().count());
+                return visual + playbook_prefix_display_width(content, content_col);
+            }
+            visual += UnicodeWidthStr::width(*content);
+            raw += src_chars;
+            rest = &rest[start_b + src_len..];
+            continue;
+        }
+
         let (chip_width, src_len) = match &token {
             PlaybookInlineToken::Clip {
                 raw: raw_clip,
@@ -21650,6 +21946,7 @@ fn playbook_inline_visual_width(
                 link_idx += 1;
                 (w, link.end - link.start)
             }
+            PlaybookInlineToken::Code { .. } => unreachable!(),
         };
         let src_chars = rest[start_b..start_b + src_len].chars().count();
         if raw_col <= raw + src_chars {
@@ -21989,6 +22286,7 @@ fn render_playbook_inline_spans<'a>(
         let src_len = match &token {
             PlaybookInlineToken::Clip { src_len, .. } => *src_len,
             PlaybookInlineToken::Link(link) => link.end - link.start,
+            PlaybookInlineToken::Code { src_len, .. } => *src_len,
         };
         let src_chars = rest[start..start + src_len].chars().count();
         let chip_char_start = base + offset + before_chars;
@@ -22021,6 +22319,21 @@ fn render_playbook_inline_spans<'a>(
                     chip_is_active_match,
                 ));
                 link_idx += 1;
+            }
+            PlaybookInlineToken::Code { content, .. } => {
+                let code_style = base_style
+                    .fg(app.theme.highlight_fg)
+                    .bg(app.theme.inactive_highlight_bg);
+                spans.extend(playbook_text_spans(
+                    &app.theme,
+                    content,
+                    chip_char_start + 1,
+                    code_style,
+                    selection,
+                    search_matches,
+                    search_selected,
+                    action_ranges,
+                ));
             }
         }
         offset += before_chars + src_chars;
@@ -23636,6 +23949,27 @@ mod tests {
         assert_eq!(
             clips[0].visual_width,
             UnicodeWidthStr::width(playbook_md_link_label("n", true).as_str()) + 2
+        );
+    }
+
+    #[test]
+    fn playbook_inline_code_hides_delimiters_and_preserves_content_width() {
+        let raw = "before `cargo test` after";
+        assert_eq!(
+            playbook_inline_rendered_text(None, raw, None, 80),
+            "before cargo test after"
+        );
+        assert_eq!(
+            playbook_visual_col_for_line(None, raw, raw.chars().count(), 80, 0),
+            "before cargo test after".chars().count()
+        );
+        assert_eq!(
+            playbook_inline_rendered_text(None, "before `unfinished", None, 80),
+            "before `unfinished"
+        );
+        assert_eq!(
+            playbook_inline_rendered_text(None, "```rust", None, 80),
+            "```rust"
         );
     }
 
@@ -27073,6 +27407,40 @@ mod tests {
             2,
             "click at display col 3 should land at char offset 2 (after ⏳a)"
         );
+    }
+
+    #[test]
+    fn playbook_cjk_cursor_mapping_round_trips_across_wraps() {
+        let markdown = "日本語漢字";
+        let len = markdown.chars().count();
+
+        // Exercise odd and even widths. In particular, odd widths leave one
+        // unusable cell after a pair of double-width glyphs, while even widths
+        // put the caret exactly on a wrap boundary. Every source boundary must
+        // still map back to itself, and either painted cell of a CJK glyph must
+        // hit-test to the offset immediately before that glyph.
+        for width in 3..=8 {
+            for offset in 0..len {
+                let (row, col) = playbook_cursor_visual_pos(None, markdown, offset, width);
+                assert_eq!(
+                    playbook_visual_to_cursor(None, markdown, row, col, width),
+                    offset,
+                    "width {width}: glyph-start hit for offset {offset} must round-trip"
+                );
+                assert_eq!(
+                    playbook_visual_to_cursor(None, markdown, row, col + 1, width),
+                    offset,
+                    "width {width}: glyph continuation hit for offset {offset} must stay on the same CJK character"
+                );
+            }
+
+            let end = playbook_cursor_visual_pos(None, markdown, len, width);
+            assert_eq!(
+                playbook_visual_to_cursor(None, markdown, end.0, end.1, width),
+                len,
+                "width {width}: end-of-line caret must round-trip"
+            );
+        }
     }
 
     #[test]

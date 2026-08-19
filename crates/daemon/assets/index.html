@@ -3207,6 +3207,12 @@
   .playbook-input ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
   /* One source line. Empty lines keep height via a <br>. */
   .playbook-line { min-height: 1.6em; }
+  .playbook-inline-code {
+    color: var(--fg-strong, var(--fg));
+    background: color-mix(in srgb, var(--accent) 16%, var(--bg-elev));
+    border-radius: 4px;
+    padding: 0 2px;
+  }
   .playbook-selection-menu {
     position: absolute;
     z-index: 8;
@@ -6698,6 +6704,36 @@ function slackOptionMarkup(values, selected) {
   return values.map((value) => `<option value="${attr(value)}" ${value === selected ? "selected" : ""}>${escape(value)}</option>`).join("");
 }
 
+function formatSlackPersonalResponseModeOverrides(overrides) {
+  return Object.entries(overrides || {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([channel, mode]) => `${channel}=${mode}`)
+    .join(",");
+}
+
+function parseSlackPersonalResponseModeOverrides(value) {
+  const entries = [];
+  const seen = new Set();
+  for (const rawEntry of String(value || "").split(",")) {
+    const entry = rawEntry.trim();
+    if (!entry) continue;
+    const separator = entry.indexOf("=");
+    if (separator < 0) throw new Error(`Response overrides must use CHANNEL=MODE entries; ${JSON.stringify(entry)} has no '='.`);
+    const channel = entry.slice(0, separator).trim();
+    const mode = entry.slice(separator + 1).trim();
+    if (!channel) throw new Error("Response override channel IDs must not be empty.");
+    if (!SLACK_PERSONAL_RESPONSE_VALUES.includes(mode)) {
+      throw new Error(`Response override for ${channel} must be ${SLACK_PERSONAL_RESPONSE_VALUES.join(" or ")}.`);
+    }
+    if (seen.has(channel)) {
+      throw new Error(`Response overrides contain duplicate channel ID ${channel}.`);
+    }
+    seen.add(channel);
+    entries.push([channel, mode]);
+  }
+  return Object.fromEntries(entries);
+}
+
 function nextOperatorChannelId(operator) {
   const channels = operator?.channels || [];
   if (!channels.some((channel) => channel.id === "http")) return "http";
@@ -6733,9 +6769,9 @@ function beginNewOperatorChannel() {
     progress: SLACK_PROGRESS_DEFAULT,
     follow_up: SLACK_FOLLOW_UP_DEFAULT,
     thread_context: SLACK_THREAD_CONTEXT_DEFAULT,
-    mcp_command: "",
     trigger: SLACK_PERSONAL_TRIGGER_DEFAULT,
     response_mode: SLACK_PERSONAL_RESPONSE_DEFAULT,
+    response_mode_overrides_text: "",
     auto_after_secs: SLACK_PERSONAL_AUTO_AFTER_DEFAULT_SECS,
     disclosure: true,
     poll_interval_secs: SLACK_PERSONAL_POLL_DEFAULT_SECS,
@@ -6749,7 +6785,12 @@ function beginEditOperatorChannel(id) {
   const operator = state.currentOperatorName && state.operators.find((item) => item.name === state.currentOperatorName);
   const channel = operator?.channels?.find((item) => item.id === id);
   if (!operator || !channel) return;
-  state.operatorChannelDraft = { mode: "edit", operatorName: operator.name, ...channel };
+  state.operatorChannelDraft = {
+    mode: "edit",
+    operatorName: operator.name,
+    ...channel,
+    response_mode_overrides_text: formatSlackPersonalResponseModeOverrides(channel.response_mode_overrides),
+  };
   renderOperatorView();
   const input = operatorActivityEl.querySelector('[data-channel-field="port"]');
   if (input) input.focus();
@@ -6789,10 +6830,6 @@ async function saveOperatorChannelDraft() {
     operatorViewFooterEl.textContent = "Slack bot token must start with xoxb-.";
     return;
   }
-  if (kind === "slack-personal" && !String(draft.mcp_command || "").trim()) {
-    operatorViewFooterEl.textContent = "slack-personal channels need an MCP command that starts their backend.";
-    return;
-  }
   try {
     const channel = {
       id: draft.id,
@@ -6813,9 +6850,9 @@ async function saveOperatorChannelDraft() {
       channel.thread_context = Math.max(0, Math.min(SLACK_THREAD_CONTEXT_MAX, Number(draft.thread_context)));
     }
     if (kind === "slack-personal") {
-      channel.mcp_command = String(draft.mcp_command || "").trim();
       if (draft.trigger) channel.trigger = draft.trigger;
       if (draft.response_mode) channel.response_mode = draft.response_mode;
+      channel.response_mode_overrides = parseSlackPersonalResponseModeOverrides(draft.response_mode_overrides_text);
       if (Number.isFinite(Number(draft.auto_after_secs))) {
         channel.auto_after_secs = Math.max(SLACK_PERSONAL_AUTO_AFTER_MIN_SECS, Number(draft.auto_after_secs));
       }
@@ -6836,7 +6873,12 @@ async function saveOperatorChannelDraft() {
     });
     syncOperatorDraftChannels(draft.operatorName);
     state.operatorNewToken = result.new_secret || null;
-    state.operatorChannelDraft = { mode: "edit", operatorName: draft.operatorName, ...result.channel };
+    state.operatorChannelDraft = {
+      mode: "edit",
+      operatorName: draft.operatorName,
+      ...result.channel,
+      response_mode_overrides_text: formatSlackPersonalResponseModeOverrides(result.channel.response_mode_overrides),
+    };
     renderSessions();
     renderOperatorView();
   } catch (e) {
@@ -7013,7 +7055,7 @@ function renderOperatorView() {
       const localEndpoint = channel.kind === "slack"
         ? `Socket Mode · ${channel.allowed_workspace_count || 0} workspace / ${channel.allowed_channel_count || 0} channel filters`
         : channel.kind === "slack-personal"
-          ? `your account via MCP · ${channel.trigger || "dm"} → ${channel.response_mode || "draft"}`
+          ? `your account via Slack MCP · OAuth credentials ${channel.has_credential ? "saved" : "missing"} · ${channel.trigger || "dm"} → ${channel.response_mode || "draft"}`
           : (channel.port ? `127.0.0.1:${channel.port}` : "no port");
       const channelState = channel.enabled ? "enabled" : "disabled";
       const attached = channel.attached_to === name;
@@ -7046,7 +7088,7 @@ function renderOperatorView() {
   const channelSpecificFields = channelDraft?.kind === "slack"
     ? `<label>App token<input data-channel-field="app_token" type="password" value="" placeholder="${channelDraft.has_app_token ? "xapp-… (set)" : "xapp-…"}" autocomplete="off"></label><label>Bot token<input data-channel-field="bot_token" type="password" value="" placeholder="${channelDraft.has_bot_token ? "xoxb-… (set)" : "xoxb-…"}" autocomplete="off"></label><label>Workspace allowlist<input data-channel-field="allowed_workspaces" value="${attr((channelDraft.allowed_workspaces || []).join(","))}" placeholder="T123,T456"></label><label>Channel allowlist<input data-channel-field="allowed_channels" value="${attr((channelDraft.allowed_channels || []).join(","))}" placeholder="C123,D456"></label><label title="What the thread shows while a turn is still running. Reactions need the reactions:write scope.">Progress<select data-channel-field="progress">${slackOptionMarkup(SLACK_PROGRESS_VALUES, channelDraft.progress || SLACK_PROGRESS_DEFAULT)}</select></label><label title="Where the bot keeps answering once addressed. Anything past off needs the message.channels subscription.">Follow-up<select data-channel-field="follow_up">${slackOptionMarkup(SLACK_FOLLOW_UP_VALUES, channelDraft.follow_up || SLACK_FOLLOW_UP_DEFAULT)}</select></label><label title="Earlier thread messages read when first pulled in; 0 reads none. Needs channels:history, and puts other people's text in front of a session that holds tools.">Thread context<input data-channel-field="thread_context" type="number" min="0" max="${SLACK_THREAD_CONTEXT_MAX}" value="${attr(channelDraft.thread_context ?? SLACK_THREAD_CONTEXT_DEFAULT)}"></label>`
     : channelDraft?.kind === "slack-personal"
-      ? `<label title="Shell command that starts the channel's MCP backend on stdio, authenticated as your Slack account. Everything this channel posts appears as you.">MCP command<input data-channel-field="mcp_command" value="${attr(channelDraft.mcp_command || "")}" placeholder="npx my-slack-mcp-server" autocomplete="off"></label><label>Workspace allowlist<input data-channel-field="allowed_workspaces" value="${attr((channelDraft.allowed_workspaces || []).join(","))}" placeholder="T123,T456"></label><label title="Channels readable when the trigger is all. Unlike the bot kind, empty means no channels — only DMs are in scope by default.">Channel allowlist<input data-channel-field="allowed_channels" value="${attr((channelDraft.allowed_channels || []).join(","))}" placeholder="C123,C456"></label><label title="What enters the operator: dm forwards only your direct messages; all also forwards allowlisted channels.">Trigger<select data-channel-field="trigger">${slackOptionMarkup(SLACK_PERSONAL_TRIGGER_VALUES, channelDraft.trigger || SLACK_PERSONAL_TRIGGER_DEFAULT)}</select></label><label title="draft composes a Slack draft; auto posts immediately; auto-after waits, then posts only if you have not replied.">Response<select data-channel-field="response_mode">${slackOptionMarkup(SLACK_PERSONAL_RESPONSE_VALUES, channelDraft.response_mode || SLACK_PERSONAL_RESPONSE_DEFAULT)}</select></label><label title="Seconds auto-after waits before rechecking the thread and posting.">Auto-after delay<input data-channel-field="auto_after_secs" type="number" min="${SLACK_PERSONAL_AUTO_AFTER_MIN_SECS}" value="${attr(channelDraft.auto_after_secs ?? SLACK_PERSONAL_AUTO_AFTER_DEFAULT_SECS)}"></label><label title="Whether an auto-sent reply carries a marker telling recipients an agent wrote it.">Disclosure<select data-channel-field="disclosure"><option value="true" ${channelDraft.disclosure === false ? "" : "selected"}>on</option><option value="false" ${channelDraft.disclosure === false ? "selected" : ""}>off</option></select></label><label title="Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling.">Idle poll ceiling<input data-channel-field="poll_interval_secs" type="number" min="${SLACK_PERSONAL_POLL_MIN_SECS}" value="${attr(channelDraft.poll_interval_secs ?? SLACK_PERSONAL_POLL_DEFAULT_SECS)}"></label><label title="Earlier thread messages read when first pulled in; 0 reads none.">Thread context<input data-channel-field="thread_context" type="number" min="0" max="${SLACK_THREAD_CONTEXT_MAX}" value="${attr(channelDraft.thread_context ?? SLACK_THREAD_CONTEXT_DEFAULT)}"></label>`
+      ? `<label title="Construct owns Slack's hosted MCP endpoint and starts browser OAuth on first use. No command or Slack token is required.">Authentication<input value="${channelDraft.has_credential ? "OAuth credentials saved" : "Save to start browser OAuth"}" readonly></label><label title="Optional comma-separated workspace hosts from Slack permalinks. Empty accepts the workspace authorized in browser OAuth.">Workspace allowlist<input data-channel-field="allowed_workspaces" value="${attr((channelDraft.allowed_workspaces || []).join(","))}" placeholder="acme.slack.com"></label><label title="Channels readable when the trigger is all. Unlike the bot kind, empty means no channels — only DMs are in scope by default.">Channel allowlist<input data-channel-field="allowed_channels" value="${attr((channelDraft.allowed_channels || []).join(","))}" placeholder="C123,C456"></label><label title="What enters the operator: dm forwards incoming direct messages; all also forwards allowlisted messages from others. Hosted search conservatively ignores your own messages because it cannot safely identify a self-DM.">Trigger<select data-channel-field="trigger">${slackOptionMarkup(SLACK_PERSONAL_TRIGGER_VALUES, channelDraft.trigger || SLACK_PERSONAL_TRIGGER_DEFAULT)}</select></label><label title="draft composes a Slack draft; auto posts immediately; auto-after waits, then posts only if you have not replied.">Default response<select data-channel-field="response_mode">${slackOptionMarkup(SLACK_PERSONAL_RESPONSE_VALUES, channelDraft.response_mode || SLACK_PERSONAL_RESPONSE_DEFAULT)}</select></label><label title="Optional exact Slack channel-ID overrides. They replace the default for every thread in that channel without widening trigger or allowlists.">Response overrides<input data-channel-field="response_mode_overrides_text" value="${attr(channelDraft.response_mode_overrides_text || "")}" placeholder="C123=auto-after,D456=draft"></label><label title="Seconds auto-after waits before rechecking the thread and posting.">Auto-after delay<input data-channel-field="auto_after_secs" type="number" min="${SLACK_PERSONAL_AUTO_AFTER_MIN_SECS}" value="${attr(channelDraft.auto_after_secs ?? SLACK_PERSONAL_AUTO_AFTER_DEFAULT_SECS)}"></label><label title="Whether an auto-sent reply carries a marker telling recipients an agent wrote it.">Disclosure<select data-channel-field="disclosure"><option value="true" ${channelDraft.disclosure === false ? "" : "selected"}>on</option><option value="false" ${channelDraft.disclosure === false ? "selected" : ""}>off</option></select></label><label title="Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling.">Idle poll ceiling<input data-channel-field="poll_interval_secs" type="number" min="${SLACK_PERSONAL_POLL_MIN_SECS}" value="${attr(channelDraft.poll_interval_secs ?? SLACK_PERSONAL_POLL_DEFAULT_SECS)}"></label><label title="Earlier thread messages read when first pulled in; 0 reads none.">Thread context<input data-channel-field="thread_context" type="number" min="0" max="${SLACK_THREAD_CONTEXT_MAX}" value="${attr(channelDraft.thread_context ?? SLACK_THREAD_CONTEXT_DEFAULT)}"></label>`
       : `<label>HTTP port<input data-channel-field="port" type="number" min="1" max="65535" value="${attr(channelDraft?.port ?? "")}"></label>`;
   const channelEditor = channelDraft ? `<div class="operator-channel-editor"><div class="operator-channel-editor-grid"><label>Channel ID<input data-channel-field="id" value="${attr(channelDraft.id || "")}" ${channelDraft.mode === "edit" ? "readonly" : ""}></label><label>Kind<select data-channel-field="kind" ${channelDraft.mode === "edit" ? "disabled" : ""}><option value="http" ${channelDraft.kind === "http" ? "selected" : ""}>http</option><option value="slack" ${channelDraft.kind === "slack" ? "selected" : ""}>slack</option><option value="slack-personal" ${channelDraft.kind === "slack-personal" ? "selected" : ""}>slack-personal</option></select></label>${channelSpecificFields}<label>State<select data-channel-field="enabled"><option value="true" ${channelDraft.enabled ? "selected" : ""}>enabled</option><option value="false" ${channelDraft.enabled ? "" : "selected"}>disabled</option></select></label></div><div class="channel-editor-actions"><button type="button" data-channel-save>Save channel</button><button type="button" data-channel-cancel>Cancel</button></div></div>` : "";
   const attachedCount = channels.filter((channel) => channel.attached_to === name).length;
@@ -9246,6 +9288,23 @@ function playbookLineClipRanges(line) {
   return ranges;
 }
 
+// Completed single-backtick spans. Backtick runs are left alone for fenced
+// code and literal Markdown; an unmatched opening delimiter stays visible as
+// source until the user completes it.
+function playbookLineCodeRanges(line) {
+  const ranges = [];
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] !== "`" || line[i - 1] === "`" || line[i + 1] === "`") continue;
+    for (let j = i + 1; j < line.length; j++) {
+      if (line[j] !== "`" || line[j - 1] === "`" || line[j + 1] === "`") continue;
+      if (j > i + 1) ranges.push([i, j + 1]);
+      i = j;
+      break;
+    }
+  }
+  return ranges;
+}
+
 // All construct-dialect inline tokens in one source line, in order: typed
 // `@{…}` references ("clip") and `[label](agentd:action/…)` action links
 // ("action"). Shared by the Playbook editor and the widget renderer (spec
@@ -9268,7 +9327,10 @@ function playbookMdLinkParse(raw) {
 }
 
 function playbookLineInlineTokens(line) {
-  const tokens = playbookLineClipRanges(line).map(([s, e]) => ({ start: s, end: e, kind: "clip" }));
+  const tokens = playbookLineCodeRanges(line).map(([s, e]) => ({ start: s, end: e, kind: "code" }));
+  for (const [start, end] of playbookLineClipRanges(line)) {
+    if (!tokens.some((t) => start < t.end && end > t.start)) tokens.push({ start, end, kind: "clip" });
+  }
   PLAYBOOK_ACTION_LINK_RE.lastIndex = 0;
   let m;
   while ((m = PLAYBOOK_ACTION_LINK_RE.exec(line))) {
@@ -9437,6 +9499,18 @@ function playbookAttachmentChipEl(raw) {
   label.textContent = `Image: ${shown}`;
   span.appendChild(label);
   span.title = (link && link.path) || raw;
+  return span;
+}
+
+// Atomic presentation for completed inline code. The exact source remains in
+// data-raw; Backspace at the right edge replaces this with ` + content so the
+// opening delimiter and text become directly editable again.
+function playbookInlineCodeEl(raw) {
+  const span = document.createElement("span");
+  span.className = "playbook-inline-code";
+  span.setAttribute("contenteditable", "false");
+  span.dataset.raw = raw;
+  span.textContent = raw.slice(1, -1);
   return span;
 }
 
@@ -9774,7 +9848,9 @@ function playbookFillLine(div, text) {
   for (const t of tokens) {
     if (t.start > pos) playbookAppendLineText(div, text.slice(pos, t.start), pos === 0);
     const raw = text.slice(t.start, t.end);
-    const chip = t.kind === "action"
+    const chip = t.kind === "code"
+      ? playbookInlineCodeEl(raw)
+      : t.kind === "action"
       ? playbookActionChipEl(raw)
       : t.kind === "attachment"
         ? playbookAttachmentChipEl(raw)
@@ -9854,7 +9930,7 @@ function playbookSerializeInline(el) {
   for (const node of el.childNodes) {
     if (node.nodeType === 3) out += node.data;
     else if (node.nodeType === 1) {
-      if (node.classList && node.classList.contains("playbook-clip")) out += node.dataset.raw || "";
+      if (node.classList && (node.classList.contains("playbook-clip") || node.classList.contains("playbook-inline-code"))) out += node.dataset.raw || "";
       else if (node.tagName === "BR") out += "";
       else out += playbookSerializeInline(node);
     }
@@ -9977,7 +10053,7 @@ function playbookDomPointToOffset(targetNode, targetOffset) {
 function playbookNodeRawLength(node) {
   if (!node) return 0;
   if (node.nodeType === 3) return playbookCharCount(node.data);
-  if (node.nodeType === 1 && node.classList && node.classList.contains("playbook-clip")) return playbookCharCount(node.dataset.raw || "");
+  if (node.nodeType === 1 && node.classList && (node.classList.contains("playbook-clip") || node.classList.contains("playbook-inline-code"))) return playbookCharCount(node.dataset.raw || "");
   if (node.nodeType === 1 && node.tagName === "BR") return 0;
   if (node.nodeType === 1) return playbookCharCount(playbookSerializeInline(node));
   return 0;
@@ -11475,8 +11551,78 @@ function playbookFindMove(delta) {
 
 // --- input / key handling ---
 
+function playbookLineAncestor(node) {
+  if (node && node.nodeType === 3) node = node.parentNode;
+  return node && node.closest ? node.closest(".playbook-line") : null;
+}
+
+// Turn a just-completed `text` sequence into its source-preserving formatted
+// span without rebuilding the whole contenteditable on ordinary keystrokes.
+function playbookFormatInlineCodeAtCaret() {
+  const offsets = playbookSelectionOffsets();
+  const sel = window.getSelection();
+  if (!offsets || offsets.anchor !== offsets.head || !sel || sel.rangeCount === 0) return;
+  const line = playbookLineAncestor(sel.getRangeAt(0).startContainer);
+  if (!line) return;
+  let lineStart = 0;
+  for (const candidate of playbookInputEl.childNodes) {
+    if (candidate === line) break;
+    if (candidate.nodeType === 1) lineStart += playbookNodeRawLength(candidate) + 1;
+  }
+  const localHead = offsets.head - lineStart;
+  const raw = playbookSerializeInline(line);
+  const completed = playbookLineInlineTokens(raw).some((t) =>
+    t.kind === "code" && playbookCharCount(raw.slice(0, t.end)) === localHead);
+  if (!completed) return;
+  playbookFillLine(line, raw);
+  const range = playbookRangeForOffset(offsets.head);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function playbookInlineCodeImmediatelyBeforeCaret() {
+  const sel = window.getSelection();
+  if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  let node = range.startContainer;
+  let offset = range.startOffset;
+  if (node.nodeType === 3) {
+    if (offset !== 0) return null;
+    node = node.previousSibling;
+  } else if (node.nodeType === 1) {
+    node = node.childNodes[offset - 1] || null;
+  }
+  return node && node.nodeType === 1 && node.classList.contains("playbook-inline-code") ? node : null;
+}
+
+function playbookRevealInlineCodeForBackspace() {
+  const code = playbookInlineCodeImmediatelyBeforeCaret();
+  if (!code) return false;
+  const raw = code.dataset.raw || "";
+  const sel = window.getSelection();
+  const replacement = document.createRange();
+  replacement.selectNode(code);
+  sel.removeAllRanges();
+  sel.addRange(replacement);
+  // Keep the replacement in the browser's native contenteditable undo stack.
+  if (document.execCommand("insertText", false, raw.slice(0, -1))) return true;
+
+  // Older engines may reject execCommand across a contenteditable=false node.
+  // Preserve the behavior there and publish the edit through the normal path.
+  const text = document.createTextNode(raw.slice(0, -1));
+  code.replaceWith(text);
+  const range = document.createRange();
+  range.setStart(text, text.data.length);
+  range.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(range);
+  playbookOnInput();
+  return true;
+}
+
 function playbookOnInput() {
   playbookNormalizeLines();
+  playbookFormatInlineCodeAtCaret();
   playbookApplyLineDecorations();
   playbookRefreshEmptyState();
   playbookUpdateDirty();
@@ -11511,6 +11657,10 @@ function playbookOnKeyDown(e) {
   }
   if (mod && (e.key === "s" || e.key === "S")) { e.preventDefault(); playbookSave(); return; }
   if (mod && e.key === "Enter") { e.preventDefault(); playbookRun(e.shiftKey); return; }
+  if (!mod && e.key === "Backspace" && playbookRevealInlineCodeForBackspace()) {
+    e.preventDefault();
+    return;
+  }
   // Emacs C-f: move the caret forward one character, matching the TUI's
   // Playbook binding. Must preventDefault or the browser opens its Find bar.
   if (mod && (e.key === "f" || e.key === "F")) {

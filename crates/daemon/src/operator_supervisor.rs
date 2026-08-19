@@ -802,6 +802,7 @@ mod tests {
     use super::*;
     use crate::operator::{
         OperatorChannelConfig, OperatorRouting, OperatorSandboxConfig, OperatorSessionMode,
+        SlackPersonalResponse,
     };
 
     struct FakePublicationBackend;
@@ -938,7 +939,7 @@ mod tests {
 
     #[test]
     fn slack_personal_channels_are_outbound_tasks_and_edits_change_revision() {
-        let personal_operator = |command: &str, paused: bool| OperatorConfig {
+        let personal_operator = |auto_after_secs: u64, paused: bool| OperatorConfig {
             position: 0,
             placement: None,
             instruction: String::new(),
@@ -954,23 +955,23 @@ mod tests {
                 "me".into(),
                 OperatorChannelConfig {
                     kind: Some("slack-personal".into()),
-                    mcp_command: Some(command.into()),
+                    response_mode: Some(SlackPersonalResponse::AutoAfter),
+                    auto_after_secs: Some(auto_after_secs),
                     ..Default::default()
                 },
             )]),
         };
-        let first_defs = defs(&[("chat", personal_operator("first-backend", false))]);
+        let first_defs = defs(&[("chat", personal_operator(30, false))]);
         assert!(
             desired_listeners(&first_defs).0.is_empty(),
             "slack-personal owns no port"
         );
         let first = desired_slack_personal(&first_defs);
         assert!(first.contains_key(&key("chat", "me")));
-        let changed =
-            desired_slack_personal(&defs(&[("chat", personal_operator("second-backend", false))]));
-        assert!(first != changed, "a backend edit must replace the task");
+        let changed = desired_slack_personal(&defs(&[("chat", personal_operator(60, false))]));
+        assert!(first != changed, "a behavior edit must replace the task");
         assert!(
-            desired_slack_personal(&defs(&[("chat", personal_operator("first-backend", true))]))
+            desired_slack_personal(&defs(&[("chat", personal_operator(30, true))]))
                 .is_empty(),
             "pausing stops the polling task"
         );
