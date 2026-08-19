@@ -9175,6 +9175,10 @@ pub(crate) fn render_operator_channel_editor(
                 editor.channel.response_mode.clone().unwrap_or_default(),
             ),
             (
+                "Overrides",
+                editor.response_mode_overrides.clone(),
+            ),
+            (
                 "Auto-after delay",
                 editor
                     .channel
@@ -9330,11 +9334,12 @@ pub(crate) fn render_operator_channel_editor(
             4 => ("Channel allowlist", "Channels the operator may read when the trigger is `all`. Unlike the bot kind, empty means no channels at all — only DMs are in scope by default.", "Type channel IDs separated by commas."),
             5 => ("Trigger", "What enters the operator: dm forwards only your direct messages; all also forwards every message in an allowlisted channel. Your own messages trigger it only in your DM with yourself.", "Space or → next · ← previous · applies on save."),
             6 => ("Response", "How visibly it answers: draft composes a Slack draft; auto posts immediately; auto-after waits the configured grace period and posts only if you have not replied.", "Space or → next · ← previous · applies on save."),
-            7 => ("Auto-after delay", "Seconds auto-after waits once the agent has prepared a reply. At the end it rechecks the thread and yields if you answered first.", "Type a number of seconds, at least 1."),
-            8 => ("Disclosure", "Whether an auto-sent reply carries a marker telling recipients an agent wrote it. It posts under your name, so turning this off means undisclosed impersonation of you.", "Space or ←/→ toggles · applies on save."),
-            9 => ("Idle poll ceiling", "Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling.", "Type a number of seconds, at least 5."),
-            10 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. This is text written by everyone in the thread, put in front of a session that holds tools.", "Type a number up to 1000 · applies on save."),
-            11 => ("State", "Disabled slack-personal channels stop their MCP backend and polling while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
+            7 => ("Response overrides", "Optional comma-separated exact Slack channel-ID overrides. Each entry replaces the default response mode for every thread in that channel; it does not widen the trigger or allowlists.", "Type entries like C123=auto-after,D456=draft · empty inherits the default everywhere."),
+            8 => ("Auto-after delay", "Seconds auto-after waits once the agent has prepared a reply. At the end it rechecks the thread and yields if you answered first.", "Type a number of seconds, at least 1."),
+            9 => ("Disclosure", "Whether an auto-sent reply carries a marker telling recipients an agent wrote it. It posts under your name, so turning this off means undisclosed impersonation of you.", "Space or ←/→ toggles · applies on save."),
+            10 => ("Idle poll ceiling", "Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling; traffic outside this channel's accepted scope does not keep polling hot.", "Type a number of seconds, at least 5."),
+            11 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. This is text written by everyone in the thread, put in front of a session that holds tools.", "Type a number up to 1000 · applies on save."),
+            12 => ("State", "Disabled slack-personal channels stop their MCP backend and polling while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
             _ => ("Channel", "", ""),
         }
     } else if editor.channel.kind == "slack" {
@@ -27050,6 +27055,40 @@ mod tests {
             2,
             "click at display col 3 should land at char offset 2 (after ⏳a)"
         );
+    }
+
+    #[test]
+    fn playbook_cjk_cursor_mapping_round_trips_across_wraps() {
+        let markdown = "日本語漢字";
+        let len = markdown.chars().count();
+
+        // Exercise odd and even widths. In particular, odd widths leave one
+        // unusable cell after a pair of double-width glyphs, while even widths
+        // put the caret exactly on a wrap boundary. Every source boundary must
+        // still map back to itself, and either painted cell of a CJK glyph must
+        // hit-test to the offset immediately before that glyph.
+        for width in 3..=8 {
+            for offset in 0..len {
+                let (row, col) = playbook_cursor_visual_pos(None, markdown, offset, width);
+                assert_eq!(
+                    playbook_visual_to_cursor(None, markdown, row, col, width),
+                    offset,
+                    "width {width}: glyph-start hit for offset {offset} must round-trip"
+                );
+                assert_eq!(
+                    playbook_visual_to_cursor(None, markdown, row, col + 1, width),
+                    offset,
+                    "width {width}: glyph continuation hit for offset {offset} must stay on the same CJK character"
+                );
+            }
+
+            let end = playbook_cursor_visual_pos(None, markdown, len, width);
+            assert_eq!(
+                playbook_visual_to_cursor(None, markdown, end.0, end.1, width),
+                len,
+                "width {width}: end-of-line caret must round-trip"
+            );
+        }
     }
 
     #[test]
