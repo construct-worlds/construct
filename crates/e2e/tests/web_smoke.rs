@@ -26,6 +26,166 @@ use chromiumoxide::page::Page;
 use futures::StreamExt;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_operator_editor_round_trips_slack_personal_response_mode_overrides() {
+    let d = Daemon::spawn().await.expect("daemon");
+    let operator_name = "web-overrides";
+    d.client
+        .put_operator(construct_protocol::OperatorPutParams {
+            operator: construct_protocol::OperatorSummary {
+                name: operator_name.into(),
+                position: 0,
+                placement: None,
+                instruction: "Answer briefly.".into(),
+                harness: "smith".into(),
+                model: None,
+                session_mode: "headless".into(),
+                cwd: ".".into(),
+                routing: "session-key".into(),
+                paused: false,
+                channels: Vec::new(),
+            },
+        })
+        .await
+        .expect("create operator");
+    d.client
+        .put_operator_channel(construct_protocol::OperatorChannelPutParams {
+            operator_name: operator_name.into(),
+            channel: construct_protocol::OperatorChannelPut {
+                id: "personal".into(),
+                kind: "slack-personal".into(),
+                enabled: false,
+                mcp_command: Some("fake-mcp".into()),
+                response_mode: Some("draft".into()),
+                response_mode_overrides: Some(std::collections::BTreeMap::from([
+                    ("C-sensitive".into(), "auto".into()),
+                    ("D-Private".into(), "draft".into()),
+                ])),
+                ..Default::default()
+            },
+            rotate_secret: false,
+        })
+        .await
+        .expect("create slack-personal channel");
+    let remote = d
+        .client
+        .remote_start(construct_protocol::TunnelProvider::None, None)
+        .await
+        .expect("start remote");
+
+    let config = BrowserConfig::builder()
+        .arg("--no-sandbox")
+        .arg("--disable-gpu")
+        .arg("--disable-dev-shm-usage")
+        .build()
+        .expect("browser config");
+    let (browser, mut handler) = match Browser::launch(config).await {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("skipping web override editor test: could not launch Chromium ({error})");
+            return;
+        }
+    };
+    let _handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+    let page = browser.new_page("about:blank").await.expect("new page");
+    let url = inject_userinfo(&remote.local_url, "remote", &remote.password);
+    page.goto(&url).await.expect("goto");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let ready: bool = page
+            .evaluate(format!(
+                "document.getElementById('conn')?.dataset?.state === 'open' && state.operators.some((operator) => operator.name === {operator_name:?})"
+            ))
+            .await
+            .ok()
+            .and_then(|result| result.into_value::<bool>().ok())
+            .unwrap_or(false);
+        if ready {
+            break;
+        }
+        assert!(Instant::now() <= deadline, "web operator state did not load");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    page.evaluate(format!(
+        "(() => {{ state.currentOperatorName = {operator_name:?}; state.operatorDraft = null; renderOperatorView(); beginEditOperatorChannel('personal'); }})()"
+    ))
+    .await
+    .expect("open channel editor");
+    let initial: String = page
+        .evaluate("document.querySelector('[data-channel-field=response_mode_overrides_text]')?.value || ''")
+        .await
+        .expect("read override input")
+        .into_value()
+        .expect("override text");
+    assert_eq!(initial, "C-sensitive=auto,D-Private=draft");
+
+    let validation_error: String = page
+        .evaluate(
+            r#"
+            (async () => {
+              const input = document.querySelector('[data-channel-field=response_mode_overrides_text]');
+              input.value = 'C-sensitive=unreviewed';
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              document.querySelector('[data-channel-save]').click();
+              await new Promise((resolve) => setTimeout(resolve, 0));
+              return operatorViewFooterEl.textContent || '';
+            })()
+            "#,
+        )
+        .await
+        .expect("validate override input")
+        .into_value()
+        .expect("validation text");
+    assert!(
+        validation_error.contains("must be draft or auto"),
+        "unexpected web validation: {validation_error}"
+    );
+
+    page.evaluate(
+        r#"
+        (() => {
+          const input = document.querySelector('[data-channel-field=response_mode_overrides_text]');
+          input.value = 'C-sensitive=draft,D-Private=auto';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('[data-channel-save]').click();
+        })()
+        "#,
+    )
+    .await
+    .expect("save edited overrides");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let channels = d
+            .client
+            .list_operator_channels(operator_name)
+            .await
+            .expect("list channels");
+        let overrides = channels
+            .iter()
+            .find(|channel| channel.id == "personal")
+            .and_then(|channel| channel.response_mode_overrides.as_ref());
+        if overrides.is_some_and(|overrides| {
+            overrides.get("C-sensitive").map(String::as_str) == Some("draft")
+                && overrides.get("D-Private").map(String::as_str) == Some("auto")
+        }) {
+            break;
+        }
+        assert!(Instant::now() <= deadline, "web editor did not persist overrides");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let round_tripped: String = page
+        .evaluate("document.querySelector('[data-channel-field=response_mode_overrides_text]')?.value || ''")
+        .await
+        .expect("read round-tripped override input")
+        .into_value()
+        .expect("override text");
+    assert_eq!(round_tripped, "C-sensitive=draft,D-Private=auto");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn web_client_loads_and_websocket_connects() {
     let d = Daemon::spawn().await.expect("daemon");
     let r = d

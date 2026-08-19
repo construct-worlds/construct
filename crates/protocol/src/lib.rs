@@ -18,7 +18,7 @@ pub mod slash;
 pub mod transport;
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub use jsonrpc::{ErrorObject, Notification, Request, Response};
 
@@ -3564,6 +3564,10 @@ pub struct OperatorChannelSummary {
     pub trigger: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mode: Option<String>,
+    /// Exact Slack channel-ID response-mode overrides. The channel's
+    /// `response_mode` remains the default when no entry matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mode_overrides: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disclosure: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4033,6 +4037,10 @@ pub struct OperatorChannelPut {
     pub trigger: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mode: Option<String>,
+    /// Exact Slack channel-ID response-mode overrides. `None` preserves the
+    /// stored map; `Some(empty)` clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mode_overrides: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disclosure: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4058,6 +4066,7 @@ impl Default for OperatorChannelPut {
             mcp_command: None,
             trigger: None,
             response_mode: None,
+            response_mode_overrides: None,
             disclosure: None,
             poll_interval_secs: None,
         }

@@ -37,7 +37,7 @@ use super::{SlackPersonalResponse, SlackPersonalTrigger};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -47,11 +47,21 @@ pub(crate) struct SlackPersonalConfig {
     pub(super) mcp_command: String,
     pub(super) poll_interval: std::time::Duration,
     pub(super) trigger: SlackPersonalTrigger,
-    pub(super) response: SlackPersonalResponse,
+    pub(super) default_response: SlackPersonalResponse,
+    pub(super) response_overrides: BTreeMap<String, SlackPersonalResponse>,
     pub(super) disclosure: bool,
     pub(super) allowed_workspaces: Vec<String>,
     pub(super) allowed_channels: Vec<String>,
     pub(super) thread_context: usize,
+}
+
+impl SlackPersonalConfig {
+    fn response_for_channel(&self, channel: &str) -> SlackPersonalResponse {
+        self.response_overrides
+            .get(channel)
+            .copied()
+            .unwrap_or(self.default_response)
+    }
 }
 
 /// Appended to every auto-sent reply unless the user turned disclosure off.
@@ -459,7 +469,7 @@ async fn deliver_reply(
     reply: &str,
 ) -> Result<()> {
     let client = backend.get()?;
-    match config.response {
+    match config.response_for_channel(&trace.channel) {
         SlackPersonalResponse::Draft => {
             client
                 .call_tool(
@@ -589,7 +599,8 @@ mod tests {
             mcp_command: "fake".into(),
             poll_interval: std::time::Duration::from_secs(20),
             trigger: SlackPersonalTrigger::Dm,
-            response: SlackPersonalResponse::Draft,
+            default_response: SlackPersonalResponse::Draft,
+            response_overrides: BTreeMap::new(),
             disclosure: true,
             allowed_workspaces: Vec::new(),
             allowed_channels: Vec::new(),
@@ -609,6 +620,38 @@ mod tests {
             is_self: false,
             is_self_dm: false,
         }
+    }
+
+    #[test]
+    fn channel_response_mode_overrides_the_default_only_for_an_exact_match() {
+        let mut config = config();
+        config.default_response = SlackPersonalResponse::Auto;
+        config
+            .response_overrides
+            .insert("C-sensitive".into(), SlackPersonalResponse::Draft);
+        config
+            .response_overrides
+            .insert("D-private".into(), SlackPersonalResponse::Auto);
+
+        assert_eq!(
+            config.response_for_channel("C-sensitive"),
+            SlackPersonalResponse::Draft
+        );
+        assert_eq!(
+            config.response_for_channel("C-other"),
+            SlackPersonalResponse::Auto,
+            "channels without an override inherit the global response mode"
+        );
+        assert_eq!(
+            config.response_for_channel("c-sensitive"),
+            SlackPersonalResponse::Auto,
+            "Slack channel IDs are exact, case-sensitive keys"
+        );
+        assert_eq!(
+            config.response_for_channel("D-private"),
+            SlackPersonalResponse::Auto,
+            "DM conversation IDs may be overridden through the same map"
+        );
     }
 
     #[test]
