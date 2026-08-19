@@ -42762,6 +42762,7 @@ mod tests {
                 mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                response_mode_overrides: None,
                 auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
@@ -43268,6 +43269,7 @@ mod tests {
                 mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                response_mode_overrides: None,
                 auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
@@ -44513,6 +44515,11 @@ mod tests {
         // disclosure on — shown rather than left as blanks.
         assert_eq!(editor.channel.trigger.as_deref(), Some("dm"));
         assert_eq!(editor.channel.response_mode.as_deref(), Some("draft"));
+        assert_eq!(
+            editor.channel.response_mode_overrides,
+            Some(std::collections::BTreeMap::new())
+        );
+        assert!(editor.response_mode_overrides.is_empty());
         assert_eq!(editor.channel.auto_after_secs, Some(60));
         assert_eq!(editor.channel.disclosure, Some(true));
         assert_eq!(editor.channel.poll_interval_secs, Some(20));
@@ -44554,6 +44561,129 @@ mod tests {
                 .response_mode
                 .as_deref(),
             Some("auto-after")
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn slack_personal_override_editor_text_round_trips_exact_channel_ids() {
+        use crate::app::operator_dialog::{
+            format_response_mode_overrides, parse_response_mode_overrides,
+        };
+
+        let expected = std::collections::BTreeMap::from([
+            ("C-sensitive".to_string(), "auto-after".to_string()),
+            ("D-Private".to_string(), "auto".to_string()),
+        ]);
+        let text = format_response_mode_overrides(Some(&expected));
+        assert_eq!(text, "C-sensitive=auto-after,D-Private=auto");
+        assert_eq!(parse_response_mode_overrides(&text), Ok(expected));
+        assert!(parse_response_mode_overrides("C1=auto,C1=draft")
+            .unwrap_err()
+            .contains("duplicate"));
+        assert!(parse_response_mode_overrides("C1=unknown")
+            .unwrap_err()
+            .contains("draft or auto or auto-after"));
+    }
+
+    #[tokio::test]
+    async fn slack_personal_tui_editor_sends_response_mode_overrides_on_save() {
+        use construct_client::Client;
+        use construct_protocol::ipc_method;
+        use serde_json::Value;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("construct.sock");
+        let listener = UnixListener::bind(&socket).expect("bind mock daemon");
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    break;
+                }
+                let request: Value = serde_json::from_str(&line).expect("request JSON");
+                let id = request.get("id").cloned().unwrap_or(Value::Null);
+                let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+                let result = match method {
+                    ipc_method::OPERATOR_CHANNEL_PUT => {
+                        let params: construct_protocol::OperatorChannelPutParams =
+                            serde_json::from_value(request["params"].clone()).expect("put params");
+                        request_tx.send(params.clone()).expect("capture put");
+                        serde_json::json!({
+                            "channel": {
+                                "id": params.channel.id,
+                                "kind": params.channel.kind,
+                                "enabled": params.channel.enabled,
+                                "mcp_command": params.channel.mcp_command,
+                                "trigger": params.channel.trigger,
+                                "response_mode": params.channel.response_mode,
+                                "response_mode_overrides": params.channel.response_mode_overrides,
+                            },
+                            "applied": {
+                                "reloaded": true,
+                                "started": 0,
+                                "stopped": 0,
+                                "rebound": 1,
+                            }
+                        })
+                    }
+                    ipc_method::OPERATOR_LIST | ipc_method::OPERATOR_CHANNEL_CATALOG_LIST => {
+                        serde_json::json!([])
+                    }
+                    other => panic!("unexpected mock method {other}"),
+                };
+                let response = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+                writer
+                    .write_all((response.to_string() + "\n").as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+        let client = Client::connect(&socket).await.expect("client connects");
+        let mut app = test_app(client, vec![summary_with_kind(
+            construct_protocol::SessionKind::User,
+        )]);
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = app.operators[0].channels.clone();
+        app.open_edit_operator_view("assistant");
+        app.open_new_operator_channel();
+        {
+            let editor = app
+                .operator_dialog
+                .as_mut()
+                .unwrap()
+                .channel_editor
+                .as_mut()
+                .unwrap();
+            editor.channel.kind = "slack-personal".into();
+            editor.channel.port = None;
+            editor.channel.mcp_command = Some("fake-mcp".into());
+            editor.channel.trigger = Some("dm".into());
+            editor.channel.response_mode = Some("draft".into());
+            editor.response_mode_overrides = "C-sensitive=auto-after,D-Private=draft".into();
+        }
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        let params = request_rx.recv().await.expect("put request");
+        assert_eq!(
+            params.channel.response_mode_overrides,
+            Some(std::collections::BTreeMap::from([
+                ("C-sensitive".into(), "auto-after".into()),
+                ("D-Private".into(), "draft".into()),
+            ]))
+        );
+        assert_eq!(
+            channel_editor(&app).response_mode_overrides,
+            "C-sensitive=auto-after,D-Private=draft",
+            "the daemon summary is formatted back into the editor"
         );
         server.abort();
     }
@@ -44838,6 +44968,7 @@ mod tests {
                 mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                response_mode_overrides: None,
                 auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,
@@ -44862,6 +44993,7 @@ mod tests {
                 mcp_command: None,
                 trigger: None,
                 response_mode: None,
+                response_mode_overrides: None,
                 auto_after_secs: None,
                 disclosure: None,
                 poll_interval_secs: None,

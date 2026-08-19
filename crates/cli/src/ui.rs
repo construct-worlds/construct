@@ -9175,6 +9175,10 @@ pub(crate) fn render_operator_channel_editor(
                 editor.channel.response_mode.clone().unwrap_or_default(),
             ),
             (
+                "Overrides",
+                editor.response_mode_overrides.clone(),
+            ),
+            (
                 "Auto-after delay",
                 editor
                     .channel
@@ -9330,11 +9334,12 @@ pub(crate) fn render_operator_channel_editor(
             4 => ("Channel allowlist", "Channels the operator may read when the trigger is `all`. Unlike the bot kind, empty means no channels at all — only DMs are in scope by default.", "Type channel IDs separated by commas."),
             5 => ("Trigger", "What enters the operator: dm forwards only your direct messages; all also forwards every message in an allowlisted channel. Your own messages trigger it only in your DM with yourself.", "Space or → next · ← previous · applies on save."),
             6 => ("Response", "How visibly it answers: draft composes a Slack draft; auto posts immediately; auto-after waits the configured grace period and posts only if you have not replied.", "Space or → next · ← previous · applies on save."),
-            7 => ("Auto-after delay", "Seconds auto-after waits once the agent has prepared a reply. At the end it rechecks the thread and yields if you answered first.", "Type a number of seconds, at least 1."),
-            8 => ("Disclosure", "Whether an auto-sent reply carries a marker telling recipients an agent wrote it. It posts under your name, so turning this off means undisclosed impersonation of you.", "Space or ←/→ toggles · applies on save."),
-            9 => ("Idle poll ceiling", "Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling.", "Type a number of seconds, at least 5."),
-            10 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. This is text written by everyone in the thread, put in front of a session that holds tools.", "Type a number up to 1000 · applies on save."),
-            11 => ("State", "Disabled slack-personal channels stop their MCP backend and polling while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
+            7 => ("Response overrides", "Optional comma-separated exact Slack channel-ID overrides. Each entry replaces the default response mode for every thread in that channel; it does not widen the trigger or allowlists.", "Type entries like C123=auto-after,D456=draft · empty inherits the default everywhere."),
+            8 => ("Auto-after delay", "Seconds auto-after waits once the agent has prepared a reply. At the end it rechecks the thread and yields if you answered first.", "Type a number of seconds, at least 1."),
+            9 => ("Disclosure", "Whether an auto-sent reply carries a marker telling recipients an agent wrote it. It posts under your name, so turning this off means undisclosed impersonation of you.", "Space or ←/→ toggles · applies on save."),
+            10 => ("Idle poll ceiling", "Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling; traffic outside this channel's accepted scope does not keep polling hot.", "Type a number of seconds, at least 5."),
+            11 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. This is text written by everyone in the thread, put in front of a session that holds tools.", "Type a number up to 1000 · applies on save."),
+            12 => ("State", "Disabled slack-personal channels stop their MCP backend and polling while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
             _ => ("Channel", "", ""),
         }
     } else if editor.channel.kind == "slack" {

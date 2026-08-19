@@ -356,6 +356,10 @@ pub struct OperatorChannelConfig {
     pub trigger: Option<SlackPersonalTrigger>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mode: Option<SlackPersonalResponse>,
+    /// Exact Slack channel-ID overrides. The scalar response mode remains the
+    /// default for every channel absent from this map (spec 0202).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub response_mode_overrides: BTreeMap<String, SlackPersonalResponse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_after_secs: Option<u64>,
     /// Whether an auto-sent reply carries the agent marker. `None` reads as
@@ -390,6 +394,7 @@ impl Default for OperatorChannelConfig {
             mcp_command: None,
             trigger: None,
             response_mode: None,
+            response_mode_overrides: BTreeMap::new(),
             auto_after_secs: None,
             disclosure: None,
             poll_interval_secs: None,
@@ -949,12 +954,13 @@ pub fn put_channel(
             if params.channel.mcp_command.is_some()
                 || params.channel.trigger.is_some()
                 || params.channel.response_mode.is_some()
+                || params.channel.response_mode_overrides.is_some()
                 || params.channel.auto_after_secs.is_some()
                 || params.channel.disclosure.is_some()
                 || params.channel.poll_interval_secs.is_some()
             {
                 return Err(anyhow!(
-                    "mcp_command, trigger, response_mode, auto_after_secs, disclosure, and poll_interval_secs apply to slack-personal channels only"
+                    "mcp_command, trigger, response_mode, response_mode_overrides, auto_after_secs, disclosure, and poll_interval_secs apply to slack-personal channels only"
                 ));
             }
         }
@@ -995,6 +1001,7 @@ pub fn put_channel(
                 || params.channel.mcp_command.is_some()
                 || params.channel.trigger.is_some()
                 || params.channel.response_mode.is_some()
+                || params.channel.response_mode_overrides.is_some()
                 || params.channel.auto_after_secs.is_some()
                 || params.channel.disclosure.is_some()
                 || params.channel.poll_interval_secs.is_some()
@@ -1019,6 +1026,13 @@ pub fn put_channel(
     let response_mode = match params.channel.response_mode.as_deref() {
         Some(value) => Some(SlackPersonalResponse::parse(value)?),
         None => existing.as_ref().and_then(|channel| channel.response_mode),
+    };
+    let response_mode_overrides = match params.channel.response_mode_overrides {
+        Some(overrides) => parse_response_mode_overrides(overrides)?,
+        None => existing
+            .as_ref()
+            .map(|channel| channel.response_mode_overrides.clone())
+            .unwrap_or_default(),
     };
     let auto_after_secs = params.channel.auto_after_secs.or_else(|| {
         existing
@@ -1083,6 +1097,7 @@ pub fn put_channel(
         mcp_command,
         trigger,
         response_mode,
+        response_mode_overrides,
         auto_after_secs,
         disclosure,
         poll_interval_secs,
@@ -1327,6 +1342,29 @@ fn normalize_allowlist(values: Vec<String>) -> Vec<String> {
     values
 }
 
+fn parse_response_mode_overrides(
+    overrides: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, SlackPersonalResponse>> {
+    let mut parsed = BTreeMap::new();
+    for (channel, mode) in overrides {
+        let normalized = channel.trim();
+        if normalized.is_empty() {
+            return Err(anyhow!(
+                "response_mode_overrides channel IDs must not be empty"
+            ));
+        }
+        let mode = SlackPersonalResponse::parse(&mode).with_context(|| {
+            format!("invalid response_mode_overrides entry for channel {normalized:?}")
+        })?;
+        if parsed.insert(normalized.to_string(), mode).is_some() {
+            return Err(anyhow!(
+                "response_mode_overrides contains duplicate channel ID {normalized:?}"
+            ));
+        }
+    }
+    Ok(parsed)
+}
+
 fn channel_summary(
     id: String,
     config: &OperatorChannelConfig,
@@ -1384,6 +1422,13 @@ fn channel_summary(
                 .unwrap_or_default()
                 .as_str()
                 .to_string()
+        }),
+        response_mode_overrides: personal.then(|| {
+            config
+                .response_mode_overrides
+                .iter()
+                .map(|(channel, mode)| (channel.clone(), mode.as_str().to_string()))
+                .collect()
         }),
         auto_after_secs: personal.then(|| {
             config
@@ -1571,7 +1616,8 @@ pub(crate) fn slack_personal_config(
         mcp_command,
         idle_poll_ceiling: std::time::Duration::from_secs(poll_secs),
         trigger: channel.trigger.unwrap_or_default(),
-        response: channel.response_mode.unwrap_or_default(),
+        default_response: channel.response_mode.unwrap_or_default(),
+        response_overrides: channel.response_mode_overrides.clone(),
         auto_after: std::time::Duration::from_secs(
             channel
                 .auto_after_secs
@@ -3106,7 +3152,11 @@ mod tests {
                 kind: "slack-personal".into(),
                 mcp_command: Some("npx my-slack-mcp".into()),
                 trigger: Some("all".into()),
-                response_mode: Some("auto-after".into()),
+                response_mode: Some("draft".into()),
+                response_mode_overrides: Some(BTreeMap::from([
+                    (" C-sensitive ".into(), "auto-after".into()),
+                    ("D-private".into(), "auto".into()),
+                ])),
                 auto_after_secs: Some(45),
                 disclosure: Some(false),
                 poll_interval_secs: Some(30),
@@ -3120,7 +3170,14 @@ mod tests {
         assert_eq!(result.channel.kind, "slack-personal");
         assert_eq!(result.channel.mcp_command.as_deref(), Some("npx my-slack-mcp"));
         assert_eq!(result.channel.trigger.as_deref(), Some("all"));
-        assert_eq!(result.channel.response_mode.as_deref(), Some("auto-after"));
+        assert_eq!(result.channel.response_mode.as_deref(), Some("draft"));
+        assert_eq!(
+            result.channel.response_mode_overrides,
+            Some(BTreeMap::from([
+                ("C-sensitive".into(), "auto-after".into()),
+                ("D-private".into(), "auto".into()),
+            ]))
+        );
         assert_eq!(result.channel.auto_after_secs, Some(45));
         assert_eq!(result.channel.disclosure, Some(false));
         assert_eq!(result.channel.poll_interval_secs, Some(30));
@@ -3139,7 +3196,12 @@ mod tests {
         .unwrap();
         assert_eq!(edited.channel.mcp_command.as_deref(), Some("npx my-slack-mcp"));
         assert_eq!(edited.channel.trigger.as_deref(), Some("all"));
-        assert_eq!(edited.channel.response_mode.as_deref(), Some("auto-after"));
+        assert_eq!(edited.channel.response_mode.as_deref(), Some("draft"));
+        assert_eq!(
+            edited.channel.response_mode_overrides,
+            result.channel.response_mode_overrides,
+            "omitting the map must preserve its stored overrides"
+        );
         assert_eq!(edited.channel.auto_after_secs, Some(45));
         assert_eq!(edited.channel.disclosure, Some(false));
         assert_eq!(edited.channel.poll_interval_secs, Some(30));
@@ -3158,6 +3220,60 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("mcp_command"), "{error}");
+    }
+
+    #[test]
+    fn slack_personal_response_mode_overrides_are_validated_and_can_be_cleared() {
+        let (_config, operators) = slack_channel_fixture();
+        let error = put_channel(
+            &operators,
+            personal_put(construct_protocol::OperatorChannelPut {
+                id: "me".into(),
+                kind: "slack-personal".into(),
+                mcp_command: Some("cmd".into()),
+                response_mode_overrides: Some(BTreeMap::from([(
+                    "C1".into(),
+                    "surprise-me".into(),
+                )])),
+                ..Default::default()
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("channel \"C1\""),
+            "{error:#}"
+        );
+
+        let created = put_channel(
+            &operators,
+            personal_put(construct_protocol::OperatorChannelPut {
+                id: "me".into(),
+                kind: "slack-personal".into(),
+                mcp_command: Some("cmd".into()),
+                response_mode_overrides: Some(BTreeMap::from([(
+                    "C1".into(),
+                    "auto".into(),
+                )])),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(created.channel.response_mode_overrides.unwrap().len(), 1);
+
+        let cleared = put_channel(
+            &operators,
+            personal_put(construct_protocol::OperatorChannelPut {
+                id: "me".into(),
+                kind: "slack-personal".into(),
+                response_mode_overrides: Some(BTreeMap::new()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            cleared.channel.response_mode_overrides,
+            Some(BTreeMap::new())
+        );
     }
 
     #[test]
@@ -3271,12 +3387,28 @@ auto_after_secs = 17
         // The safe posture is the default posture: DMs only, drafts only,
         // disclosure on (spec 0202).
         assert_eq!(config.trigger, SlackPersonalTrigger::Dm);
-        assert_eq!(config.response, SlackPersonalResponse::Draft);
+        assert_eq!(config.default_response, SlackPersonalResponse::Draft);
+        assert!(config.response_overrides.is_empty());
         assert_eq!(config.auto_after, std::time::Duration::from_secs(60));
         assert!(config.disclosure);
         assert_eq!(
             config.idle_poll_ceiling,
             std::time::Duration::from_secs(20)
+        );
+
+        let overridden = OperatorChannelConfig {
+            response_mode: Some(SlackPersonalResponse::Auto),
+            response_mode_overrides: BTreeMap::from([(
+                "C-sensitive".into(),
+                SlackPersonalResponse::Draft,
+            )]),
+            ..channel.clone()
+        };
+        let config = slack_personal_config("chat", "me", &overridden).expect("config");
+        assert_eq!(config.default_response, SlackPersonalResponse::Auto);
+        assert_eq!(
+            config.response_overrides.get("C-sensitive"),
+            Some(&SlackPersonalResponse::Draft)
         );
 
         // Disabled channels and channels without a command produce no task.

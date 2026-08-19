@@ -37,7 +37,7 @@ use super::{SlackPersonalResponse, SlackPersonalTrigger};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -47,12 +47,22 @@ pub(crate) struct SlackPersonalConfig {
     pub(super) mcp_command: String,
     pub(super) idle_poll_ceiling: std::time::Duration,
     pub(super) trigger: SlackPersonalTrigger,
-    pub(super) response: SlackPersonalResponse,
+    pub(super) default_response: SlackPersonalResponse,
+    pub(super) response_overrides: BTreeMap<String, SlackPersonalResponse>,
     pub(super) auto_after: std::time::Duration,
     pub(super) disclosure: bool,
     pub(super) allowed_workspaces: Vec<String>,
     pub(super) allowed_channels: Vec<String>,
     pub(super) thread_context: usize,
+}
+
+impl SlackPersonalConfig {
+    fn response_for_channel(&self, channel: &str) -> SlackPersonalResponse {
+        self.response_overrides
+            .get(channel)
+            .copied()
+            .unwrap_or(self.default_response)
+    }
 }
 
 /// Appended to every auto-sent reply unless the user turned disclosure off.
@@ -505,7 +515,7 @@ async fn deliver_reply(
     trace: &PersonalTrace,
     reply: &str,
 ) -> Result<()> {
-    match config.response {
+    match config.response_for_channel(&trace.channel) {
         SlackPersonalResponse::Draft => {
             let client = backend.get()?;
             client
@@ -731,7 +741,8 @@ mod tests {
             mcp_command: "fake".into(),
             idle_poll_ceiling: std::time::Duration::from_secs(20),
             trigger: SlackPersonalTrigger::Dm,
-            response: SlackPersonalResponse::Draft,
+            default_response: SlackPersonalResponse::Draft,
+            response_overrides: BTreeMap::new(),
             auto_after: std::time::Duration::from_secs(60),
             disclosure: true,
             allowed_workspaces: Vec::new(),
@@ -819,6 +830,39 @@ mod tests {
             is_self: false,
             is_self_dm: false,
         }
+    }
+
+    #[test]
+    fn channel_response_mode_overrides_the_default_only_for_an_exact_match() {
+        let mut config = config();
+        config.default_response = SlackPersonalResponse::Draft;
+        config
+            .response_overrides
+            .insert("C-sensitive".into(), SlackPersonalResponse::AutoAfter);
+        config
+            .response_overrides
+            .insert("D-private".into(), SlackPersonalResponse::Auto);
+
+        assert_eq!(
+            config.response_for_channel("C-sensitive"),
+            SlackPersonalResponse::AutoAfter,
+            "an exact CHANNEL=auto-after override wins over the global default"
+        );
+        assert_eq!(
+            config.response_for_channel("C-other"),
+            SlackPersonalResponse::Draft,
+            "channels without an override inherit the global response mode"
+        );
+        assert_eq!(
+            config.response_for_channel("c-sensitive"),
+            SlackPersonalResponse::Draft,
+            "Slack channel IDs are exact, case-sensitive keys"
+        );
+        assert_eq!(
+            config.response_for_channel("D-private"),
+            SlackPersonalResponse::Auto,
+            "DM conversation IDs may be overridden through the same map"
+        );
     }
 
     #[test]
@@ -964,7 +1008,7 @@ mod tests {
         ]))
         .await;
         let mut config = config();
-        config.response = SlackPersonalResponse::AutoAfter;
+        config.default_response = SlackPersonalResponse::AutoAfter;
         config.auto_after = std::time::Duration::from_millis(30);
         config.disclosure = false;
         let sent = SentRegistry::default();
@@ -1002,7 +1046,7 @@ mod tests {
         let (backend, calls) =
             backend_with_thread(json!([{"ts": "2.000001", "is_self": true}])).await;
         let mut config = config();
-        config.response = SlackPersonalResponse::AutoAfter;
+        config.default_response = SlackPersonalResponse::AutoAfter;
         config.auto_after = std::time::Duration::from_millis(1);
         let sent = SentRegistry::default();
         let trace = PersonalTrace {
