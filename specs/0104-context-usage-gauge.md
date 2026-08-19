@@ -69,3 +69,7 @@ the different question "how full is this conversation right now?".
 - A brand-new session and a bare shell show no gauge.
 - After a harness-native `/clear`, the gauge disappears until the
   first call of the fresh conversation reports again.
+- A Smith session using Ollama reports the context allocation of the loaded
+  model instance (for example 32,768), not the model's architectural maximum
+  or a static per-provider guess. Clients defensively cap malformed ratios at
+  100%, but adapters remain responsible for reporting the correct denominator.

@@ -10,6 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 pub struct Ollama {
     client: reqwest::Client,
@@ -36,6 +37,74 @@ impl Ollama {
             base_url,
         })
     }
+
+    /// Read the allocation of an already-loaded model. Ollama's model
+    /// metadata exposes the architectural maximum, but `/api/ps` is the
+    /// source of truth for the context length selected by this server.
+    async fn loaded_context_window_tokens(&self, model: &str) -> Option<u64> {
+        let url = format!("{}/api/ps", self.base_url);
+        let response = self
+            .client
+            .get(url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()?;
+        context_window_from_ps(&response, model)
+    }
+
+    /// Ensure the model is loaded without running inference. This pays the
+    /// same load cost the imminent chat request would pay, then lets us read
+    /// the server's effective context allocation before pruning history.
+    async fn load_model(&self, model: &str) -> bool {
+        let url = format!("{}/api/generate", self.base_url);
+        self.client
+            .post(url)
+            .timeout(Duration::from_secs(60))
+            .json(&json!({
+                "model": model,
+                "stream": false,
+            }))
+            .send()
+            .await
+            .ok()
+            .and_then(|response| response.error_for_status().ok())
+            .is_some()
+    }
+}
+
+fn normalized_model_name(model: &str) -> String {
+    if model.contains(':') {
+        model.to_ascii_lowercase()
+    } else {
+        format!("{}:latest", model.to_ascii_lowercase())
+    }
+}
+
+fn context_window_from_ps(response: &Value, requested_model: &str) -> Option<u64> {
+    let requested = normalized_model_name(requested_model);
+    response
+        .get("models")?
+        .as_array()?
+        .iter()
+        .find(|loaded| {
+            ["name", "model"].iter().any(|field| {
+                loaded
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .map(normalized_model_name)
+                    .as_deref()
+                    == Some(requested.as_str())
+            })
+        })?
+        .get("context_length")?
+        .as_u64()
+        .filter(|window| *window > 0)
 }
 
 fn role_str(r: Role) -> &'static str {
@@ -119,6 +188,16 @@ fn tools_to_ollama(tools: &[ToolSpec]) -> Vec<Value> {
 impl LlmProvider for Ollama {
     fn name(&self) -> &str {
         "ollama"
+    }
+
+    async fn effective_context_window_tokens(&self, model: &str) -> Option<u64> {
+        if let Some(window) = self.loaded_context_window_tokens(model).await {
+            return Some(window);
+        }
+        if !self.load_model(model).await {
+            return None;
+        }
+        self.loaded_context_window_tokens(model).await
     }
 
     async fn complete(
@@ -243,5 +322,76 @@ impl LlmProvider for Ollama {
             usage,
             reasoning_items: Vec::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ps_context_matches_implicit_latest_name() {
+        let response = json!({
+            "models": [{
+                "name": "qwen3.8:latest",
+                "model": "qwen3.8:latest",
+                "context_length": 32_768
+            }]
+        });
+        assert_eq!(context_window_from_ps(&response, "qwen3.8"), Some(32_768));
+    }
+
+    #[test]
+    fn ps_context_selects_requested_model_and_rejects_zero() {
+        let response = json!({
+            "models": [
+                {"name": "other:latest", "context_length": 65_536},
+                {"model": "qwen3.8:custom", "context_length": 0}
+            ]
+        });
+        assert_eq!(context_window_from_ps(&response, "qwen3.8:custom"), None);
+        assert_eq!(context_window_from_ps(&response, "missing"), None);
+    }
+
+    #[tokio::test]
+    async fn effective_context_loads_model_then_reads_runtime_allocation() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let responses = [
+                ("GET /api/ps ", r#"{"models":[]}"#),
+                (
+                    "POST /api/generate ",
+                    r#"{"model":"qwen3.8","response":"","done":true,"done_reason":"load"}"#,
+                ),
+                (
+                    "GET /api/ps ",
+                    r#"{"models":[{"name":"qwen3.8:latest","context_length":32768}]}"#,
+                ),
+            ];
+            for (expected_request, body) in responses {
+                let (mut tcp, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 8_192];
+                let read = tcp.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                assert!(request.starts_with(expected_request), "{request}");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                tcp.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let provider = Ollama::with_config(Some(format!("http://{addr}"))).unwrap();
+        assert_eq!(
+            provider.effective_context_window_tokens("qwen3.8").await,
+            Some(32_768)
+        );
+        server.await.unwrap();
     }
 }

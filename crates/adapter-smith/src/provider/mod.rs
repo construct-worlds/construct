@@ -460,6 +460,14 @@ mod overflow_tests {
 pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
 
+    /// Return the context window the provider will actually use for this
+    /// model, when it exposes that runtime value. Providers whose effective
+    /// allocation cannot be discovered cheaply leave this unknown and let
+    /// Smith's learned-limit fallback handle budgeting.
+    async fn effective_context_window_tokens(&self, _model: &str) -> Option<u64> {
+        None
+    }
+
     /// Run one turn against the model. Implementations stream the
     /// response and push deltas through `sink` so the user sees the
     /// assistant text flowing as it arrives.

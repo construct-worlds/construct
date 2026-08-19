@@ -595,6 +595,7 @@ pub async fn run(
     // are retained for the context breakdown (spec 0156).
     let prompt_sections = context::PromptSections::assemble(&cwd);
     let system_prompt: String = prompt_sections.prompt.clone();
+    let fixed_context_tokens = prompt_sections.fixed_tokens(&specs);
 
     let provider_name = spec.provider_name();
     // User-facing label (`@profile` when from config, else the wire name);
@@ -609,6 +610,8 @@ pub async fn run(
     // resolves its model once, so this never moves.
     let current_model_spec = startup_model_spec.clone();
     let provider = spec.provider;
+    let mut provider_context_window = None;
+    let mut provider_context_checked = false;
     // Per-model learned token limits — adapts on overflow errors
     // and bumps upward on successful probe calls. Shared across
     // all construct sessions on this machine via state_dir.
@@ -832,20 +835,26 @@ pub async fn run(
             //      so the conversation can spill above the safe
             //      cap and exercise the actual model limit.
             let now_ms = chrono::Utc::now().timestamp_millis();
+            if !provider_context_checked {
+                provider_context_window = provider.effective_context_window_tokens(&model).await;
+                provider_context_checked = true;
+            }
             let hardcoded_cap = context::context_window_tokens(provider_name, &model);
             let learned = limits.get(provider_name, &model);
-            let est = context::estimate_tokens(&messages) as u64;
-            let is_probe =
-                learned.is_some() && limits.should_probe(provider_name, &model, est, now_ms);
-            let effective_cap = match learned {
-                Some(lim) => lim,
-                None => hardcoded_cap as u64,
-            };
-            let budget = if is_probe {
-                ((effective_cap as f64) * crate::model_limits::PROBE_OVERFLOW_RATIO) as usize
+            let est =
+                fixed_context_tokens.saturating_add(context::estimate_tokens(&messages) as u64);
+            let is_probe = provider_context_window.is_none()
+                && learned.is_some()
+                && limits.should_probe(provider_name, &model, est, now_ms);
+            let effective_cap = provider_context_window
+                .or(learned)
+                .unwrap_or(hardcoded_cap as u64);
+            let utilization = if is_probe {
+                crate::model_limits::PROBE_OVERFLOW_RATIO
             } else {
-                ((effective_cap as f64) * context::UTILIZATION) as usize
+                context::UTILIZATION
             };
+            let budget = context::message_budget(effective_cap, utilization, fixed_context_tokens);
             // Auto-compact pass before the destructive prune. Headless
             // sessions don't get a `/compact` UI, so this is the only
             // way summaries get generated outside of an interactive
@@ -854,6 +863,7 @@ pub async fn run(
                 match crate::compact::maybe_auto_compact(
                     &mut messages,
                     effective_cap,
+                    fixed_context_tokens,
                     provider.as_ref(),
                     &model,
                 )
@@ -912,7 +922,11 @@ pub async fn run(
                             effective_cap,
                             now_ms,
                         );
-                        let retry_budget = ((new_limit as f64) * context::UTILIZATION) as usize;
+                        let retry_budget = context::message_budget(
+                            new_limit,
+                            context::UTILIZATION,
+                            fixed_context_tokens,
+                        );
                         if context::prune_to_budget(&mut messages, retry_budget) > 0 {
                             reset_context_serve(&tool_ctx);
                         }
@@ -975,9 +989,8 @@ pub async fn run(
                 tokens_cached: turn.usage.cached_tokens,
                 model: Some(current_model_spec.clone()),
             });
-            // Context gauge (spec 0104): this call's prompt side against the
-            // limit smith itself budgets requests with (learned, else the
-            // hardcoded per-model window).
+            // Context gauge (spec 0104): prefer a provider-reported runtime
+            // allocation; otherwise retain Smith's learned/static fallback.
             if turn.usage.input_tokens > 0 {
                 emit.emit(SessionEvent::ContextUsage {
                     used_tokens: turn.usage.input_tokens,
