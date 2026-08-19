@@ -456,13 +456,11 @@ impl App {
                     return;
                 }
                 if harness == "operator" {
-                    self.prompt = Some(Prompt {
-                        prompt: "Operator name: ".to_string(),
-                        input: String::new(),
-                        cursor: 0,
-                        intent: PromptIntent::NewOperatorName,
-                        error: None,
-                    });
+                    // Straight into the draft editor: the Name field with its
+                    // dimmed suggested placeholder is where the name is typed,
+                    // the same shape as naming a new channel.
+                    let suggested = self.suggested_operator_name();
+                    self.open_new_operator_view(suggested);
                     return;
                 }
                 let cwd = std::env::current_dir()

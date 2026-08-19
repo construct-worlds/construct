@@ -8599,6 +8599,13 @@ fn render_operator_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, fo
     // A trailing `*` is the whole unsaved-state indicator: the definition on
     // screen differs from the one the daemon has (spec 0175).
     let unsaved = if editing && dialog.is_dirty() { "*" } else { "" };
+    // While a create's name is still empty the title borrows the placeholder,
+    // so the pane is never captioned "operator: ".
+    let display_name = if summary.name.is_empty() && !dialog.name_placeholder.is_empty() {
+        dialog.name_placeholder.clone()
+    } else {
+        summary.name.clone()
+    };
     let border_style = pane_border_style(&app.theme, focused);
     let title = if dialog.channel_editor.is_some() {
         const BACK_LABEL: &str = "< back";
@@ -8624,12 +8631,12 @@ fn render_operator_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, fo
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("  ⛓︎ operator: {}{unsaved} ", summary.name),
+                format!("  ⛓︎ operator: {}{unsaved} ", display_name),
                 border_style,
             ),
         ])
     } else {
-        Line::from(format!(" ⛓︎ operator: {}{unsaved} ", summary.name))
+        Line::from(format!(" ⛓︎ operator: {}{unsaved} ", display_name))
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -8699,9 +8706,20 @@ fn render_operator_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, fo
         } else {
             style
         };
+        // The name of a create starts empty and shows its suggestion dimmed.
+        let placeholder = (index == 0 && dialog.mode == crate::app::OperatorDialogMode::Create)
+            .then_some(dialog.name_placeholder.as_str());
+        let value_span = editor_value_span(
+            app.theme.dim,
+            &value,
+            placeholder,
+            selected,
+            crate::app::operator_field_is_text(index) && !locked,
+            value_style,
+        );
         field_lines.push(Line::from(vec![
             Span::styled(format!("{marker} {label:<12} "), style),
-            Span::styled(value, value_style),
+            value_span,
         ]));
     }
 
@@ -9097,6 +9115,35 @@ fn render_operator_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, fo
     }
 }
 
+/// The value cell of one editor form row.
+///
+/// A field that is empty but has a placeholder shows the placeholder dimmed —
+/// a suggestion on display, not typed content. While a free-text field is
+/// selected its value is underlined and padded to a minimum input width, so
+/// the rows that accept typing are visibly inputs next to the rows that
+/// cycle or toggle.
+fn editor_value_span(
+    dim: Color,
+    value: &str,
+    placeholder: Option<&str>,
+    selected: bool,
+    free_text: bool,
+    style: Style,
+) -> Span<'static> {
+    const INPUT_MIN_WIDTH: usize = 24;
+    let placeholder = placeholder.filter(|text| value.is_empty() && !text.is_empty());
+    let text = placeholder.unwrap_or(value).to_string();
+    let mut style = style;
+    if placeholder.is_some() {
+        style = style.fg(dim);
+    }
+    if selected && free_text {
+        style = style.add_modifier(Modifier::UNDERLINED);
+        return Span::styled(format!("{text:<INPUT_MIN_WIDTH$}"), style);
+    }
+    Span::styled(text, style)
+}
+
 pub(crate) fn render_operator_channel_editor(
     f: &mut Frame,
     area: Rect,
@@ -9235,10 +9282,22 @@ pub(crate) fn render_operator_channel_editor(
         } else {
             Style::default().fg(app.theme.text)
         };
-        fields.push(Line::from(Span::styled(
-            format!("{marker} {label:<14} {value}"),
+        // A created channel's ID starts empty and shows its suggestion dimmed.
+        let placeholder = (index == 0
+            && editor.mode == crate::app::OperatorChannelDialogMode::Create)
+            .then_some(editor.id_placeholder.as_str());
+        let value_span = editor_value_span(
+            app.theme.dim,
+            value,
+            placeholder,
+            selected,
+            crate::app::channel_field_is_text(&editor.channel.kind, index) && !locked,
             style,
-        )));
+        );
+        fields.push(Line::from(vec![
+            Span::styled(format!("{marker} {label:<14} "), style),
+            value_span,
+        ]));
     }
     let columns = Layout::default()
         .direction(Direction::Horizontal)

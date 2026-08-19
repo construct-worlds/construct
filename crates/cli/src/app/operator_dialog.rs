@@ -165,6 +165,10 @@ pub struct OperatorDialog {
     pub picker_selected: usize,
     pub picker_scroll: usize,
     pub channel_editor: Option<OperatorChannelDialog>,
+    /// Suggested name shown dimmed while a created operator's name is still
+    /// empty. It is a suggestion, not typed content — but saving without
+    /// typing adopts it, so the one-keystroke create flow keeps working.
+    pub name_placeholder: String,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +182,9 @@ pub struct OperatorChannelDialog {
     pub confirm_delete: bool,
     pub app_token: String,
     pub bot_token: String,
+    /// Suggested channel ID, shown dimmed while the created channel's ID is
+    /// still empty and adopted by a save that never typed one.
+    pub id_placeholder: String,
 }
 
 /// Address-level actions exposed by a channel publication. Keeping this typed
@@ -250,6 +257,30 @@ const HTTP_FIELD_STATE: usize = 3;
 
 fn channel_field_count(editor: &OperatorChannelDialog) -> usize {
     channel_state_field(&editor.channel.kind) + 1
+}
+
+/// Whether an operator-dialog field is edited as free text. Harness, model,
+/// and session mode are picker-backed; routing cycles; state toggles.
+pub fn operator_field_is_text(field: usize) -> bool {
+    matches!(field, 0 | 1 | 5)
+}
+
+/// Whether a channel-editor field is edited as free text for this kind
+/// (ID's create-only lock is the caller's to apply). The renderer uses this
+/// to underline exactly the fields that accept typing, so it must agree with
+/// the key handling above.
+pub fn channel_field_is_text(kind: &str, field: usize) -> bool {
+    if field == 0 {
+        return true;
+    }
+    match kind {
+        "slack" => matches!(field, 2..=5 | SLACK_FIELD_THREAD_CONTEXT),
+        "slack-personal" => matches!(
+            field,
+            2..=4 | PERSONAL_FIELD_POLL | PERSONAL_FIELD_THREAD_CONTEXT
+        ),
+        _ => field == 2,
+    }
 }
 
 /// The two Slack kinds share the allowlist fields but at different indexes,
@@ -339,6 +370,7 @@ impl OperatorDialog {
             picker_selected: 0,
             picker_scroll: 0,
             channel_editor: None,
+            name_placeholder: String::new(),
         }
     }
 
@@ -651,11 +683,27 @@ impl App {
         self.show_terminal_scrollbar();
     }
 
+    /// The name a fresh operator draft suggests as its placeholder: the first
+    /// of `operator`, `operator-2`, … no saved definition uses.
+    pub fn suggested_operator_name(&self) -> String {
+        if !self.operators.iter().any(|op| op.name == "operator") {
+            return "operator".to_string();
+        }
+        (2..)
+            .map(|index| format!("operator-{index}"))
+            .find(|candidate| !self.operators.iter().any(|op| &op.name == candidate))
+            .expect("some suffix is free")
+    }
+
     pub fn open_new_operator_view(&mut self, suggested: impl Into<String>) {
         let suggested = suggested.into();
         self.dismiss_surfaces_over_operator_view();
-        self.select_operator(suggested.clone());
-        let operator = default_operator(self, suggested);
+        // The name starts empty and shows the suggestion as a placeholder:
+        // prefilling it would make the first keystroke append to a name the
+        // user never typed. The pane is bound to the draft by the (empty)
+        // name in the editor, exactly as it follows every later keystroke.
+        self.select_operator(String::new());
+        let operator = default_operator(self, String::new());
         self.operator_dialog = Some(OperatorDialog {
             mode: OperatorDialogMode::Create,
             saved: operator.clone(),
@@ -666,6 +714,7 @@ impl App {
             picker_selected: 0,
             picker_scroll: 0,
             channel_editor: None,
+            name_placeholder: suggested,
         });
     }
 
@@ -774,7 +823,9 @@ impl App {
             mode: OperatorChannelDialogMode::Create,
             operator_name: dialog.operator.name.clone(),
             channel: OperatorChannelSummary {
-                id,
+                // Empty until typed; `id` becomes the dimmed placeholder and
+                // is adopted by a save that never names the channel.
+                id: String::new(),
                 kind: "http".to_string(),
                 enabled: true,
                 port: Some(port),
@@ -804,6 +855,7 @@ impl App {
             confirm_delete: false,
             app_token: String::new(),
             bot_token: String::new(),
+            id_placeholder: id,
         });
         true
     }
@@ -841,6 +893,7 @@ impl App {
             confirm_delete: false,
             app_token: String::new(),
             bot_token: String::new(),
+            id_placeholder: String::new(),
         });
         true
     }
@@ -1225,6 +1278,19 @@ impl App {
     }
 
     async fn save_operator_channel(&mut self, rotate_secret: bool) {
+        // Like the operator name: an untyped ID adopts its placeholder.
+        if let Some(editor) = self
+            .operator_dialog
+            .as_mut()
+            .and_then(|dialog| dialog.channel_editor.as_mut())
+        {
+            if editor.mode == OperatorChannelDialogMode::Create
+                && editor.channel.id.is_empty()
+                && !editor.id_placeholder.is_empty()
+            {
+                editor.channel.id = editor.id_placeholder.clone();
+            }
+        }
         let Some(parent) = self.operator_dialog.as_ref() else {
             return;
         };
@@ -1616,12 +1682,42 @@ impl App {
     }
 
     async fn save_operator_dialog(&mut self) {
+        // Saving a create whose name was never typed adopts the placeholder,
+        // keeping the one-keystroke flow the prefilled default used to give.
+        // Adopted before the snapshot below so the editor, the selection that
+        // binds this pane to the draft, and the save all agree on the name.
+        if self.operator_dialog.as_ref().is_some_and(|dialog| {
+            dialog.mode == OperatorDialogMode::Create
+                && dialog.operator.name.is_empty()
+                && !dialog.name_placeholder.is_empty()
+        }) {
+            let adopted = self
+                .operator_dialog
+                .as_ref()
+                .map(|dialog| dialog.name_placeholder.clone())
+                .unwrap_or_default();
+            if let Some(dialog) = self.operator_dialog.as_mut() {
+                dialog.operator.name = adopted.clone();
+            }
+            if self.selection.operator_name() == Some("") {
+                self.selection = Selection::Operator(adopted);
+                self.sync_active_window_selection();
+            }
+        }
         let Some(dialog) = self.operator_dialog.clone() else {
             return;
         };
         let operator = dialog.operator;
+        // Uniqueness used to be enforced by the name prompt this editor
+        // replaced; without it here, saving a create would silently overwrite
+        // the existing definition of the same name.
+        let name_taken = dialog.mode == OperatorDialogMode::Create
+            && self.operators.iter().any(|op| op.name == operator.name);
+        let duplicate_note = format!("operator '{}' already exists", operator.name);
         let validation_error = if !valid_operator_name(&operator.name) {
             Some("Name must be 1–32 lowercase letters, digits, or interior hyphens.")
+        } else if name_taken {
+            Some(duplicate_note.as_str())
         } else if operator.harness.trim().is_empty() {
             Some("Harness cannot be empty.")
         } else if operator.cwd.trim().is_empty() {
