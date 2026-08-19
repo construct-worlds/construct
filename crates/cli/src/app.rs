@@ -31853,16 +31853,18 @@ mod tests {
     }
 
     /// Differential regression harness for playbook-editor cursor/selection
-    /// drift: for every alphanumeric char in each corpus doc, paint the real
-    /// pipeline (`render_playbook_markdown_lines` + ratatui
+    /// drift: for every alphanumeric char (including CJK) in each corpus doc,
+    /// paint the real pipeline (`render_playbook_markdown_lines` + ratatui
     /// `Wrap { trim: false }`) into a TestBackend and assert the glyph at the
     /// cell where `playbook_cursor_visual_pos` places that char's cursor is the
     /// char itself. Any divergence between the wrap/cursor math and what
     /// ratatui actually paints — the drift the user sees as "the caret is not
     /// where edits land" — shows up as a mismatch. The corpus deliberately
     /// covers the classes that have drifted before: VS16/ZWJ emoji, tabs,
-    /// NBSP, CJK at wrap boundaries, `:::` clip fences, and smart-clip chips
-    /// in heading/bullet/plain lines.
+    /// NBSP, CJK glyphs at wrap boundaries, `:::` clip fences, and smart-clip
+    /// chips in heading/bullet/plain lines. Checking Unicode alphanumerics is
+    /// intentional: an ASCII-only predicate would notice downstream drift but
+    /// never verify the wide CJK cell under the caret itself.
     #[tokio::test]
     async fn playbook_cursor_math_matches_painted_buffer_differential() {
         let (app, _dir, server) = empty_app().await;
@@ -31903,7 +31905,7 @@ mod tests {
             ("emoji-basic", "smile \u{1f600} wide and \u{1f44d} thumb\nZEND"),
             (
                 "cjk",
-                "\u{6df7}\u{5408} CJK \u{6587}\u{5b57} mixed with latin words that wrap somewhere\nZEND",
+                "混合 CJK 文字 mixed with latin words that wrap somewhere\n日本語の長い行は狭い幅で複数行に折り返される\n- 中文列表項目也折り返す\nZEND",
             ),
             (
                 "clip-fences",
@@ -31981,7 +31983,7 @@ mod tests {
                 let buffer = term.backend().buffer();
 
                 for (offset, ch) in doc.chars().enumerate() {
-                    if !ch.is_ascii_alphanumeric() || in_clip[offset] {
+                    if !ch.is_alphanumeric() || in_clip[offset] {
                         continue;
                     }
                     let (row, col) =
@@ -32028,6 +32030,107 @@ mod tests {
             failures.len(),
             failures.join("\n")
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn playbook_cjk_edits_keep_the_caret_on_the_painted_character() {
+        fn assert_caret_glyph(app: &App, expected: &str, width: u16) {
+            let popup = app.playbook_popup.as_ref().expect("playbook popup");
+            let rows = crate::ui::playbook_total_visual_rows(
+                Some(app),
+                &popup.buffer,
+                width as usize,
+            );
+            let height = (rows + 2) as u16;
+            let backend = ratatui::backend::TestBackend::new(width, height);
+            let mut term = ratatui::Terminal::new(backend).expect("terminal");
+            term.draw(|f| {
+                let lines =
+                    crate::ui::render_playbook_markdown_lines_for_test(app, &popup.buffer);
+                let para = ratatui::widgets::Paragraph::new(lines)
+                    .wrap(ratatui::widgets::Wrap { trim: false });
+                f.render_widget(para, Rect::new(0, 0, width, height));
+            })
+            .expect("draw");
+
+            let (row, col) = crate::ui::playbook_cursor_visual_pos(
+                Some(app),
+                &popup.buffer,
+                popup.cursor,
+                width as usize,
+            );
+            let painted = term
+                .backend()
+                .buffer()
+                .cell((col as u16, row as u16))
+                .map(|cell| cell.symbol())
+                .unwrap_or_default();
+            assert_eq!(
+                painted, expected,
+                "buffer {:?}, cursor {} mapped to ({row}, {col})",
+                popup.buffer, popup.cursor
+            );
+        }
+
+        let (mut app, _dir, server) = empty_app().await;
+        app.playbook_popup = Some(playbook_popup_for_test("s1", "計画進捗報告", 2));
+        app.layout.playbook_inner_area = Some(Rect::new(0, 0, 5, 12));
+
+        // Width 5 fits only two CJK glyphs per row. The initial cursor is at
+        // the first glyph of the continuation row.
+        assert_caret_glyph(&app, "進", 5);
+
+        app.insert_playbook_text("新");
+        {
+            let popup = app.playbook_popup.as_ref().unwrap();
+            assert_eq!(popup.buffer, "計画新進捗報告");
+            assert_eq!(popup.cursor, 3);
+        }
+        assert_caret_glyph(&app, "進", 5);
+
+        app.move_playbook_cursor(-1);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 2);
+        assert_caret_glyph(&app, "新", 5);
+
+        app.move_playbook_cursor(1);
+        assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 3);
+        assert_caret_glyph(&app, "進", 5);
+
+        app.delete_playbook_back();
+        {
+            let popup = app.playbook_popup.as_ref().unwrap();
+            assert_eq!(popup.buffer, "計画進捗報告");
+            assert_eq!(popup.cursor, 2);
+        }
+        assert_caret_glyph(&app, "進", 5);
+
+        app.delete_playbook_forward();
+        {
+            let popup = app.playbook_popup.as_ref().unwrap();
+            assert_eq!(popup.buffer, "計画捗報告");
+            assert_eq!(popup.cursor, 2);
+        }
+        assert_caret_glyph(&app, "捗", 5);
+
+        app.insert_playbook_text("界");
+        app.move_playbook_cursor(-1);
+        app.begin_playbook_selection();
+        app.move_playbook_cursor(1);
+        assert_eq!(
+            App::selected_playbook_text(app.playbook_popup.as_ref().unwrap()).as_deref(),
+            Some("界")
+        );
+        assert_caret_glyph(&app, "捗", 5);
+
+        app.cut_playbook_selection();
+        {
+            let popup = app.playbook_popup.as_ref().unwrap();
+            assert_eq!(popup.buffer, "計画捗報告");
+            assert_eq!(popup.cursor, 2);
+        }
+        assert_caret_glyph(&app, "捗", 5);
+
         server.abort();
     }
 

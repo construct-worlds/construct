@@ -26954,6 +26954,40 @@ mod tests {
     }
 
     #[test]
+    fn playbook_cjk_cursor_mapping_round_trips_across_wraps() {
+        let markdown = "日本語漢字";
+        let len = markdown.chars().count();
+
+        // Exercise odd and even widths. In particular, odd widths leave one
+        // unusable cell after a pair of double-width glyphs, while even widths
+        // put the caret exactly on a wrap boundary. Every source boundary must
+        // still map back to itself, and either painted cell of a CJK glyph must
+        // hit-test to the offset immediately before that glyph.
+        for width in 3..=8 {
+            for offset in 0..len {
+                let (row, col) = playbook_cursor_visual_pos(None, markdown, offset, width);
+                assert_eq!(
+                    playbook_visual_to_cursor(None, markdown, row, col, width),
+                    offset,
+                    "width {width}: glyph-start hit for offset {offset} must round-trip"
+                );
+                assert_eq!(
+                    playbook_visual_to_cursor(None, markdown, row, col + 1, width),
+                    offset,
+                    "width {width}: glyph continuation hit for offset {offset} must stay on the same CJK character"
+                );
+            }
+
+            let end = playbook_cursor_visual_pos(None, markdown, len, width);
+            assert_eq!(
+                playbook_visual_to_cursor(None, markdown, end.0, end.1, width),
+                len,
+                "width {width}: end-of-line caret must round-trip"
+            );
+        }
+    }
+
+    #[test]
     fn playbook_follow_scroll_advances_when_cursor_below_window() {
         // Cursor on visual row 19 with a 5-row window anchored at offset 0 must
         // scroll down so the cursor becomes the bottom visible row (offset 15).
