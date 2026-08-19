@@ -2,49 +2,44 @@
 //! channel (specs 0201, 0202).
 //!
 //! Unlike the Socket Mode bot channel, nothing here talks to Slack directly.
-//! The channel drives a user-configured MCP backend through [`super::mcp`]
-//! with plain daemon logic — no agent, no model turn — and simulates an event
-//! subscription by polling.
+//! The channel drives Slack's hosted MCP server through [`super::mcp`] with
+//! plain daemon logic — no agent, no model turn — and simulates an event
+//! subscription by polling. Construct owns the endpoint and first-run OAuth
+//! setup; channel configuration contains no executable command.
 //!
 //! ## The tool contract
 //!
-//! A conforming backend exposes these tools, each answering with one text
-//! content block whose body is JSON:
-//!
-//! - `slack_sweep_messages {after_ts}` →
-//!   `{"messages": [{"workspace", "channel", "ts", "thread_ts"?, "user",
-//!     "text", "is_dm", "is_self", "is_self_dm"}]}` — every message newer
-//!   than `after_ts` the account can see, thread replies included.
-//!   `is_self` marks the account owner's own messages; `is_self_dm` marks the
-//!   owner's DM with themself.
-//! - `slack_read_thread {channel, thread_ts, limit}` →
-//!   `{"messages": [{"user", "text", "ts", "is_self"}]}` oldest first.
-//! - `slack_send_message {channel, thread_ts, text}` → `{"ts"}`.
-//! - `slack_create_draft {channel, thread_ts, text}` → `{}`.
+//! The adapter maps the hosted server's native tools onto the channel model:
+//! `slack_search_public_and_private` for sweeps, `slack_read_thread` for
+//! context, `slack_send_message` for automatic replies, and
+//! `slack_send_message_draft` for the safe default.
 //!
 //! ## Identity rules
 //!
 //! Everything this channel posts appears as the user, so it never posts
 //! progress placeholders, failure notices, or anything else the response mode
 //! did not explicitly produce. Its own posts are excluded from ingress by
-//! recorded timestamp, never by author — the user's own messages are
-//! legitimate triggers (their DM with themself is a private command line).
+//! recorded timestamp. Hosted search identifies the user's messages with
+//! `from:me`; those messages remain excluded unless a future structured result
+//! can explicitly and safely identify the user's DM with themself.
 
-use super::ingress::{IngressProgress, IngressReceipt, IngressRequest, OperatorIngress, PENDING_DELIVERY_TTL};
-use super::mcp::McpClient;
+use super::ingress::{
+    IngressProgress, IngressReceipt, IngressRequest, OperatorIngress, PENDING_DELIVERY_TTL,
+};
+use super::mcp::{slack_oauth_credentials_saved, McpClient};
 use super::slack::{thread_context_block, SlackHistoryMessage};
 use super::{SlackPersonalResponse, SlackPersonalTrigger};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{BTreeMap, HashSet};
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SlackPersonalConfig {
-    pub(super) mcp_command: String,
     pub(super) idle_poll_ceiling: std::time::Duration,
     pub(super) trigger: SlackPersonalTrigger,
     pub(super) default_response: SlackPersonalResponse,
@@ -63,6 +58,431 @@ impl SlackPersonalConfig {
             .copied()
             .unwrap_or(self.default_response)
     }
+}
+
+const HOSTED_SEARCH_TOOL: &str = "slack_search_public_and_private";
+const HOSTED_READ_THREAD_TOOL: &str = "slack_read_thread";
+const HOSTED_SEND_TOOL: &str = "slack_send_message";
+const HOSTED_DRAFT_TOOL: &str = "slack_send_message_draft";
+const HOSTED_SEARCH_PAGE_LIMIT: usize = 20;
+
+/// Search is the hosted server's polling primitive. Its date filter has day
+/// precision, so the exact Slack timestamp is applied again after decoding.
+/// Paging newest-first lets a normal idle sweep stop as soon as it reaches
+/// the existing cursor, while still collecting every newer page before the
+/// cursor advances. Cursor-cycle detection protects against a broken server.
+async fn sweep_hosted_messages(client: &McpClient, after_ts: &str) -> Result<Vec<SweptMessage>> {
+    let mut messages = hosted_search(client, after_ts, false).await?;
+    let self_ids: HashSet<String> = hosted_search(client, after_ts, true)
+        .await?
+        .into_iter()
+        .map(|message| message.request_id())
+        .collect();
+    for message in &mut messages {
+        message.is_self |= self_ids.contains(&message.request_id());
+        // Hosted results may explicitly identify the account owner's self-DM.
+        // Without that signal we stay conservative: the user's own message in
+        // a DM with somebody else must never look like a self-DM command.
+        message.is_self_dm &= message.is_self && message.is_dm;
+    }
+    messages.retain(|message| ts_after(&message.ts, after_ts));
+    let mut unique = HashMap::new();
+    for message in messages {
+        unique.entry(message.request_id()).or_insert(message);
+    }
+    Ok(unique.into_values().collect())
+}
+
+async fn hosted_search(
+    client: &McpClient,
+    after_ts: &str,
+    from_me: bool,
+) -> Result<Vec<SweptMessage>> {
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    let mut messages = Vec::new();
+    loop {
+        let arguments = hosted_search_arguments(after_ts, from_me, cursor.as_deref());
+        let result = client
+            .call_tool_value(HOSTED_SEARCH_TOOL, arguments)
+            .await
+            .context("search Slack messages")?;
+        let result = decode_hosted_result(result)?;
+        let (page, next) = normalize_hosted_search_page(&result);
+        let reached_existing_cursor = page.iter().any(|message| !ts_after(&message.ts, after_ts));
+        messages.extend(page);
+        if reached_existing_cursor {
+            break;
+        }
+        let next = next
+            .filter(|value| !value.is_empty() && Some(value.as_str()) != cursor.as_deref());
+        let Some(next) = next else { break };
+        if !seen_cursors.insert(next.clone()) {
+            break;
+        }
+        cursor = Some(next);
+    }
+    Ok(messages)
+}
+
+fn hosted_search_arguments(after_ts: &str, from_me: bool, cursor: Option<&str>) -> Value {
+    let date = slack_ts_date(after_ts);
+    let query = if from_me {
+        format!("from:me after:{date}")
+    } else {
+        format!("after:{date}")
+    };
+    let mut arguments = json!({
+        "query": query,
+        "sort": "timestamp",
+        "sort_dir": "desc",
+        "content_types": "messages",
+        "include_context": false,
+        "include_bots": false,
+        "response_format": "detailed",
+        "limit": HOSTED_SEARCH_PAGE_LIMIT,
+    });
+    if let Some(cursor) = cursor {
+        arguments["cursor"] = Value::String(cursor.to_string());
+    }
+    arguments
+}
+
+fn slack_ts_date(ts: &str) -> String {
+    ts.split_once('.')
+        .map(|(seconds, _)| seconds)
+        .unwrap_or(ts)
+        .parse::<i64>()
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .map(|instant| instant.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string())
+}
+
+fn decode_hosted_result(value: Value) -> Result<Value> {
+    match value {
+        Value::String(text) => serde_json::from_str(&text)
+            .context("Slack MCP tool returned unstructured text instead of JSON"),
+        value => Ok(value),
+    }
+}
+
+fn normalize_hosted_search_page(value: &Value) -> (Vec<SweptMessage>, Option<String>) {
+    let mut messages = Vec::new();
+    collect_hosted_messages(value, &mut messages);
+    if let Some(rendered) = value.get("results").and_then(Value::as_str) {
+        messages.extend(parse_hosted_search_results(rendered));
+    }
+    let cursor = find_string(value, &["next_cursor", "nextCursor", "cursor"]).or_else(|| {
+        value
+            .get("pagination_info")
+            .and_then(Value::as_str)
+            .and_then(cursor_from_pagination)
+    });
+    (messages, cursor)
+}
+
+fn normalize_hosted_history(value: &Value) -> Vec<SlackHistoryMessage> {
+    let mut history = Vec::new();
+    collect_hosted_history(value, &mut history);
+    if let Some(rendered) = value.get("messages").and_then(Value::as_str) {
+        history.extend(parse_hosted_thread_messages(rendered));
+    }
+    history.sort_by(|a, b| match (a.ts.as_deref(), b.ts.as_deref()) {
+        (Some(a), Some(b)) => ts_order(a, b),
+        _ => std::cmp::Ordering::Equal,
+    });
+    history
+}
+
+/// Slack's hosted tools return their detailed payload in string fields inside
+/// a JSON object. This parser follows the labels emitted by the hosted search
+/// tool; the structured-object walker above remains as a compatibility path
+/// if Slack starts populating `structuredContent` with message objects.
+fn parse_hosted_search_results(rendered: &str) -> Vec<SweptMessage> {
+    rendered
+        .split("\n### Result ")
+        .skip(1)
+        .filter_map(|section| {
+            let channel_line = labeled_line(section, "Channel:")?;
+            let channel = parenthesized_id(channel_line)?;
+            let user_line = labeled_line(section, "User:").unwrap_or_default();
+            let user = parenthesized_id(user_line).unwrap_or_default();
+            let ts = labeled_line(section, "Message_ts:")
+                .or_else(|| labeled_line(section, "Message ts:"))
+                .and_then(normalize_timestamp)?;
+            let permalink = labeled_line(section, "Permalink:")
+                .and_then(markdown_link_target)
+                .unwrap_or_default();
+            let text = section
+                .split_once("\nText:\n")
+                .map(|(_, text)| {
+                    text.split("\n\n---")
+                        .next()
+                        .unwrap_or(text)
+                        .trim()
+                        .to_string()
+                })
+                .unwrap_or_default();
+            let thread_ts = query_parameter(&permalink, "thread_ts").and_then(normalize_timestamp);
+            let workspace = permalink
+                .split_once("://")
+                .and_then(|(_, tail)| tail.split('/').next())
+                .unwrap_or_default()
+                .to_string();
+            // A private channel may be rendered without a leading `#`; only
+            // Slack's direct-message ID is safe to treat as an implicit DM.
+            // Everything else stays behind the explicit channel allowlist.
+            let is_dm = channel.starts_with('D');
+            Some(SweptMessage {
+                workspace,
+                channel,
+                ts,
+                thread_ts,
+                user,
+                text,
+                is_dm,
+                is_self: false,
+                // The hosted result does not identify a DM-to-self. Leaving
+                // this false is conservative: own messages in ordinary DMs
+                // must not be mistaken for operator commands.
+                is_self_dm: false,
+            })
+        })
+        .collect()
+}
+
+fn parse_hosted_thread_messages(rendered: &str) -> Vec<SlackHistoryMessage> {
+    rendered
+        .split("=== ")
+        .skip(1)
+        .filter_map(|section| {
+            let user = labeled_line(section, "User:").and_then(parenthesized_id);
+            let ts = labeled_line(section, "Message ts:")
+                .or_else(|| labeled_line(section, "Message_ts:"))
+                .and_then(normalize_timestamp)?;
+            let ts_line = section.lines().position(|line| {
+                line.trim_start().starts_with("Message ts:")
+                    || line.trim_start().starts_with("Message_ts:")
+            })?;
+            let text = section
+                .lines()
+                .skip(ts_line + 1)
+                .take_while(|line| line.trim() != "---")
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string();
+            Some(SlackHistoryMessage {
+                user,
+                bot_id: None,
+                text: Some(text),
+                ts: Some(ts),
+            })
+        })
+        .collect()
+}
+
+fn labeled_line<'a>(text: &'a str, label: &str) -> Option<&'a str> {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix(label).map(str::trim))
+}
+
+fn parenthesized_id(text: &str) -> Option<String> {
+    let value = text.rsplit_once('(')?.1.split_once(')')?.0.trim();
+    let value = value.strip_prefix("ID:").unwrap_or(value).trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn markdown_link_target(text: &str) -> Option<String> {
+    let start = text.rfind("](")? + 2;
+    let end = text[start..].find(')')? + start;
+    Some(text[start..end].to_string())
+}
+
+fn query_parameter<'a>(url: &'a str, name: &str) -> Option<&'a str> {
+    url.split_once('?')?.1.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then_some(value)
+    })
+}
+
+fn cursor_from_pagination(text: &str) -> Option<String> {
+    let (_, tail) = text.split_once('`')?;
+    let (cursor, _) = tail.split_once('`')?;
+    (!cursor.is_empty()).then(|| cursor.to_string())
+}
+
+fn collect_hosted_history(value: &Value, history: &mut Vec<SlackHistoryMessage>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_hosted_history(value, history);
+            }
+        }
+        Value::Object(object) => {
+            let ts = object_string(object, &["ts", "message_ts", "messageTs", "timestamp"])
+                .and_then(|value| normalize_timestamp(&value))
+                .or_else(|| {
+                    object_string(object, &["permalink", "url"])
+                        .and_then(|url| timestamp_from_permalink(&url))
+                });
+            let text = object_string(object, &["text", "content", "message"]);
+            if ts.is_some() && text.is_some() {
+                history.push(SlackHistoryMessage {
+                    user: object_string(
+                        object,
+                        &["user_id", "userId", "user", "author_id", "authorId"],
+                    ),
+                    bot_id: object_string(object, &["bot_id", "botId"]),
+                    text,
+                    ts,
+                });
+                return;
+            }
+            for value in object.values() {
+                collect_hosted_history(value, history);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_hosted_messages(value: &Value, messages: &mut Vec<SweptMessage>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_hosted_messages(value, messages);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(message) = hosted_message(object) {
+                messages.push(message);
+                return;
+            }
+            for value in object.values() {
+                collect_hosted_messages(value, messages);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn hosted_message(object: &serde_json::Map<String, Value>) -> Option<SweptMessage> {
+    let channel = object_string(object, &["channel_id", "channelId", "channel"])?;
+    let text = object_string(object, &["text", "content", "message"]).unwrap_or_default();
+    let ts = object_string(object, &["ts", "message_ts", "messageTs", "timestamp"])
+        .and_then(|value| normalize_timestamp(&value))
+        .or_else(|| {
+            object_string(object, &["permalink", "url"])
+                .and_then(|url| timestamp_from_permalink(&url))
+        })?;
+    let thread_ts = object_string(object, &["thread_ts", "threadTs", "thread_timestamp"])
+        .and_then(|value| normalize_timestamp(&value));
+    let channel_type = object_string(
+        object,
+        &["channel_type", "channelType", "conversation_type"],
+    )
+    .unwrap_or_default();
+    let is_dm = object_bool(object, &["is_dm", "isDm"])
+        .unwrap_or_else(|| channel.starts_with('D') || channel_type.eq_ignore_ascii_case("im"));
+    Some(SweptMessage {
+        workspace: object_string(
+            object,
+            &[
+                "workspace_id",
+                "workspaceId",
+                "team_id",
+                "teamId",
+                "workspace",
+            ],
+        )
+        .unwrap_or_default(),
+        channel,
+        ts,
+        thread_ts,
+        user: object_string(
+            object,
+            &["user_id", "userId", "user", "author_id", "authorId"],
+        )
+        .unwrap_or_default(),
+        text,
+        is_dm,
+        is_self: object_bool(object, &["is_self", "isSelf", "is_from_me", "isFromMe"])
+            .unwrap_or(false),
+        is_self_dm: object_bool(object, &["is_self_dm", "isSelfDm", "is_self_conversation"])
+            .unwrap_or(false),
+    })
+}
+
+fn object_string(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| match object.get(*key)? {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    })
+}
+
+fn object_bool(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<bool> {
+    keys.iter().find_map(|key| object.get(*key)?.as_bool())
+}
+
+fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(object) => object_string(object, keys)
+            .or_else(|| object.values().find_map(|value| find_string(value, keys))),
+        Value::Array(values) => values.iter().find_map(|value| find_string(value, keys)),
+        _ => None,
+    }
+}
+
+fn normalize_timestamp(value: &str) -> Option<String> {
+    let value = value.trim();
+    if ts_key(value).is_some() {
+        return Some(value.to_string());
+    }
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|instant| {
+            format!(
+                "{}.{:06}",
+                instant.timestamp(),
+                instant.timestamp_subsec_micros()
+            )
+        })
+}
+
+fn timestamp_from_permalink(url: &str) -> Option<String> {
+    let compact = url.rsplit("/p").next()?;
+    let digits: String = compact.chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() <= 6 {
+        return None;
+    }
+    let split = digits.len() - 6;
+    Some(format!("{}.{}", &digits[..split], &digits[split..]))
+}
+
+fn hosted_response_timestamp(value: &Value) -> Option<String> {
+    find_string(value, &["ts", "message_ts", "messageTs", "timestamp"])
+        .and_then(|value| normalize_timestamp(&value))
+        .or_else(|| {
+            find_string(value, &["permalink", "url", "message_link", "messageLink"])
+                .and_then(|url| timestamp_from_permalink(&url))
+        })
+        .or_else(|| match value {
+            Value::String(text) => {
+                if let Some(timestamp) = timestamp_from_permalink(text) {
+                    return Some(timestamp);
+                }
+                let tail = text.split("ts=").nth(1)?;
+                let timestamp: String = tail
+                    .chars()
+                    .take_while(|character| character.is_ascii_digit() || *character == '.')
+                    .collect();
+                normalize_timestamp(&timestamp)
+            }
+            _ => None,
+        })
 }
 
 /// Appended to every auto-sent reply unless the user turned disclosure off.
@@ -205,9 +625,16 @@ pub(super) async fn serve(
         if cancel.is_cancelled() {
             return Ok(());
         }
+        if !slack_oauth_credentials_saved() {
+            tracing::info!(
+                operator = %ingress.operator_name(),
+                channel = %ingress.channel_id(),
+                "slack-personal needs Slack OAuth; opening the authorization page in the default browser"
+            );
+        }
         let client = tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            spawned = McpClient::spawn(&config.mcp_command) => spawned,
+            spawned = McpClient::spawn_slack() => spawned,
         };
         let client = match client {
             Ok(client) => Arc::new(client),
@@ -240,11 +667,9 @@ pub(super) async fn serve(
                 _ = cancel.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(poll_schedule.next_interval()) => {}
             }
-            let swept = client
-                .call_tool("slack_sweep_messages", json!({"after_ts": cursor}))
-                .await;
+            let swept = sweep_hosted_messages(&client, &cursor).await;
             let messages = match swept {
-                Ok(result) => parse_swept(&result),
+                Ok(messages) => messages,
                 Err(error) => {
                     tracing::warn!(
                         operator = %ingress.operator_name(),
@@ -285,22 +710,6 @@ pub(super) async fn serve(
             }
         }
     }
-}
-
-fn parse_swept(result: &serde_json::Value) -> Vec<SweptMessage> {
-    let Some(entries) = result.get("messages").and_then(|value| value.as_array()) else {
-        return Vec::new();
-    };
-    entries
-        .iter()
-        .filter_map(|entry| match serde_json::from_value(entry.clone()) {
-            Ok(message) => Some(message),
-            Err(error) => {
-                tracing::warn!(%error, "slack-personal backend returned a malformed message; skipping it");
-                None
-            }
-        })
-        .collect()
 }
 
 /// Decide which swept messages become deliveries, and how far the cursor
@@ -429,25 +838,15 @@ async fn first_engagement_context(
         return None;
     }
     let client = backend.get().ok()?;
-    let result = client
-        .call_tool(
-            "slack_read_thread",
-            json!({
-                "channel": message.channel,
-                "thread_ts": message.thread_ts(),
-                "limit": config.thread_context,
-            }),
-        )
-        .await;
-    match result {
-        Ok(result) => {
-            let history: Vec<SlackHistoryMessage> = result
-                .get("messages")
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok())
-                .unwrap_or_default();
-            thread_context_block(&history, &message.ts)
-        }
+    match hosted_thread_history(
+        &client,
+        &message.channel,
+        message.thread_ts(),
+        config.thread_context,
+    )
+    .await
+    {
+        Ok(history) => thread_context_block(&history, &message.ts),
         Err(error) => {
             tracing::warn!(%error, "slack-personal thread history unavailable; answering from the message alone");
             None
@@ -519,13 +918,9 @@ async fn deliver_reply(
         SlackPersonalResponse::Draft => {
             let client = backend.get()?;
             client
-                .call_tool(
-                    "slack_create_draft",
-                    json!({
-                        "channel": trace.channel,
-                        "thread_ts": trace.thread_ts,
-                        "text": reply,
-                    }),
+                .call_tool_value(
+                    HOSTED_DRAFT_TOOL,
+                    hosted_reply_arguments(&trace.channel, &trace.thread_ts, reply),
                 )
                 .await
                 .context("create Slack draft")?;
@@ -570,17 +965,13 @@ async fn send_auto_reply(
         reply.to_string()
     };
     let result = client
-        .call_tool(
-            "slack_send_message",
-            json!({
-                "channel": trace.channel,
-                "thread_ts": trace.thread_ts,
-                "text": text,
-            }),
+        .call_tool_value(
+            HOSTED_SEND_TOOL,
+            hosted_reply_arguments(&trace.channel, &trace.thread_ts, &text),
         )
         .await
         .context("send Slack message")?;
-    if let Some(ts) = result.get("ts").and_then(|value| value.as_str()) {
+    if let Some(ts) = hosted_response_timestamp(&result) {
         sent.lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(format!("{}:{ts}", trace.channel));
@@ -588,42 +979,62 @@ async fn send_auto_reply(
     Ok(())
 }
 
-#[derive(Deserialize)]
-struct GraceMessage {
-    #[serde(default)]
-    ts: String,
-    #[serde(default)]
-    is_self: bool,
-}
-
-/// Re-read the thread after the grace period. The account owner's own
-/// message wins the race: this operator is a backstop, not a competitor.
+/// Search for the account owner's own messages after the grace period. A
+/// matching message in this conversation wins the race: this operator is a
+/// backstop, not a competitor. Slack's hosted thread result does not identify
+/// the authenticated user, while its native `from:me` search does.
 async fn user_replied_after(client: &McpClient, trace: &PersonalTrace) -> Result<bool> {
-    let result = client
-        .call_tool(
-            "slack_read_thread",
-            json!({
-                "channel": trace.channel,
-                "thread_ts": trace.thread_ts,
-                "limit": construct_protocol::SLACK_THREAD_CONTEXT_MAX,
-            }),
-        )
+    let messages = hosted_search(client, &trace.message_ts, true)
         .await
         .context("check Slack thread before delayed send")?;
-    let messages: Vec<GraceMessage> = result
-        .get("messages")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .context("parse Slack thread before delayed send")?
-        .unwrap_or_default();
-    Ok(has_user_reply_after(&messages, &trace.message_ts))
+    Ok(has_user_reply_after(messages.iter(), trace))
 }
 
-fn has_user_reply_after(messages: &[GraceMessage], trigger_ts: &str) -> bool {
-    messages
-        .iter()
-        .any(|message| message.is_self && ts_after(&message.ts, trigger_ts))
+fn has_user_reply_after<'a>(
+    messages: impl IntoIterator<Item = &'a SweptMessage>,
+    trace: &PersonalTrace,
+) -> bool {
+    messages.into_iter().any(|message| {
+        message.channel == trace.channel
+            && ts_after(&message.ts, &trace.message_ts)
+            // Ordinary DMs are one linear conversation. Public and private
+            // channels require the same Slack thread.
+            && (trace.channel.starts_with('D') || message.thread_ts() == trace.thread_ts)
+    })
+}
+
+fn hosted_read_thread_arguments(channel: &str, message_ts: &str, limit: usize) -> Value {
+    json!({
+        "channel_id": channel,
+        "message_ts": message_ts,
+        "limit": limit,
+        "response_format": "detailed",
+    })
+}
+
+async fn hosted_thread_history(
+    client: &McpClient,
+    channel: &str,
+    message_ts: &str,
+    limit: usize,
+) -> Result<Vec<SlackHistoryMessage>> {
+    let result = client
+        .call_tool_value(
+            HOSTED_READ_THREAD_TOOL,
+            hosted_read_thread_arguments(channel, message_ts, limit),
+        )
+        .await
+        .context("read Slack thread")?;
+    let result = decode_hosted_result(result)?;
+    Ok(normalize_hosted_history(&result))
+}
+
+fn hosted_reply_arguments(channel: &str, thread_ts: &str, message: &str) -> Value {
+    json!({
+        "channel_id": channel,
+        "thread_ts": thread_ts,
+        "message": message,
+    })
 }
 
 /// Finish deliveries accepted before a restart. Resumable waits are picked
@@ -710,21 +1121,26 @@ fn ts_after(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
 
-    async fn backend_with_thread(
+    async fn backend_with_owned_messages(
         messages: serde_json::Value,
     ) -> (Backend, Arc<Mutex<Vec<String>>>) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = calls.clone();
-        let (reader, writer) = super::super::mcp::fake_server(move |name, _| {
+        let (reader, writer) = super::super::mcp::fake_server(move |name, arguments| {
             recorded
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(name.to_string());
             match name {
-                "slack_read_thread" => {
+                "slack_search_public_and_private" => {
+                    assert!(arguments["query"]
+                        .as_str()
+                        .is_some_and(|query| query.starts_with("from:me after:")));
                     super::super::mcp::text_result(json!({"messages": messages.clone()}))
                 }
-                "slack_send_message" => super::super::mcp::text_result(json!({"ts": "9.000001"})),
+                "slack_send_message" => super::super::mcp::text_result(json!({
+                    "message_link": "https://acme.slack.com/archives/D1/p9000001"
+                })),
                 other => panic!("unexpected tool {other}"),
             }
         });
@@ -738,7 +1154,6 @@ mod tests {
 
     fn config() -> SlackPersonalConfig {
         SlackPersonalConfig {
-            mcp_command: "fake".into(),
             idle_poll_ceiling: std::time::Duration::from_secs(20),
             trigger: SlackPersonalTrigger::Dm,
             default_response: SlackPersonalResponse::Draft,
@@ -749,6 +1164,249 @@ mod tests {
             allowed_channels: Vec::new(),
             thread_context: 50,
         }
+    }
+
+    #[test]
+    fn hosted_sweep_uses_slacks_native_search_tool_and_schema() {
+        assert_eq!(HOSTED_SEARCH_TOOL, "slack_search_public_and_private");
+        assert_eq!(
+            hosted_search_arguments("1787068800.123456", false, Some("next-page")),
+            json!({
+                "query": "after:2026-08-18",
+                "sort": "timestamp",
+                "sort_dir": "desc",
+                "content_types": "messages",
+                "include_context": false,
+                "include_bots": false,
+                "response_format": "detailed",
+                "limit": 20,
+                "cursor": "next-page",
+            })
+        );
+        assert_eq!(
+            hosted_search_arguments("1787068800.123456", true, None)["query"],
+            "from:me after:2026-08-18"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_sweep_calls_native_search_and_cross_references_from_me() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let rendered = "# Search Results\n\n### Result 1 of 1\nChannel: DM with Ada (ID: D123)\nUser: Owner (ID: U123)\nMessage_ts: 1787079601.123456\nPermalink: [View](https://acme.slack.com/archives/D123/p1787079601123456)\nText:\nmy message\n";
+        let (reader, writer) = super::super::mcp::fake_server(move |name, arguments| {
+            recorded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((name.to_string(), arguments.clone()));
+            super::super::mcp::text_result(json!({
+                "results": rendered,
+                "pagination_info": "There are no more results.",
+            }))
+        });
+        let client = McpClient::connect(reader, writer, None)
+            .await
+            .expect("connect fake MCP backend");
+        let messages = sweep_hosted_messages(&client, "1787079500.000001")
+            .await
+            .expect("hosted sweep");
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].is_self);
+        assert!(!messages[0].is_self_dm);
+        let calls = calls.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|(name, _)| name == HOSTED_SEARCH_TOOL));
+        assert_eq!(calls[0].1["query"], "after:2026-08-18");
+        assert_eq!(calls[1].1["query"], "from:me after:2026-08-18");
+    }
+
+    #[test]
+    fn hosted_detailed_search_result_maps_to_the_personal_sweep_contract() {
+        let result = json!({
+            "results": "# Search Results for: after:2026-08-18\n\n## Messages (1 result)\n### Result 1 of 1\nChannel: DM with Ada (ID: D123)\nUser: Ada Lovelace (ID: U456) [member]\nDate: 2026-08-18 12:00:01 PDT\nMessage_ts: 1787079601.123456\nPermalink: [View](https://acme.slack.com/archives/D123/p1787079601123456?thread_ts=1787079500.000001&cid=D123)\nText:\nhello from Slack\n\n---\n",
+            "pagination_info": "For more results use cursor `opaque-next=`",
+        });
+        let (messages, cursor) = normalize_hosted_search_page(&result);
+        assert_eq!(cursor.as_deref(), Some("opaque-next="));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].workspace, "acme.slack.com");
+        assert_eq!(messages[0].channel, "D123");
+        assert_eq!(messages[0].user, "U456");
+        assert_eq!(messages[0].ts, "1787079601.123456");
+        assert_eq!(messages[0].thread_ts.as_deref(), Some("1787079500.000001"));
+        assert_eq!(messages[0].text, "hello from Slack");
+        assert!(messages[0].is_dm);
+    }
+
+    #[test]
+    fn hosted_private_channel_without_hash_does_not_bypass_the_allowlist() {
+        let result = json!({
+            "results": "# Search Results\n\n### Result 1 of 1\nChannel: private-project (ID: C999)\nUser: Ada Lovelace (ID: U456)\nMessage_ts: 1787079601.123456\nPermalink: [View](https://acme.slack.com/archives/C999/p1787079601123456)\nText:\nprivate message\n",
+        });
+        let (messages, _) = normalize_hosted_search_page(&result);
+        assert_eq!(messages.len(), 1);
+        assert!(!messages[0].is_dm);
+        assert!(!accepts(&config(), &messages[0]));
+    }
+
+    #[test]
+    fn hosted_thread_uses_message_ts_and_decodes_detailed_history() {
+        assert_eq!(HOSTED_READ_THREAD_TOOL, "slack_read_thread");
+        assert_eq!(
+            hosted_read_thread_arguments("C123", "1787079500.000001", 50),
+            json!({
+                "channel_id": "C123",
+                "message_ts": "1787079500.000001",
+                "limit": 50,
+                "response_format": "detailed",
+            })
+        );
+        let result = json!({
+            "messages": "=== Thread Parent Message ===\nUser: Ada Lovelace (U456)\nDate: 2026-08-18 12:00:00 PDT\nMessage ts: 1787079500.000001\nparent text\n\n---\n\n=== Thread Reply 1 ===\nUser: Grace Hopper (U789)\nDate: 2026-08-18 12:00:01 PDT\nMessage ts: 1787079601.123456\nreply text\n",
+            "pagination_info": "There are no more messages in this thread.",
+        });
+        let history = normalize_hosted_history(&result);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].user.as_deref(), Some("U456"));
+        assert_eq!(history[0].text.as_deref(), Some("parent text"));
+        assert_eq!(history[1].ts.as_deref(), Some("1787079601.123456"));
+        assert_eq!(history[1].text.as_deref(), Some("reply text"));
+    }
+
+    #[tokio::test]
+    async fn hosted_thread_read_calls_the_native_tool_and_decodes_text_json() {
+        let (reader, writer) = super::super::mcp::fake_server(|name, arguments| {
+            assert_eq!(name, "slack_read_thread");
+            assert_eq!(
+                arguments,
+                &hosted_read_thread_arguments("C123", "1787079500.000001", 20)
+            );
+            super::super::mcp::text_result(json!({
+                "messages": "=== Thread Parent Message ===\nUser: Ada (U456)\nMessage ts: 1787079500.000001\nhello\n",
+                "pagination_info": "There are no more messages in this thread.",
+            }))
+        });
+        let client = McpClient::connect(reader, writer, None)
+            .await
+            .expect("connect fake MCP backend");
+        let history = hosted_thread_history(&client, "C123", "1787079500.000001", 20)
+            .await
+            .expect("hosted thread read");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].user.as_deref(), Some("U456"));
+        assert_eq!(history[0].text.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn hosted_send_and_draft_use_native_names_arguments_and_message_link() {
+        assert_eq!(HOSTED_SEND_TOOL, "slack_send_message");
+        assert_eq!(HOSTED_DRAFT_TOOL, "slack_send_message_draft");
+        assert_eq!(
+            hosted_reply_arguments("C123", "1787079500.000001", "hello"),
+            json!({
+                "channel_id": "C123",
+                "thread_ts": "1787079500.000001",
+                "message": "hello",
+            })
+        );
+        assert_eq!(
+            hosted_response_timestamp(&Value::String(
+                "Message sent: https://acme.slack.com/archives/C123/p1787079601123456".into()
+            ))
+            .as_deref(),
+            Some("1787079601.123456")
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_send_and_draft_delivery_call_the_native_tools() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let (reader, writer) = super::super::mcp::fake_server(move |name, arguments| {
+            recorded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((name.to_string(), arguments.clone()));
+            match name {
+                "slack_send_message_draft" => super::super::mcp::text_result(json!({})),
+                "slack_send_message" => super::super::mcp::text_result(json!({
+                    "message_link": "https://acme.slack.com/archives/C123/p1787079601123456"
+                })),
+                other => panic!("unexpected tool {other}"),
+            }
+        });
+        let client = McpClient::connect(reader, writer, None)
+            .await
+            .expect("connect fake MCP backend");
+        let backend = Backend::default();
+        backend.set(Arc::new(client));
+        let sent = SentRegistry::default();
+        let trace = PersonalTrace {
+            channel: "C123".into(),
+            thread_ts: "1787079500.000001".into(),
+            message_ts: "1787079501.000001".into(),
+        };
+        let cancel = CancellationToken::new();
+
+        deliver_reply(&config(), &cancel, &backend, &sent, &trace, "draft reply")
+            .await
+            .expect("create hosted draft");
+        let mut automatic = config();
+        automatic.default_response = SlackPersonalResponse::Auto;
+        automatic.disclosure = false;
+        deliver_reply(&automatic, &cancel, &backend, &sent, &trace, "sent reply")
+            .await
+            .expect("send hosted reply");
+
+        assert_eq!(
+            *calls.lock().unwrap_or_else(|e| e.into_inner()),
+            [
+                (
+                    "slack_send_message_draft".to_string(),
+                    json!({
+                        "channel_id": "C123",
+                        "thread_ts": "1787079500.000001",
+                        "message": "draft reply",
+                    }),
+                ),
+                (
+                    "slack_send_message".to_string(),
+                    json!({
+                        "channel_id": "C123",
+                        "thread_ts": "1787079500.000001",
+                        "message": "sent reply",
+                    }),
+                ),
+            ]
+        );
+        assert!(sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains("C123:1787079601.123456"));
+    }
+
+    #[test]
+    fn delayed_reply_checks_the_same_public_thread_but_all_of_a_dm() {
+        let trace = PersonalTrace {
+            channel: "C1".into(),
+            thread_ts: "1.0".into(),
+            message_ts: "2.0".into(),
+        };
+        let mut other_thread = message("C1", "3.0");
+        other_thread.thread_ts = Some("9.0".into());
+        assert!(!has_user_reply_after([&other_thread], &trace));
+
+        let mut same_thread = other_thread.clone();
+        same_thread.thread_ts = Some("1.0".into());
+        assert!(has_user_reply_after([&same_thread], &trace));
+
+        let dm_trace = PersonalTrace {
+            channel: "D1".into(),
+            ..trace
+        };
+        let dm_reply = message("D1", "3.0");
+        assert!(has_user_reply_after([&dm_reply], &dm_trace));
     }
 
     #[test]
@@ -980,13 +1638,13 @@ mod tests {
     }
 
     #[test]
-    fn swept_parsing_skips_malformed_entries_and_keeps_the_rest() {
-        let result = serde_json::json!({"messages": [
-            {"channel": "D1", "ts": "1.0", "text": "hi", "is_dm": true},
-            {"text": "no channel or ts"},
-            {"channel": "C1", "ts": "2.0"},
+    fn structured_search_results_remain_supported_if_slack_adds_them() {
+        let result = json!({"messages": [
+            {"channel_id": "D1", "message_ts": "1.0", "text": "hi", "is_dm": true},
+            {"text": "no channel or timestamp"},
+            {"channel_id": "C1", "message_ts": "2.0"},
         ]});
-        let messages = parse_swept(&result);
+        let (messages, _) = normalize_hosted_search_page(&result);
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].channel, "D1");
         assert!(messages[0].is_dm);
@@ -1002,9 +1660,9 @@ mod tests {
 
     #[tokio::test]
     async fn auto_after_waits_then_rechecks_and_sends() {
-        let (backend, calls) = backend_with_thread(json!([
-            {"ts": "1.9", "is_self": true},
-            {"ts": "2.1", "is_self": false}
+        let (backend, calls) = backend_with_owned_messages(json!([
+            {"channel_id": "D1", "message_ts": "1.9", "text": "old"},
+            {"channel_id": "D2", "message_ts": "2.1", "text": "another DM"}
         ]))
         .await;
         let mut config = config();
@@ -1033,7 +1691,7 @@ mod tests {
         delivery.await.expect("delayed delivery");
         assert_eq!(
             *calls.lock().unwrap_or_else(|e| e.into_inner()),
-            ["slack_read_thread", "slack_send_message"]
+            ["slack_search_public_and_private", "slack_send_message"]
         );
         assert!(sent
             .lock()
@@ -1043,8 +1701,12 @@ mod tests {
 
     #[tokio::test]
     async fn auto_after_yields_when_the_user_answers_first() {
-        let (backend, calls) =
-            backend_with_thread(json!([{"ts": "2.000001", "is_self": true}])).await;
+        let (backend, calls) = backend_with_owned_messages(json!([{
+            "channel_id": "D1",
+            "message_ts": "2.000001",
+            "text": "human reply"
+        }]))
+        .await;
         let mut config = config();
         config.default_response = SlackPersonalResponse::AutoAfter;
         config.auto_after = std::time::Duration::from_millis(1);
@@ -1068,7 +1730,7 @@ mod tests {
 
         assert_eq!(
             *calls.lock().unwrap_or_else(|e| e.into_inner()),
-            ["slack_read_thread"]
+            ["slack_search_public_and_private"]
         );
         assert!(sent.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
     }

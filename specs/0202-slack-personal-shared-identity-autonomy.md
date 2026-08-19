@@ -68,6 +68,11 @@ for an absent human rather than a competitor to a present one.
   response mode. Removing an override restores inheritance from the default.
 - The ingress sweep must keep observing threads the operator answered, so
   grace-period yielding and human-reply detection stay possible.
+- The hosted thread result does not identify the authenticated account.
+  `auto-after` therefore uses the hosted search tool's native `from:me`
+  filter and matches newer results in the same DM or public-channel thread
+  before sending. This can inherit Slack search-index lag; the grace check
+  must never be described as a push or presence guarantee.
 - Rungs 3 and 2 are only available on backends whose tool contract exposes
   drafts and reactions; a scope configured for an unavailable rung degrades
   to the next lower rung and reports that in channel status.
@@ -84,9 +89,9 @@ for an absent human rather than a competitor to a present one.
 
 ## Examples
 
-A scope covering the user's own DM-to-self is set to trigger on every
-message with auto-send and disclosure off: it behaves as a private command
-line to the operator.
+An incoming personal DM scope is set to draft: a teammate's question produces
+a ready reply without posting under the user's identity. The hosted detailed
+search format does not currently make the user's DM-to-self a safe trigger.
 
 A scope covering a team channel triggers on mentions of the user with mode
 draft: a teammate's question produces a ready reply in the user's drafts,

@@ -42862,7 +42862,6 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                mcp_command: None,
                 trigger: None,
                 response_mode: None,
                 response_mode_overrides: None,
@@ -43369,7 +43368,6 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                mcp_command: None,
                 trigger: None,
                 response_mode: None,
                 response_mode_overrides: None,
@@ -44626,12 +44624,12 @@ mod tests {
         assert_eq!(editor.channel.auto_after_secs, Some(60));
         assert_eq!(editor.channel.disclosure, Some(true));
         assert_eq!(editor.channel.poll_interval_secs, Some(20));
-        assert_eq!(editor.channel.mcp_command.as_deref(), Some(""));
+        assert!(!editor.channel.has_credential, "OAuth is pending before first use");
 
-        // The MCP command is a plain text field on row 2.
+        // Row 2 is now the workspace allowlist; there is no executable input.
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
             .await;
-        assert!(app.insert_operator_dialog_text("npx my-slack-mcp"));
+        assert!(app.insert_operator_dialog_text("acme.slack.com"));
         let editor = app
             .operator_dialog
             .as_ref()
@@ -44639,7 +44637,7 @@ mod tests {
             .channel_editor
             .as_ref()
             .unwrap();
-        assert_eq!(editor.channel.mcp_command.as_deref(), Some("npx my-slack-mcp"));
+        assert_eq!(editor.channel.allowed_workspaces, ["acme.slack.com"]);
 
         // draft → auto → auto-after, using the protocol-published order.
         app.operator_dialog
@@ -44724,7 +44722,6 @@ mod tests {
                                 "id": params.channel.id,
                                 "kind": params.channel.kind,
                                 "enabled": params.channel.enabled,
-                                "mcp_command": params.channel.mcp_command,
                                 "trigger": params.channel.trigger,
                                 "response_mode": params.channel.response_mode,
                                 "response_mode_overrides": params.channel.response_mode_overrides,
@@ -44767,7 +44764,6 @@ mod tests {
                 .unwrap();
             editor.channel.kind = "slack-personal".into();
             editor.channel.port = None;
-            editor.channel.mcp_command = Some("fake-mcp".into());
             editor.channel.trigger = Some("dm".into());
             editor.channel.response_mode = Some("draft".into());
             editor.response_mode_overrides = "C-sensitive=auto-after,D-Private=draft".into();
@@ -45068,7 +45064,6 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                mcp_command: None,
                 trigger: None,
                 response_mode: None,
                 response_mode_overrides: None,
@@ -45093,7 +45088,6 @@ mod tests {
                 progress: None,
                 follow_up: None,
                 thread_context: None,
-                mcp_command: None,
                 trigger: None,
                 response_mode: None,
                 response_mode_overrides: None,

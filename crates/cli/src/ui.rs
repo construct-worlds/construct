@@ -8878,10 +8878,17 @@ fn render_operator_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, fo
             } else {
                 "disabled"
             };
-            let endpoint = channel
-                .port
-                .map(|port| format!("127.0.0.1:{port}"))
-                .unwrap_or_else(|| "no port".to_string());
+            let endpoint = match channel.kind.as_str() {
+                "slack" => "Socket Mode".to_string(),
+                "slack-personal" if channel.has_credential => {
+                    "Slack MCP · OAuth credentials saved".to_string()
+                }
+                "slack-personal" => "Slack MCP · OAuth credentials missing".to_string(),
+                _ => channel
+                    .port
+                    .map(|port| format!("127.0.0.1:{port}"))
+                    .unwrap_or_else(|| "no port".to_string()),
+            };
             let owner = channel
                 .attached_to
                 .as_deref()
@@ -8911,7 +8918,13 @@ fn render_operator_view(f: &mut Frame, area: Rect, app: &mut App, name: &str, fo
                         ),
                     }
                 })
-                .unwrap_or_else(|| if attached { "  loopback".to_string() } else { String::new() });
+                .unwrap_or_else(|| {
+                    if attached && channel.kind == "http" {
+                        "  loopback".to_string()
+                    } else {
+                        String::new()
+                    }
+                });
             let style = if selected {
                 Style::default()
                     .fg(app.theme.highlight_fg)
@@ -9160,10 +9173,6 @@ pub(crate) fn render_operator_channel_editor(
         vec![
             ("Channel ID", editor.channel.id.clone()),
             ("Kind", editor.channel.kind.clone()),
-            (
-                "MCP command",
-                editor.channel.mcp_command.clone().unwrap_or_default(),
-            ),
             ("Workspaces", editor.channel.allowed_workspaces.join(",")),
             ("Channels", editor.channel.allowed_channels.join(",")),
             (
@@ -9328,18 +9337,17 @@ pub(crate) fn render_operator_channel_editor(
     let (title, body, hint) = if editor.channel.kind == "slack-personal" {
         match editor.selected_field {
             0 => ("Channel ID", "Stable local name for this channel; locked after creation.", "Type to edit when creating."),
-            1 => ("Kind", "slack-personal acts through your own Slack account via an MCP backend — no Slack app, no bot. Everything it posts appears as you.", "←/→ or Space switches kind when creating."),
-            2 => ("MCP command", "Shell command that starts the channel's MCP backend on stdio, e.g. a Slack MCP server authenticated as your account. The daemon polls it for new messages and posts replies through it.", "Type the command · restarts the backend on save."),
-            3 => ("Workspace allowlist", "Optional comma-separated Slack team IDs. Empty accepts messages from any workspace the backend can see.", "Type workspace IDs separated by commas."),
-            4 => ("Channel allowlist", "Channels the operator may read when the trigger is `all`. Unlike the bot kind, empty means no channels at all — only DMs are in scope by default.", "Type channel IDs separated by commas."),
-            5 => ("Trigger", "What enters the operator: dm forwards only your direct messages; all also forwards every message in an allowlisted channel. Your own messages trigger it only in your DM with yourself.", "Space or → next · ← previous · applies on save."),
-            6 => ("Response", "How visibly it answers: draft composes a Slack draft; auto posts immediately; auto-after waits the configured grace period and posts only if you have not replied.", "Space or → next · ← previous · applies on save."),
-            7 => ("Response overrides", "Optional comma-separated exact Slack channel-ID overrides. Each entry replaces the default response mode for every thread in that channel; it does not widen the trigger or allowlists.", "Type entries like C123=auto-after,D456=draft · empty inherits the default everywhere."),
-            8 => ("Auto-after delay", "Seconds auto-after waits once the agent has prepared a reply. At the end it rechecks the thread and yields if you answered first.", "Type a number of seconds, at least 1."),
-            9 => ("Disclosure", "Whether an auto-sent reply carries a marker telling recipients an agent wrote it. It posts under your name, so turning this off means undisclosed impersonation of you.", "Space or ←/→ toggles · applies on save."),
-            10 => ("Idle poll ceiling", "Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling; traffic outside this channel's accepted scope does not keep polling hot.", "Type a number of seconds, at least 5."),
-            11 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. This is text written by everyone in the thread, put in front of a session that holds tools.", "Type a number up to 1000 · applies on save."),
-            12 => ("State", "Disabled slack-personal channels stop their MCP backend and polling while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
+            1 => ("Kind", "slack-personal acts through your own Slack account via Slack's hosted MCP server. Everything it posts appears as you.", "Saving starts browser OAuth on first use; no MCP command or Slack token is required."),
+            2 => ("Workspace allowlist", "Optional comma-separated Slack workspace hosts, such as acme.slack.com. Empty accepts the workspace authorized in browser OAuth.", "Type workspace hosts separated by commas."),
+            3 => ("Channel allowlist", "Channels the operator may read when the trigger is `all`. Unlike the bot kind, empty means no channels at all — only DMs are in scope by default.", "Type channel IDs separated by commas."),
+            4 => ("Trigger", "What enters the operator: dm forwards incoming direct messages; all also forwards every message from others in an allowlisted channel. Hosted search marks your own messages but cannot safely identify a self-DM, so they are ignored.", "Space or → next · ← previous · applies on save."),
+            5 => ("Response", "How visibly it answers: draft composes a Slack draft; auto posts immediately; auto-after waits the configured grace period and posts only if you have not replied.", "Space or → next · ← previous · applies on save."),
+            6 => ("Response overrides", "Optional comma-separated exact Slack channel-ID overrides. Each entry replaces the default response mode for every thread in that channel; it does not widen the trigger or allowlists.", "Type entries like C123=auto-after,D456=draft · empty inherits the default everywhere."),
+            7 => ("Auto-after delay", "Seconds auto-after waits once the agent has prepared a reply. At the end it searches for your newer reply and yields if you answered first.", "Type a number of seconds, at least 1."),
+            8 => ("Disclosure", "Whether an auto-sent reply carries a marker telling recipients an agent wrote it. It posts under your name, so turning this off means undisclosed impersonation of you.", "Space or ←/→ toggles · applies on save."),
+            9 => ("Idle poll ceiling", "Longest delay between sweeps. Accepted activity resets polling to 5 seconds, then idle sweeps back off to this ceiling; traffic outside this channel's accepted scope does not keep polling hot.", "Type a number of seconds, at least 5."),
+            10 => ("Thread context", "Earlier messages of a thread to read when first pulled into one; 0 reads none. This is text written by everyone in the thread, put in front of a session that holds tools.", "Type a number up to 1000 · applies on save."),
+            11 => ("State", "Disabled slack-personal channels stop their MCP backend and polling while preserving configuration.", "Space or ←/→ toggles · applies immediately."),
             _ => ("Channel", "", ""),
         }
     } else if editor.channel.kind == "slack" {

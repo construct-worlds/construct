@@ -804,13 +804,13 @@ struct SlackHistoryResponse {
 #[derive(Debug, Deserialize)]
 pub(super) struct SlackHistoryMessage {
     #[serde(default)]
-    user: Option<String>,
+    pub(super) user: Option<String>,
     #[serde(default)]
-    bot_id: Option<String>,
+    pub(super) bot_id: Option<String>,
     #[serde(default)]
-    text: Option<String>,
+    pub(super) text: Option<String>,
     #[serde(default)]
-    ts: Option<String>,
+    pub(super) ts: Option<String>,
 }
 
 /// Render fetched thread history as material the agent reads but does not obey.
