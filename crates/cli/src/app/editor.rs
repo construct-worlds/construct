@@ -3003,6 +3003,13 @@ impl App {
             return;
         }
         let (char_start, char_end) = if let Some(range) =
+            crate::playbook_markdown::playbook_closing_inline_fence_before_cursor(
+                &popup.buffer,
+                popup.cursor,
+            )
+        {
+            (range.start, range.end)
+        } else if let Some(range) =
             playbook_smart_clip_range_before_or_containing(&popup.buffer, popup.cursor)
         {
             (range.start, range.end)

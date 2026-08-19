@@ -16847,6 +16847,18 @@ fn playbook_smart_clip_ranges(buffer: &str) -> Vec<PlaybookSmartClipRange> {
         let kind = classifier.classify(raw);
         if kind.is_markdown() {
             let chars: Vec<char> = raw.chars().collect();
+            let inline_fences = crate::playbook_markdown::playbook_inline_fences(raw)
+                .into_iter()
+                .map(|fence| {
+                    (
+                        raw[..fence.source.start].chars().count(),
+                        raw[..fence.source.end].chars().count(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let unmatched_inline_start =
+                crate::playbook_markdown::playbook_unmatched_inline_fence_start(raw)
+                    .map(|start| raw[..start].chars().count());
             let mut idx = 0usize;
             while idx + 1 < chars.len() {
                 if chars[idx] != '@' || chars[idx + 1] != '{' {
@@ -16858,10 +16870,16 @@ fn playbook_smart_clip_ranges(buffer: &str) -> Vec<PlaybookSmartClipRange> {
                     end += 1;
                 }
                 if end < chars.len() {
-                    ranges.push(PlaybookSmartClipRange {
-                        start: line_start + idx,
-                        end: line_start + end + 1,
-                    });
+                    if !inline_fences
+                        .iter()
+                        .any(|&(start, fence_end)| idx < fence_end && end + 1 > start)
+                        && unmatched_inline_start.is_none_or(|start| idx < start)
+                    {
+                        ranges.push(PlaybookSmartClipRange {
+                            start: line_start + idx,
+                            end: line_start + end + 1,
+                        });
+                    }
                     idx = end + 1;
                 } else {
                     idx += 2;
@@ -32554,7 +32572,7 @@ mod tests {
 
     #[test]
     fn playbook_backtick_fence_keeps_smart_clips_literal() {
-        let md = "@{session:outside}\n```md\n@{session:literal}\n```\n@{harness:codex}";
+        let md = "@{session:outside}\n```md\n@{session:literal}\n```\n```@{session:inline}```\n@{harness:codex}";
         assert_eq!(
             playbook_referenced_session_ids(md),
             vec!["outside".to_string()]
@@ -32586,7 +32604,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn playbook_backtick_fence_renders_literal_source_without_interactions() {
+    async fn playbook_backtick_fence_formats_inline_and_keeps_multiline_literal() {
         let (mut app, _dir, server) = empty_app().await;
         let md = "```rust\n# not a heading\n- not a bullet\n@{session:literal}\n![shot](/tmp/shot.png)\n[Run](agentd:action/example)\n```";
         app.playbook_popup = Some(playbook_popup_for_test("s1", md, 0));
@@ -32602,12 +32620,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(painted, md.lines().collect::<Vec<_>>());
-        assert_eq!(lines[0].spans[0].style.fg, Some(app.theme.dim));
-        assert_eq!(lines[1].spans[0].style.fg, Some(app.theme.accent_alt));
-        assert_eq!(
-            lines[1].spans[0].style.bg,
-            Some(app.theme.inactive_highlight_bg)
-        );
+        assert!(lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .all(|span| span.style.bg.is_none()));
 
         let area = Rect::new(0, 0, 80, 20);
         assert!(crate::ui::playbook_session_clip_hits(Some(&app), md, 0, area).is_empty());
@@ -32631,6 +32647,71 @@ mod tests {
             app.playbook_popup.as_ref().unwrap().buffer,
             code_list,
             "Tab must not apply Markdown list indentation inside raw code"
+        );
+
+        let boundary_source = "before ```界🙂 @{session:literal}```";
+        let inline = format!("{boundary_source} after");
+        app.playbook_popup = Some(playbook_popup_for_test(
+            "s1",
+            &inline,
+            boundary_source.chars().count(),
+        ));
+        let lines = crate::ui::render_playbook_markdown_lines_for_test(&app, &inline);
+        let painted = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(painted, "before 界🙂 @{session:literal} after");
+        assert_eq!(
+            lines[0]
+                .spans
+                .iter()
+                .find(|span| span.content.contains("界🙂"))
+                .unwrap()
+                .style
+                .bg,
+            Some(app.theme.inactive_highlight_bg)
+        );
+        assert!(crate::ui::playbook_session_clip_hits(Some(&app), &inline, 0, area).is_empty());
+        let (_, cursor_col) = crate::ui::playbook_cursor_visual_pos(
+            Some(&app),
+            &inline,
+            boundary_source.chars().count(),
+            80,
+        );
+        assert_eq!(
+            cursor_col,
+            unicode_width::UnicodeWidthStr::width("before 界🙂 @{session:literal}")
+        );
+
+        app.delete_playbook_back();
+        assert_eq!(
+            app.playbook_popup.as_ref().unwrap().buffer,
+            "before ```界🙂 @{session:literal} after"
+        );
+        let revealed = crate::ui::render_playbook_markdown_lines_for_test(
+            &app,
+            &app.playbook_popup.as_ref().unwrap().buffer,
+        );
+        assert_eq!(
+            revealed[0]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "before ```界🙂 @{session:literal} after"
+        );
+        app.insert_playbook_text("```");
+        assert_eq!(app.playbook_popup.as_ref().unwrap().buffer, inline);
+        let restored = crate::ui::render_playbook_markdown_lines_for_test(&app, &inline);
+        assert_eq!(
+            restored[0]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "before 界🙂 @{session:literal} after"
         );
         server.abort();
     }

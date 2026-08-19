@@ -12,7 +12,10 @@ use crate::app::{
     PLAYBOOK_REVEAL_MS,
 };
 use crate::keymap::{KeyAction, Profile};
-use crate::playbook_markdown::{PlaybookLineClassifier, PlaybookLineKind};
+use crate::playbook_markdown::{
+    playbook_inline_fences, playbook_unmatched_inline_fence_start, PlaybookLineClassifier,
+    PlaybookLineKind,
+};
 use crate::text_util::wrap_to_width;
 use crate::theme::Theme;
 use construct_protocol::{
@@ -21258,10 +21261,11 @@ enum PlaybookInlineToken<'a> {
     Code {
         content: &'a str,
         src_len: usize,
+        delimiter_len: usize,
     },
 }
 
-fn find_playbook_inline_code(text: &str) -> Option<(usize, PlaybookInlineToken<'_>)> {
+fn find_playbook_single_inline_code(text: &str) -> Option<(usize, PlaybookInlineToken<'_>)> {
     let bytes = text.as_bytes();
     let mut from = 0usize;
     while let Some(rel) = text[from..].find('`') {
@@ -21284,6 +21288,7 @@ fn find_playbook_inline_code(text: &str) -> Option<(usize, PlaybookInlineToken<'
                     PlaybookInlineToken::Code {
                         content: &text[content_start..close],
                         src_len: close + 1 - start,
+                        delimiter_len: 1,
                     },
                 ));
             }
@@ -21292,6 +21297,25 @@ fn find_playbook_inline_code(text: &str) -> Option<(usize, PlaybookInlineToken<'
         return None;
     }
     None
+}
+
+fn find_playbook_inline_code(text: &str) -> Option<(usize, PlaybookInlineToken<'_>)> {
+    let single = find_playbook_single_inline_code(text);
+    let triple = playbook_inline_fences(text).into_iter().next().map(|fence| {
+        let start = fence.source.start;
+        (
+            start,
+            PlaybookInlineToken::Code {
+                content: &text[fence.content],
+                src_len: fence.source.end - start,
+                delimiter_len: 3,
+            },
+        )
+    });
+    match (single, triple) {
+        (Some(single), Some(triple)) => Some(if single.0 <= triple.0 { single } else { triple }),
+        (single, triple) => single.or(triple),
+    }
 }
 
 fn next_playbook_inline_token(text: &str) -> Option<(usize, PlaybookInlineToken<'_>)> {
@@ -21314,6 +21338,11 @@ fn next_playbook_inline_token(text: &str) -> Option<(usize, PlaybookInlineToken<
         if next.as_ref().is_none_or(|current| candidate.0 < current.0) {
             next = Some(candidate);
         }
+    }
+    if playbook_unmatched_inline_fence_start(text)
+        .is_some_and(|start| next.as_ref().is_none_or(|candidate| start < candidate.0))
+    {
+        return None;
     }
     next
 }
@@ -21358,7 +21387,9 @@ fn playbook_inline_rendered_text(
                 link_idx += 1;
                 link.end - link.start
             }
-            PlaybookInlineToken::Code { content, src_len } => {
+            PlaybookInlineToken::Code {
+                content, src_len, ..
+            } => {
                 out.push_str(content);
                 src_len
             }
@@ -21485,7 +21516,9 @@ fn playbook_inline_with_clips(
                 link_idx += 1;
                 link.end - link.start
             }
-            PlaybookInlineToken::Code { content, src_len } => {
+            PlaybookInlineToken::Code {
+                content, src_len, ..
+            } => {
                 out.push_str(content);
                 visual += UnicodeWidthStr::width(content);
                 src_len
@@ -21915,11 +21948,16 @@ fn playbook_inline_visual_width(
         visual += UnicodeWidthStr::width(before);
         raw += before_len;
 
-        if let PlaybookInlineToken::Code { content, src_len } = &token {
+        if let PlaybookInlineToken::Code {
+            content,
+            src_len,
+            delimiter_len,
+        } = &token
+        {
             let src_chars = rest[start_b..start_b + src_len].chars().count();
             if raw_col <= raw + src_chars {
                 let content_col = raw_col
-                    .saturating_sub(raw + 1)
+                    .saturating_sub(raw + delimiter_len)
                     .min(content.chars().count());
                 return visual + playbook_prefix_display_width(content, content_col);
             }
@@ -21998,25 +22036,17 @@ fn render_playbook_markdown_lines<'a>(
             Vec::new()
         };
         let li = playbook_line_instance(&mut dups, raw);
-        if matches!(kind, PlaybookLineKind::CodeFence | PlaybookLineKind::Code) {
-            // Fenced code remains a source editor: delimiters and body paint
-            // character-for-character, while the body receives a restrained
-            // code treatment and no Markdown/clip/link transformations run.
+        if !kind.is_markdown() {
+            // Multiline fences remain literal source on this line-oriented
+            // editor surface. Markdown/clip/link transformations stay inert;
+            // completed one-line triple-backtick spans are formatted by the
+            // shared inline-token path below.
             let painted = playbook_painted_indent_line(raw);
-            let style = if kind == PlaybookLineKind::CodeFence {
-                Style::default()
-                    .fg(app.theme.dim)
-                    .bg(app.theme.inactive_highlight_bg)
-            } else {
-                Style::default()
-                    .fg(app.theme.accent_alt)
-                    .bg(app.theme.inactive_highlight_bg)
-            };
             let spans = playbook_text_spans(
                 &app.theme,
                 &painted,
                 line_start,
-                style,
+                Style::default().fg(app.theme.text),
                 selection,
                 search_matches,
                 search_selected,
@@ -22320,14 +22350,18 @@ fn render_playbook_inline_spans<'a>(
                 ));
                 link_idx += 1;
             }
-            PlaybookInlineToken::Code { content, .. } => {
+            PlaybookInlineToken::Code {
+                content,
+                delimiter_len,
+                ..
+            } => {
                 let code_style = base_style
                     .fg(app.theme.highlight_fg)
                     .bg(app.theme.inactive_highlight_bg);
                 spans.extend(playbook_text_spans(
                     &app.theme,
                     content,
-                    chip_char_start + 1,
+                    chip_char_start + delimiter_len,
                     code_style,
                     selection,
                     search_matches,
@@ -23970,6 +24004,19 @@ mod tests {
         assert_eq!(
             playbook_inline_rendered_text(None, "```rust", None, 80),
             "```rust"
+        );
+        let triple = "before ```界🙂 ` raw``` after";
+        assert_eq!(
+            playbook_inline_rendered_text(None, triple, None, 80),
+            "before 界🙂 ` raw after"
+        );
+        assert_eq!(
+            playbook_visual_col_for_line(None, triple, triple.chars().count(), 80, 0),
+            UnicodeWidthStr::width("before 界🙂 ` raw after")
+        );
+        assert_eq!(
+            playbook_inline_rendered_text(None, "before ```界🙂", None, 80),
+            "before ```界🙂"
         );
     }
 

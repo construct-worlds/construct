@@ -3213,6 +3213,10 @@
     border-radius: 4px;
     padding: 0 2px;
   }
+  .playbook-inline-code.is-fenced {
+    background: color-mix(in srgb, var(--accent-alt) 22%, var(--bg-elev));
+  }
+  .playbook-line.is-fenced-source { color: var(--fg); }
   .playbook-selection-menu {
     position: absolute;
     z-index: 8;
@@ -9288,21 +9292,39 @@ function playbookLineClipRanges(line) {
   return ranges;
 }
 
-// Completed single-backtick spans. Backtick runs are left alone for fenced
-// code and literal Markdown; an unmatched opening delimiter stays visible as
-// source until the user completes it.
+function playbookExactBacktickRun(line, at, len) {
+  if (line.slice(at, at + len) !== "`".repeat(len)) return false;
+  return line[at - 1] !== "`" && line[at + len] !== "`";
+}
+
+// Completed single- and exact triple-backtick spans. Unmatched triple runs
+// begin a literal, inert tail until the user types the closing delimiter.
 function playbookLineCodeRanges(line) {
   const ranges = [];
+  let unmatchedTriple = -1;
+  for (let i = 0; i <= line.length - 3; i++) {
+    if (!playbookExactBacktickRun(line, i, 3)) continue;
+    let close = -1;
+    for (let j = i + 3; j <= line.length - 3; j++) {
+      if (playbookExactBacktickRun(line, j, 3) && j > i + 3) { close = j; break; }
+    }
+    if (close === -1) { unmatchedTriple = i; break; }
+    ranges.push([i, close + 3, 3]);
+    i = close + 2;
+  }
   for (let i = 0; i < line.length; i++) {
+    if (unmatchedTriple !== -1 && i >= unmatchedTriple) break;
     if (line[i] !== "`" || line[i - 1] === "`" || line[i + 1] === "`") continue;
+    if (ranges.some(([s, e]) => i >= s && i < e)) continue;
     for (let j = i + 1; j < line.length; j++) {
       if (line[j] !== "`" || line[j - 1] === "`" || line[j + 1] === "`") continue;
-      if (j > i + 1) ranges.push([i, j + 1]);
+      if (j > i + 1) ranges.push([i, j + 1, 1]);
       i = j;
       break;
     }
   }
-  return ranges;
+  ranges.sort((a, b) => a[0] - b[0]);
+  return { ranges, unmatchedTriple };
 }
 
 // All construct-dialect inline tokens in one source line, in order: typed
@@ -9327,8 +9349,10 @@ function playbookMdLinkParse(raw) {
 }
 
 function playbookLineInlineTokens(line) {
-  const tokens = playbookLineCodeRanges(line).map(([s, e]) => ({ start: s, end: e, kind: "code" }));
+  const code = playbookLineCodeRanges(line);
+  const tokens = code.ranges.map(([s, e, delimiter]) => ({ start: s, end: e, kind: "code", delimiter }));
   for (const [start, end] of playbookLineClipRanges(line)) {
+    if (code.unmatchedTriple !== -1 && start >= code.unmatchedTriple) continue;
     if (!tokens.some((t) => start < t.end && end > t.start)) tokens.push({ start, end, kind: "clip" });
   }
   PLAYBOOK_ACTION_LINK_RE.lastIndex = 0;
@@ -9336,6 +9360,7 @@ function playbookLineInlineTokens(line) {
   while ((m = PLAYBOOK_ACTION_LINK_RE.exec(line))) {
     const start = m.index;
     const end = m.index + m[0].length;
+    if (code.unmatchedTriple !== -1 && start >= code.unmatchedTriple) continue;
     if (tokens.some((t) => start < t.end && end > t.start)) continue;
     tokens.push({ start, end, kind: "action" });
   }
@@ -9343,6 +9368,7 @@ function playbookLineInlineTokens(line) {
   while ((m = PLAYBOOK_MD_LINK_RE.exec(line))) {
     const start = m.index;
     const end = m.index + m[0].length;
+    if (code.unmatchedTriple !== -1 && start >= code.unmatchedTriple) continue;
     if (tokens.some((t) => start < t.end && end > t.start)) continue;
     // Images only (spec 0099): plain `[name](path)` file links stay
     // literal text — no preview affordance, and chipping hid the path.
@@ -9502,15 +9528,16 @@ function playbookAttachmentChipEl(raw) {
   return span;
 }
 
-// Atomic presentation for completed inline code. The exact source remains in
-// data-raw; Backspace at the right edge replaces this with ` + content so the
-// opening delimiter and text become directly editable again.
-function playbookInlineCodeEl(raw) {
+// Atomic presentation for completed single- or triple-backtick code. The exact
+// source remains in data-raw; Backspace at the right edge removes the closing
+// delimiter so the opening delimiter and text become directly editable again.
+function playbookInlineCodeEl(raw, delimiter = 1) {
   const span = document.createElement("span");
-  span.className = "playbook-inline-code";
+  span.className = "playbook-inline-code" + (delimiter === 3 ? " is-fenced" : "");
   span.setAttribute("contenteditable", "false");
   span.dataset.raw = raw;
-  span.textContent = raw.slice(1, -1);
+  span.dataset.delimiter = String(delimiter);
+  span.textContent = raw.slice(delimiter, -delimiter);
   return span;
 }
 
@@ -9849,7 +9876,7 @@ function playbookFillLine(div, text) {
     if (t.start > pos) playbookAppendLineText(div, text.slice(pos, t.start), pos === 0);
     const raw = text.slice(t.start, t.end);
     const chip = t.kind === "code"
-      ? playbookInlineCodeEl(raw)
+      ? playbookInlineCodeEl(raw, t.delimiter || 1)
       : t.kind === "action"
       ? playbookActionChipEl(raw)
       : t.kind === "attachment"
@@ -9904,10 +9931,30 @@ function playbookApplyLineDecorations() {
   }
 }
 
-function playbookLineDiv(text) {
+function playbookMultilineFenceKinds(markdown) {
+  const lines = markdown.split("\n");
+  const kinds = new Array(lines.length).fill("markdown");
+  let open = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^( {0,3})(`{3,})(.*)$/.exec(lines[i]);
+    if (open) {
+      kinds[i] = m && m[2].length >= open && m[3].trim() === "" ? "fence" : "code";
+      if (kinds[i] === "fence") open = 0;
+    } else if (m && !m[3].includes("`")) {
+      kinds[i] = "fence";
+      open = m[2].length;
+    }
+  }
+  return kinds;
+}
+
+function playbookLineDiv(text, fencedSource = false) {
   const div = document.createElement("div");
-  div.className = "playbook-line";
-  return playbookFillLine(div, text);
+  div.className = "playbook-line" + (fencedSource ? " is-fenced-source" : "");
+  if (!fencedSource) return playbookFillLine(div, text);
+  if (text === "") div.appendChild(document.createElement("br"));
+  else div.appendChild(document.createTextNode(text));
+  return div;
 }
 
 // Render the whole document into the contenteditable (one .playbook-line per
@@ -9915,7 +9962,9 @@ function playbookLineDiv(text) {
 // template, live adopt), never on every keystroke.
 function playbookRenderDoc(markdown) {
   while (playbookInputEl.firstChild) playbookInputEl.removeChild(playbookInputEl.firstChild);
-  for (const line of markdown.split("\n")) playbookInputEl.appendChild(playbookLineDiv(line));
+  const lines = markdown.split("\n");
+  const kinds = playbookMultilineFenceKinds(markdown);
+  lines.forEach((line, i) => playbookInputEl.appendChild(playbookLineDiv(line, kinds[i] !== "markdown")));
   playbookApplyLineDecorations();
   playbookApplyShimmer();
   playbookRenderCursors();
@@ -11186,6 +11235,8 @@ function playbookClipContext() {
   const range = sel.getRangeAt(0);
   const node = range.startContainer;
   if (node.nodeType !== 3 || !playbookInputEl.contains(node)) return null;
+  const offsets = playbookSelectionOffsets();
+  if (offsets && playbookOffsetIsFencedSource(playbookSerialize(), offsets.head)) return null;
   const text = node.data.slice(0, range.startOffset);
   const at = text.lastIndexOf("@");
   if (at === -1) return null;
@@ -11194,6 +11245,23 @@ function playbookClipContext() {
   const prev = at > 0 ? text[at - 1] : "";
   if (prev && /[A-Za-z0-9_]/.test(prev)) return null;
   return { node, at, query };
+}
+
+function playbookOffsetIsFencedSource(markdown, rawOffset) {
+  const chars = Array.from(markdown || "");
+  const before = chars.slice(0, Math.max(0, rawOffset)).join("");
+  const lineIndex = (before.match(/\n/g) || []).length;
+  const line = (markdown || "").split("\n")[lineIndex] || "";
+  const local = Array.from(before.slice(before.lastIndexOf("\n") + 1)).length;
+  const code = playbookLineCodeRanges(line);
+  const inCompleted = code.ranges.some(([start, end, delimiter]) =>
+    delimiter === 3 && local >= Array.from(line.slice(0, start)).length && local <= Array.from(line.slice(0, end)).length);
+  const unmatchedStart = code.unmatchedTriple === -1
+    ? null
+    : Array.from(line.slice(0, code.unmatchedTriple)).length;
+  return inCompleted
+    || (unmatchedStart != null && local >= unmatchedStart)
+    || playbookMultilineFenceKinds(markdown)[lineIndex] !== "markdown";
 }
 
 // Relevance score of a non-empty, lowercased `query` against a candidate.
@@ -11580,6 +11648,28 @@ function playbookFormatInlineCodeAtCaret() {
   sel.addRange(range);
 }
 
+// Multiline fences stay literal and inert. Rebuild only when a delimiter edit
+// changes which source lines belong to such a fence, then restore the source
+// caret offset. Completed one-line triple spans use the inline token above.
+function playbookSyncFencedSourcePresentation() {
+  const markdown = playbookSerialize();
+  const lines = markdown.split("\n");
+  const kinds = playbookMultilineFenceKinds(markdown);
+  const elements = Array.from(playbookInputEl.children);
+  const mismatch = elements.length !== lines.length || elements.some((el, i) =>
+    el.classList.contains("is-fenced-source") !== (kinds[i] !== "markdown"));
+  if (!mismatch) return false;
+  const offsets = playbookSelectionOffsets();
+  playbookRenderDoc(markdown);
+  if (offsets && offsets.anchor === offsets.head) {
+    const sel = window.getSelection();
+    const range = playbookRangeForOffset(offsets.head);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  return true;
+}
+
 function playbookInlineCodeImmediatelyBeforeCaret() {
   const sel = window.getSelection();
   if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return null;
@@ -11599,17 +11689,18 @@ function playbookRevealInlineCodeForBackspace() {
   const code = playbookInlineCodeImmediatelyBeforeCaret();
   if (!code) return false;
   const raw = code.dataset.raw || "";
+  const delimiter = Math.max(1, Number(code.dataset.delimiter || 1));
   const sel = window.getSelection();
   const replacement = document.createRange();
   replacement.selectNode(code);
   sel.removeAllRanges();
   sel.addRange(replacement);
   // Keep the replacement in the browser's native contenteditable undo stack.
-  if (document.execCommand("insertText", false, raw.slice(0, -1))) return true;
+  if (document.execCommand("insertText", false, raw.slice(0, -delimiter))) return true;
 
   // Older engines may reject execCommand across a contenteditable=false node.
   // Preserve the behavior there and publish the edit through the normal path.
-  const text = document.createTextNode(raw.slice(0, -1));
+  const text = document.createTextNode(raw.slice(0, -delimiter));
   code.replaceWith(text);
   const range = document.createRange();
   range.setStart(text, text.data.length);
@@ -11622,7 +11713,7 @@ function playbookRevealInlineCodeForBackspace() {
 
 function playbookOnInput() {
   playbookNormalizeLines();
-  playbookFormatInlineCodeAtCaret();
+  if (!playbookSyncFencedSourcePresentation()) playbookFormatInlineCodeAtCaret();
   playbookApplyLineDecorations();
   playbookRefreshEmptyState();
   playbookUpdateDirty();

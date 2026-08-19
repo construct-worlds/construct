@@ -57,10 +57,12 @@ IME) with the same capabilities, plus `Ctrl+S` to save, `Ctrl+F` for
 Emacs-style cursor-forward (click the Find button to search), and
 `Ctrl+Enter` to run.
 
-Triple-backtick code fences remain fully visible and editable in the TUI. The
-fence delimiters are dimmed and the body is code-styled, while Markdown syntax,
-smart clips, attachments, and action links inside the fence stay literal and
-non-interactive.
+Completed triple-backtick spans on one line render as highlighted code with
+their delimiters hidden while preserving the exact Markdown source. Backspace
+at the rendered right edge removes the closing three backticks and reveals the
+source; retyping them restores the formatting. Multiline and incomplete fences
+remain visible literal source, with Markdown syntax, smart clips, attachments,
+and action links inside them kept non-interactive.
 
 ## Smart clips
 
