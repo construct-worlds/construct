@@ -45492,7 +45492,7 @@ mod tests {
         app.open_edit_operator_view("assistant");
         app.open_new_operator_channel();
         assert_eq!(channel_editor(&app).channel.id, "");
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .await;
         // Whatever the save round-trip did, the untyped ID became the
         // suggested one before validation ran — never an empty-ID error.
@@ -45501,6 +45501,61 @@ mod tests {
         assert_ne!(
             editor.note.as_deref(),
             Some("Channel ID must be 1–32 lowercase letters, digits, or interior hyphens."),
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn channel_editor_marks_unsaved_edits_and_names_ctrl_s_save() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.operators.push(operator_summary_for_test("assistant"));
+        app.operator_channel_catalog = app.operators[0].channels.clone();
+        app.open_edit_operator_view("assistant");
+        app.open_edit_operator_channel(0);
+        assert!(
+            !channel_editor(&app).is_dirty(),
+            "saved channel starts clean"
+        );
+
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        let mut draw = |app: &mut App| {
+            let editor = channel_editor(app).clone();
+            term.draw(|f| {
+                crate::ui::render_operator_channel_editor(f, f.area(), app, &editor);
+            })
+            .expect("draw");
+            rendered_text(term.backend().buffer())
+        };
+
+        let text = draw(&mut app);
+        assert!(text.contains("Channel · assistant"), "{text}");
+        assert!(
+            !text.contains("Channel · assistant*"),
+            "clean channel is unmarked"
+        );
+        assert!(text.contains("C-s save"), "save hint is explicit: {text}");
+        assert!(
+            !text.contains("Enter/C-s save"),
+            "Enter is not advertised as save: {text}"
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .await;
+        assert!(
+            channel_editor(&app).is_dirty(),
+            "editing the port marks the channel dirty"
+        );
+        let text = draw(&mut app);
+        assert!(
+            text.contains("Channel · assistant*"),
+            "dirty channel carries the marker: {text}"
+        );
+
+        app.open_new_operator_channel();
+        assert!(
+            channel_editor(&app).is_dirty(),
+            "a channel that has never been saved is dirty"
         );
         server.abort();
     }
@@ -45817,7 +45872,23 @@ mod tests {
             editor.response_mode_overrides = "C-sensitive=auto-after,D-Private=draft".into();
         }
 
+        assert!(channel_editor(&app).is_dirty());
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert!(
+            matches!(
+                request_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "Enter must not send a channel save"
+        );
+        assert_eq!(
+            channel_editor(&app).mode,
+            OperatorChannelDialogMode::Create,
+            "Enter leaves the unsaved draft in place"
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
             .await;
         let params = request_rx.recv().await.expect("put request");
         assert_eq!(
@@ -45831,6 +45902,22 @@ mod tests {
             channel_editor(&app).response_mode_overrides,
             "C-sensitive=auto-after,D-Private=draft",
             "the daemon summary is formatted back into the editor"
+        );
+        assert!(
+            !channel_editor(&app).is_dirty(),
+            "the daemon-confirmed save clears dirty state"
+        );
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        let editor = channel_editor(&app).clone();
+        term.draw(|f| {
+            crate::ui::render_operator_channel_editor(f, f.area(), &mut app, &editor);
+        })
+        .expect("draw");
+        let text = rendered_text(term.backend().buffer());
+        assert!(
+            !text.contains("Channel · assistant*"),
+            "saved state clears the rendered dirty marker: {text}"
         );
         server.abort();
     }

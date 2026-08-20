@@ -38,6 +38,12 @@ The pane title marks unsaved state with a trailing `*` on the operator name.
 confirmed. Channel attachment and detachment are applied straight to the daemon
 rather than staged in the editor, so they never contribute to unsaved state.
 
+The dedicated editor for an attached channel follows the same explicit-save
+language independently of the surrounding definition: `C-s` is its only save
+key, `Enter` never saves, and a trailing `*` marks a new or modified channel
+until the daemon confirms the save. Its footer always names `C-s save` so the
+save boundary is visible while editing.
+
 The view is one continuous navigable list: the definition fields, then the
 channel catalog rows, then the routed session rows, wrapping back to the first
 field. Channels are a section, not a definition field. Next/previous
@@ -77,6 +83,8 @@ be modelled as a sub-mode of a field.
   the per-field help, and the field count in step.
 - Anything that adopts a daemon-confirmed definition into the editor must also
   refresh the saved baseline, or the title will keep claiming unsaved work.
+- A successful channel save must likewise refresh the channel editor's saved
+  baseline and clear its dirty marker.
 - Global chord prefixes must keep working over an open editor. The editor no
   longer closes to make room for them, so it has to stand aside for chord
   continuation keys.
