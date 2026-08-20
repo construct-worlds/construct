@@ -9298,7 +9298,11 @@ pub(crate) fn render_operator_channel_editor(
     };
     let mut fields = vec![
         Line::from(Span::styled(
-            format!("Channel · {}", editor.operator_name),
+            format!(
+                "Channel · {}{}",
+                editor.operator_name,
+                if editor.is_dirty() { "*" } else { "" }
+            ),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -9421,11 +9425,11 @@ pub(crate) fn render_operator_channel_editor(
     }
     f.render_widget(Paragraph::new(help).wrap(Wrap { trim: false }), columns[2]);
     let footer = if editor.mode == crate::app::OperatorChannelDialogMode::Create {
-        "Enter/C-s save · Esc back"
+        "C-s save · Esc back"
     } else if editor.channel.kind == "http" {
-        "Enter/C-s save · C-r rotate credential · C-d delete · Esc back"
+        "C-s save · C-r rotate credential · C-d delete · Esc back"
     } else {
-        "Enter/C-s save · C-d delete · Esc back"
+        "C-s save · C-d delete · Esc back"
     };
     let footer_y = area.bottom().saturating_sub(1);
     f.render_widget(

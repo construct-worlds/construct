@@ -176,6 +176,10 @@ pub struct OperatorChannelDialog {
     pub mode: OperatorChannelDialogMode,
     pub operator_name: String,
     pub channel: OperatorChannelSummary,
+    /// The editable channel fields as the daemon last confirmed them.
+    /// Runtime-only publication state is intentionally ignored by
+    /// [`Self::is_dirty`].
+    pub saved: OperatorChannelSummary,
     pub selected_field: usize,
     pub note: Option<String>,
     pub new_secret: Option<String>,
@@ -185,9 +189,51 @@ pub struct OperatorChannelDialog {
     /// Editable `CHANNEL=MODE` list for slack-personal overrides. Kept as
     /// text so partially typed entries survive until save-time validation.
     pub response_mode_overrides: String,
+    pub saved_response_mode_overrides: String,
     /// Suggested channel ID, shown dimmed while the created channel's ID is
     /// still empty and adopted by a save that never typed one.
     pub id_placeholder: String,
+}
+
+fn same_editable_channel(left: &OperatorChannelSummary, right: &OperatorChannelSummary) -> bool {
+    left.id == right.id
+        && left.kind == right.kind
+        && left.enabled == right.enabled
+        && left.port == right.port
+        && left.allowed_workspaces == right.allowed_workspaces
+        && left.allowed_channels == right.allowed_channels
+        && left.progress == right.progress
+        && left.follow_up == right.follow_up
+        && left.thread_context == right.thread_context
+        && left.trigger == right.trigger
+        && left.response_mode == right.response_mode
+        && left.auto_after_secs == right.auto_after_secs
+        && left.disclosure == right.disclosure
+        && left.poll_interval_secs == right.poll_interval_secs
+}
+
+impl OperatorChannelDialog {
+    /// A created channel has not been saved yet. Existing channels are dirty
+    /// when any editable field or write-only credential differs from the last
+    /// daemon-confirmed state.
+    pub fn is_dirty(&self) -> bool {
+        self.mode == OperatorChannelDialogMode::Create
+            || !same_editable_channel(&self.channel, &self.saved)
+            || self.response_mode_overrides != self.saved_response_mode_overrides
+            || !self.app_token.is_empty()
+            || !self.bot_token.is_empty()
+    }
+
+    fn adopt_saved(&mut self, channel: OperatorChannelSummary) {
+        self.response_mode_overrides =
+            format_response_mode_overrides(channel.response_mode_overrides.as_ref());
+        self.saved_response_mode_overrides = self.response_mode_overrides.clone();
+        self.saved = channel.clone();
+        self.channel = channel;
+        self.mode = OperatorChannelDialogMode::Edit;
+        self.app_token.clear();
+        self.bot_token.clear();
+    }
 }
 
 /// Address-level actions exposed by a channel publication. Keeping this typed
@@ -901,6 +947,7 @@ impl App {
                 attached_to: Some(dialog.operator.name.clone()),
                 publication: None,
             },
+            saved: OperatorChannelSummary::default(),
             selected_field: 0,
             note: Some("HTTP channels bind on loopback as soon as they are saved.".to_string()),
             new_secret: None,
@@ -908,6 +955,7 @@ impl App {
             app_token: String::new(),
             bot_token: String::new(),
             response_mode_overrides: String::new(),
+            saved_response_mode_overrides: String::new(),
             id_placeholder: id,
         });
         true
@@ -937,6 +985,7 @@ impl App {
         dialog.channel_editor = Some(OperatorChannelDialog {
             mode: OperatorChannelDialogMode::Edit,
             operator_name: dialog.operator.name.clone(),
+            saved: channel.clone(),
             channel,
             selected_field: 2,
             note: Some(if attached_here {
@@ -948,6 +997,7 @@ impl App {
             confirm_delete: false,
             app_token: String::new(),
             bot_token: String::new(),
+            saved_response_mode_overrides: response_mode_overrides.clone(),
             response_mode_overrides,
             id_placeholder: String::new(),
         });
@@ -1470,13 +1520,7 @@ impl App {
                         parent.adopt_saved(operator);
                     }
                     if let Some(editor) = parent.channel_editor.as_mut() {
-                        editor.mode = OperatorChannelDialogMode::Edit;
-                        editor.response_mode_overrides = format_response_mode_overrides(
-                            result.channel.response_mode_overrides.as_ref(),
-                        );
-                        editor.channel = result.channel;
-                        editor.app_token.clear();
-                        editor.bot_token.clear();
+                        editor.adopt_saved(result.channel);
                         let has_new_secret = new_secret.is_some();
                         editor.new_secret = new_secret;
                         editor.confirm_delete = false;
@@ -2171,7 +2215,6 @@ impl App {
                     dialog.channel_editor = None;
                 }
             }
-            KeyCode::Enter => self.save_operator_channel(false).await,
             KeyCode::Tab | KeyCode::Down => {
                 if let Some(dialog) = self.operator_dialog.as_mut() {
                     if let Some(editor) = dialog.channel_editor.as_mut() {
