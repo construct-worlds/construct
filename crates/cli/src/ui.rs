@@ -15124,11 +15124,12 @@ fn pane_border_style(theme: &Theme, focused: bool) -> Style {
     }
 }
 
-/// Paint the moving bright band for a newly focused pane after that pane and
-/// its title chrome are fully composited. The overlay temporarily draws all
-/// four edges even when the steady pane chrome hides some of them. `(x + y) /
-/// 2` supplies the phase, so the band intersects the top/left edges first and
-/// the bottom/right edges last: a diagonal top-left → bottom-right sweep.
+/// Paint the moving band for a newly focused pane after that pane and its
+/// title chrome are fully composited. The overlay toggles each border glyph:
+/// an already-visible rule is erased while a hidden rule is drawn brightly.
+/// `(x + y) / 2` supplies the phase, so the band intersects the top/left edges
+/// first and the bottom/right edges last: a diagonal top-left → bottom-right
+/// sweep.
 fn render_focus_border_sweep(f: &mut Frame, app: &mut App, now: Instant) {
     let target = app.focused_border_target();
     let rect = match target {
@@ -15206,12 +15207,21 @@ fn paint_focus_border_sweep(f: &mut Frame, rect: Rect, progress: f32, highlight:
                     (_, _, true, _) | (_, _, _, true) => "─",
                     _ => "│",
                 };
-                cell.set_symbol(symbol);
-                cell.set_style(highlight);
-                // `Cell::set_style` patches the existing cell and therefore
-                // cannot clear a modifier inherited from the pane beneath it.
-                // The focus cue is the glyph foreground, never reverse video.
-                cell.modifier.remove(Modifier::DIM | Modifier::REVERSED);
+                if cell.symbol() == symbol {
+                    // Compose like an XOR mask: a bright foreground repaint is
+                    // easy to lose on the pane's always-visible top rule, a
+                    // rolled-down Playbook frame, or a `/border` full frame.
+                    // Removing the glyph makes the same moving band legible on
+                    // all three without consulting pane-specific state.
+                    cell.set_symbol(" ");
+                } else {
+                    cell.set_symbol(symbol);
+                    cell.set_style(highlight);
+                    // `Cell::set_style` patches the existing cell and therefore
+                    // cannot clear a modifier inherited from the pane beneath
+                    // it. The drawn cue is foreground-only, never reverse video.
+                    cell.modifier.remove(Modifier::DIM | Modifier::REVERSED);
+                }
             }
         }
     }
@@ -15244,15 +15254,21 @@ mod focus_border_paint_tests {
     }
 
     #[test]
-    fn sweep_draws_full_foreground_border_over_hidden_edges() {
+    fn sweep_erases_visible_top_rule_and_draws_hidden_side_edge() {
         let backend = TestBackend::new(12, 12);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
             .draw(|f| {
-                f.buffer_mut()
-                    .cell_mut(Position { x: 5, y: 0 })
-                    .expect("top rule")
-                    .set_symbol("─");
+                let rect = Rect::new(0, 0, 11, 11);
+                f.render_widget(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Green)),
+                    rect,
+                );
+                f.render_widget(Clear, Rect::new(0, 1, 1, 10));
+                f.render_widget(Clear, Rect::new(10, 1, 1, 10));
+                f.render_widget(Clear, Rect::new(0, 10, 11, 1));
                 f.buffer_mut()
                     .cell_mut(Position { x: 0, y: 5 })
                     .expect("left edge")
@@ -15264,20 +15280,47 @@ mod focus_border_paint_tests {
                     );
                 paint_focus_border_sweep(
                     f,
-                    Rect::new(0, 0, 11, 11),
+                    rect,
                     0.25,
                     Style::default().fg(Color::Blue),
                 );
             })
             .expect("draw");
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(5, 0)].symbol(), "─");
-        assert_eq!(buffer[(5, 0)].fg, Color::Blue);
+        assert_eq!(buffer[(5, 0)].symbol(), " ");
         assert_eq!(buffer[(0, 5)].symbol(), "│");
         assert_eq!(buffer[(0, 5)].fg, Color::Blue);
         assert_eq!(buffer[(0, 5)].bg, Color::Yellow);
         assert!(!buffer[(0, 5)].modifier.contains(Modifier::REVERSED));
-        assert_eq!(buffer[(0, 0)].symbol(), " ");
+        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+    }
+
+    #[test]
+    fn sweep_erases_visible_full_frame_like_playbook_or_border_mode() {
+        let backend = TestBackend::new(12, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|f| {
+                let rect = Rect::new(0, 0, 11, 11);
+                f.render_widget(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan)),
+                    rect,
+                );
+                paint_focus_border_sweep(
+                    f,
+                    rect,
+                    0.25,
+                    Style::default().fg(Color::Blue),
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(5, 0)].symbol(), " ");
+        assert_eq!(buffer[(0, 5)].symbol(), " ");
+        assert_eq!(buffer[(10, 0)].symbol(), "┐");
+        assert_eq!(buffer[(0, 10)].symbol(), "└");
     }
 
     #[test]
@@ -15315,11 +15358,15 @@ mod focus_border_paint_tests {
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
             .draw(|f| {
-                f.buffer_mut().set_string(
-                    1,
-                    0,
-                    " rename me ",
-                    Style::default().fg(Color::Yellow),
+                f.render_widget(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Green))
+                        .title(Line::from(Span::styled(
+                            " rename me ",
+                            Style::default().fg(Color::Yellow),
+                        ))),
+                    Rect::new(0, 0, 21, 11),
                 );
                 paint_focus_border_sweep(
                     f,
