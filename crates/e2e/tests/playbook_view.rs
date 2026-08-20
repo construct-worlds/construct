@@ -95,6 +95,8 @@ async fn web_playbook_view_full_parity() {
             }, async () => {
               setSession("s-prog", "shell");
               await switchCurrentViewMode("playbook");
+              const editorStyle = getComputedStyle(playbookInputEl);
+              const barStyle = getComputedStyle(playbookWrapEl.querySelector(".playbook-bar"));
               return {
                 wrapVisible: !playbookWrapEl.hidden,
                 transcriptHidden: transcriptEl.hidden,
@@ -103,6 +105,9 @@ async fn web_playbook_view_full_parity() {
                 playbookPressed: viewModePlaybookBtn.getAttribute("aria-pressed"),
                 mode: state.mode,
                 mounted: state.playbook.mountedId,
+                editorFontSize: editorStyle.fontSize,
+                surroundingFontSize: barStyle.fontSize,
+                editorFontFamily: editorStyle.fontFamily,
               };
             })
             "###,
@@ -118,6 +123,16 @@ async fn web_playbook_view_full_parity() {
     assert_eq!(enter["playbookPressed"], "true", "{enter:?}");
     assert_eq!(enter["mode"], "playbook", "{enter:?}");
     assert_eq!(enter["mounted"], "s-prog", "{enter:?}");
+    assert_eq!(
+        enter["editorFontSize"], enter["surroundingFontSize"],
+        "Playbook body text should match the surrounding WebUI scale: {enter:?}"
+    );
+    assert!(
+        enter["editorFontFamily"]
+            .as_str()
+            .is_some_and(|family| family.contains("monospace")),
+        "Playbook body text should retain a monospace editor stack: {enter:?}"
+    );
 
     // --- 2a. Inline code paints without delimiters; Backspace at its right
     //          edge reveals the opening delimiter and editable text. ---------
