@@ -1671,6 +1671,187 @@ async fn web_client_loads_and_websocket_connects() {
         "cancelling the mark must not edit the document: {mark_cleared:?}"
     );
 
+    // Playbook selection menu focus (spec 0196): bare Tab moves focus into the
+    // visible selection menu instead of reaching the contenteditable, where
+    // `insertText` would replace the very selection the menu acts on. Escape
+    // then peels the menu off while the selection stays live, so the next Tab
+    // nests the selected list lines. Driven with trusted CDP key events, and
+    // with Tab carrying its `text`, so the browser's own default action is
+    // genuinely in play for the `preventDefault` assertions.
+    page.evaluate(
+        r#"
+        (() => {
+          window.__menuSaved = {
+            sessions: state.sessions,
+            currentId: state.currentId,
+            mode: state.mode,
+            mountedId: state.playbook.mountedId,
+            docById: state.playbook.docById,
+            html: playbookInputEl.innerHTML,
+            wrapHidden: playbookWrapEl.hidden,
+          };
+          const markdown = '- alpha item\n- beta item\n';
+          state.sessions = [
+            { id: 's-menu', title: 'Menu', harness: 'smith', state: 'running', has_pty: true },
+          ];
+          state.currentId = 's-menu';
+          state.mode = 'playbook';
+          state.playbook.mountedId = 's-menu';
+          state.playbook.docById = new Map([['s-menu', {
+            version: 1,
+            templateId: null,
+            saved: playbookNormalizeClipIds(markdown),
+            live: playbookNormalizeClipIds(markdown),
+            blocks: playbookBlockSpans(markdown),
+            pendingLive: 0,
+          }]]);
+          playbookWrapEl.hidden = false;
+          playbookRenderDoc(markdown);
+          state.playbook.mark = false;
+          state.playbook.menu.dismissed = false;
+          playbookInputEl.focus();
+          // Select "alpha" on the first list line, as a pointer drag would.
+          const text = playbookInputEl.children[0].firstChild;
+          const range = document.createRange();
+          range.setStart(text, 2);
+          range.setEnd(text, 7);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          playbookUpdateSelectionMenu();
+          return true;
+        })()
+        "#,
+    )
+    .await
+    .expect("stage playbook selection menu fixture");
+
+    let menu_probe = r#"
+        (() => ({
+          activeInMenu: playbookSelectionMenuEl.contains(document.activeElement),
+          activeIsEditor: document.activeElement === playbookInputEl,
+          activeId: document.activeElement ? document.activeElement.id : null,
+          itemCount: playbookSelectionMenuEl.querySelectorAll('button').length,
+          menuVisible: !playbookSelectionMenuEl.hidden,
+          selection: window.getSelection().toString(),
+          text: playbookSerialize(),
+        }))()
+        "#;
+
+    let menu_shown: serde_json::Value = page
+        .evaluate(menu_probe)
+        .await
+        .expect("evaluate playbook selection menu shown")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        menu_shown["menuVisible"], true,
+        "a non-empty selection should surface the menu: {menu_shown:?}"
+    );
+
+    press_key_with_text(&page, "Tab", "Tab", 9, "\t").await;
+    let menu_focused: serde_json::Value = page
+        .evaluate(menu_probe)
+        .await
+        .expect("evaluate playbook selection menu focus")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        menu_focused["activeInMenu"], true,
+        "Tab must move focus into the selection menu: {menu_focused:?}"
+    );
+    assert_eq!(
+        menu_focused["activeId"], "playbookSelectionRunBtn",
+        "Tab should land on the menu's first row: {menu_focused:?}"
+    );
+    assert_eq!(
+        menu_focused["text"], "- alpha item\n- beta item\n",
+        "Tab must not insert a tab or replace the selection: {menu_focused:?}"
+    );
+    assert_eq!(
+        menu_focused["selection"], "alpha",
+        "Tab must leave the selection the menu acts on intact: {menu_focused:?}"
+    );
+
+    // Tab again walks the menu rather than escaping it.
+    press_key_with_text(&page, "Tab", "Tab", 9, "\t").await;
+    let menu_walked: serde_json::Value = page
+        .evaluate(menu_probe)
+        .await
+        .expect("evaluate playbook selection menu walk")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        menu_walked["activeInMenu"], true,
+        "Tab inside the menu should move between rows, not leave: {menu_walked:?}"
+    );
+    assert_eq!(
+        menu_walked["text"], "- alpha item\n- beta item\n",
+        "menu navigation must not edit the document: {menu_walked:?}"
+    );
+
+    // Escape hands focus back with the selection alive, and dismisses the menu.
+    press_key_chord(&page, "Escape", "Escape", 27, 0).await;
+    let menu_dismissed: serde_json::Value = page
+        .evaluate(menu_probe)
+        .await
+        .expect("evaluate playbook selection menu dismissed")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        menu_dismissed["activeIsEditor"], true,
+        "Escape should return focus to the editor: {menu_dismissed:?}"
+    );
+    assert_eq!(
+        menu_dismissed["menuVisible"], false,
+        "Escape should dismiss the menu: {menu_dismissed:?}"
+    );
+    assert_eq!(
+        menu_dismissed["selection"], "alpha",
+        "Escape dismisses the menu without cancelling the selection: {menu_dismissed:?}"
+    );
+
+    // With the menu gone the editor owns Tab again: it nests the selected list
+    // line instead of replacing the selection with an indent.
+    press_key_with_text(&page, "Tab", "Tab", 9, "\t").await;
+    let menu_indent: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const out = {
+                selection: window.getSelection().toString(),
+                text: playbookSerialize(),
+              };
+              const saved = window.__menuSaved;
+              state.sessions = saved.sessions;
+              state.currentId = saved.currentId;
+              state.mode = saved.mode;
+              state.playbook.mountedId = saved.mountedId;
+              state.playbook.docById = saved.docById;
+              state.playbook.mark = false;
+              state.playbook.menu.dismissed = false;
+              state.playbook.menu.range = null;
+              playbookInputEl.innerHTML = saved.html;
+              playbookWrapEl.hidden = saved.wrapHidden;
+              window.getSelection().removeAllRanges();
+              playbookSelectionMenuEl.hidden = true;
+              return out;
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate playbook selection menu indent")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        menu_indent["text"], "  - alpha item\n- beta item\n",
+        "Tab with the menu dismissed should nest the selected list line: {menu_indent:?}"
+    );
+    assert_eq!(
+        menu_indent["selection"], "  - alpha item",
+        "indenting acts on the selection instead of destroying it: {menu_indent:?}"
+    );
+
     // Mobile regression: selecting a PTY-backed session from the list must not
     // focus xterm when the native keyboard is hidden, or iOS/Android pop the
     // keyboard just because the user changed selection. If the keyboard was
@@ -4903,6 +5084,32 @@ impl Drop for ScreencastRecording {
 /// Playbook clip picker's root rows built from it (#1098).
 /// CDP's `Input.dispatchKeyEvent` modifier bit for Ctrl.
 const CDP_MODIFIER_CTRL: i64 = 2;
+
+/// Dispatch a real key press that also carries its `text`, so the browser runs
+/// the insertion default action a text-less key event skips. Tab needs this:
+/// without `text` the contenteditable would never try to replace the selection,
+/// and "the document is unchanged" would pass even with the handler removed.
+async fn press_key_with_text(page: &Page, key: &str, code: &str, vk: i64, text: &str) {
+    let down = DispatchKeyEventParams::builder()
+        .r#type(DispatchKeyEventType::KeyDown)
+        .key(key)
+        .code(code)
+        .windows_virtual_key_code(vk)
+        .native_virtual_key_code(vk)
+        .text(text)
+        .build()
+        .expect("build key event");
+    page.execute(down).await.expect("dispatch key down");
+    let up = DispatchKeyEventParams::builder()
+        .r#type(DispatchKeyEventType::KeyUp)
+        .key(key)
+        .code(code)
+        .windows_virtual_key_code(vk)
+        .native_virtual_key_code(vk)
+        .build()
+        .expect("build key event");
+    page.execute(up).await.expect("dispatch key up");
+}
 
 /// Dispatch a real (trusted) key press, modifiers included.
 ///

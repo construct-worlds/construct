@@ -4107,8 +4107,12 @@
                aria-label="playbook markdown"></div>
           <div class="playbook-cursor-layer" id="playbookCursorLayer"></div>
           <div class="playbook-empty" id="playbookEmpty" hidden></div>
-          <div class="playbook-selection-menu" id="playbookSelectionMenu" hidden>
-            <button type="button" id="playbookSelectionRunBtn"
+          <!-- Keyboard-reachable (spec 0196): Tab moves focus from the editor
+               into this menu, so its rows must be genuinely focusable menu
+               items rather than a pointer-only affordance. -->
+          <div class="playbook-selection-menu" id="playbookSelectionMenu" hidden
+               role="menu" aria-label="playbook selection actions">
+            <button type="button" role="menuitem" id="playbookSelectionRunBtn"
                     title="Run selected playbook text on this session (Shift: run in a fork)">
               <span aria-hidden="true">▶</span><span>Run</span>
             </button>
@@ -5069,6 +5073,16 @@ const state = {
     // it. The DOM selection's own anchor *is* the mark, so no offset is
     // stored here — only whether the region is active.
     mark: false,
+    // Selection menu focus model (spec 0196). `dismissed` is the first stage
+    // of Escape's two-stage cancel: the menu is hidden while the selection
+    // stays live, so the next Tab reaches the editor's indent command instead
+    // of the menu. `range` is the selection snapshotted when focus leaves the
+    // editor for the menu, because a blurred contenteditable does not reliably
+    // keep a readable Range and every menu action needs to know what to run.
+    // `mark` parks the armed-region flag while focus is in the menu: focusing
+    // a button blurs the editor, and the blur handler disarms the mark, which
+    // would otherwise cost Escape its second stage on a keyboard selection.
+    menu: { dismissed: false, range: null, mark: false },
     // Desktop pointer hover affordance for Playbook shimmer/session clips.
     // { kind, sessionId, anchorEl, token, term, clientX, clientY } | null.
     hover: null,
@@ -10469,12 +10483,20 @@ function playbookSelectionFocusRect(sel, fallbackRange) {
 }
 
 function playbookHideSelectionMenu() {
+  // While the menu holds keyboard focus the user is driving it; a stray
+  // selection recompute must not yank the menu — and the focus with it — out
+  // from under them. Explicit dismissal clears `hidden` directly instead.
+  if (playbookSelectionMenuEl.contains(document.activeElement)) return;
   playbookSelectionMenuEl.hidden = true;
 }
 
 function playbookUpdateSelectionMenu() {
   const runnable = playbookRunnableSelectionRange();
-  if (!runnable) { playbookHideSelectionMenu(); return; }
+  // An empty region also retires the dismissal, so the *next* selection opens
+  // a fresh menu. That is what restores the menu after a keyboard selection,
+  // whose region is momentarily empty between C-Space and the first motion.
+  if (!runnable) { state.playbook.menu.dismissed = false; playbookHideSelectionMenu(); return; }
+  if (state.playbook.menu.dismissed) { playbookHideSelectionMenu(); return; }
   const rect = playbookSelectionFocusRect(runnable.sel, runnable.range);
   if (!rect || (!rect.width && !rect.height)) { playbookHideSelectionMenu(); return; }
   const editor = playbookEditorEl.getBoundingClientRect();
@@ -10493,6 +10515,168 @@ function playbookUpdateSelectionMenu() {
   top = Math.max(pad, Math.min(top, Math.max(pad, editor.height - menuH - pad)));
   playbookSelectionMenuEl.style.left = Math.round(left) + "px";
   playbookSelectionMenuEl.style.top = Math.round(top) + "px";
+}
+
+// --- Playbook selection menu focus (spec 0196) ------------------------------
+// The TUI lets bare Tab carry focus from the editor into the visible selection
+// menu; Tab/S-Tab and the arrows walk its rows, Enter runs the focused one, and
+// Escape peels the menu off while leaving the selection live so the next Tab
+// reaches the editor's indent command. The web menu was pointer-only, so Tab
+// fell through to the contenteditable and `insertText` replaced the user's
+// selected text with an indent — losing the selection instead of acting on it.
+// These mirror the TUI contract rather than inventing a second web one.
+
+/** The menu's focusable rows in visual order: Run, then one per verb. */
+function playbookSelectionMenuItems() {
+  return Array.from(playbookSelectionMenuEl.querySelectorAll("button"));
+}
+
+function playbookSelectionMenuVisible() {
+  return !playbookSelectionMenuEl.hidden;
+}
+
+/**
+ * Move focus into the menu, reopening it first if Escape had dismissed it.
+ *
+ * The live Range is snapshotted here: focusing a button blurs the
+ * contenteditable, and a blurred editor's selection is not reliably readable
+ * afterwards, while every menu action needs it back to know what to run.
+ */
+function playbookFocusSelectionMenu() {
+  if (!playbookRunnableSelectionRange()) return false;
+  state.playbook.menu.dismissed = false;
+  playbookUpdateSelectionMenu();
+  if (!playbookSelectionMenuVisible()) return false;
+  const items = playbookSelectionMenuItems();
+  if (!items.length) return false;
+  const sel = window.getSelection();
+  state.playbook.menu.range = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+  state.playbook.menu.mark = state.playbook.mark;
+  items[0].focus();
+  return true;
+}
+
+/** Put the snapshotted selection back so the run/verb paths can read it. */
+function playbookRestoreMenuSelection() {
+  const range = state.playbook.menu.range;
+  if (!range) return;
+  const sel = window.getSelection();
+  if (!sel) return;
+  try { sel.removeAllRanges(); sel.addRange(range); } catch (_) {}
+}
+
+/** Hand focus, and the selection it was holding, back to the editor. */
+function playbookReturnFocusToEditor() {
+  try { playbookInputEl.focus(); } catch (_) {}
+  playbookRestoreMenuSelection();
+  // Re-arm the region the menu borrowed, so the caret motions still extend it
+  // and a second Escape still cancels it — the state the user left behind.
+  state.playbook.mark = state.playbook.menu.mark;
+  state.playbook.menu.range = null;
+  state.playbook.menu.mark = false;
+}
+
+/**
+ * Escape's first stage: hide the menu but keep the selection, so the next Tab
+ * indents the selected lines and a second Escape cancels the region. Menu
+ * dismissal and selection cancellation stay separate actions (spec 0196).
+ */
+function playbookDismissSelectionMenu() {
+  state.playbook.menu.dismissed = true;
+  playbookReturnFocusToEditor();
+  playbookSelectionMenuEl.hidden = true;
+  playbookSetMsg("selection menu dismissed");
+}
+
+/** Move focus `delta` rows through the menu, wrapping at both ends. */
+function playbookMoveSelectionMenuFocus(delta) {
+  const items = playbookSelectionMenuItems();
+  if (!items.length) return;
+  const at = items.indexOf(document.activeElement);
+  const from = at < 0 ? 0 : at + delta;
+  items[((from % items.length) + items.length) % items.length].focus();
+}
+
+/** Run the focused row against the snapshotted selection. */
+async function playbookActivateSelectionMenuItem(btn, fork) {
+  if (!btn) return;
+  playbookRestoreMenuSelection();
+  state.playbook.menu.range = null;
+  state.playbook.menu.mark = false;
+  state.playbook.menu.dismissed = false;
+  if (btn.dataset.verb) await playbookRunVerb(btn.dataset.verb, fork);
+  else await playbookRun(fork);
+  try { playbookInputEl.focus(); } catch (_) {}
+  playbookClearSelection();
+}
+
+/** Index of the editor line containing `node`, or -1 when it is outside. */
+function playbookLineIndexOf(node) {
+  let el = node && node.nodeType === 3 ? node.parentNode : node;
+  while (el && el.parentNode !== playbookInputEl) el = el.parentNode;
+  if (!el || el.parentNode !== playbookInputEl) return -1;
+  return Array.prototype.indexOf.call(playbookInputEl.children, el);
+}
+
+/**
+ * Tab with the menu dismissed: nest — or with Shift, un-nest — every list line
+ * the selection spans, matching the TUI's selected-list indent (spec 0094).
+ * Only markdown list lines move; fenced code and prose are left alone. The
+ * selection is restored across the edit so the band stays selected for a
+ * second Tab, and the key is consumed either way so a no-op never falls
+ * through to the contenteditable and eats the selection.
+ */
+function playbookIndentSelectedLines(outdent) {
+  const runnable = playbookRunnableSelectionRange();
+  if (!runnable) return false;
+  const range = runnable.range;
+  const startIdx = playbookLineIndexOf(range.startContainer);
+  let endIdx = playbookLineIndexOf(range.endContainer);
+  if (startIdx < 0 || endIdx < 0 || endIdx < startIdx) return false;
+  // A selection ending exactly at a line start does not really include that
+  // line's text, so it is not indented (same rule as the TUI's range end).
+  if (endIdx > startIdx && range.endOffset === 0) endIdx -= 1;
+
+  const kinds = playbookMultilineFenceKinds(playbookSerialize());
+  let changed = false;
+  for (let i = startIdx; i <= endIdx; i++) {
+    const el = playbookInputEl.children[i];
+    if (!el) continue;
+    if ((kinds[i] || "markdown") !== "markdown") continue;
+    const stripped = playbookSerializeInline(el).replace(/^ +/, "");
+    if (!stripped.startsWith("- ") && !stripped.startsWith("* ")) continue;
+    const first = el.firstChild;
+    if (outdent) {
+      if (!first || first.nodeType !== 3) continue;
+      const lead = /^ {1,2}/.exec(first.data);
+      if (!lead) continue;
+      first.data = first.data.slice(lead[0].length);
+    } else if (first && first.nodeType === 3) {
+      first.data = "  " + first.data;
+    } else {
+      el.insertBefore(document.createTextNode("  "), first);
+    }
+    changed = true;
+  }
+  if (!changed) return true;
+
+  const sel = window.getSelection();
+  if (sel) {
+    const band = document.createRange();
+    const last = playbookInputEl.children[endIdx];
+    band.setStart(playbookInputEl.children[startIdx], 0);
+    band.setEnd(last, last.childNodes.length);
+    try { sel.removeAllRanges(); sel.addRange(band); } catch (_) {}
+  }
+  // The DOM was edited programmatically, so no `input` event fires to drive
+  // playbookOnInput's pipeline — run the parts this edit invalidates. The mark
+  // deliberately survives: indenting acts on the region, it does not consume it.
+  playbookApplyLineDecorations();
+  playbookUpdateDirty();
+  playbookRenderCursors();
+  playbookUpdateSelectionMenu();
+  playbookOnLocalEdit();
+  return true;
 }
 
 function playbookClearSelection() {
@@ -11333,6 +11517,7 @@ function playbookRenderSelectionVerbs() {
     ...verbs.map((v) => {
       const btn = document.createElement("button");
       btn.type = "button";
+      btn.setAttribute("role", "menuitem");
       btn.className = "playbook-selection-verb-btn";
       btn.dataset.verb = v.name;
       btn.title = `${v.description || v.label} (Shift: run in a fork)`;
@@ -12060,6 +12245,14 @@ function playbookOnKeyDown(e) {
     playbookCancelMark();
     return;
   }
+  // C-o focuses the selection menu: the TUI's original focus chord, kept as a
+  // compatibility alias that can also reopen a menu Escape dismissed.
+  if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "o" || e.key === "O")
+      && playbookRunnableSelectionRange()) {
+    e.preventDefault();
+    playbookFocusSelectionMenu();
+    return;
+  }
   // With the mark armed, every caret motion extends the region from it rather
   // than collapsing the selection — the whole point of setting a mark. This
   // precedes the C-f binding below so C-f extends too.
@@ -12090,9 +12283,27 @@ function playbookOnKeyDown(e) {
     return;
   }
   if (e.key === "Escape" && state.playbook.find) { e.preventDefault(); playbookCloseFind(); playbookInputEl.focus(); return; }
+  // Escape peels the transient menu off before it cancels the region: with the
+  // menu gone the selection is still live, so the next Tab reaches the indent
+  // command and a second Escape clears the region (spec 0196's two stages).
+  if (e.key === "Escape" && playbookSelectionMenuVisible() && playbookRunnableSelectionRange()) {
+    e.preventDefault();
+    playbookDismissSelectionMenu();
+    return;
+  }
   if (e.key === "Escape" && state.playbook.mark) { e.preventDefault(); playbookCancelMark(); return; }
   if (e.key === "Tab" && !mod) {
     e.preventDefault();
+    // Tab's jobs in the TUI's order (spec 0196): enter a visible selection
+    // menu, indent the selected list lines once Escape has dismissed that
+    // menu, and otherwise insert a plain tab stop. With a selection live it
+    // must never reach the contenteditable — `insertText` would replace the
+    // selected text with the indent, destroying what the menu acts on.
+    if (playbookRunnableSelectionRange()) {
+      if (playbookSelectionMenuVisible()) { playbookFocusSelectionMenu(); return; }
+      playbookIndentSelectedLines(e.shiftKey);
+      return;
+    }
     document.execCommand("insertText", false, "  ");
     return;
   }
@@ -12135,6 +12346,10 @@ function playbookWireEvents() {
   // A click (or drag) hands selection back to the mouse; the flag must not
   // survive it, or the next arrow key would extend from the new caret.
   playbookInputEl.addEventListener("pointerdown", () => playbookDeactivateMark());
+  // A pointer press starts a fresh selection gesture, so it retires an earlier
+  // Escape dismissal — otherwise the menu would stay hidden for a brand-new
+  // mouse selection made after the keyboard dismissed the previous one.
+  playbookInputEl.addEventListener("pointerdown", () => { state.playbook.menu.dismissed = false; });
   playbookInputEl.addEventListener("pointerup", () => playbookUpdateSelectionMenu());
   // Copy/cut consume the region (emacs deactivates the mark after
   // kill-ring-save); the highlight itself is left to the browser.
@@ -12179,9 +12394,29 @@ function playbookWireEvents() {
   playbookSelectionRunBtn.addEventListener("mousedown", async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    await playbookRun(e.shiftKey);
-    playbookClearSelection();
-    try { playbookInputEl.focus(); } catch (_) {}
+    await playbookActivateSelectionMenuItem(playbookSelectionRunBtn, e.shiftKey);
+  });
+  // Keyboard-driven menu (spec 0196): Tab/S-Tab and the arrows walk the rows,
+  // Enter runs the focused one (Shift: in a fork), Escape hands focus back to
+  // the editor with the selection intact, C-g cancels selection and menu both.
+  playbookSelectionMenuEl.addEventListener("keydown", async (e) => {
+    if (e.key === "Tab") { e.preventDefault(); playbookMoveSelectionMenuFocus(e.shiftKey ? -1 : 1); return; }
+    if (e.key === "ArrowDown") { e.preventDefault(); playbookMoveSelectionMenuFocus(1); return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); playbookMoveSelectionMenuFocus(-1); return; }
+    if (e.key === "Escape") { e.preventDefault(); playbookDismissSelectionMenu(); return; }
+    if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "g" || e.key === "G")) {
+      e.preventDefault();
+      playbookReturnFocusToEditor();
+      playbookClearSelection();
+      playbookSetMsg("selection canceled");
+      return;
+    }
+    if (e.key === "Enter" || e.key === " ") {
+      // preventDefault so the browser does not also synthesize a click on the
+      // focused button, which would run the action a second time.
+      e.preventDefault();
+      await playbookActivateSelectionMenuItem(e.target.closest("button"), e.shiftKey);
+    }
   });
   // Delegated: verb buttons are rebuilt by playbookRenderSelectionVerbs
   // whenever the verb list changes, so a per-button listener would need
@@ -12191,9 +12426,7 @@ function playbookWireEvents() {
     if (!btn) return;
     e.preventDefault();
     e.stopPropagation();
-    await playbookRunVerb(btn.dataset.verb, e.shiftKey);
-    playbookClearSelection();
-    try { playbookInputEl.focus(); } catch (_) {}
+    await playbookActivateSelectionMenuItem(btn, e.shiftKey);
   });
   playbookFindBtn.addEventListener("click", () => {
     if (state.playbook.find) { playbookCloseFind(); playbookInputEl.focus(); } else playbookOpenFind();
