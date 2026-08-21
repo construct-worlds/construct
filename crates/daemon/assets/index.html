@@ -1119,6 +1119,7 @@
     overflow: hidden;
     opacity: 0.82;
   }
+  .pane-mirror > .playbook-wrap { height: 100%; }
   .pane-empty {
     flex: 1 1 0;
     display: grid;
@@ -3974,7 +3975,7 @@
         `#viewStack` below is the one interactive surface stack (transcript,
         terminal, playbook, composer, widgets). In split mode it is MOVED into
         whichever pane is focused; the other panes get a read-only mirror of
-        their session's cached terminal / transcript element. That is why
+        their session's cached terminal, transcript, or Playbook. That is why
         there is one stack rather than one per pane: the composer, playbook
         editor and widget machinery are singletons keyed off the focused
         session, and duplicating them per pane would duplicate all of it.
@@ -4988,6 +4989,10 @@ const state = {
     verbs: null,
     // Session id whose playbook is currently mounted in the editor, or null.
     mountedId: null,
+    // Background playbook.get requests for read-only split-pane mirrors.
+    // The interactive editor stays a singleton owned by the focused pane;
+    // unfocused panes render from the same per-session document cache.
+    mirrorLoadById: new Map(),
     // Shimmer backstop timer id (clears the run highlight at its deadline), or 0.
     raf: 0,
     // Smart-clip (@) autocomplete: { ctx, query, items, selected } | null.
@@ -10011,14 +10016,19 @@ function playbookLineDiv(text, fenceKind = "markdown") {
   return div;
 }
 
-// Render the whole document into the contenteditable (one .playbook-line per
-// source line). Caret-destructive — only for external content changes (mount,
-// template, live adopt), never on every keystroke.
-function playbookRenderDoc(markdown) {
-  while (playbookInputEl.firstChild) playbookInputEl.removeChild(playbookInputEl.firstChild);
+// Render the whole document into an editor-shaped root (one .playbook-line per
+// source line). The interactive caller is caret-destructive, so it uses this
+// only for external content changes (mount, template, live adopt), never on
+// every keystroke. Read-only split mirrors share the same renderer.
+function playbookRenderDocInto(root, markdown) {
+  while (root.firstChild) root.removeChild(root.firstChild);
   const lines = markdown.split("\n");
   const kinds = playbookMultilineFenceKinds(markdown);
-  lines.forEach((line, i) => playbookInputEl.appendChild(playbookLineDiv(line, kinds[i])));
+  lines.forEach((line, i) => root.appendChild(playbookLineDiv(line, kinds[i])));
+}
+
+function playbookRenderDoc(markdown) {
+  playbookRenderDocInto(playbookInputEl, markdown);
   playbookApplyLineDecorations();
   playbookApplyShimmer();
   playbookRenderCursors();
@@ -10826,6 +10836,7 @@ function handlePlaybookState(params) {
     refreshShimmer();
     playbookPublishCursor();
   }
+  refreshPlaybookMirrors(id);
 }
 
 function handlePlaybookCursor(params) {
@@ -14396,6 +14407,10 @@ function buildMirror(leaf, { duplicate = false } = {}) {
   }
   const session = state.sessions.find((s) => s.id === id);
   const mode = session ? preferredViewModeForSession(session) : "chat";
+  if (mode === "playbook" && session) {
+    mirror.appendChild(buildPlaybookMirror(id));
+    return mirror;
+  }
   if (mode === "terminal" && session) {
     if (duplicate) {
       const handle = duplicateTerminalMirrorForPane(leaf.id, id);
@@ -14451,6 +14466,95 @@ function buildMirror(leaf, { duplicate = false } = {}) {
       .catch(() => {});
   }
   return mirror;
+}
+
+/**
+ * Read-only Playbook surface for an unfocused split pane.
+ *
+ * The editable Playbook DOM belongs to the focused singleton view stack, but
+ * the selected surface belongs to the session. Moving focus must therefore
+ * leave the old pane visibly in Playbook while the singleton stack moves to
+ * the newly focused session. Render from the per-session document cache just
+ * like transcript/terminal mirrors render from their per-session caches.
+ */
+function buildPlaybookMirror(sessionId) {
+  const wrap = document.createElement("div");
+  wrap.className = "playbook-wrap playbook-pane-mirror";
+  wrap.dataset.sessionId = sessionId;
+
+  const bar = document.createElement("div");
+  bar.className = "playbook-bar";
+  const label = document.createElement("span");
+  label.className = "playbook-bar-label";
+  label.textContent = "Playbook";
+  const version = document.createElement("span");
+  version.className = "playbook-version";
+  bar.append(label, version);
+
+  const editor = document.createElement("div");
+  editor.className = "playbook-editor";
+  const input = document.createElement("div");
+  input.className = "playbook-input";
+  input.setAttribute("role", "document");
+  input.setAttribute("aria-label", "playbook markdown (read only)");
+  editor.appendChild(input);
+  wrap.append(bar, editor);
+
+  renderPlaybookMirror(wrap, sessionId);
+  return wrap;
+}
+
+function renderPlaybookMirror(wrap, sessionId) {
+  const input = wrap.querySelector(".playbook-input");
+  const version = wrap.querySelector(".playbook-version");
+  if (!input || !version) return;
+  const mountedHere =
+    state.mode === "playbook" && state.playbook.mountedId === sessionId;
+  const doc = state.playbook.docById.get(sessionId);
+  const markdown = mountedHere
+    ? playbookSerialize()
+    : doc
+      ? (doc.live != null ? doc.live : doc.saved || "")
+      : null;
+  version.textContent = doc && doc.version != null ? `v${doc.version}` : "";
+  if (markdown == null) {
+    input.textContent = "loading…";
+    hydratePlaybookMirror(sessionId);
+    return;
+  }
+  playbookRenderDocInto(input, markdown);
+}
+
+function refreshPlaybookMirrors(sessionId) {
+  for (const mirror of document.querySelectorAll(".playbook-pane-mirror")) {
+    if (mirror.dataset.sessionId === sessionId) {
+      renderPlaybookMirror(mirror, sessionId);
+    }
+  }
+}
+
+function hydratePlaybookMirror(sessionId) {
+  if (state.playbook.mirrorLoadById.has(sessionId)) return;
+  const pending = rpc("playbook.get", { session_id: sessionId })
+    .then((result) => {
+      const p = result && result.playbook;
+      if (!p) return;
+      const current = state.playbook.docById.get(sessionId);
+      if (!current || p.version > current.version) {
+        state.playbook.docById.set(sessionId, {
+          version: p.version,
+          templateId: p.template_id || null,
+          saved: playbookNormalizeClipIds(p.markdown),
+          live: playbookNormalizeClipIds(p.markdown),
+          blocks: result.blocks || [],
+          pendingLive: 0,
+        });
+      }
+      refreshPlaybookMirrors(sessionId);
+    })
+    .catch(() => {})
+    .finally(() => state.playbook.mirrorLoadById.delete(sessionId));
+  state.playbook.mirrorLoadById.set(sessionId, pending);
 }
 
 function createDuplicateTerminalMirror(paneId, sessionId) {

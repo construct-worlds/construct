@@ -46,6 +46,19 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         ))
         .await
         .expect("create beta");
+    d.client
+        .playbook_update(construct_protocol::PlaybookUpdateParams {
+            session_id: a.clone(),
+            markdown: "# Alpha plan\n\n- keep this playbook in pane A\n".to_string(),
+            base_version: None,
+            actor: construct_protocol::PlaybookUpdateActor::Human,
+            template_id: None,
+            note: None,
+            shimmer: None,
+            shimmer_tooltips: None,
+        })
+        .await
+        .expect("seed alpha playbook");
     let mut terminal_params = shell_session_params(&cwd, "duplicate terminal");
     terminal_params.mode = Some("interactive".to_string());
     terminal_params.pty_size = Some(construct_protocol::PtySize {
@@ -362,6 +375,30 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         .and_then(|r| r.into_value::<String>().ok())
         .unwrap_or_default();
 
+    // Regression: surface selection belongs to the session shown by each
+    // pane, while the interactive view stack follows focus. Put pane A in
+    // Playbook through the real toggle, then focus pane B through the pane's
+    // mousedown path. A must keep a read-only Playbook surface for A and B
+    // must receive its own session, not the singleton editor still mounted
+    // for A during the first focus repaint.
+    assert!(
+        wait_for_bool(&page, &format!("state.currentId === {a:?}")).await,
+        "pane A should be selected before entering Playbook"
+    );
+    page.evaluate("viewModePlaybookBtn.click(); true")
+        .await
+        .expect("click Playbook toggle");
+    assert!(
+        wait_for_bool(
+            &page,
+            &format!(
+                "state.mode === 'playbook' && state.playbook.mountedId === {a:?} && playbookSerialize().includes('keep this playbook in pane A')"
+            ),
+        )
+        .await,
+        "pane A should render its seeded Playbook before focus moves"
+    );
+
     page.evaluate(
         "(() => {
            const panes = document.querySelectorAll('#paneGrid .pane');
@@ -372,7 +409,25 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
     )
     .await
     .ok();
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    let pane_ownership_js = format!(
+        "(() => {{
+           const focused = document.querySelector('#paneGrid .pane.is-focused');
+           const unfocused = document.querySelector('#paneGrid .pane:not(.is-focused)');
+           const playbook = unfocused?.querySelector('.playbook-pane-mirror');
+           const transcript = state.transcriptPaneById.get({b:?});
+           return state.currentId === {b:?}
+             && focusedPaneSessionId() === {b:?}
+             && !!focused?.querySelector('#viewStack')
+             && !!transcript && focused.contains(transcript)
+             && playbook?.dataset.sessionId === {a:?}
+             && playbook.textContent.includes('keep this playbook in pane A')
+             && !focused.contains(playbook);
+         }})()"
+    );
+    assert!(
+        wait_for_bool(&page, &pane_ownership_js).await,
+        "focusing B must leave A's Playbook in pane A and render session B in pane B"
+    );
 
     let after_focus: String = page
         .evaluate(geometry_js)
@@ -385,6 +440,15 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         before_focus, after_focus,
         "changing pane focus must not move the panes or their title bars"
     );
+
+    // Keep the rest of this broad split-layout scenario on its original
+    // chat defaults; later sections deliberately assign one session to both
+    // panes and test the duplicate-transcript path.
+    page.evaluate(format!(
+        "state.viewModeById.delete({a:?}); saveViewModePrefs(); renderPaneGrid(); true"
+    ))
+    .await
+    .expect("restore alpha's natural view preference");
 
     // A browser refresh keeps the selected session in the URL. That session
     // identifies the locally focused pane (focus itself is intentionally not
