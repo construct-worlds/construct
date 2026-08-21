@@ -13199,7 +13199,7 @@ impl App {
     }
 
     /// Replay the focused pane's border sweep when typing resumes after a long
-    /// silence (spec 0206). Called once per dispatched key, before routing, so
+    /// silence (spec 0207). Called once per dispatched key, before routing, so
     /// the pane credited is the one that is about to consume the key.
     fn note_focus_border_key(&mut self, key: KeyEvent) {
         // A bare modifier press is the user reaching for a chord, not input a
@@ -37728,7 +37728,7 @@ mod tests {
 
     /// A key delivered to an already-focused pane after a long silence
     /// replays that pane's focus sweep, and paints it on that pane's border
-    /// and nowhere else (spec 0206).
+    /// and nowhere else (spec 0207).
     #[tokio::test]
     async fn idle_keystroke_replays_the_focused_pane_sweep() {
         let (mut app, _dir, server) = empty_app().await;

@@ -1,4 +1,4 @@
-# 0206-tui-idle-typing-focus-sweep
+# 0207-tui-idle-typing-focus-sweep
 
 Status: accepted
 Date: 2026-08-21

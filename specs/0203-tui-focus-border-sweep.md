@@ -9,7 +9,7 @@ Scope: Keyboard focus acquisition is acknowledged by a brief directional highlig
 
 When keyboard focus moves to a different TUI pane or focusable sidebar section, that surface plays a roughly 200 ms border highlight sweeping from its top-left toward its bottom-right, then settles into the ordinary focused-border appearance.
 
-Focus identity includes the session-list rows, the lineage section, and each split window independently. Moving between sibling split windows therefore retriggers the animation even though both use the same general view-focus route. The initial pane at TUI startup does not animate. The same animation is replayed on the already-focused pane when typing resumes after a long silence (spec 0206).
+Focus identity includes the session-list rows, the lineage section, and each split window independently. Moving between sibling split windows therefore retriggers the animation even though both use the same general view-focus route. The initial pane at TUI startup does not animate. The same animation is replayed on the already-focused pane when typing resumes after a long silence (spec 0207).
 
 The sweep temporarily traces all four border edges, including their corners, even when the pane's steady chrome hides its side and bottom borders or exposes only a header rule. Where no border line is visible, the moving segment draws a bright line; where a steady pane or Playbook border is already visible, the moving segment erases that portion of the line for the frame. It does not fill or reverse the cells' backgrounds. Embedded titles and live title-edit text remain readable and are not replaced by the sweep. Once the sweep passes, the pane immediately returns to its configured steady border visibility.
 
