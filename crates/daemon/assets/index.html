@@ -3407,20 +3407,82 @@
   /* Playbook session clips animate by swapping their leading glyph in JS on
      the same 120ms cadence as the TUI. Keep the chip body still: no bounce,
      pulse, or transform while a referenced session is active. */
-  /* Run shimmer: a travelling highlight band sweeps the running lines. Pure CSS
-     (no per-char DOM rebuild) so it never disturbs the caret while editing. */
+  /* Run shimmer. The TUI re-styles every character of a pending block with a
+     brightness taken from a travelling sine wave (crates/cli/src/ui.rs,
+     `apply_playbook_shimmer`): PLAYBOOK_SHIMMER_SPEED 4.2 rad/s,
+     PLAYBOOK_SHIMMER_DENSITY 0.18 rad/char, fg blended muted -> text through a
+     smoothstep so the region rests dim and the crest pops. Same wave here,
+     painted as a repeating gradient clipped to the glyphs rather than a
+     per-character DOM rebuild, so the caret, selection and typing are
+     untouched:
+       wavelength 2*pi/0.18 = 34.907ch   period 2*pi/4.2 = 1.496s
+     The 17 stops sample smoothstep(0.5 - 0.5*sin(theta)) every 1/16 turn; 0%
+     and 100% match so the tile repeats seamlessly. `--pb-shim-lag` (set per
+     line in playbookApplyShimmer) is the negative animation-delay that
+     reproduces the TUI's single character index running across all pending
+     lines, keeping the band continuous down the block. */
   .playbook-line.is-running {
-    background-image: linear-gradient(100deg,
-      transparent 20%,
-      color-mix(in srgb, var(--accent) 30%, transparent) 38%,
-      color-mix(in srgb, var(--accent) 30%, transparent) 50%,
-      transparent 68%);
-    background-size: 220% 100%;
-    background-repeat: no-repeat;
-    border-radius: 3px;
-    animation: playbook-shimmer 1.6s linear infinite;
+    --pb-shim-block-bg: transparent;
+    background-color: transparent;
+    background-image:
+      linear-gradient(90deg,
+        color-mix(in srgb, var(--fg) 50.0%, var(--fg-faint)) 0%,
+        color-mix(in srgb, var(--fg) 22.7%, var(--fg-faint)) 6.25%,
+        color-mix(in srgb, var(--fg) 5.8%, var(--fg-faint)) 12.5%,
+        color-mix(in srgb, var(--fg) 0.4%, var(--fg-faint)) 18.75%,
+        var(--fg-faint) 25%,
+        color-mix(in srgb, var(--fg) 0.4%, var(--fg-faint)) 31.25%,
+        color-mix(in srgb, var(--fg) 5.8%, var(--fg-faint)) 37.5%,
+        color-mix(in srgb, var(--fg) 22.7%, var(--fg-faint)) 43.75%,
+        color-mix(in srgb, var(--fg) 50.0%, var(--fg-faint)) 50%,
+        color-mix(in srgb, var(--fg) 77.3%, var(--fg-faint)) 56.25%,
+        color-mix(in srgb, var(--fg) 94.2%, var(--fg-faint)) 62.5%,
+        color-mix(in srgb, var(--fg) 99.6%, var(--fg-faint)) 68.75%,
+        var(--fg) 75%,
+        color-mix(in srgb, var(--fg) 99.6%, var(--fg-faint)) 81.25%,
+        color-mix(in srgb, var(--fg) 94.2%, var(--fg-faint)) 87.5%,
+        color-mix(in srgb, var(--fg) 77.3%, var(--fg-faint)) 93.75%,
+        color-mix(in srgb, var(--fg) 50.0%, var(--fg-faint)) 100%),
+      linear-gradient(var(--pb-shim-block-bg), var(--pb-shim-block-bg));
+    background-size: 34.907ch 100%, auto;
+    background-repeat: repeat-x, repeat;
+    -webkit-background-clip: text, border-box;
+    background-clip: text, border-box;
+    -webkit-text-fill-color: transparent;
+    animation: playbook-shimmer 1.496s linear infinite;
+    animation-delay: var(--pb-shim-lag, 0s);
+  }
+  /* Fenced-code rows paint their own block background. `background-clip: text`
+     would clip it to the glyphs, so re-issue it as the second (border-box)
+     layer instead of leaving it on background-color. */
+  .playbook-line.is-running.is-fenced-code {
+    --pb-shim-block-bg: color-mix(in srgb, var(--accent-alt) 22%, var(--bg-elev));
+  }
+  /* Spans that carry their own background are left alone by the TUI overlay;
+     keep their colors here too (transparent text fill inherits otherwise). */
+  .playbook-line.is-running .playbook-clip,
+  .playbook-line.is-running .playbook-inline-code {
+    -webkit-text-fill-color: currentColor;
+  }
+  /* Defensive: Chrome keeps painting the clipped gradient through a selection,
+     but an engine that repaints selected glyphs from the text fill colour would
+     draw them transparent. Pin those back to plain foreground. */
+  .playbook-line.is-running::selection,
+  .playbook-line.is-running ::selection {
+    -webkit-text-fill-color: var(--fg);
   }
   .playbook-line.is-running { cursor: help; }
+  @media (prefers-reduced-motion: reduce) {
+    /* No travelling wave: mark the pending rows with a static tint and leave
+       their text at full contrast. */
+    .playbook-line.is-running {
+      background-image: none;
+      background-color: color-mix(in srgb, var(--accent) 14%, transparent);
+      border-radius: 3px;
+      -webkit-text-fill-color: currentColor;
+      animation: none;
+    }
+  }
   .playbook-line.is-settling:not(.is-running) {
     background-image: linear-gradient(100deg,
       transparent 28%,
@@ -3432,9 +3494,12 @@
     border-radius: 3px;
     animation: playbook-settle 300ms ease-out 1 both;
   }
+  /* One wavelength per period: 34.907ch in 1.496s = 23.33 chars/sec, the TUI's
+     SPEED/DENSITY. Positive x moves the crest along the text, matching the
+     TUI's crest travelling toward a growing character index. */
   @keyframes playbook-shimmer {
-    from { background-position: 140% 0; }
-    to { background-position: -40% 0; }
+    from { background-position-x: 0ch, 0; }
+    to { background-position-x: 34.907ch, 0; }
   }
   @keyframes playbook-settle {
     0% { background-position: 145% 0; }
@@ -4999,6 +5064,11 @@ const state = {
     clip: null,
     // Find state: { query, matches:[{s,e}], idx } | null.
     find: null,
+    // Emacs mark (spec 0206): true while C-Space has armed a region, so the
+    // next caret motion extends the native selection instead of collapsing
+    // it. The DOM selection's own anchor *is* the mark, so no offset is
+    // stored here — only whether the region is active.
+    mark: false,
     // Desktop pointer hover affordance for Playbook shimmer/session clips.
     // { kind, sessionId, anchorEl, token, term, clientX, clientY } | null.
     hover: null,
@@ -10459,6 +10529,24 @@ function playbookNormalizeLines() {
 // --- run shimmer: toggle .is-running on running lines (CSS animates the wave,
 //     so it never rebuilds the DOM or disturbs the caret) ---
 
+// TUI wave constants (crates/cli/src/ui.rs PLAYBOOK_SHIMMER_SPEED / _DENSITY).
+const PB_SHIM_PERIOD_MS = (2 * Math.PI / 4.2) * 1000;   // 1496ms per wavelength
+const PB_SHIM_MS_PER_CHAR = (0.18 / 4.2) * 1000;        // 42.86ms — 23.33 ch/sec
+
+// The TUI advances ONE character index across every pending line, so the bright
+// band runs continuously down a block instead of restarting per row. The CSS
+// wave is periodic, so a line whose text starts `charOffset` characters into
+// that index is simply the same animation lagged by charOffset / 23.33 seconds.
+// `animStartPerf` is when this element's animation began (when .is-running was
+// added); `runStartPerf` is the run's own origin, so lines that join a run late
+// stay in phase with the ones already shimmering. Result is wrapped into
+// (-period, 0] because a positive animation-delay would freeze the first frame.
+function playbookShimmerLagMs(animStartPerf, runStartPerf, charOffset) {
+  const raw = animStartPerf - runStartPerf + charOffset * PB_SHIM_MS_PER_CHAR;
+  const wrapped = ((raw % PB_SHIM_PERIOD_MS) + PB_SHIM_PERIOD_MS) % PB_SHIM_PERIOD_MS;
+  return Math.round((wrapped - PB_SHIM_PERIOD_MS) * 10) / 10;
+}
+
 function playbookApplyShimmer() {
   const id = state.playbook.mountedId;
   const lineEls = playbookInputEl.querySelectorAll(":scope > div");
@@ -10477,15 +10565,32 @@ function playbookApplyShimmer() {
     const cleanBlocks = doc && playbookNormalizeClipIds(playbookSerialize()) === doc.saved ? (doc.blocks || []) : null;
     settling = cleanBlocks ? playbookSettleLines(playbookSerialize(), settledRefs, cleanBlocks) : null;
   }
+  const runStartPerf = run && Number.isFinite(run.startPerf) ? run.startPerf : 0;
+  let shimChars = 0;
   lineEls.forEach((el, i) => {
     const running = !!(shimmer && shimmer.active[i]);
+    const wasRunning = el.classList.contains("is-running");
     el.classList.toggle("is-running", running);
     el.classList.toggle("is-settling", !running && !!(settling && settling[i]));
     if (running) {
+      // Only lines that are actually shimmering advance the character index,
+      // exactly like the TUI overlay's `gidx`.
+      if (!wasRunning || !Number.isFinite(el.pbShimStartPerf)) el.pbShimStartPerf = performance.now();
+      const lag = playbookShimmerLagMs(el.pbShimStartPerf, runStartPerf, shimChars);
+      if (el.pbShimLagMs !== lag) {
+        el.pbShimLagMs = lag;
+        el.style.setProperty("--pb-shim-lag", `${lag}ms`);
+      }
+      shimChars += el.textContent.length;
       const label = shimmer.tooltips[i] || PLAYBOOK_SHIMMER_FALLBACK_TOOLTIP;
       el.dataset.tooltip = label;
       el.setAttribute("aria-label", label);
     } else {
+      if (wasRunning || el.pbShimLagMs != null) {
+        el.pbShimStartPerf = null;
+        el.pbShimLagMs = null;
+        el.style.removeProperty("--pb-shim-lag");
+      }
       delete el.dataset.tooltip;
       el.removeAttribute("aria-label");
       const hover = state.playbook.hover;
@@ -10609,6 +10714,7 @@ async function enterPlaybookMode(id, opts = {}) {
 async function playbookMountSession(id) {
   state.playbook.mountedId = id;
   playbookStopShimmer();
+  playbookDeactivateMark();
   playbookCloseClipMenu();
   playbookHideSelectionMenu();
   playbookCloseFind();
@@ -11787,6 +11893,9 @@ function playbookRevealInlineCodeForBackspace() {
 }
 
 function playbookOnInput() {
+  // An edit consumes the region the way emacs `delete-selection-mode` does —
+  // the browser has already replaced or deleted it — so the mark stops here.
+  playbookDeactivateMark();
   playbookNormalizeLines();
   if (!playbookSyncFencedSourcePresentation()) playbookFormatInlineCodeAtCaret();
   playbookApplyLineDecorations();
@@ -11798,6 +11907,117 @@ function playbookOnInput() {
   playbookUpdateSelectionMenu();
   if (state.playbook.find) playbookRecomputeFind();
   playbookOnLocalEdit();
+}
+
+// --- Emacs mark and region (spec 0206) ---------------------------------
+// The TUI Playbook has had `C-Space` set a zero-width mark that the next
+// movement key extends; the web editor had no mark at all, so `C-Space` fell
+// through to the contenteditable and inserted a space. The two clients share
+// one keymap, so this mirrors the TUI's semantics rather than inventing web
+// ones: `C-Space` marks, motion extends, `C-g` / `Escape` cancel.
+//
+// The browser's own selection anchor plays the role of the mark, so extending
+// is just `Selection.modify("extend", ...)` — no shadow offsets to keep in
+// sync with a DOM the renderer rewrites underneath us.
+
+/** Collapse the selection onto the caret (its focus end), if it is ours. */
+function playbookCollapseToCaret() {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount || !sel.focusNode) return;
+  if (!playbookInputEl.contains(sel.focusNode)) return;
+  try { sel.collapse(sel.focusNode, sel.focusOffset); } catch (_) {}
+}
+
+/** `C-Space`: arm the region at the caret. Returns false when unfocused. */
+function playbookSetMark() {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount || !sel.focusNode) return false;
+  if (!playbookInputEl.contains(sel.focusNode)) return false;
+  // A mark set over an existing selection starts fresh at the caret, matching
+  // the TUI's `begin_playbook_selection` (anchor == head == cursor).
+  playbookCollapseToCaret();
+  playbookCloseClipMenu();
+  state.playbook.mark = true;
+  playbookUpdateSelectionMenu();
+  playbookSetMsg("mark set");
+  return true;
+}
+
+/**
+ * Drop the region flag without touching the DOM selection.
+ *
+ * Used by the paths where the browser already owns what happens to the
+ * highlight — typing replaces it, a click restarts it, copy leaves it up —
+ * so only the "arrows extend" mode has to end.
+ */
+function playbookDeactivateMark() {
+  if (!state.playbook.mark) return false;
+  state.playbook.mark = false;
+  return true;
+}
+
+/** `C-g` / `Escape`: deactivate the region and leave the caret where it is. */
+function playbookCancelMark() {
+  if (!playbookDeactivateMark()) return false;
+  playbookCollapseToCaret();
+  playbookUpdateSelectionMenu();
+  playbookPublishCursor();
+  playbookRenderCursors();
+  playbookSetMsg("mark cleared");
+  return true;
+}
+
+/**
+ * Resolve a keydown to a caret motion as [direction, granularity] for
+ * `Selection.modify`, or null when the key does not move the caret.
+ *
+ * Covers the TUI Playbook's movement bindings — arrows, Home/End, emacs
+ * `C-f`/`C-b`/`C-n`/`C-p`/`C-a`/`C-e` — plus the word and
+ * line/document-boundary motions each platform spells with its own modifier.
+ * Alt combinations are matched on `code`, because macOS turns `M-f` into `ƒ`
+ * and `M-b` into `∫` in `key`.
+ */
+function playbookMotionForKey(e) {
+  const ctrl = e.ctrlKey;
+  const alt = e.altKey;
+  const meta = e.metaKey;
+  switch (e.key) {
+    case "ArrowLeft":
+      if (meta) return ["backward", "lineboundary"];
+      return ["backward", ctrl || alt ? "word" : "character"];
+    case "ArrowRight":
+      if (meta) return ["forward", "lineboundary"];
+      return ["forward", ctrl || alt ? "word" : "character"];
+    case "ArrowUp":
+      return ["backward", meta ? "documentboundary" : "line"];
+    case "ArrowDown":
+      return ["forward", meta ? "documentboundary" : "line"];
+    case "Home":
+      return ["backward", ctrl ? "documentboundary" : "lineboundary"];
+    case "End":
+      return ["forward", ctrl ? "documentboundary" : "lineboundary"];
+  }
+  if (alt && !ctrl && !meta) {
+    if (e.code === "KeyF") return ["forward", "word"];
+    if (e.code === "KeyB") return ["backward", "word"];
+  }
+  if (ctrl && !meta && !alt) {
+    switch (String(e.key).toLowerCase()) {
+      case "f": return ["forward", "character"];
+      case "b": return ["backward", "character"];
+      case "n": return ["forward", "line"];
+      case "p": return ["backward", "line"];
+      case "a": return ["backward", "lineboundary"];
+      case "e": return ["forward", "lineboundary"];
+    }
+  }
+  return null;
+}
+
+/** True when this keydown is `C-Space` on any layout. */
+function playbookIsSetMarkKey(e) {
+  if (!e.ctrlKey || e.metaKey || e.altKey) return false;
+  return e.key === " " || e.key === "Spacebar" || e.code === "Space";
 }
 
 function playbookOnKeyDown(e) {
@@ -11821,6 +12041,40 @@ function playbookOnKeyDown(e) {
     if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); playbookAcceptClip(); return; }
     if (e.key === "Escape") { e.preventDefault(); playbookCloseClipMenu(); return; }
   }
+  // C-Space sets the mark. `preventDefault` is mandatory — the contenteditable
+  // would otherwise take the keystroke as a literal space — and this handler
+  // sits on the editor itself, so it runs at target before the document-level
+  // capture keymap has any interest in the key (`C-space` is bound to nothing
+  // there, and is not a prefix of the `C-x Space` chord).
+  if (playbookIsSetMarkKey(e)) {
+    e.preventDefault();
+    playbookSetMark();
+    return;
+  }
+  // C-g is the emacs spelling of Escape's cancel, as in the TUI: it peels off
+  // the transient Playbook UI, then deactivates the region.
+  if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "g" || e.key === "G")) {
+    e.preventDefault();
+    if (state.playbook.clip) { playbookCloseClipMenu(); return; }
+    if (state.playbook.find) { playbookCloseFind(); playbookInputEl.focus(); return; }
+    playbookCancelMark();
+    return;
+  }
+  // With the mark armed, every caret motion extends the region from it rather
+  // than collapsing the selection — the whole point of setting a mark. This
+  // precedes the C-f binding below so C-f extends too.
+  if (state.playbook.mark) {
+    const motion = playbookMotionForKey(e);
+    if (motion) {
+      e.preventDefault();
+      const sel = window.getSelection();
+      if (sel && typeof sel.modify === "function") sel.modify("extend", motion[0], motion[1]);
+      playbookUpdateSelectionMenu();
+      playbookPublishCursor();
+      playbookRenderCursors();
+      return;
+    }
+  }
   if (mod && (e.key === "s" || e.key === "S")) { e.preventDefault(); playbookSave(); return; }
   if (mod && e.key === "Enter") { e.preventDefault(); playbookRun(e.shiftKey); return; }
   if (!mod && e.key === "Backspace" && playbookRevealInlineCodeForBackspace()) {
@@ -11836,6 +12090,7 @@ function playbookOnKeyDown(e) {
     return;
   }
   if (e.key === "Escape" && state.playbook.find) { e.preventDefault(); playbookCloseFind(); playbookInputEl.focus(); return; }
+  if (e.key === "Escape" && state.playbook.mark) { e.preventDefault(); playbookCancelMark(); return; }
   if (e.key === "Tab" && !mod) {
     e.preventDefault();
     document.execCommand("insertText", false, "  ");
@@ -11877,7 +12132,14 @@ function playbookWireEvents() {
       playbookMsg(`preview failed: ${err.message}`, true));
   });
   playbookInputEl.addEventListener("click", () => { playbookUpdateClipMenu(); playbookUpdateSelectionMenu(); playbookPublishCursor(); playbookRenderCursors(); });
+  // A click (or drag) hands selection back to the mouse; the flag must not
+  // survive it, or the next arrow key would extend from the new caret.
+  playbookInputEl.addEventListener("pointerdown", () => playbookDeactivateMark());
   playbookInputEl.addEventListener("pointerup", () => playbookUpdateSelectionMenu());
+  // Copy/cut consume the region (emacs deactivates the mark after
+  // kill-ring-save); the highlight itself is left to the browser.
+  playbookInputEl.addEventListener("copy", () => playbookDeactivateMark());
+  playbookInputEl.addEventListener("cut", () => playbookDeactivateMark());
   playbookInputEl.addEventListener("pointermove", playbookHandleHoverPointerMove);
   playbookInputEl.addEventListener("pointerleave", playbookHideHover);
   playbookInputEl.addEventListener("scroll", () => { playbookRenderCursors(); playbookHideHover(); playbookHideSelectionMenu(); });
@@ -11890,7 +12152,7 @@ function playbookWireEvents() {
       playbookHideSelectionMenu();
     }
   });
-  playbookInputEl.addEventListener("blur", () => { setTimeout(playbookCloseClipMenu, 120); });
+  playbookInputEl.addEventListener("blur", () => { playbookDeactivateMark(); setTimeout(playbookCloseClipMenu, 120); });
   // Keep the editor plain text: paste as text/plain, never rich HTML.
   // Pasted files become session attachments whose Markdown links land at
   // the caret (spec 0099).

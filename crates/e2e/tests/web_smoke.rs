@@ -18,6 +18,7 @@ use construct_e2e::{artifact_dir, Daemon};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::input::{DispatchKeyEventParams, DispatchKeyEventType};
 use chromiumoxide::cdp::browser_protocol::page::{
     EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams,
     StopScreencastParams,
@@ -1523,6 +1524,151 @@ async fn web_client_loads_and_websocket_connects() {
             .as_str()
             .is_some_and(|text| text.contains("WORKER_PREVIEW_LINE")),
         "preview terminal should contain replayed PTY output: {playbook_hover:?}"
+    );
+
+    // Playbook mark and region (spec 0206): `C-Space` arms a region at the
+    // caret and the next motion extends it, as in the TUI. Driven with real
+    // CDP key events rather than synthesized `KeyboardEvent`s, because the
+    // bug this guards was the contenteditable eating `C-Space` as a literal
+    // space — only a trusted event exercises that default action at all.
+    page.evaluate(
+        r#"
+        (() => {
+          window.__markSaved = {
+            sessions: state.sessions,
+            currentId: state.currentId,
+            mode: state.mode,
+            mountedId: state.playbook.mountedId,
+            docById: state.playbook.docById,
+            html: playbookInputEl.innerHTML,
+            wrapHidden: playbookWrapEl.hidden,
+          };
+          const markdown = 'alpha beta gamma\ndelta epsilon\n';
+          state.sessions = [
+            { id: 's-mark', title: 'Mark', harness: 'smith', state: 'running', has_pty: true },
+          ];
+          state.currentId = 's-mark';
+          state.mode = 'playbook';
+          state.playbook.mountedId = 's-mark';
+          state.playbook.docById = new Map([['s-mark', {
+            version: 1,
+            templateId: null,
+            saved: playbookNormalizeClipIds(markdown),
+            live: playbookNormalizeClipIds(markdown),
+            blocks: playbookBlockSpans(markdown),
+            pendingLive: 0,
+          }]]);
+          playbookWrapEl.hidden = false;
+          playbookRenderDoc(markdown);
+          window.__markKeys = [];
+          // Bubble phase on `document`: this runs after every listener on the
+          // editor, so `defaultPrevented` already reflects the handler's call.
+          window.__markProbe = (e) => {
+            window.__markKeys.push({
+              key: e.key,
+              ctrl: e.ctrlKey,
+              defaultPrevented: e.defaultPrevented,
+            });
+          };
+          document.addEventListener('keydown', window.__markProbe);
+          playbookInputEl.focus();
+          const line = playbookInputEl.children[0];
+          const range = document.createRange();
+          range.setStart(line.firstChild || line, 0);
+          range.collapse(true);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          return true;
+        })()
+        "#,
+    )
+    .await
+    .expect("stage playbook mark fixture");
+
+    press_key_chord(&page, " ", "Space", 32, CDP_MODIFIER_CTRL).await;
+    for _ in 0..6 {
+        press_key_chord(&page, "ArrowRight", "ArrowRight", 39, 0).await;
+    }
+    press_key_chord(&page, "f", "KeyF", 70, CDP_MODIFIER_CTRL).await;
+
+    let mark_region: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => ({
+              selection: window.getSelection().toString(),
+              mark: state.playbook.mark,
+              text: playbookSerialize(),
+              setMarkPrevented: window.__markKeys[0] && window.__markKeys[0].defaultPrevented,
+              menuVisible: !playbookSelectionMenuEl.hidden,
+            }))()
+            "#,
+        )
+        .await
+        .expect("evaluate playbook mark region")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        mark_region["setMarkPrevented"], true,
+        "C-Space must reach the Playbook handler and be prevented: {mark_region:?}"
+    );
+    assert_eq!(
+        mark_region["mark"], true,
+        "C-Space should arm the region: {mark_region:?}"
+    );
+    assert_eq!(
+        mark_region["selection"], "alpha b",
+        "motion after C-Space should extend from the mark: {mark_region:?}"
+    );
+    assert_eq!(
+        mark_region["menuVisible"], true,
+        "a non-empty region should surface the selection menu: {mark_region:?}"
+    );
+    assert_eq!(
+        mark_region["text"], "alpha beta gamma\ndelta epsilon\n",
+        "C-Space must not type a space into the document: {mark_region:?}"
+    );
+
+    press_key_chord(&page, "g", "KeyG", 71, CDP_MODIFIER_CTRL).await;
+    press_key_chord(&page, "ArrowRight", "ArrowRight", 39, 0).await;
+    let mark_cleared: serde_json::Value = page
+        .evaluate(
+            r#"
+            (() => {
+              const out = {
+                selection: window.getSelection().toString(),
+                mark: state.playbook.mark,
+                text: playbookSerialize(),
+              };
+              document.removeEventListener('keydown', window.__markProbe);
+              const saved = window.__markSaved;
+              state.sessions = saved.sessions;
+              state.currentId = saved.currentId;
+              state.mode = saved.mode;
+              state.playbook.mountedId = saved.mountedId;
+              state.playbook.docById = saved.docById;
+              playbookInputEl.innerHTML = saved.html;
+              playbookWrapEl.hidden = saved.wrapHidden;
+              playbookHideSelectionMenu();
+              return out;
+            })()
+            "#,
+        )
+        .await
+        .expect("evaluate playbook mark cancel")
+        .into_value::<serde_json::Value>()
+        .expect("json object");
+    assert_eq!(
+        mark_cleared["mark"], false,
+        "C-g should deactivate the region: {mark_cleared:?}"
+    );
+    assert_eq!(
+        mark_cleared["selection"], "",
+        "motion after C-g should move the caret, not extend: {mark_cleared:?}"
+    );
+    assert_eq!(
+        mark_cleared["text"], "alpha beta gamma\ndelta epsilon\n",
+        "cancelling the mark must not edit the document: {mark_cleared:?}"
     );
 
     // Mobile regression: selecting a PTY-backed session from the list must not
@@ -4755,6 +4901,29 @@ impl Drop for ScreencastRecording {
 /// Poll until `state.harnesses` is populated (the connect flow fetches it
 /// asynchronously after the socket opens), then return a probe of the
 /// Playbook clip picker's root rows built from it (#1098).
+/// CDP's `Input.dispatchKeyEvent` modifier bit for Ctrl.
+const CDP_MODIFIER_CTRL: i64 = 2;
+
+/// Dispatch a real (trusted) key press, modifiers included.
+///
+/// `press_key` in chromiumoxide cannot carry modifiers, and a synthesized
+/// `KeyboardEvent` never runs the browser's default action — which is exactly
+/// what a `preventDefault` assertion needs to be meaningful.
+async fn press_key_chord(page: &Page, key: &str, code: &str, vk: i64, modifiers: i64) {
+    for kind in [DispatchKeyEventType::KeyDown, DispatchKeyEventType::KeyUp] {
+        let params = DispatchKeyEventParams::builder()
+            .r#type(kind)
+            .key(key)
+            .code(code)
+            .windows_virtual_key_code(vk)
+            .native_virtual_key_code(vk)
+            .modifiers(modifiers)
+            .build()
+            .expect("build key event");
+        page.execute(params).await.expect("dispatch key event");
+    }
+}
+
 async fn wait_for_harness_roster(page: &Page) -> serde_json::Value {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
