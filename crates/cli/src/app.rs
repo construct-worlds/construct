@@ -708,12 +708,17 @@ pub(crate) enum FocusBorderTarget {
 }
 
 /// Transient state for the focused-pane border sweep. The first observed
-/// target establishes the baseline without animating; only a real focus
-/// transition starts a sweep.
+/// target establishes the baseline without animating; a real focus
+/// transition starts a sweep, and so does the first keystroke that reaches
+/// the already-focused pane after an idle gap.
 #[derive(Debug, Default)]
 pub(crate) struct FocusBorderSweep {
     target: Option<FocusBorderTarget>,
     started_at: Option<Instant>,
+    /// Monotonic time of the last keystroke that the focused pane consumed.
+    /// `None` until the first such key, which is what lets a TUI left alone
+    /// after startup still answer the first keypress with the cue.
+    last_key_at: Option<Instant>,
 }
 
 impl FocusBorderSweep {
@@ -747,6 +752,37 @@ impl FocusBorderSweep {
                 / Duration::from_millis(FOCUS_BORDER_SWEEP_TRAVEL_MS).as_secs_f32())
             .min(1.0),
         )
+    }
+
+    /// Record a keystroke that the *already focused* pane consumed, and report
+    /// whether it re-armed the sweep.
+    ///
+    /// Rules, in the order they are applied:
+    ///
+    /// - Every such key refreshes the idle clock, so sustained typing keeps
+    ///   the gap closed and can never replay the animation.
+    /// - A key that lands while a sweep is already on screen — a focus change
+    ///   one frame ago, most often — is absorbed. Focus acquisition and
+    ///   idle resume never stack into a double animation.
+    /// - Otherwise, a key arriving `idle_after` or later than the previous one
+    ///   replays the same sweep on the focused pane. The very first recorded
+    ///   key counts as ending an idle gap: at that point the user has been
+    ///   away from the keyboard since the TUI opened.
+    pub(crate) fn note_focused_pane_key(
+        &mut self,
+        now: Instant,
+        idle_after: Duration,
+    ) -> bool {
+        let previous = self.last_key_at.replace(now);
+        if self.is_animating(now) {
+            return false;
+        }
+        let resumed = previous
+            .is_none_or(|previous| now.saturating_duration_since(previous) >= idle_after);
+        if resumed {
+            self.started_at = Some(now);
+        }
+        resumed
     }
 
     /// Keep target tracking current when its surface has no border (the
@@ -803,6 +839,94 @@ mod focus_border_sweep_tests {
             None
         );
         assert!(!sweep.is_animating(t0 + Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn typing_after_an_idle_gap_replays_the_sweep_once() {
+        let idle = Duration::from_millis(FOCUS_BORDER_IDLE_RESUME_MS);
+        let mut sweep = FocusBorderSweep::default();
+        let t0 = Instant::now();
+        sweep.sync(FocusBorderTarget::MainWindow(1));
+
+        // First key of the session: the user has been away since startup.
+        assert!(sweep.note_focused_pane_key(t0, idle));
+        assert_eq!(
+            sweep.observe(FocusBorderTarget::MainWindow(1), t0),
+            Some(0.0),
+            "the resumed sweep starts at the pane's top-left corner"
+        );
+
+        // Continuous typing: every key refreshes the idle clock, and none of
+        // them replays the animation — not the ones landing inside the 200 ms
+        // window, and not the ones after it.
+        let mut at = t0;
+        for step in 1..=400u32 {
+            at = t0 + Duration::from_millis(u64::from(step) * 400);
+            assert!(
+                !sweep.note_focused_pane_key(at, idle),
+                "keystroke {step} at {:?} re-triggered mid-typing",
+                at - t0
+            );
+        }
+        assert!(
+            at - t0 > idle,
+            "the typing run must outlast the idle threshold to be a real test"
+        );
+        assert!(!sweep.is_animating(at));
+
+        // Silence, then one more key: that transition — and only it — replays.
+        let resumed = at + idle;
+        assert!(sweep.note_focused_pane_key(resumed, idle));
+        assert_eq!(
+            sweep.observe(FocusBorderTarget::MainWindow(1), resumed),
+            Some(0.0)
+        );
+        assert!(!sweep.note_focused_pane_key(
+            resumed + Duration::from_millis(10),
+            idle
+        ));
+    }
+
+    #[test]
+    fn a_key_during_a_focus_gain_sweep_does_not_animate_twice() {
+        let idle = Duration::from_millis(FOCUS_BORDER_IDLE_RESUME_MS);
+        let mut sweep = FocusBorderSweep::default();
+        let t0 = Instant::now();
+        sweep.sync(FocusBorderTarget::SessionList);
+
+        // Focus lands on a split window, which starts its own sweep...
+        assert_eq!(sweep.observe(FocusBorderTarget::MainWindow(1), t0), Some(0.0));
+        // ...and the keystroke that arrives while it plays is absorbed: the
+        // sweep keeps its original start, so it neither restarts nor extends.
+        let during = t0 + Duration::from_millis(40);
+        assert!(!sweep.note_focused_pane_key(during, idle));
+        assert_eq!(
+            sweep.observe(FocusBorderTarget::MainWindow(1), during),
+            Some(0.25),
+            "the in-flight sweep continues from where focus gain started it"
+        );
+        assert!(!sweep.is_animating(t0 + Duration::from_millis(FOCUS_BORDER_SWEEP_MS)));
+
+        // The absorbed key still counted as activity, so the next key right
+        // after the sweep ends is ordinary typing, not an idle resume.
+        assert!(!sweep.note_focused_pane_key(
+            t0 + Duration::from_millis(FOCUS_BORDER_SWEEP_MS + 1),
+            idle
+        ));
+    }
+
+    #[test]
+    fn idle_resume_threshold_falls_back_to_the_shipped_default() {
+        let default = Duration::from_millis(FOCUS_BORDER_IDLE_RESUME_MS);
+        assert_eq!(parse_focus_border_idle_resume(None), default);
+        assert_eq!(parse_focus_border_idle_resume(Some("  ")), default);
+        assert_eq!(parse_focus_border_idle_resume(Some("later")), default);
+        assert_eq!(
+            parse_focus_border_idle_resume(Some(" 1500 ")),
+            Duration::from_millis(1500),
+            "the recording override is read from the environment, never from \
+             a shortened shipped constant"
+        );
     }
 
     #[test]
@@ -5312,6 +5436,38 @@ pub const FOCUS_BORDER_SWEEP_MS: u64 = 200;
 const FOCUS_BORDER_SWEEP_FRAME_MS: u64 = 40;
 const FOCUS_BORDER_SWEEP_TRAVEL_MS: u64 =
     FOCUS_BORDER_SWEEP_MS - FOCUS_BORDER_SWEEP_FRAME_MS;
+/// Silence after which the next keystroke consumed by the focused pane
+/// replays that pane's focus sweep. Two minutes is long enough that no
+/// stretch of real work — reading a diff, waiting out a harness turn,
+/// composing the next instruction — reaches it, so the cue only appears when
+/// the user has genuinely been away and has to re-find where typing lands.
+pub const FOCUS_BORDER_IDLE_RESUME_MS: u64 = 120_000;
+/// Demo/recording override for the idle threshold above. Reading a full two
+/// minutes of silence into a screen capture is impractical, and shortening
+/// the shipped constant to make the recording easy would ship the wrong
+/// product. Unset (the normal case) or unparseable means the constant.
+const FOCUS_BORDER_IDLE_RESUME_ENV: &str = "CONSTRUCT_FOCUS_SWEEP_IDLE_MS";
+
+fn parse_focus_border_idle_resume(raw: Option<&str>) -> Duration {
+    raw.map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map_or_else(
+            || Duration::from_millis(FOCUS_BORDER_IDLE_RESUME_MS),
+            Duration::from_millis,
+        )
+}
+
+/// Resolve the idle threshold once per process; the env read is not repeated
+/// on every keystroke.
+fn focus_border_idle_resume() -> Duration {
+    static IDLE: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *IDLE.get_or_init(|| {
+        parse_focus_border_idle_resume(
+            std::env::var(FOCUS_BORDER_IDLE_RESUME_ENV).ok().as_deref(),
+        )
+    })
+}
 /// Pulsing-star spinner: a 4-glyph sparkle whose size "breathes" via a
 /// palindromic frame schedule (small → big → small). Single cell wide so
 /// it slots into the same column as the static state glyph.
@@ -6187,6 +6343,13 @@ async fn run_loop(
         }
         let skip_event_draw = std::mem::take(&mut app.skip_redraw_after_event);
         let skip_draw = skip_event_draw || std::mem::take(&mut skip_idle_tick_draw);
+        // The keystroke that re-arms an idle-resume sweep is usually the same
+        // keystroke the focused PTY consumes, and that path deliberately skips
+        // its own paint (the child's echo is the visible change). Paint anyway
+        // while a sweep is on screen so the band starts at the top-left corner
+        // instead of wherever the 40 ms cadence timer picks it up. Gated on a
+        // live animation, so an idle TUI keeps every existing skip.
+        let skip_draw = skip_draw && !app.focus_border_sweep.is_animating(Instant::now());
         if !skip_draw {
             // Repair palette collisions before painting, and again whenever the
             // theme changes underneath us (spec 0111). A no-op on a truecolor
@@ -13006,7 +13169,55 @@ impl App {
         }
     }
 
+    /// True when a floating keyboard surface — a modal dialog, a transient
+    /// popup, or the prompt/minibuffer strip — owns the keystroke about to be
+    /// dispatched. None of those are `FocusBorderTarget`s, so a key one of
+    /// them swallows must not flash an unrelated pane's border.
+    ///
+    /// Mirrors the gates at the top of `on_key`, deliberately on the
+    /// conservative side: a surface that consumes only some keys and falls
+    /// through on the rest still suppresses the cue for the key that dismisses
+    /// it, and the pane gets the cue back on the next one. Every surface that
+    /// *is* a focus-border target — the session list, the lineage section, a
+    /// split window and everything hosted inside one (PTY, Playbook, operator
+    /// editor, inline UI, pinned clip) — is absent here on purpose.
+    fn keyboard_overlay_owns_input(&self) -> bool {
+        // Disconnected: the panes are stale mirrors of a daemon that is gone,
+        // and the surviving keymap is the quit/reconnect fallback, not pane
+        // input.
+        !self.connected
+            || self.fleet_panel.as_ref().is_some_and(|panel| panel.pinned)
+            || self.route_menu.is_some()
+            || self.suggest_deck.is_some()
+            || self.help_visible
+            || self.session_title_rename.is_some()
+            || self.session_picker_active()
+            || self.configure_popup.is_some()
+            || self.remote_control_popup.is_some()
+            || self.tasks_popup.is_some()
+            || self.prompt.is_some()
+    }
+
+    /// Replay the focused pane's border sweep when typing resumes after a long
+    /// silence (spec 0207). Called once per dispatched key, before routing, so
+    /// the pane credited is the one that is about to consume the key.
+    fn note_focus_border_key(&mut self, key: KeyEvent) {
+        // A bare modifier press is the user reaching for a chord, not input a
+        // pane consumes; `on_term_event` forwards those for the Shift-fork
+        // tracker alone.
+        if matches!(key.code, KeyCode::Modifier(_)) || self.keyboard_overlay_owns_input() {
+            return;
+        }
+        if self
+            .focus_border_sweep
+            .note_focused_pane_key(Instant::now(), focus_border_idle_resume())
+        {
+            self.request_tick_redraw();
+        }
+    }
+
     async fn on_key(&mut self, key: KeyEvent) {
+        self.note_focus_border_key(key);
         self.text_selection = None;
         self.selected_text = None;
         self.selected_text_bounds = None;
@@ -37489,6 +37700,199 @@ mod tests {
         let client = Client::connect(&sock).await.expect("client connects");
         let app = test_app(client, Vec::new());
         (app, dir, server)
+    }
+
+    /// Backdate the idle clock so the next key looks like typing resuming
+    /// after the user walked away, without the test sleeping for minutes.
+    fn go_idle(app: &mut App) {
+        app.focus_border_sweep.last_key_at = Some(
+            Instant::now() - Duration::from_millis(FOCUS_BORDER_IDLE_RESUME_MS + 1_000),
+        );
+    }
+
+    fn press(code: KeyCode) -> CtEvent {
+        CtEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// Cells on `rect`'s perimeter — the only cells the sweep is allowed to
+    /// touch.
+    fn is_border_cell(rect: Rect, x: u16, y: u16) -> bool {
+        let on_x = x == rect.x || x == rect.right().saturating_sub(1);
+        let on_y = y == rect.y || y == rect.bottom().saturating_sub(1);
+        (on_x || on_y)
+            && x >= rect.x
+            && x < rect.right()
+            && y >= rect.y
+            && y < rect.bottom()
+    }
+
+    /// A key delivered to an already-focused pane after a long silence
+    /// replays that pane's focus sweep, and paints it on that pane's border
+    /// and nowhere else (spec 0207).
+    #[tokio::test]
+    async fn idle_keystroke_replays_the_focused_pane_sweep() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.focus = PaneFocus::View;
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("baseline frame");
+        assert!(
+            !app.focus_border_sweep.is_animating(Instant::now()),
+            "startup focus stays silent — spec 0203's baseline is unchanged"
+        );
+
+        go_idle(&mut app);
+        app.on_term_event(press(KeyCode::Char('j'))).await;
+        assert!(
+            app.focus_border_sweep.is_animating(Instant::now()),
+            "the first key after the idle gap re-arms the sweep"
+        );
+
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("sweep frame");
+        let swept = term.backend().buffer().clone();
+        // Re-render the identical app state with only the sweep disarmed, so
+        // the diff between the two frames is the animation and nothing else.
+        app.focus_border_sweep.started_at = None;
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("steady frame");
+        let steady = term.backend().buffer().clone();
+        assert_ne!(swept, steady, "the resumed sweep must repaint something");
+
+        let pane = app
+            .layout
+            .main_window_areas
+            .first()
+            .expect("the view pane publishes its area")
+            .area;
+        for y in 0..swept.area.height {
+            for x in 0..swept.area.width {
+                if swept[(x, y)] != steady[(x, y)] {
+                    assert!(
+                        is_border_cell(pane, x, y),
+                        "sweep touched ({x},{y}), outside the focused pane's border {pane:?}"
+                    );
+                }
+            }
+        }
+        server.abort();
+    }
+
+    /// Typing does not strobe: only the idle→resume transition animates.
+    #[tokio::test]
+    async fn continuous_typing_never_replays_the_sweep() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.focus = PaneFocus::View;
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("frame");
+
+        go_idle(&mut app);
+        app.on_term_event(press(KeyCode::Char('a'))).await;
+        assert!(app.focus_border_sweep.is_animating(Instant::now()));
+
+        // Let the 200 ms sweep retire, then keep typing. Nothing re-arms.
+        app.focus_border_sweep.started_at = None;
+        for code in [
+            KeyCode::Char('b'),
+            KeyCode::Char('c'),
+            KeyCode::Backspace,
+            KeyCode::Down,
+            KeyCode::Enter,
+        ] {
+            app.on_term_event(press(code)).await;
+            assert!(
+                !app.focus_border_sweep.is_animating(Instant::now()),
+                "{code:?} re-triggered the sweep mid-typing"
+            );
+        }
+        server.abort();
+    }
+
+    /// A modal that swallows the keystroke must not flash the border of a
+    /// pane that never saw it.
+    #[tokio::test]
+    async fn keys_swallowed_by_an_overlay_do_not_animate_a_pane() {
+        let (mut app, _dir, server) = empty_app().await;
+        app.focus = PaneFocus::View;
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("frame");
+
+        app.help_visible = true;
+        go_idle(&mut app);
+        app.on_term_event(press(KeyCode::Down)).await;
+        assert!(
+            !app.focus_border_sweep.is_animating(Instant::now()),
+            "the help dialog's own scroll key is not pane input"
+        );
+
+        app.help_visible = false;
+        app.open_prompt_for_command();
+        go_idle(&mut app);
+        app.on_term_event(press(KeyCode::Char('x'))).await;
+        assert!(
+            !app.focus_border_sweep.is_animating(Instant::now()),
+            "text typed into the prompt strip is not pane input"
+        );
+
+        app.prompt = None;
+        app.connected = false;
+        go_idle(&mut app);
+        app.on_term_event(press(KeyCode::Char('x'))).await;
+        assert!(
+            !app.focus_border_sweep.is_animating(Instant::now()),
+            "a disconnected TUI has no live pane to point at"
+        );
+
+        // With every overlay gone, the same key reaches the pane again.
+        app.connected = true;
+        go_idle(&mut app);
+        app.on_term_event(press(KeyCode::Char('x'))).await;
+        assert!(app.focus_border_sweep.is_animating(Instant::now()));
+        server.abort();
+    }
+
+    /// Focus acquisition already animates; the key that caused it must not
+    /// stack a second sweep on top.
+    #[tokio::test]
+    async fn focus_change_then_key_animates_once_on_the_new_pane() {
+        let (mut app, _dir, server) = two_session_app().await;
+        app.focus = PaneFocus::View;
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("frame");
+
+        // `C-x o` after an idle stretch: focus moves to the session list.
+        go_idle(&mut app);
+        app.on_term_event(CtEvent::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        )))
+        .await;
+        app.on_term_event(press(KeyCode::Char('o'))).await;
+        assert_eq!(app.focus, PaneFocus::List);
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("focus-gain frame");
+        let started_at = app
+            .focus_border_sweep
+            .started_at
+            .expect("focus acquisition sweeps the list pane");
+        assert_eq!(
+            app.focus_border_sweep.target,
+            Some(FocusBorderTarget::SessionList)
+        );
+
+        // A key landing while that sweep plays is absorbed: same start time,
+        // so the animation runs its one course instead of restarting.
+        app.on_term_event(press(KeyCode::Char('n'))).await;
+        assert_eq!(
+            app.focus_border_sweep.started_at,
+            Some(started_at),
+            "the key must not restart the focus-gain sweep"
+        );
+        server.abort();
     }
 
     /// Like `empty_app`, but pre-populated with two live user sessions (`s1`,
