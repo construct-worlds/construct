@@ -5064,6 +5064,11 @@ const state = {
     clip: null,
     // Find state: { query, matches:[{s,e}], idx } | null.
     find: null,
+    // Emacs mark (spec 0206): true while C-Space has armed a region, so the
+    // next caret motion extends the native selection instead of collapsing
+    // it. The DOM selection's own anchor *is* the mark, so no offset is
+    // stored here — only whether the region is active.
+    mark: false,
     // Desktop pointer hover affordance for Playbook shimmer/session clips.
     // { kind, sessionId, anchorEl, token, term, clientX, clientY } | null.
     hover: null,
@@ -10709,6 +10714,7 @@ async function enterPlaybookMode(id, opts = {}) {
 async function playbookMountSession(id) {
   state.playbook.mountedId = id;
   playbookStopShimmer();
+  playbookDeactivateMark();
   playbookCloseClipMenu();
   playbookHideSelectionMenu();
   playbookCloseFind();
@@ -11887,6 +11893,9 @@ function playbookRevealInlineCodeForBackspace() {
 }
 
 function playbookOnInput() {
+  // An edit consumes the region the way emacs `delete-selection-mode` does —
+  // the browser has already replaced or deleted it — so the mark stops here.
+  playbookDeactivateMark();
   playbookNormalizeLines();
   if (!playbookSyncFencedSourcePresentation()) playbookFormatInlineCodeAtCaret();
   playbookApplyLineDecorations();
@@ -11898,6 +11907,117 @@ function playbookOnInput() {
   playbookUpdateSelectionMenu();
   if (state.playbook.find) playbookRecomputeFind();
   playbookOnLocalEdit();
+}
+
+// --- Emacs mark and region (spec 0206) ---------------------------------
+// The TUI Playbook has had `C-Space` set a zero-width mark that the next
+// movement key extends; the web editor had no mark at all, so `C-Space` fell
+// through to the contenteditable and inserted a space. The two clients share
+// one keymap, so this mirrors the TUI's semantics rather than inventing web
+// ones: `C-Space` marks, motion extends, `C-g` / `Escape` cancel.
+//
+// The browser's own selection anchor plays the role of the mark, so extending
+// is just `Selection.modify("extend", ...)` — no shadow offsets to keep in
+// sync with a DOM the renderer rewrites underneath us.
+
+/** Collapse the selection onto the caret (its focus end), if it is ours. */
+function playbookCollapseToCaret() {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount || !sel.focusNode) return;
+  if (!playbookInputEl.contains(sel.focusNode)) return;
+  try { sel.collapse(sel.focusNode, sel.focusOffset); } catch (_) {}
+}
+
+/** `C-Space`: arm the region at the caret. Returns false when unfocused. */
+function playbookSetMark() {
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount || !sel.focusNode) return false;
+  if (!playbookInputEl.contains(sel.focusNode)) return false;
+  // A mark set over an existing selection starts fresh at the caret, matching
+  // the TUI's `begin_playbook_selection` (anchor == head == cursor).
+  playbookCollapseToCaret();
+  playbookCloseClipMenu();
+  state.playbook.mark = true;
+  playbookUpdateSelectionMenu();
+  playbookSetMsg("mark set");
+  return true;
+}
+
+/**
+ * Drop the region flag without touching the DOM selection.
+ *
+ * Used by the paths where the browser already owns what happens to the
+ * highlight — typing replaces it, a click restarts it, copy leaves it up —
+ * so only the "arrows extend" mode has to end.
+ */
+function playbookDeactivateMark() {
+  if (!state.playbook.mark) return false;
+  state.playbook.mark = false;
+  return true;
+}
+
+/** `C-g` / `Escape`: deactivate the region and leave the caret where it is. */
+function playbookCancelMark() {
+  if (!playbookDeactivateMark()) return false;
+  playbookCollapseToCaret();
+  playbookUpdateSelectionMenu();
+  playbookPublishCursor();
+  playbookRenderCursors();
+  playbookSetMsg("mark cleared");
+  return true;
+}
+
+/**
+ * Resolve a keydown to a caret motion as [direction, granularity] for
+ * `Selection.modify`, or null when the key does not move the caret.
+ *
+ * Covers the TUI Playbook's movement bindings — arrows, Home/End, emacs
+ * `C-f`/`C-b`/`C-n`/`C-p`/`C-a`/`C-e` — plus the word and
+ * line/document-boundary motions each platform spells with its own modifier.
+ * Alt combinations are matched on `code`, because macOS turns `M-f` into `ƒ`
+ * and `M-b` into `∫` in `key`.
+ */
+function playbookMotionForKey(e) {
+  const ctrl = e.ctrlKey;
+  const alt = e.altKey;
+  const meta = e.metaKey;
+  switch (e.key) {
+    case "ArrowLeft":
+      if (meta) return ["backward", "lineboundary"];
+      return ["backward", ctrl || alt ? "word" : "character"];
+    case "ArrowRight":
+      if (meta) return ["forward", "lineboundary"];
+      return ["forward", ctrl || alt ? "word" : "character"];
+    case "ArrowUp":
+      return ["backward", meta ? "documentboundary" : "line"];
+    case "ArrowDown":
+      return ["forward", meta ? "documentboundary" : "line"];
+    case "Home":
+      return ["backward", ctrl ? "documentboundary" : "lineboundary"];
+    case "End":
+      return ["forward", ctrl ? "documentboundary" : "lineboundary"];
+  }
+  if (alt && !ctrl && !meta) {
+    if (e.code === "KeyF") return ["forward", "word"];
+    if (e.code === "KeyB") return ["backward", "word"];
+  }
+  if (ctrl && !meta && !alt) {
+    switch (String(e.key).toLowerCase()) {
+      case "f": return ["forward", "character"];
+      case "b": return ["backward", "character"];
+      case "n": return ["forward", "line"];
+      case "p": return ["backward", "line"];
+      case "a": return ["backward", "lineboundary"];
+      case "e": return ["forward", "lineboundary"];
+    }
+  }
+  return null;
+}
+
+/** True when this keydown is `C-Space` on any layout. */
+function playbookIsSetMarkKey(e) {
+  if (!e.ctrlKey || e.metaKey || e.altKey) return false;
+  return e.key === " " || e.key === "Spacebar" || e.code === "Space";
 }
 
 function playbookOnKeyDown(e) {
@@ -11921,6 +12041,40 @@ function playbookOnKeyDown(e) {
     if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); playbookAcceptClip(); return; }
     if (e.key === "Escape") { e.preventDefault(); playbookCloseClipMenu(); return; }
   }
+  // C-Space sets the mark. `preventDefault` is mandatory — the contenteditable
+  // would otherwise take the keystroke as a literal space — and this handler
+  // sits on the editor itself, so it runs at target before the document-level
+  // capture keymap has any interest in the key (`C-space` is bound to nothing
+  // there, and is not a prefix of the `C-x Space` chord).
+  if (playbookIsSetMarkKey(e)) {
+    e.preventDefault();
+    playbookSetMark();
+    return;
+  }
+  // C-g is the emacs spelling of Escape's cancel, as in the TUI: it peels off
+  // the transient Playbook UI, then deactivates the region.
+  if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "g" || e.key === "G")) {
+    e.preventDefault();
+    if (state.playbook.clip) { playbookCloseClipMenu(); return; }
+    if (state.playbook.find) { playbookCloseFind(); playbookInputEl.focus(); return; }
+    playbookCancelMark();
+    return;
+  }
+  // With the mark armed, every caret motion extends the region from it rather
+  // than collapsing the selection — the whole point of setting a mark. This
+  // precedes the C-f binding below so C-f extends too.
+  if (state.playbook.mark) {
+    const motion = playbookMotionForKey(e);
+    if (motion) {
+      e.preventDefault();
+      const sel = window.getSelection();
+      if (sel && typeof sel.modify === "function") sel.modify("extend", motion[0], motion[1]);
+      playbookUpdateSelectionMenu();
+      playbookPublishCursor();
+      playbookRenderCursors();
+      return;
+    }
+  }
   if (mod && (e.key === "s" || e.key === "S")) { e.preventDefault(); playbookSave(); return; }
   if (mod && e.key === "Enter") { e.preventDefault(); playbookRun(e.shiftKey); return; }
   if (!mod && e.key === "Backspace" && playbookRevealInlineCodeForBackspace()) {
@@ -11936,6 +12090,7 @@ function playbookOnKeyDown(e) {
     return;
   }
   if (e.key === "Escape" && state.playbook.find) { e.preventDefault(); playbookCloseFind(); playbookInputEl.focus(); return; }
+  if (e.key === "Escape" && state.playbook.mark) { e.preventDefault(); playbookCancelMark(); return; }
   if (e.key === "Tab" && !mod) {
     e.preventDefault();
     document.execCommand("insertText", false, "  ");
@@ -11977,7 +12132,14 @@ function playbookWireEvents() {
       playbookMsg(`preview failed: ${err.message}`, true));
   });
   playbookInputEl.addEventListener("click", () => { playbookUpdateClipMenu(); playbookUpdateSelectionMenu(); playbookPublishCursor(); playbookRenderCursors(); });
+  // A click (or drag) hands selection back to the mouse; the flag must not
+  // survive it, or the next arrow key would extend from the new caret.
+  playbookInputEl.addEventListener("pointerdown", () => playbookDeactivateMark());
   playbookInputEl.addEventListener("pointerup", () => playbookUpdateSelectionMenu());
+  // Copy/cut consume the region (emacs deactivates the mark after
+  // kill-ring-save); the highlight itself is left to the browser.
+  playbookInputEl.addEventListener("copy", () => playbookDeactivateMark());
+  playbookInputEl.addEventListener("cut", () => playbookDeactivateMark());
   playbookInputEl.addEventListener("pointermove", playbookHandleHoverPointerMove);
   playbookInputEl.addEventListener("pointerleave", playbookHideHover);
   playbookInputEl.addEventListener("scroll", () => { playbookRenderCursors(); playbookHideHover(); playbookHideSelectionMenu(); });
@@ -11990,7 +12152,7 @@ function playbookWireEvents() {
       playbookHideSelectionMenu();
     }
   });
-  playbookInputEl.addEventListener("blur", () => { setTimeout(playbookCloseClipMenu, 120); });
+  playbookInputEl.addEventListener("blur", () => { playbookDeactivateMark(); setTimeout(playbookCloseClipMenu, 120); });
   // Keep the editor plain text: paste as text/plain, never rich HTML.
   // Pasted files become session attachments whose Markdown links land at
   // the caret (spec 0099).
