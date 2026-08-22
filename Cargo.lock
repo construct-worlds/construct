@@ -587,7 +587,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "construct-adapter-antigravity"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-claude"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-codex"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-common"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "construct-protocol",
  "serde_json",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-grok"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-hermes"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-kimi"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-muse"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-opencode"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-protocol",
@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-pi"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-adapter-common",
@@ -711,7 +711,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-prime-agent"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-adapter-pi",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-shell"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-protocol",
@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "construct-adapter-smith"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -757,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "construct-cli"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "construct-client"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "construct-protocol",
@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "construct-daemon"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "construct-e2e"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "construct-mcp"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "construct-protocol"
-version = "0.17.8"
+version = "0.17.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
