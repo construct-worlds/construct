@@ -5772,11 +5772,14 @@ impl SessionManager {
     ///
     /// Collapsed groups are skipped at boundaries: their members are hidden,
     /// so the session jumps the whole project in one step instead of swapping
-    /// with each hidden member.
+    /// with each hidden member. When *every* region below is collapsed the
+    /// skip has nowhere to land, so move-down enters the nearest one and
+    /// expands it rather than refusing — otherwise the last session of the
+    /// first project could never move down at all in the common steady state
+    /// of one expanded project and the rest collapsed.
     ///
     /// No-op at the absolute top (ungrouped session #0) or bottom (last
-    /// member of last group), or when the only regions in the move direction
-    /// are collapsed groups.
+    /// member of last group).
     ///
     /// Returns whether a move actually happened, so callers can tell a real
     /// reorder apart from hitting a boundary — both look identical from the
@@ -5968,8 +5971,35 @@ impl SessionManager {
                 // skipping collapsed projects.
                 let next =
                     groups::region_below_skipping_collapsed(me.group_id.as_deref(), &all_groups);
-                let Some(next_region) = next else {
-                    return Ok(false);
+                let next_region = match next {
+                    Some(region) => region,
+                    None => {
+                        // Every region below is a collapsed project, so the
+                        // skip has nowhere to land. Refusing here makes the key
+                        // look broken rather than bounded: the steady state of
+                        // a working fleet is one expanded project with the rest
+                        // collapsed, which leaves the last session of the first
+                        // project unable to move down *at all* even though
+                        // project rows sit plainly below it. Land in the
+                        // nearest one instead and expand it, so the session
+                        // stays visible where the user dropped it — the
+                        // rendered list keeps matching the reorder model.
+                        //
+                        // Move-up needs no counterpart: the ungrouped region
+                        // always renders above every project and can never be
+                        // collapsed, so the upward skip always has somewhere to
+                        // land. That asymmetry is why moving up kept working
+                        // here while moving down did nothing.
+                        let Some(collapsed_region) =
+                            groups::region_below(me.group_id.as_deref(), &all_groups)
+                        else {
+                            return Ok(false);
+                        };
+                        if let Some(gid) = collapsed_region.as_deref() {
+                            self.set_group_collapsed(gid, false).await?;
+                        }
+                        collapsed_region
+                    }
                 };
                 self.move_session_into_region(&me.id, &next_region, RegionEdge::Top, &all_sessions)
                     .await?;
@@ -10129,6 +10159,105 @@ mod tests {
         let mover = sessions.iter().find(|s| s.id == "su-mover").unwrap();
         assert_eq!(mover.group_id, None);
         assert!(mover.position > 0, "should land below su-top (pos 0)");
+    }
+
+    #[tokio::test]
+    async fn move_session_down_expands_the_only_collapsed_region_below() {
+        use construct_protocol::{MoveDirection, SessionKind};
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        // The steady state of a working fleet: one expanded project on top,
+        // every project below it collapsed. Nothing the skip can land on.
+        insert_group(&mgr, "gexp", 0, false).await;
+        insert_group(&mgr, "gcol-1", 1, true).await;
+        insert_group(&mgr, "gcol-2", 2, true).await;
+        for (id, position, group) in [
+            ("ge-1", 0, Some("gexp".to_string())),
+            ("ge-mover", 1, Some("gexp".to_string())),
+            ("gc1-1", 0, Some("gcol-1".to_string())),
+            ("gc2-1", 0, Some("gcol-2".to_string())),
+        ] {
+            mgr.sessions.write().await.insert(
+                id.into(),
+                synthetic_entry_with_group(id, SessionKind::User, position, group),
+            );
+        }
+
+        // Moving down from the bottom of `gexp` must not be a no-op just
+        // because every region below is collapsed: two project rows are
+        // plainly visible below the session, so refusing looks like a broken
+        // key. Land in the nearest one and expand it so the session stays
+        // where the user dropped it.
+        let moved = mgr
+            .move_session("ge-mover", MoveDirection::Down)
+            .await
+            .expect("move down");
+        assert!(moved, "move down must report a real reorder");
+
+        let sessions = mgr.list().await;
+        let mover = sessions.iter().find(|s| s.id == "ge-mover").unwrap();
+        assert_eq!(mover.group_id.as_deref(), Some("gcol-1"));
+        assert!(mover.position < 0, "should land above gc1-1 (pos 0)");
+
+        let groups = mgr.list_groups().await;
+        let gcol1 = groups.iter().find(|g| g.id == "gcol-1").unwrap();
+        assert!(
+            !gcol1.collapsed,
+            "the entered project must expand so the moved session stays visible",
+        );
+        // Only the project the session entered expands; the rest keep the
+        // collapse state the user chose.
+        let gcol2 = groups.iter().find(|g| g.id == "gcol-2").unwrap();
+        assert!(gcol2.collapsed, "untouched projects stay collapsed");
+    }
+
+    #[tokio::test]
+    async fn move_session_down_stops_at_the_last_project() {
+        use construct_protocol::{MoveDirection, SessionKind};
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::storage::Storage::new(tmp.path().join("data")).expect("storage"));
+        let config = Arc::new(crate::config::Config::default());
+        let (mgr, _remote_rx, _restart_rx) =
+            SessionManager::new(storage, config, tmp.path().join("run"))
+                .await
+                .expect("session manager");
+
+        insert_group(&mgr, "glast", 0, false).await;
+        for (id, position, group) in [
+            ("gl-1", 0, Some("glast".to_string())),
+            ("gl-mover", 1, Some("glast".to_string())),
+        ] {
+            mgr.sessions.write().await.insert(
+                id.into(),
+                synthetic_entry_with_group(id, SessionKind::User, position, group),
+            );
+        }
+
+        // The last member of the last project is the true bottom of the list:
+        // there is no region below at all, collapsed or otherwise, so the
+        // boundary still reports "nothing to reorder past".
+        let moved = mgr
+            .move_session("gl-mover", MoveDirection::Down)
+            .await
+            .expect("move down");
+        assert!(!moved, "the absolute bottom is still a no-op");
+
+        let sessions = mgr.list().await;
+        let mover = sessions.iter().find(|s| s.id == "gl-mover").unwrap();
+        assert_eq!(mover.group_id.as_deref(), Some("glast"));
+        assert_eq!(mover.position, 1);
     }
 
     #[tokio::test]
