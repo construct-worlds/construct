@@ -457,6 +457,10 @@ enabled = true
 # [router]
 # enabled        = false # opt out of all model routing and publication
 # publish_models = false # keep manual routing, but do not augment native pickers
+# discover_models = true # fetch each target's live model list from its
+#                        # /models endpoint; discovered ids append after the
+#                        # curated ones in pickers, failures fall back to
+#                        # curated. Set false to suppress the requests.
 # port           = 8917 # optional pin. When omitted the daemon reclaims the
 #                       # port last bound by this home (runtime_dir/router.port),
 #                       # falling back to 8917 and then a free port if busy.
@@ -654,6 +658,16 @@ pub struct RouterConfig {
     /// declare, so this is the only thing there is to configure.
     #[serde(default)]
     pub oauth: BTreeMap<String, OauthModels>,
+    /// Fetch each route target's model list from its listing endpoint
+    /// (spec 0209). Discovered ids are appended after the curated catalog
+    /// in pickers; any failure degrades to curated-only. Disable to keep
+    /// the daemon from making these listing requests at all.
+    #[serde(default = "default_discover_models")]
+    pub discover_models: bool,
+}
+
+fn default_discover_models() -> bool {
+    true
 }
 
 impl Default for RouterConfig {
@@ -664,6 +678,7 @@ impl Default for RouterConfig {
             featured_models: Vec::new(),
             port: None,
             oauth: BTreeMap::new(),
+            discover_models: default_discover_models(),
         }
     }
 }

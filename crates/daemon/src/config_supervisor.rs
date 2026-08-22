@@ -285,6 +285,7 @@ fn describe_applied(previous: &Config, next: &Config) -> Vec<String> {
         || previous.router.featured_models != next.router.featured_models
         || previous.router.oauth != next.router.oauth
         || previous.router.enabled != next.router.enabled
+        || previous.router.discover_models != next.router.discover_models
     {
         applied.push("[router]".to_string());
     }
