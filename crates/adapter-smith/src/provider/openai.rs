@@ -19,6 +19,10 @@ pub struct OpenAi {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    /// OpenRouter mode: send its `usage: {include: true}` accounting knob
+    /// (the response's final usage chunk then carries the generation's real
+    /// USD cost) and the attribution headers its ranking honors.
+    openrouter: bool,
 }
 
 impl OpenAi {
@@ -42,7 +46,18 @@ impl OpenAi {
                 .context("build reqwest client")?,
             base_url,
             api_key,
+            openrouter: false,
         })
+    }
+
+    /// Build for an OpenRouter endpoint: same wire format, plus the
+    /// OpenRouter-only request extras (usage-cost accounting, attribution
+    /// headers). Kept a flag rather than a separate provider impl because
+    /// everything on the stream is plain chat completions.
+    pub fn openrouter(base_url: Option<String>, api_key: String) -> Result<Self> {
+        let mut p = Self::with_config(base_url, api_key)?;
+        p.openrouter = true;
+        Ok(p)
     }
 }
 
@@ -151,13 +166,27 @@ impl LlmProvider for OpenAi {
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools_to_openai(tools));
         }
+        if self.openrouter {
+            // OpenRouter's usage accounting: the final usage chunk then
+            // carries `cost` — the generation's actual USD price — so
+            // `Usage.usd` is exact for any routed model, no price table.
+            body["usage"] = json!({ "include": true });
+        }
 
         let url = format!("{}/chat/completions", self.base_url);
-        let resp = self
+        let mut req = self
             .client
             .post(&url)
             .bearer_auth(&self.api_key)
-            .json(&body)
+            .json(&body);
+        if self.openrouter {
+            // Optional app attribution; OpenRouter uses these for its app
+            // rankings. Harmless plain headers, never credentials.
+            req = req
+                .header("HTTP-Referer", "https://github.com/construct-worlds/construct")
+                .header("X-Title", "Construct");
+        }
+        let resp = req
             .send()
             .await
             .context("openai POST /chat/completions")?;
@@ -208,6 +237,12 @@ impl LlmProvider for OpenAi {
                     .pointer("/prompt_tokens_details/cached_tokens")
                     .and_then(|n| n.as_u64())
                     .unwrap_or(usage.cached_tokens);
+                // OpenRouter (with `usage: {include: true}`) reports the
+                // generation's actual cost in USD. Absent everywhere else.
+                usage.usd = u
+                    .get("cost")
+                    .and_then(|n| n.as_f64())
+                    .unwrap_or(usage.usd);
             }
             let choice = match chunk
                 .get("choices")

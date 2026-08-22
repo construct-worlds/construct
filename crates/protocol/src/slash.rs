@@ -431,6 +431,12 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     // DeepSeek platform API path.
     "deepseek:deepseek-v4-pro",
     "deepseek:deepseek-v4-flash",
+    // OpenRouter aggregator path. `openrouter/auto` is the stable
+    // meta-router id; any `vendor/model` id on openrouter.ai works, and
+    // stealth ids (like ox-alpha) rotate — typing them out still completes
+    // the prefix.
+    "openrouter:openrouter/auto",
+    "openrouter:stealth/ox-alpha",
     // Local Ollama examples.
     "ollama:llama3.1",
     "ollama:qwen3.8",

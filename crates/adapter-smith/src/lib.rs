@@ -148,6 +148,8 @@ fn model_startup_error_message(params: &SessionStartParams, error: &str) -> Stri
         );
     } else if lower.contains("deepseek_api_key") {
         msg.push_str("\n\nAction: set `DEEPSEEK_API_KEY` or switch smith to another model.");
+    } else if lower.contains("openrouter_api_key") {
+        msg.push_str("\n\nAction: set `OPENROUTER_API_KEY` or switch smith to another model.");
     } else if lower.contains("meta_api_key") || lower.contains("model_api_key") {
         msg.push_str(
             "\n\nAction: set `META_API_KEY` or `MODEL_API_KEY`, or switch smith to another model.",
@@ -164,7 +166,7 @@ fn model_startup_error_message(params: &SessionStartParams, error: &str) -> Stri
     msg.push_str(
         "\n\nsmith needs one of: `CONSTRUCT_SMITH_MODEL`, `ANTHROPIC_API_KEY`, \
          `OPENAI_API_KEY`, `GEMINI_API_KEY`, `META_API_KEY`/`MODEL_API_KEY`, `GROK_API_KEY`/`XAI_API_KEY`, \
-         `DEEPSEEK_API_KEY`, a valid Grok OAuth login, or a local Ollama. Run `/configure` in the construct TUI \
+         `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, a valid Grok OAuth login, or a local Ollama. Run `/configure` in the construct TUI \
          (or `M-x configure`) to check status and pick one.",
     );
     msg

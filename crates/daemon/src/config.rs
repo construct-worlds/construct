@@ -232,6 +232,7 @@ enabled = true
 #   META_API_KEY / MODEL_API_KEY   -> meta       (muse-spark-1.1)
 #   GROK_API_KEY / XAI_API_KEY     -> grok       (grok-4.6)
 #   DEEPSEEK_API_KEY               -> deepseek   (deepseek-v4-pro)
+#   OPENROUTER_API_KEY             -> openrouter (openrouter/auto)
 #
 # The key must be in the DAEMON's environment (or [daemon.env] below), and a
 # restart picks it up. Declare a profile with one of those names only to
@@ -254,6 +255,12 @@ enabled = true
 # base_url    = "https://api.deepseek.com/anthropic"
 # api_key_env = "DEEPSEEK_API_KEY"
 # model       = "deepseek-v4-pro"
+
+# OpenRouter pinned to one routed model instead of the auto-router. Any
+# `vendor/model` id on openrouter.ai works, including stealth previews:
+# [smith.models.ox]
+# provider    = "openrouter"
+# model       = "stealth/ox-alpha"   # key comes from OPENROUTER_API_KEY
 
 # OpenAI-compatible example (Groq):
 # [smith.models.groq]
@@ -671,6 +678,15 @@ pub const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 /// [`SmithConfig::route_profiles`]).
 pub const DEEPSEEK_ROUTE_NAME: &str = "deepseek";
 
+/// OpenRouter's OpenAI-compatible aggregator endpoint and key env var,
+/// shared by the built-in target and the profile defaults for the same
+/// reason as DeepSeek's.
+pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+pub const OPENROUTER_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
+/// Route name the built-in OpenRouter target claims; a user-declared
+/// `[smith.models.openrouter]` profile takes it back.
+pub const OPENROUTER_ROUTE_NAME: &str = "openrouter";
+
 /// One built-in API-key route target (spec 0179): a provider with a single
 /// well-known public endpoint, which becomes a route target the moment its
 /// key is present in the daemon's environment — no config block required.
@@ -745,6 +761,15 @@ pub const BUILTIN_TARGETS: &[BuiltinTarget] = &[
         key_envs: &[DEEPSEEK_API_KEY_ENV],
         default_model: "deepseek-v4-pro",
     },
+    BuiltinTarget {
+        route: OPENROUTER_ROUTE_NAME,
+        provider: OPENROUTER_ROUTE_NAME,
+        base_url: OPENROUTER_BASE_URL,
+        key_envs: &[OPENROUTER_API_KEY_ENV],
+        // OpenRouter's model-routing meta-id: the one id every account can
+        // serve; specific `vendor/model` ids come from the user.
+        default_model: "openrouter/auto",
+    },
 ];
 
 /// `[smith]` — only the `models` table is read by the daemon. Smith parses
@@ -815,7 +840,8 @@ fn env_var_present(name: &str) -> bool {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ModelProfile {
     /// Wire protocol: `openai` | `openai-responses` | `azure-openai` |
-    /// `anthropic` | `gemini` | `meta` | `ollama` | `grok`.
+    /// `anthropic` | `gemini` | `meta` | `ollama` | `grok` | `deepseek` |
+    /// `openrouter`.
     pub provider: String,
     #[serde(default)]
     pub base_url: Option<String>,
@@ -840,6 +866,7 @@ impl ModelProfile {
             "anthropic" => "https://api.anthropic.com/v1",
             "grok" => "https://api.x.ai/v1",
             "deepseek" => DEEPSEEK_BASE_URL,
+            "openrouter" => OPENROUTER_BASE_URL,
             "gemini" | "google" => "https://generativelanguage.googleapis.com/v1beta",
             "meta" => "https://api.meta.ai/v1",
             "ollama" => "http://localhost:11434",
@@ -859,6 +886,7 @@ impl ModelProfile {
             "meta" => &["META_API_KEY", "MODEL_API_KEY"],
             "grok" => &["GROK_API_KEY", "XAI_API_KEY"],
             "deepseek" => &[DEEPSEEK_API_KEY_ENV],
+            "openrouter" => &[OPENROUTER_API_KEY_ENV],
             _ => &[],
         }
     }
@@ -1571,6 +1599,18 @@ mod tests {
             Some(DEEPSEEK_BASE_URL)
         );
         assert_eq!(profile.default_key_envs(), &[DEEPSEEK_API_KEY_ENV]);
+    }
+
+    /// An `openrouter` provider resolves to the aggregator endpoint and its
+    /// key env without either being declared.
+    #[test]
+    fn openrouter_profile_defaults_to_its_public_endpoint_and_key() {
+        let profile: ModelProfile = toml::from_str(r#"provider = "openrouter""#).expect("parse");
+        assert_eq!(
+            profile.resolved_base_url().as_deref(),
+            Some(OPENROUTER_BASE_URL)
+        );
+        assert_eq!(profile.default_key_envs(), &[OPENROUTER_API_KEY_ENV]);
     }
 
     /// The key alone makes DeepSeek a route target — no config block (spec 0179).

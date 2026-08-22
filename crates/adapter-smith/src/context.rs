@@ -44,6 +44,11 @@ pub fn context_window_tokens(provider: &str, model: &str) -> usize {
         // session at 8K and compact almost immediately on a model that can
         // hold the whole conversation.
         ("deepseek", _) => 1_000_000,
+        // OpenRouter serves heterogeneous models, so no single number is
+        // right. 128K is a floor most serious hosted models clear; the
+        // overflow learn-and-retry path tightens it when a routed model
+        // enforces less. The 8K default would compact almost immediately.
+        ("openrouter", _) => 128_000,
         // ChatGPT-subscription Codex backend. Same gpt-5* family,
         // same advertised context window as the platform API — the
         // billing pipe is what differs, not the model. Starting

@@ -114,9 +114,9 @@ pub fn provider_dialect(provider: &str) -> Option<Dialect> {
     match provider.to_ascii_lowercase().as_str() {
         "anthropic" => Some(Dialect::AnthropicMessages),
         "gemini" | "google" => Some(Dialect::GoogleGemini),
-        // Grok and DeepSeek are served by smith's OpenAI client and speak the
-        // same wire format.
-        "openai" | "grok" | "deepseek" => Some(Dialect::OpenAiChat),
+        // Grok, DeepSeek, and OpenRouter are served by smith's OpenAI client
+        // and speak the same wire format.
+        "openai" | "grok" | "deepseek" | "openrouter" => Some(Dialect::OpenAiChat),
         // Azure's current v1 API uses Responses on the wire; its adapter
         // difference is the `api-key` header, not a separate JSON dialect.
         // Meta serves Muse Spark over the same Responses surface — smith's
