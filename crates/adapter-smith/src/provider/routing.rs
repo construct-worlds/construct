@@ -22,6 +22,13 @@
 //! Claude Code login credentials and calls the Anthropic API directly with the
 //! subscription OAuth token (see spec 0125). It is distinct from `anthropic:`,
 //! which uses `ANTHROPIC_API_KEY`.
+//!
+//! `openrouter:` is the OpenRouter aggregator (`openrouter.ai/api/v1`,
+//! OpenAI-compatible chat completions, `OPENROUTER_API_KEY`). It has no
+//! bare-name fallback on purpose: OpenRouter ids are `vendor/model` paths,
+//! and slashes also appear in Ollama names (`hf.co/user/model`), so a bare
+//! slash id is ambiguous — and routing through an aggregator is a distinct
+//! billing path, which stays an explicit act (spec 0028).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -36,6 +43,10 @@ pub enum Provider {
     /// DeepSeek platform API surface. OpenAI-compatible chat completions at
     /// `api.deepseek.com`, billed against a DeepSeek API key.
     DeepSeek,
+    /// OpenRouter aggregator. OpenAI-compatible chat completions at
+    /// `openrouter.ai`, billed against an OpenRouter API key; model ids are
+    /// `vendor/model` paths (`stealth/ox-alpha`, `openrouter/auto`).
+    OpenRouter,
     /// OAuth-backed Grok access path.
     GrokOauth,
     /// OAuth-backed Codex backend; reads `~/.codex/auth.json`, bills
@@ -102,6 +113,12 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
             model: rest.to_string(),
         });
     }
+    if let Some(rest) = s.strip_prefix("openrouter:") {
+        return Ok(ModelSpec {
+            provider: Provider::OpenRouter,
+            model: rest.to_string(),
+        });
+    }
     if let Some(rest) = s.strip_prefix("grok-oauth:") {
         return Ok(ModelSpec {
             provider: Provider::GrokOauth,
@@ -141,6 +158,7 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
                     | "ollama"
                     | "grok"
                     | "deepseek"
+                    | "openrouter"
                     | "grok-oauth"
                     | "codex-oauth"
                     | "claude-oauth"
@@ -150,7 +168,7 @@ pub fn parse_model_spec(s: &str) -> Result<ModelSpec, String> {
         {
             return Err(format!(
                 "unknown provider prefix `{prefix}:` (expected one of \
-                 openai:, anthropic:, gemini:, meta:, ollama:, grok:, deepseek:, grok-oauth:, codex-oauth:, claude-oauth:, kimi-oauth:)"
+                 openai:, anthropic:, gemini:, meta:, ollama:, grok:, deepseek:, openrouter:, grok-oauth:, codex-oauth:, claude-oauth:, kimi-oauth:)"
             ));
         }
     }
@@ -351,6 +369,35 @@ mod tests {
     fn explicit_prefix_beats_deepseek_sniff() {
         assert_eq!(parse("ollama:deepseek-v4-flash").provider, Provider::Ollama);
         assert_eq!(parse("openai:deepseek-v4-pro").provider, Provider::OpenAI);
+    }
+
+    #[test]
+    fn openrouter_prefix_is_recognized() {
+        let s = parse("openrouter:stealth/ox-alpha");
+        assert_eq!(s.provider, Provider::OpenRouter);
+        assert_eq!(s.model, "stealth/ox-alpha");
+
+        let s = parse("openrouter:openrouter/auto");
+        assert_eq!(s.provider, Provider::OpenRouter);
+        assert_eq!(s.model, "openrouter/auto");
+    }
+
+    /// OpenRouter variant suffixes (`:free`, `:nitro`) ride after the model
+    /// id. Only the first colon is the provider separator; the rest of the
+    /// spec is the model verbatim.
+    #[test]
+    fn openrouter_variant_suffix_stays_in_the_model() {
+        let s = parse("openrouter:deepseek/deepseek-chat:free");
+        assert_eq!(s.provider, Provider::OpenRouter);
+        assert_eq!(s.model, "deepseek/deepseek-chat:free");
+    }
+
+    /// No bare-name sniff for OpenRouter: `vendor/model` slash ids also
+    /// occur in Ollama names (`hf.co/user/model`), and an aggregator is a
+    /// distinct billing path — selecting it stays explicit (spec 0028).
+    #[test]
+    fn bare_slash_id_does_not_route_to_openrouter() {
+        assert_eq!(parse("stealth/ox-alpha").provider, Provider::Ollama);
     }
 
     #[test]

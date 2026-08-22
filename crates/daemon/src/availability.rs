@@ -456,6 +456,13 @@ pub async fn smith_auth_methods(
         "deepseek-v4-pro",
         &["DEEPSEEK_API_KEY"],
     );
+    let openrouter_key = env_key_method(
+        "openrouter_api_key",
+        "OpenRouter API key",
+        "openrouter",
+        "openrouter/auto",
+        &["OPENROUTER_API_KEY"],
+    );
     let claude_sub_present = claude_oauth_credentials_present(cache).await;
     let claude_sub = SmithAuthMethod {
         id: "claude_subscription",
@@ -534,7 +541,8 @@ pub async fn smith_auth_methods(
         || openai.available
         || gemini.available
         || meta.available
-        || deepseek_key.available;
+        || deepseek_key.available
+        || openrouter_key.available;
     let auto = SmithAuthMethod {
         id: "auto",
         label: "Auto-detect",
@@ -542,7 +550,8 @@ pub async fn smith_auth_methods(
         default_model: "",
         available: auto_available,
         detail: if auto_available {
-            "auto-detects the first set API key: Anthropic → OpenAI → Gemini → Meta → DeepSeek"
+            "auto-detects the first set API key: Anthropic → OpenAI → Gemini → Meta → \
+             DeepSeek → OpenRouter"
                 .to_string()
         } else {
             "no auto-detected API key set (subscriptions and Ollama must be picked explicitly)"
@@ -550,7 +559,8 @@ pub async fn smith_auth_methods(
         },
     };
     vec![
-        anthropic, openai, gemini, meta, grok_key, deepseek_key, claude_sub, codex_sub, grok_sub,
+        anthropic, openai, gemini, meta, grok_key, deepseek_key, openrouter_key, claude_sub,
+        codex_sub, grok_sub,
         kimi_sub,
         ollama, auto,
     ]

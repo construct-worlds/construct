@@ -59,6 +59,10 @@ pub(crate) fn pick_default_spec_str() -> Result<String> {
         // Flash is the cheap tier — titles never need the pro model.
         return Ok("deepseek:deepseek-v4-flash".to_string());
     }
+    if std::env::var("OPENROUTER_API_KEY").is_ok() {
+        // The auto-router picks per prompt; a title prompt is tiny.
+        return Ok("openrouter:openrouter/auto".to_string());
+    }
     Err(anyhow!(
         "no auto-detected smith credential and no CONSTRUCT_SMITH_MODEL pin set; skipping auto-title"
     ))
@@ -81,6 +85,11 @@ pub(crate) fn provider_for(p: Provider) -> Result<Box<dyn LlmProvider>> {
             Some("https://api.deepseek.com/v1".to_string()),
             std::env::var("DEEPSEEK_API_KEY")
                 .map_err(|_| anyhow!("deepseek requires DEEPSEEK_API_KEY"))?,
+        )?),
+        Provider::OpenRouter => Box::new(provider::openai::OpenAi::openrouter(
+            Some("https://openrouter.ai/api/v1".to_string()),
+            std::env::var("OPENROUTER_API_KEY")
+                .map_err(|_| anyhow!("openrouter requires OPENROUTER_API_KEY"))?,
         )?),
         // Title generation always uses one of the key providers above; the
         // user never picks OAuth providers for title-gen since the
