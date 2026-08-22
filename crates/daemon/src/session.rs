@@ -6347,6 +6347,10 @@ impl SessionManager {
         &self,
         session_id: Option<&str>,
     ) -> Result<construct_protocol::RouterListRoutesResult> {
+        // Bring live model listings up to date before building the menu
+        // (spec 0209). Fresh cache entries make this free; a cold cache
+        // costs one bounded fetch round, never a hang.
+        self.router.refresh_discovered_models().await;
         let Some(session_id) = session_id else {
             return Ok(self.router.list_routes("", false, None, false));
         };

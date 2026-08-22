@@ -25,6 +25,7 @@
 
 pub mod ca;
 pub mod catalog;
+pub mod discovery;
 pub mod oauth;
 pub mod proxy;
 pub mod translate;
@@ -628,6 +629,10 @@ pub(crate) struct RouterSettings {
     profiles: BTreeMap<String, ModelProfile>,
     /// `[router.oauth]` model overrides, keyed by provider name.
     oauth_models: BTreeMap<String, crate::config::OauthModels>,
+    /// Whether route targets with a listing endpoint get their picker
+    /// models fetched live (spec 0209). On by default; the off switch
+    /// exists for locked-down networks where the fetch itself is unwanted.
+    discover_models: bool,
 }
 
 pub struct Router {
@@ -662,6 +667,10 @@ pub struct Router {
     /// credential is served as a plain tunnel: unattributable traffic gets
     /// the safe path, never a route.
     tokens: RwLock<HashMap<String, Arc<SessionRouting>>>,
+    /// TTL cache of live-fetched model listings, keyed by endpoint
+    /// (spec 0209). Refreshed on route-menu opens; consulted by
+    /// [`Self::profile_model_list`].
+    discovered: discovery::DiscoveryCache,
 }
 
 impl Router {
@@ -691,6 +700,7 @@ impl Router {
                 featured_models: cfg.featured_models.clone(),
                 profiles,
                 oauth_models: cfg.oauth.clone(),
+                discover_models: cfg.discover_models,
             })),
             preferred_port,
             port_pinned: cfg.port.is_some(),
@@ -704,6 +714,7 @@ impl Router {
             observed_rx: std::sync::Mutex::new(Some(observed_rx)),
             sessions: RwLock::new(HashMap::new()),
             tokens: RwLock::new(HashMap::new()),
+            discovered: discovery::DiscoveryCache::default(),
         })
     }
 
@@ -773,6 +784,7 @@ impl Router {
             featured_models: cfg.featured_models.clone(),
             profiles,
             oauth_models: cfg.oauth.clone(),
+            discover_models: cfg.discover_models,
         });
         restart_required
     }
@@ -854,6 +866,12 @@ impl Router {
         if !claimed_preferred {
             self.report_fallback(bound, established);
         }
+        // Warm the discovered-model cache in the background (spec 0209) so
+        // catalogs published to native harnesses at attach carry live
+        // listings without waiting for a route-menu open. Off the start
+        // path: startup must not block on vendor endpoints.
+        let warm = self.clone();
+        tokio::spawn(async move { warm.refresh_discovered_models().await });
         Ok(())
     }
 
@@ -1368,7 +1386,50 @@ impl Router {
                 models.push(model);
             }
         }
+        // Live-discovered ids come after the declared model and the curated
+        // catalog (spec 0209): curation keeps its known-good ordering at the
+        // front, discovery contributes the endpoint's real tail. An empty or
+        // failed discovery leaves exactly the curated behavior.
+        if let Some(base_url) = profile.resolved_base_url() {
+            let key = discovery::cache_key(&profile.provider, &base_url);
+            if let Some(discovered) = self.discovered.get(&key) {
+                for model in discovered.iter() {
+                    if !models.contains(model) {
+                        models.push(model.clone());
+                    }
+                }
+            }
+        }
         models
+    }
+
+    /// Refresh the discovered-model cache for every route target whose
+    /// provider has a listing endpoint and whose credential resolves
+    /// (spec 0209). Called on route-menu opens; fresh entries make this a
+    /// no-op, so the common cost is zero and the worst case is one bounded
+    /// wait. Best-effort by design — the caller proceeds with whatever the
+    /// cache then holds.
+    pub async fn refresh_discovered_models(&self) {
+        let settings = self.settings();
+        if !settings.discover_models {
+            return;
+        }
+        let specs: Vec<discovery::FetchSpec> = settings
+            .profiles
+            .values()
+            .filter_map(|profile| {
+                let kind = discovery::list_kind(&profile.provider)?;
+                let base_url = profile.resolved_base_url()?;
+                let api_key = profile.resolve_api_key().ok()?;
+                Some(discovery::FetchSpec {
+                    key: discovery::cache_key(&profile.provider, &base_url),
+                    kind,
+                    base_url,
+                    api_key,
+                })
+            })
+            .collect();
+        self.discovered.refresh(specs).await;
     }
 
     /// Model a subscription target sends when none is chosen explicitly.
@@ -1625,6 +1686,9 @@ mod tests {
             featured_models: Vec::new(),
             port: Some(0),
             oauth: BTreeMap::new(),
+            // Tests never fetch listings; discovery is exercised by its
+            // own module tests.
+            discover_models: false,
         }
     }
 
@@ -1643,6 +1707,40 @@ mod tests {
             api_key: None,
             model: Some("kimi-k2.5".to_string()),
         }
+    }
+
+    /// Discovered ids append after the declared model and the curated
+    /// catalog, deduped; an empty discovery leaves exactly the curated
+    /// behavior (spec 0209).
+    #[tokio::test]
+    async fn discovered_models_append_after_curated_in_route_menu() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = profile("openrouter", None);
+        p.base_url = Some("https://openrouter.ai/api/v1".to_string());
+        p.model = Some("openrouter/auto".to_string());
+        let r = Router::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            &cfg_with(true),
+            profiles(vec![("openrouter", p.clone())]),
+        );
+        let curated: Vec<String> = r.profile_model_list(&p);
+        assert!(curated.contains(&"openrouter/auto".to_string()));
+
+        let key = discovery::cache_key("openrouter", "https://openrouter.ai/api/v1");
+        r.discovered.insert(
+            &key,
+            vec![
+                "stealth/newer-alpha".to_string(),
+                // Already curated/declared: must not duplicate.
+                "openrouter/auto".to_string(),
+            ],
+            true,
+        );
+        let merged = r.profile_model_list(&p);
+        assert_eq!(&merged[..curated.len()], &curated[..], "curated order keeps the front");
+        assert_eq!(merged.len(), curated.len() + 1);
+        assert_eq!(merged.last().map(String::as_str), Some("stealth/newer-alpha"));
     }
 
     /// REGRESSION: pins the `||` short-circuit in `Router::start`. When the
@@ -1825,6 +1923,7 @@ mod tests {
             featured_models: Vec::new(),
             port: None, // auto
             oauth: BTreeMap::new(),
+            discover_models: false,
         };
         let r = started(&dir, cfg).await;
         let bound = r.port();
@@ -1890,6 +1989,7 @@ mod tests {
             featured_models: Vec::new(),
             port: None,
             oauth: BTreeMap::new(),
+            discover_models: false,
         };
         let r = started(&dir, cfg).await;
         assert_eq!(
@@ -1914,6 +2014,7 @@ mod tests {
             featured_models: Vec::new(),
             port: Some(busy),
             oauth: BTreeMap::new(),
+            discover_models: false,
         };
         let r = Router::new(
             dir.path().to_path_buf(),
