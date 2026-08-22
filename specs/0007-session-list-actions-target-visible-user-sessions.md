@@ -28,3 +28,5 @@ This does not forbid commands that operate on all sessions. Such commands must b
 ## Examples
 
 If a project is collapsed, moving a visible session down should jump over that collapsed block rather than targeting one of its hidden sessions.
+
+See 0209 for the boundary case where every region in the move direction is collapsed and the skip has nowhere to land.
