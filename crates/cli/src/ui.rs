@@ -304,6 +304,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     app.layout.modeline_model_hit = None;
     app.layout.modeline_context_gauge_hit = None;
     app.layout.modeline_theme_hit = None;
+    app.layout.modeline_border_hit = None;
     app.layout.modeline_brand_hit = None;
     app.layout.suggest_affordance_hits.clear();
     app.layout.suggest_deck_area = None;
@@ -492,6 +493,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     render_modeline_version_notice_tooltip(f, app);
     render_modeline_remote_tooltip(f, app);
     render_modeline_theme_tooltip(f, app);
+    render_modeline_border_tooltip(f, app);
     render_modeline_brand_tooltip(f, app);
 
     finish_frame(f, app);
@@ -12790,6 +12792,15 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
 const MODELINE_BRAND: &str = "construct";
 const MODELINE_BRAND_PAD: u16 = 1;
 
+/// Glyphs for the modeline's pane-border toggle: the border itself, solid
+/// while the pane sides are drawn and dotted once they are hidden. Both are
+/// box-drawing characters, so they render at the same single-cell width the
+/// hit rect is measured at in every terminal — and the control pictures the
+/// state it is in, letting it read without a label in a row of
+/// otherwise-labelled notices.
+const MODELINE_BORDER_SHOWN: &str = "\u{2502}";
+const MODELINE_BORDER_HIDDEN: &str = "\u{2506}";
+
 /// The modeline's compact model segment — no `"model:"` label (unlike the
 /// harness-hover tooltip), just the bare value(s): `"-"` when nothing is
 /// known, the model alone, or `"model (effort)"` when both are known.
@@ -13052,8 +13063,27 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     // with BUILD_ID, so the collision point moves between a clean and a
     // `-dirty` build).
     let theme_label = format!("theme:{}", app.theme_name.label());
-    let mut persistent_notices: Vec<Vec<(String, Option<KeyAction>)>> =
-        vec![vec![(theme_label, Some(KeyAction::CycleTheme))]];
+    // Pane-border toggle, in the theme notice's own group rather than a
+    // notice of its own: both control how the views *look*, so they read as
+    // one cluster (`theme:matrix │`) instead of two competing notices. That
+    // grouping is also what keeps the glyph legible: the notices are joined
+    // by " | ", so a bare vertical rule standing alone as its own notice
+    // would read as a separator rather than a control. Riding along after
+    // the theme label, with the separator a space away on either side, it
+    // reads as the border it toggles — │ while the pane sides are drawn,
+    // ┆ once they are hidden.
+    let border_label = format!(
+        " {}",
+        if app.hide_pane_side_borders {
+            MODELINE_BORDER_HIDDEN
+        } else {
+            MODELINE_BORDER_SHOWN
+        }
+    );
+    let mut persistent_notices: Vec<Vec<(String, Option<KeyAction>)>> = vec![vec![
+        (theme_label, Some(KeyAction::CycleTheme)),
+        (border_label, Some(KeyAction::ToggleBorder)),
+    ]];
     persistent_notices.push(vec![(
         modeline_remote_text(app.remote_enabled, app.remote_clients),
         Some(KeyAction::OpenRemoteControl),
@@ -13350,6 +13380,13 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
                         });
                         if action == &KeyAction::CycleTheme {
                             app.layout.modeline_theme_hit = Some(crate::app::ModelineThemeHit {
+                                row: nrect.y,
+                                start_col: col,
+                                end_col: col.saturating_add(label_w),
+                            });
+                        }
+                        if action == &KeyAction::ToggleBorder {
+                            app.layout.modeline_border_hit = Some(crate::app::ModelineBorderHit {
                                 row: nrect.y,
                                 start_col: col,
                                 end_col: col.saturating_add(label_w),
@@ -13810,6 +13847,24 @@ fn render_modeline_theme_tooltip(f: &mut Frame, app: &App) {
         hit.start_col,
         hit.row.saturating_sub(2),
     );
+}
+
+fn render_modeline_border_tooltip(f: &mut Frame, app: &App) {
+    let Some(hit) = app.layout.modeline_border_hit else {
+        return;
+    };
+    let Some((mx, my)) = app.mouse_pos else {
+        return;
+    };
+    if !hit.contains(mx, my) {
+        return;
+    }
+    let label = if app.hide_pane_side_borders {
+        " Pane side borders hidden. Click to show "
+    } else {
+        " Pane side borders shown. Click to hide "
+    };
+    render_button_tooltip(f, &app.theme, label, hit.start_col, hit.row.saturating_sub(2));
 }
 
 /// Compute how many rows the minibuffer footer occupies this frame.

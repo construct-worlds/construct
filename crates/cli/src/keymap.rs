@@ -142,6 +142,10 @@ pub enum KeyAction {
     /// Cycle the active UI color theme. Click-only for the minibuffer theme
     /// affordance; `/theme` remains the keyboard-facing command.
     CycleTheme,
+    /// Toggle the pane side borders. Click-only for the status-bar border
+    /// affordance rendered beside the theme label; `/border` remains the
+    /// keyboard-facing command.
+    ToggleBorder,
     /// Open the remote-control dialog. Click-only for the persistent
     /// minibuffer status-bar affordance; `/remote-connect` remains the
     /// keyboard-facing command.

@@ -4197,6 +4197,22 @@ impl ModelineThemeHit {
     }
 }
 
+/// Clickable pane-border glyph in the modeline, rendered inside the theme
+/// notice so both view-appearance toggles read as one control cluster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelineBorderHit {
+    pub row: u16,
+    pub start_col: u16,
+    /// Exclusive end column.
+    pub end_col: u16,
+}
+
+impl ModelineBorderHit {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        row == self.row && col >= self.start_col && col < self.end_col
+    }
+}
+
 /// Clickable `construct` wordmark at the head of the modeline. Toggles the
 /// minibuffer panel (spec 0200), giving the fleet's command surface a
 /// permanently visible pointer affordance next to the keybinding.
@@ -4400,6 +4416,9 @@ pub struct LayoutSnapshot {
     pub frame_area: Option<ratatui::layout::Rect>,
     /// Clickable theme label in the modeline status bar.
     pub modeline_theme_hit: Option<ModelineThemeHit>,
+    /// Clickable pane-border glyph in the modeline status bar, sharing the
+    /// theme notice's group.
+    pub modeline_border_hit: Option<ModelineBorderHit>,
     /// Clickable `construct` wordmark at the head of the modeline status bar.
     pub modeline_brand_hit: Option<ModelineBrandHit>,
     /// Number of rows of the list pane currently in use (so a click
@@ -4902,6 +4921,7 @@ impl LayoutSnapshot {
             modeline_context_gauge_hit: _,
             modeline_model_hit: _,
             modeline_theme_hit: _,
+            modeline_border_hit: _,
             modeline_brand_hit: _,
             suggest_affordance_hits: _,
             suggest_deck_area: _,
@@ -14435,6 +14455,9 @@ impl App {
             CycleTheme => {
                 self.apply_named_theme(self.theme_name.next());
             }
+            ToggleBorder => {
+                self.toggle_pane_side_borders(false);
+            }
             OpenRemoteControl => {
                 self.open_remote_control_popup(None).await;
             }
@@ -14481,6 +14504,31 @@ impl App {
             TutorialPrevStep => self.tutorial_prev_step(),
             TutorialEndTour => self.tutorial_end_tour(),
             TutorialNudge => self.tutorial_nudge(),
+        }
+    }
+
+    /// Flip the pane side borders. Shared by `/border` and the status-bar
+    /// border affordance so both spellings of the toggle stay in step.
+    ///
+    /// `announce` is what separates them. A typed `/border` acks in the
+    /// status area, where the user is already looking. A click must not:
+    /// a transient status renders on the left of the modeline and preempts
+    /// the right-aligned notice block whenever the two collide on a narrow
+    /// terminal, which would blank the very glyph just clicked — and drop
+    /// its hit zone — until the status expired. `CycleTheme` stays silent
+    /// for the same reason. The click has its own feedback anyway: the
+    /// glyph swaps between │ and ┆ on the next frame.
+    pub(super) fn toggle_pane_side_borders(&mut self, announce: bool) {
+        self.hide_pane_side_borders = !self.hide_pane_side_borders;
+        if announce {
+            self.set_status(format!(
+                "pane side borders {}",
+                if self.hide_pane_side_borders {
+                    "hidden"
+                } else {
+                    "shown"
+                }
+            ));
         }
     }
 
@@ -15083,17 +15131,7 @@ impl App {
             "archived" | "archive" | "archives" => {
                 self.toggle_archived_for_selection();
             }
-            "border" => {
-                self.hide_pane_side_borders = !self.hide_pane_side_borders;
-                self.set_status(format!(
-                    "pane side borders {}",
-                    if self.hide_pane_side_borders {
-                        "hidden"
-                    } else {
-                        "shown"
-                    }
-                ));
-            }
+            "border" => self.toggle_pane_side_borders(true),
             "diff" => self.run_action(KeyAction::OpenDiff).await,
             "interrupt" => self.run_action(KeyAction::Interrupt).await,
             "mouse" | "select" | "selection" => {
@@ -17719,6 +17757,7 @@ mod tests {
             frame_area: None,
             modeline_context_gauge_hit: None,
             modeline_theme_hit: None,
+            modeline_border_hit: None,
             modeline_brand_hit: None,
             list_row_count: 0,
             list_items_area: None,
@@ -40063,6 +40102,104 @@ mod tests {
         assert!(
             !app.is_minibuffer_panel_open(),
             "a second click should close the minibuffer, not re-open it"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn modeline_border_glyph_toggles_pane_side_borders() {
+        // The border toggle rides in the theme notice's group: a click flips
+        // the same state `/border` does, the glyph reports which state that
+        // is, and — like CycleTheme — the click stays silent so the notice
+        // block is never preempted out from under the thing just clicked.
+        let (mut app, _dir, server) = empty_app().await;
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+
+        assert!(
+            app.hide_pane_side_borders,
+            "borders start hidden by default"
+        );
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw");
+        let hit = app
+            .layout
+            .modeline_border_hit
+            .expect("border glyph must register a hit zone");
+        let theme_hit = app
+            .layout
+            .modeline_theme_hit
+            .expect("theme label must still register its own hit zone");
+        assert_eq!(
+            hit.row, theme_hit.row,
+            "border glyph shares the theme notice's row"
+        );
+        assert!(
+            hit.start_col >= theme_hit.end_col && hit.start_col - theme_hit.end_col <= 1,
+            "border glyph must sit directly after the theme label, not in a \
+             separate notice: theme ends at {}, border starts at {}",
+            theme_hit.end_col,
+            hit.start_col
+        );
+
+        let modeline = |t: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            rendered_text(t.backend().buffer())
+                .lines()
+                .find(|line| line.contains("theme:"))
+                .expect("modeline")
+                .to_string()
+        };
+        assert!(
+            modeline(&terminal).contains("\u{2506}"),
+            "hidden borders must show the dotted glyph:\n{}",
+            modeline(&terminal)
+        );
+
+        app.mouse_pos = Some((hit.start_col, hit.row));
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw with border hover");
+        assert!(
+            rendered_text(terminal.backend().buffer())
+                .contains("Pane side borders hidden. Click to show"),
+            "hovering the glyph should show its tooltip"
+        );
+
+        app.handle_left_click(hit.start_col, hit.row).await;
+        assert!(
+            !app.hide_pane_side_borders,
+            "clicking the glyph should show the pane side borders"
+        );
+        assert!(
+            app.status.is_none(),
+            "a click must not set a transient status — it preempts the \
+             notice block the glyph lives in: {:?}",
+            app.status.as_ref().map(|(m, _)| m.as_str())
+        );
+
+        terminal
+            .draw(|f| crate::ui::render(f, &mut app))
+            .expect("draw after click");
+        assert!(
+            modeline(&terminal).contains("\u{2502}"),
+            "shown borders must show the solid glyph:\n{}",
+            modeline(&terminal)
+        );
+        assert!(
+            app.layout.modeline_border_hit.is_some(),
+            "glyph must remain a click target after toggling"
+        );
+
+        // Same state, other spelling — and the typed command still acks.
+        app.run_slash_command("border").await;
+        assert!(app.hide_pane_side_borders, "/border flips the same state");
+        assert!(
+            app.status
+                .as_ref()
+                .is_some_and(|(m, _)| m.contains("pane side borders hidden")),
+            "typed /border keeps its status ack"
         );
 
         server.abort();
