@@ -40308,7 +40308,7 @@ mod tests {
             .expect("draw running state without clients");
         let screen = rendered_text(terminal.backend().buffer());
         assert!(
-            screen.contains("theme:matrix | ● remote:0 |"),
+            screen.contains("theme:matrix ╎ | ● remote:0 |"),
             "running listener should stay visible with zero clients:\n{screen}"
         );
 
@@ -40318,7 +40318,7 @@ mod tests {
             .expect("draw connected state");
         let screen = rendered_text(terminal.backend().buffer());
         assert!(
-            screen.contains("theme:matrix | ● remote:2 |"),
+            screen.contains("theme:matrix ╎ | ● remote:2 |"),
             "connected client count should render in the same right-side affordance:\n{screen}"
         );
         server.abort();
