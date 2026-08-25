@@ -14517,7 +14517,7 @@ impl App {
     /// terminal, which would blank the very glyph just clicked — and drop
     /// its hit zone — until the status expired. `CycleTheme` stays silent
     /// for the same reason. The click has its own feedback anyway: the
-    /// glyph swaps between │ and ┆ on the next frame.
+    /// glyph swaps between ║ and ╎ on the next frame.
     pub(super) fn toggle_pane_side_borders(&mut self, announce: bool) {
         self.hide_pane_side_borders = !self.hide_pane_side_borders;
         if announce {
@@ -40008,7 +40008,7 @@ mod tests {
         assert!(
             modeline
                 .trim_end()
-                .ends_with(&format!("theme:matrix | ○ remote | {}", crate::BUILD_ID)),
+                .ends_with(&format!("theme:matrix ╎ | ○ remote | {}", crate::BUILD_ID)),
             "theme label should be right-aligned in status bar:\n{modeline}"
         );
         assert!(
@@ -40152,8 +40152,8 @@ mod tests {
                 .to_string()
         };
         assert!(
-            modeline(&terminal).contains("\u{2506}"),
-            "hidden borders must show the dotted glyph:\n{}",
+            modeline(&terminal).contains("\u{254e}"),
+            "hidden borders must show the dashed glyph:\n{}",
             modeline(&terminal)
         );
 
@@ -40183,8 +40183,8 @@ mod tests {
             .draw(|f| crate::ui::render(f, &mut app))
             .expect("draw after click");
         assert!(
-            modeline(&terminal).contains("\u{2502}"),
-            "shown borders must show the solid glyph:\n{}",
+            modeline(&terminal).contains("\u{2551}"),
+            "shown borders must show the doubled glyph:\n{}",
             modeline(&terminal)
         );
         assert!(
@@ -40279,7 +40279,7 @@ mod tests {
             .expect("draw stopped state");
         let screen = rendered_text(terminal.backend().buffer());
         assert!(
-            screen.contains("theme:matrix | ○ remote |"),
+            screen.contains("theme:matrix ╎ | ○ remote |"),
             "stopped remote control should remain discoverable between theme and version:\n{screen}"
         );
         let hint = app

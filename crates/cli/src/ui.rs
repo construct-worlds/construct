@@ -12792,14 +12792,19 @@ fn render_chat(f: &mut Frame, area: Rect, app: &mut App) {
 const MODELINE_BRAND: &str = "construct";
 const MODELINE_BRAND_PAD: u16 = 1;
 
-/// Glyphs for the modeline's pane-border toggle: the border itself, solid
-/// while the pane sides are drawn and dotted once they are hidden. Both are
-/// box-drawing characters, so they render at the same single-cell width the
-/// hit rect is measured at in every terminal — and the control pictures the
-/// state it is in, letting it read without a label in a row of
-/// otherwise-labelled notices.
-const MODELINE_BORDER_SHOWN: &str = "\u{2502}";
-const MODELINE_BORDER_HIDDEN: &str = "\u{2506}";
+/// Glyphs for the modeline's pane-border toggle: the border itself, drawn
+/// while the pane sides are and dashed once they are hidden.
+///
+/// Both are *doubled* rules rather than the single stroke they depict. The
+/// notices around them are joined by `" | "`, and a single light vertical
+/// (`│`) is indistinguishable from that ASCII pipe in most terminal fonts —
+/// the control disappeared into the punctuation. Doubling reads as the same
+/// border while staying visibly unlike a separator. Both stay box-drawing
+/// characters, so they render at the single-cell width the hit rect is
+/// measured at, and each pictures the state it is in, which is what lets the
+/// control go unlabelled in a row of otherwise-labelled notices.
+const MODELINE_BORDER_SHOWN: &str = "\u{2551}";
+const MODELINE_BORDER_HIDDEN: &str = "\u{254e}";
 
 /// The modeline's compact model segment — no `"model:"` label (unlike the
 /// harness-hover tooltip), just the bare value(s): `"-"` when nothing is
@@ -13065,13 +13070,10 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     let theme_label = format!("theme:{}", app.theme_name.label());
     // Pane-border toggle, in the theme notice's own group rather than a
     // notice of its own: both control how the views *look*, so they read as
-    // one cluster (`theme:matrix │`) instead of two competing notices. That
-    // grouping is also what keeps the glyph legible: the notices are joined
-    // by " | ", so a bare vertical rule standing alone as its own notice
-    // would read as a separator rather than a control. Riding along after
-    // the theme label, with the separator a space away on either side, it
-    // reads as the border it toggles — │ while the pane sides are drawn,
-    // ┆ once they are hidden.
+    // one cluster (`theme:matrix ║`) instead of two competing notices — and
+    // riding along after the theme label, rather than standing alone between
+    // two " | " separators, is also part of what keeps the glyph readable as
+    // a control. See MODELINE_BORDER_SHOWN for the rest of that story.
     let border_label = format!(
         " {}",
         if app.hide_pane_side_borders {
