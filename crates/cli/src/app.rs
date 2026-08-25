@@ -16316,17 +16316,36 @@ fn wrapped_text_with_positions(
     // that quadratic dominated the render loop on wide terminals. Decode each
     // line once into `line_chars` and index it in O(1) instead.
     let mut line_chars: Vec<char> = Vec::new();
+    // Whether the previous row used its last cell. A row that does is one the
+    // width cut off mid-content, so the row under it is its continuation and
+    // any indent in front of that continuation is layout, not part of the
+    // text. A row that ends in padding ended on its own terms, and that
+    // padding is what stops a URL from running into the line below.
+    let mut prev_row_ran_to_edge = false;
     for row in bounds.top()..bounds.bottom() {
         let Some(line) = frame_text.get(row as usize) else {
+            // A row with no frame text contributes nothing, which would let
+            // the rows either side of it abut. Treat it as a break.
+            prev_row_ran_to_edge = false;
             continue;
         };
         line_chars.clear();
         line_chars.extend(line.chars());
-        for col in bounds.left()..bounds.right() {
-            let ch = line_chars.get(col as usize).copied().unwrap_or(' ');
-            text.push(ch);
+        let cell = |col: u16| line_chars.get(col as usize).copied().unwrap_or(' ');
+        let ran_to_edge = !cell(bounds.right().saturating_sub(1)).is_whitespace();
+        // Drop the indent only when this row really is a continuation *and*
+        // has content of its own — an all-blank row keeps its cells so it can
+        // terminate the run above it.
+        let first_content = (bounds.left()..bounds.right()).find(|col| !cell(*col).is_whitespace());
+        let start_col = match (prev_row_ran_to_edge, first_content) {
+            (true, Some(col)) => col,
+            _ => bounds.left(),
+        };
+        for col in start_col..bounds.right() {
+            text.push(cell(col));
             positions.push(ScreenPoint { col, row });
         }
+        prev_row_ran_to_edge = ran_to_edge;
     }
     (text, positions)
 }
@@ -51514,6 +51533,74 @@ mod drain_gate_tests {
         assert_eq!(hit.ranges[1].row, 1);
         assert_eq!(hit.ranges[1].start_col, 0);
         assert_eq!(hit.ranges[1].end_col, 12);
+    }
+
+    /// A URL the width cut in half, with the continuation indented by the
+    /// renderer (agent markdown, bullet bodies, box-drawn panels). Both halves
+    /// must resolve to the one whole URL, and the continuation's cells must be
+    /// clickable too — before this, a click on row 0 opened a truncated URL and
+    /// a click on the tail did nothing at all.
+    #[test]
+    fn url_hit_stitches_across_an_indented_continuation() {
+        let frame = vec![
+            "  https://example.com/a".to_string(),
+            "    bbb/ccc?q=1".to_string(),
+        ];
+        let bounds = Rect::new(0, 0, 23, 2);
+        let whole = "https://example.com/abbb/ccc?q=1";
+
+        let head = super::url_hit_in_frame(&frame, 4, 0, bounds).expect("head of URL is a hit");
+        assert_eq!(head.url, whole, "clicking the first row must open the whole URL");
+
+        let tail = super::url_hit_in_frame(&frame, 6, 1, bounds)
+            .expect("the indented continuation must be clickable");
+        assert_eq!(tail.url, whole, "clicking the continuation must open the same URL");
+
+        // The indent is layout, not URL: the hover underline starts at the
+        // first real character of the continuation.
+        assert_eq!(head.ranges.len(), 2);
+        assert_eq!(head.ranges[1].row, 1);
+        assert_eq!(head.ranges[1].start_col, 4);
+        assert_eq!(head.ranges[1].end_col, 15);
+
+        // Clicking the indent itself is not clicking the URL.
+        assert!(
+            super::url_hit_in_frame(&frame, 1, 1, bounds).is_none(),
+            "the indent in front of a continuation must not be a hit"
+        );
+    }
+
+    /// The guard on that stitching: only a row the width actually cut is
+    /// continued. A URL that ends with room to spare on its row ended there,
+    /// and must not swallow whatever the next line happens to start with.
+    #[test]
+    fn url_hit_does_not_stitch_a_line_that_ended_on_its_own() {
+        let bounds = Rect::new(0, 0, 40, 2);
+        let frame = vec![
+            "see https://example.com/x".to_string(),
+            "    and then some prose".to_string(),
+        ];
+        let hit = super::url_hit_in_frame(&frame, 6, 0, bounds).expect("hit");
+        assert_eq!(
+            hit.url, "https://example.com/x",
+            "a URL with padding after it must stop at the padding"
+        );
+        assert_eq!(hit.ranges.len(), 1, "and must not underline the next row");
+    }
+
+    /// A blank row between two rows is a break, not a splice — even when the
+    /// row above it ran to the edge.
+    #[test]
+    fn url_hit_does_not_stitch_across_a_blank_row() {
+        let bounds = Rect::new(0, 0, 23, 3);
+        let frame = vec![
+            "  https://example.com/a".to_string(),
+            "                       ".to_string(),
+            "    bbb/ccc?q=1".to_string(),
+        ];
+        let hit = super::url_hit_in_frame(&frame, 4, 0, bounds).expect("hit");
+        assert_eq!(hit.url, "https://example.com/a");
+        assert_eq!(hit.ranges.len(), 1);
     }
 
     /// Zoomed mode renders without borders, so the content fills `view_area`
