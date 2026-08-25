@@ -886,9 +886,15 @@ mod tests {
         // `CODEX_HOME` could still interleave with this one's read. Take the
         // crate-wide guard every env-mutating test uses.
         let _lock = crate::router::oauth::test_env_guard();
-        // Every direct-API-key var the auto rung counts. A var missing from
-        // this list makes the test pass or fail on the developer's own
-        // exported keys rather than on the fixture.
+        // Every provider key var this module can consult — deliberately wider
+        // than the auto rung's own ladder. Scoping it to "vars the auto rung
+        // counts" is what let this list rot: OpenRouter joined the ladder and
+        // the list did not, so on any machine exporting OPENROUTER_API_KEY the
+        // fixture was overruled by the developer's own key and the test failed
+        // locally while staying green in CI. Tracking provider existence
+        // instead means a new provider only has to be a provider to be
+        // scrubbed, whether or not it is in the ladder yet. Scrubbing a var the
+        // ladder ignores costs nothing.
         let key_vars = [
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
@@ -896,7 +902,10 @@ mod tests {
             "GOOGLE_API_KEY",
             "META_API_KEY",
             "MODEL_API_KEY",
+            "GROK_API_KEY",
+            "XAI_API_KEY",
             "DEEPSEEK_API_KEY",
+            "OPENROUTER_API_KEY",
         ];
         let saved_keys: Vec<Option<String>> =
             key_vars.iter().map(|v| std::env::var(v).ok()).collect();
