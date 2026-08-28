@@ -588,6 +588,45 @@ impl Storage {
         self.session_dir(id).join("transcript.jsonl")
     }
 
+    /// Where a session's transcript-scan checkpoint lives (spec 0211). A
+    /// derived cache beside the transcript it summarizes: deleting it costs
+    /// one slow boot and nothing else.
+    pub fn scan_checkpoint_path(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("scan.json")
+    }
+
+    /// Load a session's scan checkpoint. A missing or unreadable file is
+    /// `None` — the caller falls back to a full transcript walk, so there is
+    /// nothing here worth failing a boot over.
+    pub fn load_scan_checkpoint(&self, id: &str) -> Option<crate::session::scan::ScanCheckpoint> {
+        let path = self.scan_checkpoint_path(id);
+        let bytes = std::fs::read(&path).ok()?;
+        match serde_json::from_slice(&bytes) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(%id, error = ?e, "unreadable scan checkpoint; rescanning transcript");
+                None
+            }
+        }
+    }
+
+    /// Persist a session's scan checkpoint, written-then-renamed so a crash
+    /// mid-write leaves the previous checkpoint intact rather than a torn
+    /// file that the next boot would have to reject.
+    pub fn save_scan_checkpoint(
+        &self,
+        id: &str,
+        checkpoint: &crate::session::scan::ScanCheckpoint,
+    ) -> Result<()> {
+        self.ensure_session_dir(id)?;
+        let path = self.scan_checkpoint_path(id);
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_string(checkpoint)?;
+        std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
+        Ok(())
+    }
+
     pub fn pty_log_path(&self, id: &str) -> PathBuf {
         self.session_dir(id).join("pty.log")
     }

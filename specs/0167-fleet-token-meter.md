@@ -263,11 +263,21 @@ keep burning tokens while nobody is attached. The history therefore belongs
 to the daemon, which observes every session's usage report whether or not a
 client is connected, and a starting client seeds its view from that window.
 
-Nothing new is persisted for it. The samples are recovered at startup from
-the same usage reports already written to each session's transcript, walked
-in the same pass that self-heals the token tallies (spec 0103), so the
-history survives a daemon restart at no additional storage cost and with no
-second copy to keep consistent.
+The samples are recovered at startup from the usage reports already written
+to each session's transcript, in the same pass that self-heals the token
+tallies (spec 0103) — so the history survives a daemon restart without a
+second capture path to keep consistent.
+
+That pass is checkpointed (spec 0211), and the window rides the checkpoint
+with it: samples still in the window when a checkpoint is written are stored
+with it, and the rest of the window is recovered from the transcript bytes
+appended since. Sessions therefore keep their history across a restart
+without any transcript being re-read in full. Because the checkpoint is a
+discardable cache, losing it costs a slower startup and no history at all.
+
+What is stored is pruned to the retention window as it is written. A window
+is a bounded view by definition, and a durable copy that outlived it would
+accumulate samples every consumer would immediately discard.
 
 Recovered samples are attributed to the model that was in effect **at that
 point in the transcript**, not to the session's current model. A session

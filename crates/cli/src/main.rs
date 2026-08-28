@@ -1118,12 +1118,21 @@ async fn daemon_start(socket_override: Option<PathBuf>) -> Result<()> {
     }
     construct_daemon::spawn_detached_daemon(Some(&socket))
         .with_context(|| format!("spawn detached daemon for {}", socket.display()))?;
-    // The daemon binds the socket early in startup; poll for readiness (~5s).
-    if poll_socket(&socket, true, 50).await {
+    // The daemon binds the socket early in startup, but "early" is not
+    // "immediately": it first rebuilds each session's derived state from its
+    // transcript. That is checkpointed and normally near-instant (spec 0211),
+    // but the first start after an upgrade — or after the checkpoints are
+    // discarded — pays a full walk of every transcript on disk, which on a
+    // large fleet runs to tens of seconds.
+    //
+    // So this waits as long as the auto-start path does. Reporting a failure
+    // while the daemon is in fact still reading sends the user to a log that
+    // says nothing is wrong, and it comes up seconds later anyway.
+    if poll_socket(&socket, true, 600).await {
         println!("construct daemon started ({})", socket.display());
         Ok(())
     } else {
-        anyhow::bail!("construct daemon did not become ready within 5s; check the daemon log")
+        anyhow::bail!("construct daemon did not become ready within 60s; check the daemon log")
     }
 }
 
