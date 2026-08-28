@@ -7,10 +7,13 @@
 //! session's usage report whether or not anyone is attached, so it keeps the
 //! window and clients seed from it.
 //!
-//! Nothing new is persisted for this. The samples are recovered at boot from
-//! the transcripts the daemon already walks end-to-end to self-heal each
-//! session's token tally (spec 0103), so a daemon restart costs no extra I/O
-//! and loses no history.
+//! The samples are recovered at boot from the transcripts the daemon already
+//! walks to self-heal each session's token tally (spec 0103), so there is no
+//! second capture path to keep consistent. That walk resumes from a
+//! per-session checkpoint (spec 0211) which carries the in-window samples
+//! with it, so a restart recovers the window without re-reading history in
+//! full — and, the checkpoint being a discardable cache, loses nothing if it
+//! is missing.
 //!
 //! Structured like [`crate::usage::UsageCache`]: a plain, non-async struct
 //! behind a `std::sync::Mutex` on `SessionManager`, so every critical section

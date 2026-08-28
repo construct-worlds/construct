@@ -33,6 +33,7 @@ mod events;
 mod groups;
 mod lifecycle;
 mod playbook_run;
+pub mod scan;
 mod pty;
 mod usage_probe;
 mod widgets;
@@ -1738,169 +1739,73 @@ impl SessionManager {
         );
         let summaries = storage.list_summaries()?;
         let mut sessions = HashMap::new();
-        // Fleet token history (spec 0167), recovered from the same
-        // transcript walk that self-heals each session's tally below — no
-        // extra I/O, and no separate persistence to keep in sync.
+        // Fleet token history (spec 0167), recovered alongside each session's
+        // self-healing tally by the same scan below.
         let history_now_ms = Utc::now().timestamp_millis();
-        let history_cutoff = Utc::now()
-            - chrono::Duration::seconds(crate::cost_history::WINDOW_SECS);
+        let history_cutoff =
+            Utc::now() - chrono::Duration::seconds(crate::cost_history::WINDOW_SECS);
         let mut cost_samples: Vec<construct_protocol::TokenSample> = Vec::new();
+        // Boot-scan accounting, logged once at the end. A boot that reads
+        // gigabytes is the failure mode this checkpoint exists to prevent
+        // (#1313), so the numbers that would explain a slow start are
+        // recorded rather than left to be guessed at.
+        let scan_started = std::time::Instant::now();
+        let (mut n_uptodate, mut n_tail, mut n_full, mut bytes_read) = (0u64, 0u64, 0u64, 0u64);
         for s in summaries {
             // Preserve the prior state in the entry. `resume_running_sessions`
             // (called from main after construction) tries to respawn each
             // resumable session and falls back to marking Errored on failure.
-            // Recover seq counter from transcript line count, and recount
-            // chat messages and token tallies while we're at it —
-            // `message_count`/`tokens` then self-heal for summaries saved
-            // before the fields existed (or that lagged a crash). The
-            // context gauge (spec 0104) restores from the LAST report seen,
-            // and a Reset along the way clears it — mirroring the live fold.
+            //
+            // Derived fields — seq counter, message count, last-message
+            // snippet, token tally (spec 0103), context gauge (spec 0104) —
+            // are rebuilt from the transcript so they self-heal for summaries
+            // saved before the fields existed (or that lagged a crash). The
+            // rebuild resumes from the on-disk checkpoint (spec 0211) and
+            // reads only what was appended since, so this stays proportional
+            // to new history rather than to all of it.
+            //
+            // Nothing is appending to these transcripts yet: adapters are
+            // resumed by the caller only after construction returns, which is
+            // what makes sampling the file length here safe.
             let path = storage.transcript_path(&s.id);
-            let (
-                count,
-                message_count,
-                last_message_at,
-                last_message,
-                last_error,
-                tokens,
-                context,
-                context_segments,
-            ) =
-                if path.exists() {
-                    let f = std::fs::File::open(&path)?;
-                    let reader = std::io::BufReader::new(f);
-                    use std::io::BufRead;
-                    let mut n = 0u64;
-                    let mut msgs = 0u64;
-                    let mut last_msg_at: Option<chrono::DateTime<chrono::Utc>> = None;
-                    // Last-message snippet slots, folded exactly as the live
-                    // event path folds them so the restored snippet matches
-                    // what live observation would have produced.
-                    let mut last_msg_role: Option<construct_protocol::MessageRole> = None;
-                    let mut last_msg_text: Option<String> = None;
-                    let mut last_error: Option<String> = None;
-                    let mut tally = construct_protocol::TokenTally::default();
-                    let mut context: (Option<u64>, Option<u64>) = (None, None);
-                    let mut segments: Vec<construct_protocol::ContextSegment> = Vec::new();
-                    // The model in effect as the scan advances. Attributing a
-                    // historical sample to the session's model *now* would
-                    // credit the current model for work an earlier one did.
-                    let mut scan_model: Option<String> = None;
-                    for line in reader.lines() {
-                        let line = line?;
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        n += 1;
-                        if let Ok(ts) =
-                            serde_json::from_str::<construct_protocol::TimestampedEvent>(&line)
-                        {
-                            match ts.event {
-                                SessionEvent::Message { role, ref text } => {
-                                    msgs += 1;
-                                    last_msg_at = Some(ts.at);
-                                    construct_protocol::fold_last_message(
-                                        &mut last_msg_role,
-                                        &mut last_msg_text,
-                                        role,
-                                        text,
-                                    );
-                                }
-                                SessionEvent::Error { ref message } => {
-                                    last_error = Some(construct_protocol::snippet(message));
-                                }
-                                SessionEvent::Done { exit_code } if exit_code != 0 => {
-                                    last_error = Some(format!("exited {exit_code}"));
-                                }
-                                SessionEvent::Status { state, .. }
-                                    if state == SessionState::Running =>
-                                {
-                                    // Mirrors the live fold: a fresh turn
-                                    // outdates the previous failure.
-                                    last_error = None;
-                                }
-                                SessionEvent::ModelChanged { ref model } => {
-                                    scan_model = Some(model.clone());
-                                }
-                                SessionEvent::Cost {
-                                    tokens_in,
-                                    tokens_out,
-                                    tokens_cached,
-                                    ref model,
-                                    ..
-                                } => {
-                                    if ts.at >= history_cutoff {
-                                        cost_samples.push(construct_protocol::TokenSample {
-                                            at_ms: ts.at.timestamp_millis(),
-                                            session_id: Some(s.id.clone()),
-                                            model: model.clone().or_else(|| scan_model.clone()),
-                                            // Cached input is a subset of the
-                                            // prompt side; adding it would
-                                            // double-count. It is carried
-                                            // alongside so the recovered
-                                            // history can still tell new work
-                                            // from re-served context.
-                                            tokens: tokens_in.saturating_add(tokens_out),
-                                            cached: tokens_cached,
-                                        });
-                                    }
-                                    tally.add(tokens_in, tokens_out, tokens_cached);
-                                }
-                                SessionEvent::ContextUsage {
-                                    used_tokens,
-                                    window_tokens,
-                                } => {
-                                    context.0 = Some(used_tokens);
-                                    if window_tokens.is_some() {
-                                        context.1 = window_tokens;
-                                    }
-                                }
-                                SessionEvent::ContextBreakdown { segments: segs } => {
-                                    segments = segs;
-                                }
-                                SessionEvent::Reset => {
-                                    context = (None, None);
-                                    segments.clear();
-                                    last_msg_role = None;
-                                    last_msg_text = None;
-                                    last_error = None;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    (
-                        n,
-                        msgs,
-                        last_msg_at,
-                        last_msg_role.zip(last_msg_text),
-                        last_error,
-                        tally,
-                        context,
-                        segments,
-                    )
-                } else {
-                    (
-                        0,
-                        0,
-                        None,
-                        None,
-                        None,
-                        construct_protocol::TokenTally::default(),
-                        (None, None),
-                        Vec::new(),
-                    )
+            let prior = storage.load_scan_checkpoint(&s.id);
+            let outcome =
+                crate::session::scan::scan_transcript(&path, &s.id, prior, history_cutoff)
+                    .with_context(|| format!("scan transcript for {}", s.id))?;
+            match outcome.mode {
+                crate::session::scan::ScanMode::UpToDate => n_uptodate += 1,
+                crate::session::scan::ScanMode::Tail => n_tail += 1,
+                crate::session::scan::ScanMode::Full => n_full += 1,
+            }
+            bytes_read += outcome.read;
+
+            // Re-checkpoint whenever the scan advanced, so the next boot
+            // starts from here. Best-effort: a checkpoint that fails to write
+            // only costs the next boot a longer read.
+            if outcome.mode != crate::session::scan::ScanMode::UpToDate {
+                let checkpoint = crate::session::scan::ScanCheckpoint {
+                    version: crate::session::scan::SCAN_VERSION,
+                    bytes: outcome.bytes,
+                    scan: outcome.scan.clone(),
                 };
+                if let Err(e) = storage.save_scan_checkpoint(&s.id, &checkpoint) {
+                    tracing::warn!(session = %s.id, error = ?e, "save scan checkpoint failed");
+                }
+            }
+
+            let mut scan = outcome.scan;
+            cost_samples.append(&mut scan.cost_samples);
+            let count = scan.seq;
             let mut s = s;
-            s.message_count = message_count;
-            s.last_message_at = last_message_at;
-            s.last_message_role = last_message.as_ref().map(|(role, _)| *role);
-            s.last_message = last_message.map(|(_, text)| text);
-            s.last_error = last_error;
-            s.tokens = tokens;
-            s.context_used = context.0;
-            s.context_window = context.1;
-            s.context_segments = context_segments;
+            s.message_count = scan.message_count;
+            s.last_message_at = scan.last_message_at;
+            s.last_message_role = scan.last_message_role;
+            s.last_message = scan.last_message_text;
+            s.last_error = scan.last_error;
+            s.tokens = scan.tokens;
+            s.context_used = scan.context_used;
+            s.context_window = scan.context_window;
+            s.context_segments = scan.context_segments;
             // Scrollback survives daemon restarts because `pty_replay`
             // serves it from the on-disk `pty.log` directly; no in-memory
             // rehydration needed.
@@ -1930,6 +1835,15 @@ impl SessionManager {
             };
             sessions.insert(s.id.clone(), Arc::new(entry));
         }
+        tracing::info!(
+            sessions = n_uptodate + n_tail + n_full,
+            up_to_date = n_uptodate,
+            tail = n_tail,
+            full = n_full,
+            mib_read = bytes_read / (1024 * 1024),
+            elapsed_ms = scan_started.elapsed().as_millis() as u64,
+            "transcript scan complete",
+        );
         // Load persisted groups.
         let mut groups: HashMap<String, Arc<GroupEntry>> = HashMap::new();
         match storage.load_groups() {
@@ -12288,6 +12202,91 @@ mod tests {
         assert_eq!(
             loaded.last_message_role,
             Some(construct_protocol::MessageRole::Assistant)
+        );
+    }
+
+    /// That recount is checkpointed (spec 0211): a boot resumes the fold from
+    /// `scan.json` and reads only what was appended since, instead of walking
+    /// every transcript in full before the IPC socket binds.
+    ///
+    /// "Did not re-read" is asserted the only way it can be observed from
+    /// outside: the checkpoint is doctored to a value the transcript does not
+    /// support, and the next boot is required to report it. A boot that
+    /// rescanned would overwrite it with the true count.
+    #[tokio::test]
+    async fn boot_resumes_the_recount_from_the_scan_checkpoint() {
+        use chrono::Utc;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        let run = tmp.path().join("run");
+        let storage = Arc::new(crate::storage::Storage::new(data.clone()).expect("storage"));
+        let summary = placement_summary("cp", 0, None, construct_protocol::SessionKind::User);
+        storage.save_summary(&summary).expect("save summary");
+
+        let base = Utc::now();
+        let mut append = |i: u64, event: construct_protocol::SessionEvent| {
+            let ts = construct_protocol::TimestampedEvent {
+                seq: i,
+                at: base + chrono::Duration::seconds(i as i64),
+                event,
+            };
+            storage.append_event("cp", &ts).expect("append event");
+        };
+        let message = |text: &str| construct_protocol::SessionEvent::Message {
+            role: construct_protocol::MessageRole::Assistant,
+            text: text.into(),
+        };
+        append(1, message("one"));
+        append(2, message("two"));
+
+        let boot = |storage: Arc<crate::storage::Storage>, run: std::path::PathBuf| async move {
+            let config = Arc::new(crate::config::Config::default());
+            let (mgr, _remote_rx, _restart_rx) = SessionManager::new(storage, config, run)
+                .await
+                .expect("session manager");
+            mgr.get_entry("cp").await.expect("entry").summary().await
+        };
+
+        // First boot: a cold walk, which leaves a checkpoint behind.
+        let first = boot(storage.clone(), run.clone()).await;
+        assert_eq!(first.message_count, 2);
+
+        let checkpoint_path = storage.scan_checkpoint_path("cp");
+        let transcript_len = std::fs::metadata(storage.transcript_path("cp"))
+            .expect("transcript")
+            .len();
+        let mut checkpoint: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&checkpoint_path).expect("read checkpoint"))
+                .expect("parse checkpoint");
+        assert_eq!(
+            checkpoint["bytes"].as_u64(),
+            Some(transcript_len),
+            "the checkpoint records the transcript length its state reflects"
+        );
+
+        // Doctor the tally, leaving the recorded length alone.
+        checkpoint["message_count"] = serde_json::json!(41);
+        std::fs::write(
+            &checkpoint_path,
+            serde_json::to_string(&checkpoint).expect("encode"),
+        )
+        .expect("write checkpoint");
+
+        let second = boot(storage.clone(), run.clone()).await;
+        assert_eq!(
+            second.message_count, 41,
+            "a boot whose checkpoint is level with the transcript must not \
+             re-read it"
+        );
+
+        // A third boot folds only the newly appended tail onto that state.
+        append(3, message("three"));
+        let third = boot(storage.clone(), run.clone()).await;
+        assert_eq!(
+            third.message_count, 42,
+            "the tail is folded onto the checkpoint, not counted from zero"
         );
     }
 
