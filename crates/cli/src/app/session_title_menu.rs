@@ -59,6 +59,16 @@ impl App {
             SessionTitleMenuAction::SplitVertical => {
                 self.split_active_window(WindowSplitDirection::Below)
             }
+            SessionTitleMenuAction::Zoom => {
+                // The chord derives its target from the focused pane; a menu
+                // click can land while focus is still the list, so pin the
+                // target to the view this menu hangs off. Unzoom keeps
+                // whatever focus the user had.
+                if matches!(self.zoom, ZoomMode::None) {
+                    self.focus = PaneFocus::View;
+                }
+                self.run_action(crate::keymap::KeyAction::ToggleZoom).await;
+            }
             SessionTitleMenuAction::CloseSplit => self.delete_active_window(),
             SessionTitleMenuAction::Archive => {
                 if self

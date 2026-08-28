@@ -1771,6 +1771,9 @@ pub enum SessionTitleMenuAction {
     PlaybookTerminalMode,
     SplitHorizontal,
     SplitVertical,
+    /// Fill the screen with this pane (or restore the split layout when
+    /// something is already zoomed) — the menu twin of the zoom chord.
+    Zoom,
     CloseSplit,
     Archive,
     /// Fork-only: merge the fork's result into its parent and archive it.
@@ -1810,12 +1813,13 @@ impl OperatorTitleMenuAction {
 }
 
 impl SessionTitleMenuAction {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Rename,
         Self::Fork,
         Self::PlaybookTerminalMode,
         Self::SplitHorizontal,
         Self::SplitVertical,
+        Self::Zoom,
         Self::CloseSplit,
         Self::Archive,
         Self::Merge,
@@ -1831,6 +1835,7 @@ impl SessionTitleMenuAction {
             Self::PlaybookTerminalMode => "playbook mode",
             Self::SplitHorizontal => "split horizontal",
             Self::SplitVertical => "split vertical",
+            Self::Zoom => "zoom",
             Self::CloseSplit => "close split",
             Self::Archive => "archive",
             Self::Merge => "merge and archive",
@@ -33726,6 +33731,76 @@ mod tests {
             "menu split action must fire even over a mouse-grabbing child"
         );
         assert_eq!(app.leaf_window_ids().len(), 2);
+        server.abort();
+    }
+
+    /// The menu's zoom row is the mouse twin of the zoom chord. The chord
+    /// picks its target from the focused pane, which a mouse user may have
+    /// left on the list — the row must zoom the view the menu hangs off
+    /// anyway.
+    #[tokio::test]
+    async fn session_menu_zoom_row_zooms_the_view_pane() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let (mut app, _dir, server) = captured_app().await;
+        app.main_windows = MainWindowTree::single(1, Selection::Session("s1".into()));
+        app.active_window_id = 1;
+        app.focus = PaneFocus::List;
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut term = ratatui::Terminal::new(backend).expect("terminal");
+        term.draw(|f| crate::ui::render(f, &mut app)).expect("render");
+
+        let pane = app
+            .layout
+            .main_window_areas
+            .first()
+            .copied()
+            .expect("single pane registered");
+        let (bx, _, by) = crate::ui::view_close_button_range(pane.area);
+        let click = |kind, col, row| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+
+        app.on_mouse(click(MouseEventKind::Down(MouseButton::Left), bx + 1, by))
+            .await;
+        app.on_mouse(click(MouseEventKind::Up(MouseButton::Left), bx + 1, by))
+            .await;
+        let menu = app
+            .session_title_menu
+            .clone()
+            .expect("clicking the actions button opens the session menu");
+        term.draw(|f| crate::ui::render(f, &mut app))
+            .expect("render open menu");
+        assert!(
+            rendered_text(term.backend().buffer()).contains("zoom"),
+            "the menu should offer zoom"
+        );
+
+        let zoom_idx = SessionTitleMenuAction::ALL
+            .iter()
+            .position(|action| *action == SessionTitleMenuAction::Zoom)
+            .expect("zoom menu row");
+        let item_row = menu.area.y + 1 + zoom_idx as u16;
+        let item_col = menu.area.x + 2;
+        assert_eq!(
+            menu.item_at(item_col, item_row),
+            Some(SessionTitleMenuAction::Zoom)
+        );
+        app.on_mouse(click(MouseEventKind::Down(MouseButton::Left), item_col, item_row))
+            .await;
+        app.on_mouse(click(MouseEventKind::Up(MouseButton::Left), item_col, item_row))
+            .await;
+
+        assert_eq!(app.zoom, ZoomMode::View, "the menu row zooms the view pane");
+        assert_eq!(app.focus, PaneFocus::View, "zooming follows focus to the view");
+        assert!(
+            app.session_title_menu.is_none(),
+            "acting on a row closes the menu"
+        );
+
         server.abort();
     }
 

@@ -8171,6 +8171,8 @@ fn session_title_menu_action_label(
         (SessionTitleMenuAction::SplitHorizontal, Profile::Vim) => Some("C-w v"),
         (SessionTitleMenuAction::SplitVertical, Profile::Emacs) => Some("C-x 2"),
         (SessionTitleMenuAction::SplitVertical, Profile::Vim) => Some("C-w s"),
+        (SessionTitleMenuAction::Zoom, Profile::Emacs) => Some("C-x z"),
+        (SessionTitleMenuAction::Zoom, Profile::Vim) => Some("z"),
         (SessionTitleMenuAction::CloseSplit, Profile::Emacs) => Some("C-x 0"),
         (SessionTitleMenuAction::CloseSplit, Profile::Vim) => Some("C-w c"),
         (SessionTitleMenuAction::Archive, Profile::Emacs)
