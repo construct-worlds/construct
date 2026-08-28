@@ -19,8 +19,11 @@ Scope: Where the web UI's per-session controls live and how session reorder work
   of the session view (next to the terminal scroll controls), mirroring
   the TUI's session-title menu: rename, pin/unpin, fork conversation,
   restart, archive/unarchive, merge and archive (enabled only for forks,
-  visible otherwise so the menu teaches the workflow), delete. TUI-only
-  entries that manage split panes are omitted — the web UI has no splits.
+  visible otherwise so the menu teaches the workflow), delete. It also
+  carries the pane actions for the web UI's own split layout — split
+  horizontal, split vertical, zoom/unzoom, close split — shown but
+  disabled when the viewport or the current layout cannot offer them, so
+  the menu keeps a stable shape.
 - Client-side preferences (currently the theme) live in a settings sheet
   opened by activating the matrix-rain connection badge in the header,
   which doubles as the settings button.
@@ -47,4 +50,3 @@ single menu matching the TUI keep both clients teaching the same model.
 
 - Cross-region drops (e.g. dragging into a different project group) are
   not reorder semantics; grouping stays a separate operation.
-- The TUI's split-pane management stays TUI-only.

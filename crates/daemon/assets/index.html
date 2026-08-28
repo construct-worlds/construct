@@ -4160,6 +4160,8 @@
                 id="sessionMenuSplitHBtn">split horizontal</button>
         <button type="button" role="menuitem" data-menu-action="split-vertical"
                 id="sessionMenuSplitVBtn">split vertical</button>
+        <button type="button" role="menuitem" data-menu-action="zoom"
+                id="sessionMenuZoomBtn">zoom</button>
         <button type="button" role="menuitem" data-menu-action="close-split"
                 id="sessionMenuCloseSplitBtn">close split</button>
         <button type="button" role="menuitem" data-menu-action="restart">restart</button>
@@ -8514,6 +8516,9 @@ function refreshSessionActions() {
       // between viewports.
       "split-horizontal": splitLayoutAvailable(),
       "split-vertical": splitLayoutAvailable(),
+      // Zoom fills the grid with the focused pane, so it needs panes to
+      // hide — with one pane there is nothing to zoom.
+      zoom: splitLayoutActive(),
       "close-split": splitLayoutActive(),
       restart: !!sel && terminal && !archived,
       archive: isUserSession,
@@ -8524,6 +8529,11 @@ function refreshSessionActions() {
       const on = enabledByAction[btn.dataset.menuAction];
       btn.disabled = on === false;
     }
+    // Unlike the TUI — whose zoomed layout is borderless, with no title bar
+    // to reopen the menu from — a zoomed pane here keeps its head, so the
+    // row is the way back out and has to say so.
+    const zoomItem = $("sessionMenuZoomBtn");
+    if (zoomItem) zoomItem.textContent = state.paneZoom ? "unzoom" : "zoom";
     const pinItem = $("sessionMenuPinItem");
     if (pinItem) pinItem.textContent = pinned ? "unpin" : "pin";
     const archiveItem = $("sessionMenuArchiveItem");
@@ -14514,6 +14524,9 @@ function closePane(paneId) {
   if (!leaves.some((l) => l.id === state.focusedPaneId)) {
     state.focusedPaneId = leaves.length ? leaves[0].id : null;
   }
+  // A collapsed layout has nothing to zoom. Drop the per-client flag so the
+  // next split doesn't come back pre-zoomed with no visible way out.
+  if (leaves.length <= 1) state.paneZoom = false;
   renderPaneGrid();
   pushLayout(next);
 }
@@ -19302,6 +19315,14 @@ $("sessionMenuBtn").addEventListener("click", (ev) => {
   $("sessionMenuBtn").setAttribute("aria-expanded", open ? "true" : "false");
 });
 
+/** Fill the pane grid with the focused pane, or restore the split layout.
+ *  Shared by `C-x z` and the session menu's zoom row. Per-client state
+ *  (spec 0118), so it never round-trips to the daemon. */
+function togglePaneZoom() {
+  state.paneZoom = !state.paneZoom;
+  renderPaneGrid();
+}
+
 $("sessionMenu").addEventListener("click", (ev) => {
   const btn = ev.target.closest("[data-menu-action]");
   if (!btn || btn.disabled) return;
@@ -19311,6 +19332,7 @@ $("sessionMenu").addEventListener("click", (ev) => {
   // through the session-action path.
   if (action === "split-horizontal") return splitFocusedPane("right");
   if (action === "split-vertical") return splitFocusedPane("below");
+  if (action === "zoom") return togglePaneZoom();
   if (action === "close-split") return closePane(state.focusedPaneId);
   handleRowAction(action, state.currentId);
 });
@@ -20252,8 +20274,7 @@ function runKeyAction(action, keys) {
         showChordEcho("C-x z — nothing to zoom", true);
         return;
       }
-      state.paneZoom = !state.paneZoom;
-      renderPaneGrid();
+      togglePaneZoom();
       return;
     case "new-session":
       openNewSessionDialog();

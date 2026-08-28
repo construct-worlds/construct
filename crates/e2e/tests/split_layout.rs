@@ -575,6 +575,8 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         "the session menu pill belongs in the pane title bar once one exists"
     );
 
+    let before_close_baseline = d.client.layout().await.expect("layout").version;
+
     // ...and that menu is what now offers the split/close actions.
     let menu_actions: String = page
         .evaluate(
@@ -586,16 +588,63 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         .ok()
         .and_then(|r| r.into_value::<String>().ok())
         .unwrap_or_default();
-    for action in ["split-horizontal", "split-vertical", "close-split"] {
+    for action in ["split-horizontal", "split-vertical", "zoom", "close-split"] {
         assert!(
             menu_actions.contains(action),
             "session menu must offer {action}, got {menu_actions}"
         );
     }
 
+    // Zoom fills the grid with the focused pane and — unlike the TUI, whose
+    // zoomed layout is borderless — the pane head survives, so the same row
+    // is the way back out and must relabel itself.
+    assert_eq!(
+        zoom_menu_label(&page).await,
+        "zoom",
+        "an unzoomed split offers zoom"
+    );
+    page.evaluate(
+        "(() => { document.getElementById('sessionMenuZoomBtn').click(); return true; })()",
+    )
+    .await
+    .ok();
+    assert!(
+        wait_for_bool(
+            &page,
+            "document.getElementById('paneGrid').classList.contains('is-zoomed')",
+        )
+        .await,
+        "the menu's zoom row must zoom the pane grid"
+    );
+    // Zoom is per-client (spec 0118): it hides panes, it does not rewrite the
+    // shared tree, so no layout edit is published.
+    let after_zoom = d.client.layout().await.expect("layout");
+    assert_eq!(
+        after_zoom.version, before_close_baseline,
+        "zoom is client-local and must not publish a layout edit"
+    );
+    assert_eq!(
+        zoom_menu_label(&page).await,
+        "unzoom",
+        "a zoomed pane's menu is the way back out"
+    );
+    page.evaluate(
+        "(() => { document.getElementById('sessionMenuZoomBtn').click(); return true; })()",
+    )
+    .await
+    .ok();
+    assert!(
+        wait_for_bool(
+            &page,
+            "!document.getElementById('paneGrid').classList.contains('is-zoomed')",
+        )
+        .await,
+        "clicking unzoom must restore the split layout"
+    );
+
     // Closing a split through the menu really collapses the layout, and the
     // collapse is published like any other layout edit.
-    let before_close = d.client.layout().await.expect("layout").version;
+    let before_close = before_close_baseline;
     page.evaluate(
         "(() => { document.querySelector('#sessionMenu [data-menu-action=\"close-split\"]').click(); return true; })()",
     )
@@ -1013,6 +1062,21 @@ async fn set_viewport(page: &Page, (w, h): (u32, u32)) {
         .evaluate("window.dispatchEvent(new Event('resize')); true")
         .await;
     tokio::time::sleep(Duration::from_millis(350)).await;
+}
+
+/// Open the session menu (so its items refresh against current state) and
+/// read what the zoom row currently offers: "zoom" or "unzoom".
+async fn zoom_menu_label(page: &Page) -> String {
+    page.evaluate(
+        "(() => {
+           document.getElementById('sessionMenuBtn').click();
+           return document.getElementById('sessionMenuZoomBtn').textContent.trim();
+         })()",
+    )
+    .await
+    .ok()
+    .and_then(|r| r.into_value::<String>().ok())
+    .unwrap_or_default()
 }
 
 async fn eval_number(page: &Page, js: &str) -> f64 {
