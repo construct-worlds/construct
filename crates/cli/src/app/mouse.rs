@@ -103,44 +103,16 @@ impl App {
     }
 
     fn url_click_bounds(&self, col: u16, row: u16) -> Option<ratatui::layout::Rect> {
-        fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
-            c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
-        }
-        if let Some(view) = self.layout.view_area {
-            // Zoomed mode renders edge-to-edge without any border; the view area
-            // IS the content area.  Normal (split) mode wraps content in a 1-cell
-            // border on all sides, so we shrink by 1 in that case only.
-            let inner = if matches!(self.zoom, ZoomMode::None) {
-                ratatui::layout::Rect {
-                    x: view.x.saturating_add(1),
-                    y: view.y.saturating_add(1),
-                    width: view.width.saturating_sub(2),
-                    height: view.height.saturating_sub(2),
-                }
-            } else {
-                view
-            };
-            if contains(inner, col, row) {
-                return Some(inner);
-            }
-        }
-        if matches!(
-            self.prompt.as_ref().map(|m| &m.intent),
-            Some(PromptIntent::Minibuffer)
-        ) {
-            if let Some(area) = self.layout.prompt_area {
-                let inner = ratatui::layout::Rect {
-                    x: area.x,
-                    y: area.y.saturating_add(1),
-                    width: area.width,
-                    height: area.height.saturating_sub(1),
-                };
-                if contains(inner, col, row) {
-                    return Some(inner);
-                }
-            }
-        }
-        None
+        url_click_bounds_for_layout(
+            &self.layout,
+            self.zoom,
+            matches!(
+                self.prompt.as_ref().map(|m| &m.intent),
+                Some(PromptIntent::Minibuffer)
+            ),
+            col,
+            row,
+        )
     }
 
     pub(super) fn rect_contains(r: ratatui::layout::Rect, col: u16, row: u16) -> bool {
@@ -483,6 +455,103 @@ impl App {
             self.show_terminal_scrollbar();
         } else if self.view == ViewMode::Chat {
             self.adjust_chat_scroll(delta);
+        }
+    }
+}
+
+fn url_click_bounds_for_layout(
+    layout: &LayoutSnapshot,
+    zoom: ZoomMode,
+    is_minibuffer_panel: bool,
+    col: u16,
+    row: u16,
+) -> Option<ratatui::layout::Rect> {
+    fn contains(r: ratatui::layout::Rect, c: u16, y: u16) -> bool {
+        c >= r.x && c < r.x + r.width && y >= r.y && y < r.y + r.height
+    }
+
+    // Each split pane renders and wraps at its own inner edge. URL recovery
+    // must use that same edge or a row that filled a narrow pane looks padded
+    // when it is measured against the full, unsplit view.
+    for pane in &layout.main_window_areas {
+        if contains(pane.inner_area, col, row) {
+            return Some(pane.inner_area);
+        }
+    }
+
+    // Zoomed mode renders edge-to-edge without a border. Normal layouts with
+    // no materialized pane hits use the view's one-cell-inset content area.
+    if layout.main_window_areas.is_empty() {
+        if let Some(view) = layout.view_area {
+            let inner = if matches!(zoom, ZoomMode::None) {
+                ratatui::layout::Rect {
+                    x: view.x.saturating_add(1),
+                    y: view.y.saturating_add(1),
+                    width: view.width.saturating_sub(2),
+                    height: view.height.saturating_sub(2),
+                }
+            } else {
+                view
+            };
+            if contains(inner, col, row) {
+                return Some(inner);
+            }
+        }
+    }
+
+    if is_minibuffer_panel {
+        if let Some(area) = layout.prompt_area {
+            let inner = ratatui::layout::Rect {
+                x: area.x,
+                y: area.y.saturating_add(1),
+                width: area.width,
+                height: area.height.saturating_sub(1),
+            };
+            if contains(inner, col, row) {
+                return Some(inner);
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn url_hit_uses_split_pane_wrap_edge() {
+        let left = WindowPaneHit {
+            id: 1,
+            area: Rect::new(0, 0, 30, 4),
+            inner_area: Rect::new(1, 1, 28, 2),
+        };
+        let right = WindowPaneHit {
+            id: 2,
+            area: Rect::new(29, 0, 31, 4),
+            inner_area: Rect::new(30, 1, 29, 2),
+        };
+        let layout = LayoutSnapshot {
+            view_area: Some(Rect::new(0, 0, 60, 4)),
+            main_window_areas: vec![left, right],
+            ..LayoutSnapshot::default()
+        };
+
+        let mut frame = vec![" ".repeat(60); 4];
+        frame[1].replace_range(3..29, "https://example.com/abcdef");
+        frame[2].replace_range(5..14, "ghijk?q=1");
+
+        for (col, row) in [(4, 1), (6, 2)] {
+            let bounds = url_click_bounds_for_layout(&layout, ZoomMode::None, false, col, row)
+                .expect("both URL rows are inside the left split pane");
+            assert_eq!(bounds, left.inner_area);
+
+            let hit = url_hit_in_frame(&frame, col, row, bounds)
+                .expect("both halves of a split-pane URL must be clickable");
+            assert_eq!(hit.url, "https://example.com/abcdefghijk?q=1");
+            assert_eq!(hit.ranges.len(), 2);
         }
     }
 }
