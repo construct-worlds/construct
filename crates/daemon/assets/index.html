@@ -368,6 +368,13 @@
   main.session-list-hidden {
     grid-template-columns: 0 1fr;
   }
+  /* Zoom (spec 0212) means the focused session view fills the window, so the
+     list gets out of the way — the same geometry as hiding it, but driven by
+     zoom rather than by the user's own show/hide preference, which is left
+     untouched so unzooming restores exactly what they had. */
+  main.is-zoomed {
+    grid-template-columns: 0 1fr;
+  }
   @media (max-width: 720px) {
     main,
     main.session-list-hidden {
@@ -386,6 +393,18 @@
        the full remaining height. */
     main:has(.session-list.collapsed) {
       grid-template-rows: 0 1fr;
+    }
+    main.is-zoomed {
+      grid-template-rows: 0 1fr;
+    }
+    main.is-zoomed .session-list-wrap {
+      min-height: 0;
+      overflow: hidden;
+      border-right: none;
+      border-bottom: none;
+    }
+    main.is-zoomed .new-session-btn {
+      display: none;
     }
     .session-list.collapsed { max-height: 0; padding: 0; border-bottom: none; }
     /* When the list is collapsed, drop its header controls too —
@@ -2387,7 +2406,8 @@
     border-right: 1px solid var(--border);
     background: var(--bg-elev);
   }
-  main.session-list-hidden .session-list-wrap {
+  main.session-list-hidden .session-list-wrap,
+  main.is-zoomed .session-list-wrap {
     overflow: hidden;
     border-right: none;
   }
@@ -2415,7 +2435,8 @@
   .session-list-resizer.is-dragging::after {
     background: var(--accent);
   }
-  main.session-list-hidden .session-list-resizer {
+  main.session-list-hidden .session-list-resizer,
+  main.is-zoomed .session-list-resizer {
     display: none;
   }
   @media (max-width: 720px) {
@@ -8516,9 +8537,9 @@ function refreshSessionActions() {
       // between viewports.
       "split-horizontal": splitLayoutAvailable(),
       "split-vertical": splitLayoutAvailable(),
-      // Zoom fills the grid with the focused pane, so it needs panes to
-      // hide — with one pane there is nothing to zoom.
-      zoom: splitLayoutActive(),
+      // Zoom fills the window with the focused view, which is meaningful
+      // with or without splits — there is always a list to cover.
+      zoom: !!sel,
       "close-split": splitLayoutActive(),
       restart: !!sel && terminal && !archived,
       archive: isUserSession,
@@ -14139,6 +14160,11 @@ function setSessionListWidth(width, persist = true) {
 
 function setSessionListVisible(visible, persist = true) {
   state.sessionListVisible = !!visible;
+  // Zoom hides the list, so asking for the list is asking to leave zoom —
+  // otherwise the `≡` toggle and `C-x b` would both be dead controls while
+  // zoomed. (The TUI answers the same request by zooming the list instead;
+  // there is no zoomed-list surface here.)
+  if (visible && state.paneZoom) setPaneZoom(false);
   // Collapsing/expanding the list reshapes the terminal host, which can
   // clamp the xterm viewport's scrollTop. Stamp the churn window BEFORE
   // the class flip so the resulting scroll events are never mistaken for
@@ -14151,10 +14177,18 @@ function setSessionListVisible(visible, persist = true) {
     sessionListEl.classList.remove("collapsed");
     if (visible) setSessionListWidth(currentSessionListWidth(), false);
   }
-  toggleListBtn.setAttribute("aria-expanded", visible ? "true" : "false");
-  toggleListBtn.title = visible ? "hide session list" : "show session list";
+  syncSessionListToggle();
   if (persist) localStorage.setItem(SESSION_LIST_VISIBLE_KEY, visible ? "1" : "0");
   if (state.mode === "terminal") requestAnimationFrame(refitTerminal);
+}
+
+/** The `≡` button reports what a press would do. Zoom hides the list without
+ *  touching the preference, so while zoomed the button offers the list back
+ *  (by unzooming) even though the preference still says "visible". */
+function syncSessionListToggle() {
+  const shown = state.sessionListVisible && !state.paneZoom;
+  toggleListBtn.setAttribute("aria-expanded", shown ? "true" : "false");
+  toggleListBtn.title = shown ? "hide session list" : "show session list";
 }
 
 function isSessionListVisible() {
@@ -14176,6 +14210,9 @@ function initSessionListLayout() {
 initSessionListLayout();
 
 toggleListBtn.addEventListener("click", () => {
+  // While zoomed the list is hidden by zoom, not by the preference, so a
+  // press means "give me the list back" — which unzooms.
+  if (state.paneZoom) return setSessionListVisible(true);
   setSessionListVisible(!isSessionListVisible());
 });
 
@@ -14524,9 +14561,6 @@ function closePane(paneId) {
   if (!leaves.some((l) => l.id === state.focusedPaneId)) {
     state.focusedPaneId = leaves.length ? leaves[0].id : null;
   }
-  // A collapsed layout has nothing to zoom. Drop the per-client flag so the
-  // next split doesn't come back pre-zoomed with no visible way out.
-  if (leaves.length <= 1) state.paneZoom = false;
   renderPaneGrid();
   pushLayout(next);
 }
@@ -19315,12 +19349,28 @@ $("sessionMenuBtn").addEventListener("click", (ev) => {
   $("sessionMenuBtn").setAttribute("aria-expanded", open ? "true" : "false");
 });
 
-/** Fill the pane grid with the focused pane, or restore the split layout.
- *  Shared by `C-x z` and the session menu's zoom row. Per-client state
- *  (spec 0118), so it never round-trips to the daemon. */
+/** Zoom, or restore. Shared by `C-x z` and the session menu's zoom row.
+ *  Per-client state (spec 0118), so it never round-trips to the daemon. */
 function togglePaneZoom() {
-  state.paneZoom = !state.paneZoom;
+  setPaneZoom(!state.paneZoom);
+}
+
+/** Zoom means the focused session view fills the window (spec 0212): the
+ *  other panes get out of the way, and so does the session list. The list's
+ *  own show/hide preference is deliberately not touched — unzooming restores
+ *  whatever the user had, rather than whatever zoom left behind. */
+function setPaneZoom(on) {
+  const next = !!on;
+  if (state.paneZoom === next) return;
+  state.paneZoom = next;
+  // Reshaping the view can clamp xterm's scrollTop. Stamp the churn window
+  // BEFORE the layout flips so the resulting scroll events are never mistaken
+  // for the user scrolling into history — same order as the list toggle.
+  noteTerminalScrollChurn();
+  mainEl.classList.toggle("is-zoomed", next);
+  syncSessionListToggle();
   renderPaneGrid();
+  if (state.mode === "terminal") requestAnimationFrame(refitTerminal);
 }
 
 $("sessionMenu").addEventListener("click", (ev) => {
@@ -20270,7 +20320,7 @@ function runKeyAction(action, keys) {
       return;
     }
     case "toggle-zoom":
-      if (!splitLayoutActive()) {
+      if (!currentSession()) {
         showChordEcho("C-x z — nothing to zoom", true);
         return;
       }

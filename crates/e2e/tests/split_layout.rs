@@ -616,6 +616,16 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         .await,
         "the menu's zoom row must zoom the pane grid"
     );
+    // Spec 0212: zoom fills the window, so the session list gets out of the
+    // way too — not just the sibling panes.
+    assert!(
+        wait_for_bool(
+            &page,
+            "document.querySelector('.session-list-wrap').getBoundingClientRect().width === 0",
+        )
+        .await,
+        "zoom must cover the session list"
+    );
     // Zoom is per-client (spec 0118): it hides panes, it does not rewrite the
     // shared tree, so no layout edit is published.
     let after_zoom = d.client.layout().await.expect("layout");
@@ -641,6 +651,16 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
         .await,
         "clicking unzoom must restore the split layout"
     );
+    // ...list included: zoom borrows the list, it does not consume the
+    // user's own show/hide preference.
+    assert!(
+        wait_for_bool(
+            &page,
+            "document.querySelector('.session-list-wrap').getBoundingClientRect().width > 0",
+        )
+        .await,
+        "unzooming must give the session list back"
+    );
 
     // Closing a split through the menu really collapses the layout, and the
     // collapse is published like any other layout edit.
@@ -660,6 +680,50 @@ async fn shared_split_layout_renders_wide_and_is_read_only_narrow() {
     assert!(
         after_close.version > before_close,
         "closing a pane is a layout edit and must be published to other clients"
+    );
+
+    // Zoom is not split-gated (spec 0212): with one pane it still has the
+    // list to cover, so the row stays live and does the same thing.
+    let zoom_enabled_single = wait_for_bool(
+        &page,
+        "(() => {
+           const btn = document.getElementById('sessionMenuBtn');
+           const item = document.getElementById('sessionMenuZoomBtn');
+           if (!btn || !item) return false;
+           if (document.getElementById('sessionMenu').hidden) btn.click();
+           return !item.disabled;
+         })()",
+    )
+    .await;
+    assert!(
+        zoom_enabled_single,
+        "zoom must stay available when the layout has a single pane"
+    );
+    page.evaluate(
+        "(() => { document.getElementById('sessionMenuZoomBtn').click(); return true; })()",
+    )
+    .await
+    .ok();
+    assert!(
+        wait_for_bool(
+            &page,
+            "document.querySelector('.session-list-wrap').getBoundingClientRect().width === 0",
+        )
+        .await,
+        "zooming a single pane must still cover the session list"
+    );
+    // The `≡` toggle asks for the list back, which is a request to leave zoom
+    // — it must not be a dead control while zoomed.
+    page.evaluate("(() => { document.getElementById('toggleList').click(); return true; })()")
+        .await
+        .ok();
+    assert!(
+        wait_for_bool(
+            &page,
+            "document.querySelector('.session-list-wrap').getBoundingClientRect().width > 0",
+        )
+        .await,
+        "asking for the list while zoomed must leave zoom"
     );
 
     // Split back from a SINGLE pane through the session menu. This is the
