@@ -416,16 +416,19 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     "claude-oauth:fable",
     // Anthropic API path.
     "anthropic:claude-sonnet-5",
+    "anthropic:claude-fable-5-1",
     "anthropic:claude-fable-5",
     "anthropic:claude-opus-4-8",
     "anthropic:claude-sonnet-4-6",
     "anthropic:claude-haiku-4-5",
     // Google Gemini API path.
+    "gemini:gemini-3.8-flash",
     "gemini:gemini-3.1-pro",
     "gemini:gemini-3.5-flash",
     "gemini:gemini-2.5-pro",
     "gemini:gemini-2.5-flash",
     // Meta Model API path.
+    "meta:muse-spark-1.3",
     "meta:muse-spark-1.2",
     "meta:muse-spark-1.1",
     // DeepSeek platform API path.
@@ -487,7 +490,7 @@ pub fn resolve_claude_oauth_model(model: &str) -> String {
         "opus" => "claude-opus-4-8".to_string(),
         "sonnet" => "claude-sonnet-4-6".to_string(),
         "haiku" => "claude-haiku-4-5".to_string(),
-        "fable" => "claude-fable-5".to_string(),
+        "fable" => "claude-fable-5-1".to_string(),
         other => other.to_string(),
     }
 }
@@ -622,8 +625,29 @@ mod tests {
         assert!(matches.contains(&"/model claude-oauth:fable".to_string()));
 
         assert_eq!(
+            models_for_provider("anthropic"),
+            vec![
+                "claude-sonnet-5",
+                "claude-fable-5-1",
+                "claude-fable-5",
+                "claude-opus-4-8",
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5"
+            ]
+        );
+        assert_eq!(
+            models_for_provider("gemini"),
+            vec![
+                "gemini-3.8-flash",
+                "gemini-3.1-pro",
+                "gemini-3.5-flash",
+                "gemini-2.5-pro",
+                "gemini-2.5-flash"
+            ]
+        );
+        assert_eq!(
             models_for_provider("meta"),
-            vec!["muse-spark-1.2", "muse-spark-1.1"]
+            vec!["muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.1"]
         );
         assert_eq!(
             models_for_provider("ollama"),
@@ -644,7 +668,7 @@ mod tests {
         assert_eq!(resolve_claude_oauth_model("sonnet"), "claude-sonnet-4-6");
         assert_eq!(resolve_claude_oauth_model("opus"), "claude-opus-4-8");
         assert_eq!(resolve_claude_oauth_model("haiku"), "claude-haiku-4-5");
-        assert_eq!(resolve_claude_oauth_model("fable"), "claude-fable-5");
+        assert_eq!(resolve_claude_oauth_model("fable"), "claude-fable-5-1");
         assert_eq!(
             resolve_claude_oauth_model("claude-sonnet-4-6"),
             "claude-sonnet-4-6"

@@ -3994,7 +3994,7 @@ mod tests {
         let cases = [
             ("sonnet", "claude-sonnet-4-6"),
             ("opus", "claude-opus-4-8"),
-            ("fable", "claude-fable-5"),
+            ("fable", "claude-fable-5-1"),
         ];
         for (alias, concrete) in cases {
             let published = r

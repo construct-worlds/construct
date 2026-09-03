@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(resolve_model("opus"), "claude-opus-4-8");
         assert_eq!(resolve_model("sonnet"), "claude-sonnet-4-6");
         assert_eq!(resolve_model("haiku"), "claude-haiku-4-5");
-        assert_eq!(resolve_model("fable"), "claude-fable-5");
+        assert_eq!(resolve_model("fable"), "claude-fable-5-1");
         // Concrete ids pass through untouched.
         assert_eq!(resolve_model("claude-sonnet-4-6"), "claude-sonnet-4-6");
         assert_eq!(resolve_model("claude-opus-4-8"), "claude-opus-4-8");
