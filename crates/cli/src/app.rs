@@ -16700,6 +16700,7 @@ fn playbook_cursor_at_modal_point(
     scroll_offset: usize,
     col: u16,
     row: u16,
+    body_width: usize,
 ) -> Option<usize> {
     let inner_x = modal
         .x
@@ -16718,10 +16719,9 @@ fn playbook_cursor_at_modal_point(
     // offset instead of being treated as a whole logical line.
     let target_row = (row.saturating_sub(inner_y) as usize).saturating_add(scroll_offset);
     let target_col = col.saturating_sub(inner_x) as usize;
-    let width = ui::playbook_modal_inner_width(modal);
     Some(playbook_normalize_playbook_cursor(
         buffer,
-        ui::playbook_visual_to_cursor(app, buffer, target_row, target_col, width),
+        ui::playbook_visual_to_cursor(app, buffer, target_row, target_col, body_width),
     ))
 }
 
@@ -33120,6 +33120,42 @@ mod tests {
         app.place_playbook_cursor(modal, 4, 3);
 
         assert_eq!(app.playbook_popup.as_ref().unwrap().cursor, 7);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn playbook_click_on_slid_popup_uses_unclipped_wrap_width() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (mut app, _dir, server) = empty_app().await;
+        app.playbook_popup = Some(playbook_popup_for_test(
+            "s1",
+            "abcdefghijklmnopQRST",
+            0,
+        ));
+
+        // A terminal-focused Playbook keeps its 20-column logical popup width
+        // while sliding four columns right, then clips at the pane edge. The
+        // body therefore paints at width 16 even though the clickable modal
+        // rectangle is only 16 columns wide (which would imply body width 12
+        // if used for layout). The first cell of the painted continuation row
+        // is source offset 16, not 12.
+        app.layout.modal_area = Some(Rect::new(4, 0, 16, 20));
+        app.layout.playbook_inner_area = Some(Rect::new(6, 2, 16, 16));
+
+        app.handle_playbook_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 6,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        })
+        .await;
+
+        assert_eq!(
+            app.playbook_popup.as_ref().unwrap().cursor,
+            16,
+            "click mapping must use the full rendered body width, not the clipped hit rect"
+        );
         server.abort();
     }
 

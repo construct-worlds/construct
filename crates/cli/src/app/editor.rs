@@ -1,12 +1,28 @@
 use super::*;
 
 impl App {
+    /// Width the playbook body was laid out at in the last frame.
+    ///
+    /// A terminal-focused playbook slides right while retaining its full width,
+    /// but `modal_area` is clipped to the owning pane for hit-testing. Deriving
+    /// wrap width from that clipped rectangle makes click-to-caret resolve
+    /// against narrower lines than the ones on screen. The rendered inner area
+    /// keeps the logical width, so prefer it whenever it is available.
+    fn playbook_click_body_width(&self, modal: ratatui::layout::Rect) -> usize {
+        self.layout
+            .playbook_inner_area
+            .filter(|inner| inner.width > 0)
+            .map(|inner| inner.width as usize)
+            .unwrap_or_else(|| crate::ui::playbook_modal_inner_width(modal))
+    }
+
     pub(super) fn place_playbook_cursor(
         &mut self,
         modal: ratatui::layout::Rect,
         col: u16,
         row: u16,
     ) {
+        let body_width = self.playbook_click_body_width(modal);
         let cursor = {
             let app: &App = self;
             let Some(popup) = app.playbook_popup.as_ref() else {
@@ -19,6 +35,7 @@ impl App {
                 popup.scroll_offset,
                 col,
                 row,
+                body_width,
             )
             .unwrap_or(0)
         };
@@ -514,6 +531,7 @@ impl App {
         }
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                let body_width = self.playbook_click_body_width(modal);
                 let cursor = {
                     let app: &App = self;
                     let Some(popup) = app.playbook_popup.as_ref() else {
@@ -526,6 +544,7 @@ impl App {
                         popup.scroll_offset,
                         ev.column,
                         modal_row,
+                        body_width,
                     )
                     .unwrap_or(0)
                 };
@@ -567,6 +586,7 @@ impl App {
                 true
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                let body_width = self.playbook_click_body_width(modal);
                 let cursor = {
                     let app: &App = self;
                     let Some(popup) = app.playbook_popup.as_ref() else {
@@ -579,6 +599,7 @@ impl App {
                         popup.scroll_offset,
                         ev.column,
                         modal_row,
+                        body_width,
                     )
                     .unwrap_or(0)
                 };
