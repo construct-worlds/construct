@@ -251,6 +251,7 @@ enum Command {
     },
     /// Download and install the latest release (or `--version TAG`),
     /// atomically replacing the installed binaries in place.
+    #[command(alias = "update")]
     Upgrade {
         /// Install a specific release tag (e.g. v0.2.0). Default: latest.
         #[arg(long)]
@@ -1275,5 +1276,35 @@ mod tests {
             harness_and_args,
             ["claude", "--model", "opus", "--title", "raw"]
         );
+    }
+
+    #[test]
+    fn update_is_hidden_alias_for_upgrade() {
+        use clap::CommandFactory;
+
+        let cli = Cli::try_parse_from(["construct", "update", "--check", "--restart", "--version", "v0.18.0"])
+            .expect("parse construct update");
+
+        let Some(Command::Upgrade {
+            version,
+            restart,
+            check,
+            bin_dir,
+        }) = cli.command
+        else {
+            panic!("expected upgrade command from update alias");
+        };
+
+        assert_eq!(version.as_deref(), Some("v0.18.0"));
+        assert!(restart);
+        assert!(check);
+        assert_eq!(bin_dir, None);
+
+        let mut cmd = Cli::command();
+        let mut help_buf = Vec::new();
+        cmd.write_help(&mut help_buf).expect("write help");
+        let help_text = String::from_utf8(help_buf).expect("valid utf8");
+        assert!(help_text.contains("upgrade"));
+        assert!(!help_text.contains("update"));
     }
 }
