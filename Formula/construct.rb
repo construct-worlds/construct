@@ -5,7 +5,7 @@
 class Construct < Formula
   desc "Terminal-native agentic development environment"
   homepage "https://github.com/construct-worlds/construct"
-  version "0.17.12"
+  version "0.17.13"
   license "MIT"
 
   depends_on :macos
