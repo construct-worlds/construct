@@ -65,3 +65,4 @@ libc = "0.2"
 # release/cross builds do not acquire a system ALSA linkage requirement.
 [target.'cfg(target_os = "macos")'.dependencies]
 midir = { workspace = true }
+hidapi = { workspace = true, features = ["macos-shared-device"] }

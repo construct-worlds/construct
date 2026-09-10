@@ -109,6 +109,9 @@ Use `?` for help and `M-x` for the command palette. From the TUI you can create
 sessions, switch between agents, send input, inspect diffs, and interrupt or stop
 work without leaving the flow.
 
+On macOS, a [Work Louder Creator Micro 2](docs/creator-micro.md) can select six
+live sessions and mirror their idle, working, and attention state on its keys.
+
 You can also launch straight into construct by prepending `construct new` to your
 favorite CLI harness command:
 
