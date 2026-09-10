@@ -15178,8 +15178,19 @@ impl App {
             self.set_status(format!("Creator Micro session key {} is unassigned", slot + 1));
             return;
         };
-        self.select_session(session_id);
-        self.focus = PaneFocus::View;
+        if let Some(window_id) = self
+            .main_windows
+            .leaf_panes()
+            .into_iter()
+            .find_map(|(window_id, visible_id)| {
+                (visible_id == Some(session_id.as_str())).then_some(window_id)
+            })
+        {
+            self.focus_main_window(window_id);
+        } else {
+            self.select_session(session_id);
+            self.focus = PaneFocus::View;
+        }
         self.lineage_focused = false;
         self.set_vim_insert_if_captured();
         self.set_status(format!("Creator Micro selected session {}", slot + 1));
@@ -36177,6 +36188,60 @@ mod tests {
         assert_eq!(
             app.status.as_ref().map(|(message, _)| message.as_str()),
             Some("Creator Micro split key 4 is unassigned")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn creator_micro_session_key_focuses_visible_session_or_replaces_active_pane() {
+        let (mut app, _dir, server) = captured_app().await;
+        let activity_at = chrono::Utc::now();
+        for id in ["s2", "s3"] {
+            let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+            session.id = id.into();
+            session.last_event_at = Some(activity_at);
+            app.sessions.push(session);
+        }
+        if let Some(session) = app.sessions.iter_mut().find(|session| session.id == "s1") {
+            session.last_event_at = Some(activity_at);
+        }
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+        app.creator_micro_session_slots[0] = Some("s2".into());
+        app.creator_micro_session_slots[1] = Some("s3".into());
+
+        app.select_creator_micro_session(0);
+        assert_eq!(app.active_window_id, 2);
+        assert_eq!(
+            app.selection_for_window(1),
+            Some(Selection::Session("s1".into()))
+        );
+        assert_eq!(
+            app.selection_for_window(2),
+            Some(Selection::Session("s2".into()))
+        );
+
+        app.select_creator_micro_session(1);
+        assert_eq!(app.active_window_id, 2);
+        assert_eq!(
+            app.selection_for_window(1),
+            Some(Selection::Session("s1".into()))
+        );
+        assert_eq!(
+            app.selection_for_window(2),
+            Some(Selection::Session("s3".into()))
         );
         server.abort();
     }

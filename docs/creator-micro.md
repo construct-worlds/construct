@@ -47,6 +47,8 @@ user sessions. A session that remains in that set keeps its physical key even
 when its recency rank changes. When a newly active session enters a full set, it
 inherits the key vacated by the least-recent session. Subagents, operators, the
 minibuffer, and sessions with no recorded activity do not take a key.
+Pressing a session key focuses its existing split pane when it is already
+visible. Otherwise, it opens the session in the currently focused split pane.
 
 `ACT10` and `ACT11` are independent yes/no inputs. A stock wide keycap can
 actuate both switches together; use independently pressable keycaps for this

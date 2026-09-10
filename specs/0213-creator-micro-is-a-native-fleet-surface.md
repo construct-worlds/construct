@@ -17,10 +17,12 @@ in the vacated slot instead of reshuffling every surviving assignment.
 Each assigned key displays that session's state: dim blue is idle, breathing
 amber is running, and bright green needs attention. An unassigned key is off.
 Pressing an agent key selects that session in the active pane and gives its view
-keyboard focus. The four middle-row action keys focus split panes 1–4 in their
-visible ordinal order. The three bottom-row switches dispatch yes, no, and
-enter. The encoder dispatches the same scroll and focus actions as Construct's
-keyboard, mouse, and MIDI inputs.
+keyboard focus. If that session is already visible in another split pane, the
+key focuses that pane without swapping its contents; otherwise it replaces the
+session in the currently active pane. The four middle-row action keys focus
+split panes 1–4 in their visible ordinal order. The three bottom-row switches
+dispatch yes, no, and enter. The encoder dispatches the same scroll and focus
+actions as Construct's keyboard, mouse, and MIDI inputs.
 
 The integration is disabled until the user opts in. Once enabled, a sleeping or
 disconnected wireless device is retried without blocking the TUI and has a
