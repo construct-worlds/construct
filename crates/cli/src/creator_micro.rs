@@ -38,6 +38,8 @@ pub enum CreatorMicroCommand {
     Status,
     /// List connected compatible Work Louder devices.
     Devices,
+    /// Open the vendor channel and query the firmware without changing the device.
+    Probe,
     /// Enable the control surface for subsequently opened TUIs.
     Enable,
     /// Stop Construct from opening or lighting the control surface.
@@ -93,6 +95,7 @@ pub fn run(command: Option<CreatorMicroCommand>) -> Result<()> {
             print_devices()
         }
         CreatorMicroCommand::Devices => print_devices(),
+        CreatorMicroCommand::Probe => probe_device(),
         CreatorMicroCommand::Enable => {
             CreatorMicroConfig { enabled: true }.save(&path)?;
             println!("Creator Micro control enabled in {}", path.display());
@@ -222,16 +225,21 @@ fn worker_loop(
 }
 
 #[cfg(target_os = "macos")]
-fn run_connection(
-    feedback_rx: &std_mpsc::Receiver<CreatorMicroSnapshot>,
-    event_tx: &mpsc::UnboundedSender<CreatorMicroEvent>,
-    link_tx: &mpsc::UnboundedSender<CreatorMicroLinkStatus>,
-    stop: &AtomicBool,
-    snapshot: &mut CreatorMicroSnapshot,
-) -> Result<()> {
+struct OpenedCreatorMicro {
+    device: hidapi::HidDevice,
+    product: String,
+    transport: String,
+}
+
+#[cfg(target_os = "macos")]
+fn open_creator_micro() -> Result<OpenedCreatorMicro> {
     use hidapi::HidApi;
 
     let api = HidApi::new().context("initialize HID")?;
+    // Be explicit even though the dependency feature sets this during first
+    // initialization. hidapi's setting is process-global, so another caller
+    // could otherwise change it before a reconnect attempt.
+    api.set_open_exclusive(false);
     let mut candidates = api
         .device_list()
         .filter(|device| {
@@ -253,7 +261,7 @@ fn run_connection(
         .context("no Creator Micro 2 found; wake it or connect USB-C")?;
     let device = info
         .open_device(&api)
-        .context("open Creator Micro 2 non-exclusively")?;
+        .context("open Creator Micro 2 vendor channel non-exclusively")?;
     let product = info
         .product_string()
         .unwrap_or("Creator Micro 2")
@@ -266,6 +274,26 @@ fn run_connection(
         hidapi::BusType::Unknown => "unknown",
     }
     .to_string();
+    Ok(OpenedCreatorMicro {
+        device,
+        product,
+        transport,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn run_connection(
+    feedback_rx: &std_mpsc::Receiver<CreatorMicroSnapshot>,
+    event_tx: &mpsc::UnboundedSender<CreatorMicroEvent>,
+    link_tx: &mpsc::UnboundedSender<CreatorMicroLinkStatus>,
+    stop: &AtomicBool,
+    snapshot: &mut CreatorMicroSnapshot,
+) -> Result<()> {
+    let OpenedCreatorMicro {
+        device,
+        product,
+        transport,
+    } = open_creator_micro()?;
     let _ = link_tx.send(CreatorMicroLinkStatus::Connected { product, transport });
 
     let mut request_id = 1u16;
@@ -327,13 +355,18 @@ fn send_feedback(
             }
         })
         .collect::<Vec<_>>();
-    let message = serde_json::to_vec(&json!({
+    let message = json!({
         "method": "v.oai.thstatus",
         "params": params,
         "id": *request_id,
-    }))?;
+    });
     *request_id = (*request_id + 1) % 999;
+    write_rpc(device, &message).context("write Creator Micro feedback")
+}
 
+#[cfg(target_os = "macos")]
+fn write_rpc(device: &hidapi::HidDevice, message: &Value) -> Result<()> {
+    let message = serde_json::to_vec(message)?;
     let framed = [b"\r\n".as_slice(), message.as_slice(), b"\r\n".as_slice()].concat();
     for chunk in framed.chunks(MAX_PAYLOAD) {
         let mut packet = [0u8; REPORT_SIZE];
@@ -343,9 +376,71 @@ fn send_feedback(
         packet[3..3 + chunk.len()].copy_from_slice(chunk);
         device
             .write(&packet)
-            .context("write Creator Micro feedback")?;
+            .context("write Creator Micro vendor report")?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn probe_device() -> Result<()> {
+    const PROBE_ID: u64 = 991;
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+    let OpenedCreatorMicro {
+        device,
+        product,
+        transport,
+    } = open_creator_micro()?;
+    println!("opened: {product} over {transport}");
+    println!(
+        "access: {}",
+        if device.is_open_exclusive()? {
+            "exclusive"
+        } else {
+            "shared"
+        }
+    );
+    write_rpc(
+        &device,
+        &json!({"method": "sys.version", "params": Value::Null, "id": PROBE_ID}),
+    )
+    .context("send read-only firmware query")?;
+
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let mut reassembler = JsonReassembler::default();
+    let mut buffer = [0u8; REPORT_SIZE];
+    while Instant::now() < deadline {
+        let count = device
+            .read_timeout(&mut buffer, 100)
+            .context("read firmware query response")?;
+        if count < 3 || buffer[0] != REPORT_ID || buffer[1] != CHANNEL_RPC {
+            continue;
+        }
+        let payload_len = usize::from(buffer[2]);
+        if payload_len > MAX_PAYLOAD || 3 + payload_len > count {
+            continue;
+        }
+        for message in reassembler.push(&buffer[3..3 + payload_len]) {
+            if message.get("id").and_then(Value::as_u64) != Some(PROBE_ID) {
+                continue;
+            }
+            if let Some(error) = message.get("error") {
+                anyhow::bail!("firmware query failed: {error}");
+            }
+            println!(
+                "firmware: {}",
+                message.get("result").unwrap_or(&Value::Null)
+            );
+            println!("vendor channel: ready");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("timed out waiting for the firmware response")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn probe_device() -> Result<()> {
+    anyhow::bail!("native Creator Micro control is currently supported on macOS")
 }
 
 #[derive(Default)]

@@ -62,8 +62,13 @@ Micro agent lights while using it with Construct.
 
 ```sh
 construct creator-micro status
+construct creator-micro probe
 construct creator-micro disable
 ```
+
+`probe` opens the vendor channel in shared mode and makes a read-only firmware
+version request. It distinguishes enumeration, permission/ownership, write, and
+response failures without changing the device keymap or lighting.
 
 Configuration lives in `creator-micro.toml` under the config directory printed
 by `construct paths`. Disabling takes effect for newly opened TUIs; an existing
