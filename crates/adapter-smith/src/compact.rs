@@ -251,6 +251,11 @@ fn render_head_for_summarizer(head: &[Message]) -> String {
                 out.push_str(text.trim());
                 out.push_str("\n\n");
             }
+            (Role::User, Content::UserInput { text, images }) => {
+                out.push_str("USER: ");
+                out.push_str(text.trim());
+                out.push_str(&format!("\n[{} image attachment(s)]\n\n", images.len()));
+            }
             (_, Content::AssistantToolCalls { text, calls }) => {
                 if let Some(t) = text {
                     if !t.is_empty() {
@@ -303,6 +308,11 @@ fn render_head_for_summarizer(head: &[Message]) -> String {
                 out.push_str("OTHER: ");
                 out.push_str(text.trim());
                 out.push_str("\n\n");
+            }
+            (Role::System | Role::Assistant | Role::Tool, Content::UserInput { text, images }) => {
+                out.push_str("OTHER: ");
+                out.push_str(text.trim());
+                out.push_str(&format!("\n[{} image attachment(s)]\n\n", images.len()));
             }
         }
     }

@@ -9,6 +9,7 @@ mod agent;
 mod compact;
 mod context;
 mod hooks;
+mod image_input;
 mod interactive;
 mod interval_suggest;
 mod model_limits;

@@ -126,6 +126,13 @@ fn messages_to_ollama(system: &str, messages: &[Message]) -> Vec<Value> {
             Content::Text { text } => {
                 out.push(json!({ "role": role_str(m.role), "content": text }));
             }
+            Content::UserInput { text, images } => {
+                out.push(json!({
+                    "role": "user",
+                    "content": text,
+                    "images": images.iter().map(|image| image.data.as_str()).collect::<Vec<_>>(),
+                }));
+            }
             Content::AssistantToolCalls { text, calls } => {
                 let tc: Vec<Value> = calls
                     .iter()
@@ -188,6 +195,10 @@ fn tools_to_ollama(tools: &[ToolSpec]) -> Vec<Value> {
 impl LlmProvider for Ollama {
     fn name(&self) -> &str {
         "ollama"
+    }
+
+    fn supports_image_input(&self) -> bool {
+        true
     }
 
     async fn effective_context_window_tokens(&self, model: &str) -> Option<u64> {
@@ -328,6 +339,27 @@ impl LlmProvider for Ollama {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ImageInput;
+
+    #[test]
+    fn maps_user_images_to_ollama_images_array() {
+        let messages = messages_to_ollama(
+            "",
+            &[Message {
+                role: Role::User,
+                content: Content::UserInput {
+                    text: "inspect".into(),
+                    images: vec![ImageInput {
+                        media_type: "image/png".into(),
+                        data: "YWJj".into(),
+                        source: None,
+                    }],
+                },
+            }],
+        );
+        assert_eq!(messages[0]["content"], "inspect");
+        assert_eq!(messages[0]["images"], json!(["YWJj"]));
+    }
 
     #[test]
     fn ps_context_matches_implicit_latest_name() {

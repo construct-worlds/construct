@@ -156,6 +156,10 @@ impl LlmProvider for AntigravityOauth {
         "antigravity-oauth"
     }
 
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+
     async fn complete(
         &self,
         model: &str,
@@ -297,6 +301,21 @@ fn messages_to_antigravity(messages: &[Message]) -> Vec<Value> {
                     Role::System => unreachable!(),
                 };
                 out.push(json!({ "role": role, "parts": [{ "text": text }] }));
+            }
+            (_, Content::UserInput { text, images }) => {
+                let mut parts = Vec::with_capacity(images.len() + 1);
+                if !text.is_empty() {
+                    parts.push(json!({ "text": text }));
+                }
+                parts.extend(images.iter().map(|image| {
+                    json!({
+                        "inlineData": {
+                            "mimeType": image.media_type,
+                            "data": image.data,
+                        }
+                    })
+                }));
+                out.push(json!({ "role": "user", "parts": parts }));
             }
             (_, Content::AssistantToolCalls { text, calls }) => {
                 let mut parts: Vec<Value> = Vec::new();

@@ -65,6 +65,23 @@ pub(crate) fn messages_to_anthropic(messages: &[Message]) -> Vec<Value> {
                 };
                 out.push(json!({ "role": role, "content": text }));
             }
+            (_, Content::UserInput { text, images }) => {
+                let mut blocks = Vec::with_capacity(images.len() + 1);
+                if !text.is_empty() {
+                    blocks.push(json!({ "type": "text", "text": text }));
+                }
+                blocks.extend(images.iter().map(|image| {
+                    json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image.media_type,
+                            "data": image.data,
+                        }
+                    })
+                }));
+                out.push(json!({ "role": "user", "content": blocks }));
+            }
             (_, Content::AssistantToolCalls { text, calls }) => {
                 let mut blocks: Vec<Value> = Vec::with_capacity(calls.len() + 1);
                 if let Some(t) = text {
@@ -303,6 +320,10 @@ impl LlmProvider for Anthropic {
         "anthropic"
     }
 
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+
     async fn complete(
         &self,
         model: &str,
@@ -357,4 +378,30 @@ enum BlockKind {
     /// Streamed via `thinking_delta` content-block deltas; we route
     /// these to `TextSink::reasoning_delta` instead of `delta`.
     Thinking,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::ImageInput;
+
+    #[test]
+    fn user_images_use_anthropic_source_blocks() {
+        let wire = messages_to_anthropic(&[Message {
+            role: Role::User,
+            content: Content::UserInput {
+                text: "inspect".into(),
+                images: vec![ImageInput {
+                    media_type: "image/jpeg".into(),
+                    data: "YWJj".into(),
+                    source: None,
+                }],
+            },
+        }]);
+        assert_eq!(wire[0]["content"][0]["type"], "text");
+        assert_eq!(wire[0]["content"][1]["type"], "image");
+        assert_eq!(wire[0]["content"][1]["source"]["type"], "base64");
+        assert_eq!(wire[0]["content"][1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(wire[0]["content"][1]["source"]["data"], "YWJj");
+    }
 }

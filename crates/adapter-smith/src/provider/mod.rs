@@ -39,11 +39,35 @@ pub struct Message {
     pub content: Content,
 }
 
+/// One image snapshot attached to a user turn. `data` is unwrapped base64 so
+/// every provider can place it in its native content-block shape. `source` is
+/// retained for diagnostics/transcript persistence but is never sent as image
+/// bytes by itself, so replay does not depend on the source file still existing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageInput {
+    pub media_type: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+impl ImageInput {
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.data)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Content {
     /// Plain text (system / user / assistant).
     Text { text: String },
+    /// A user turn with one or more local image snapshots. The original text
+    /// remains intact for transcript display and provider context.
+    UserInput {
+        text: String,
+        images: Vec<ImageInput>,
+    },
     /// Assistant turn that's making tool calls. May also include final
     /// pre-tool prose (`text`) that comes before the calls.
     AssistantToolCalls {
@@ -76,6 +100,32 @@ pub enum Content {
     /// `id` + `encrypted_content` for prompt caching and reasoning
     /// continuity; providers that don't support it skip this variant.
     Reasoning(ReasoningItem),
+}
+
+impl Content {
+    pub fn has_images(&self) -> bool {
+        matches!(self, Self::UserInput { images, .. } if !images.is_empty())
+    }
+}
+
+/// Reject multimodal content before any provider request when the selected
+/// wire cannot represent it. Validation covers both the pending user turn and
+/// existing history, including a resumed/image-bearing conversation switched
+/// to a text-only provider.
+pub fn ensure_image_input_supported(
+    provider: &dyn LlmProvider,
+    messages: &[Message],
+    pending: Option<&Content>,
+) -> Result<()> {
+    let has_images =
+        pending.is_some_and(Content::has_images) || messages.iter().any(|m| m.content.has_images());
+    if provider.supports_image_input() || !has_images {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} does not support image input; switch to an image-capable Smith provider or use /reset before continuing",
+        provider.name()
+    )
 }
 
 /// A reasoning item captured from a Responses-API turn and replayed on the
@@ -459,6 +509,13 @@ mod overflow_tests {
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
+
+    /// Whether this wire implementation can represent image content. A model
+    /// behind a capable wire may still reject vision; that provider response
+    /// remains the authoritative model-level error.
+    fn supports_image_input(&self) -> bool {
+        false
+    }
 
     /// Return the context window the provider will actually use for this
     /// model, when it exposes that runtime value. Providers whose effective

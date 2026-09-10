@@ -27,5 +27,5 @@ Muse Spark 1.1 advertises a one-million-token context window, so Smith starts wi
 
 ## Non-Goals
 
-- Meta-hosted search, media inputs, and other provider-native tools are not exposed by this initial integration.
+- Meta-hosted search and provider-native tools are not exposed by this integration. User image content follows Smith's cross-provider image-input contract.
 - Reasoning traces are not surfaced or persisted unless Meta exposes a replayable and user-visible reasoning format.

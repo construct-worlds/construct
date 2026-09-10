@@ -229,6 +229,10 @@ impl LlmProvider for KimiOauth {
         "kimi-oauth"
     }
 
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+
     async fn complete(
         &self,
         model: &str,

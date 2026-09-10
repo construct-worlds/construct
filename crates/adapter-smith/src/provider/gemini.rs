@@ -74,6 +74,21 @@ fn messages_to_gemini(messages: &[Message]) -> Vec<Value> {
                 };
                 out.push(json!({ "role": role, "parts": [{ "text": text }] }));
             }
+            (_, Content::UserInput { text, images }) => {
+                let mut parts = Vec::with_capacity(images.len() + 1);
+                if !text.is_empty() {
+                    parts.push(json!({ "text": text }));
+                }
+                parts.extend(images.iter().map(|image| {
+                    json!({
+                        "inlineData": {
+                            "mimeType": image.media_type,
+                            "data": image.data,
+                        }
+                    })
+                }));
+                out.push(json!({ "role": "user", "parts": parts }));
+            }
             (_, Content::AssistantToolCalls { text, calls }) => {
                 let mut parts: Vec<Value> = Vec::with_capacity(calls.len() + 1);
                 if let Some(t) = text {
@@ -147,6 +162,10 @@ fn tools_to_gemini(tools: &[ToolSpec]) -> Value {
 impl LlmProvider for Gemini {
     fn name(&self) -> &str {
         "gemini"
+    }
+
+    fn supports_image_input(&self) -> bool {
+        true
     }
 
     async fn complete(
@@ -305,6 +324,28 @@ impl LlmProvider for Gemini {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ImageInput;
+
+    #[test]
+    fn maps_user_images_to_inline_data_parts() {
+        let contents = messages_to_gemini(&[Message {
+            role: Role::User,
+            content: Content::UserInput {
+                text: "inspect".into(),
+                images: vec![ImageInput {
+                    media_type: "image/webp".into(),
+                    data: "YWJj".into(),
+                    source: None,
+                }],
+            },
+        }]);
+        assert_eq!(contents[0]["parts"][0]["text"], "inspect");
+        assert_eq!(
+            contents[0]["parts"][1]["inlineData"]["mimeType"],
+            "image/webp"
+        );
+        assert_eq!(contents[0]["parts"][1]["inlineData"]["data"], "YWJj");
+    }
 
     #[test]
     fn maps_roles_and_tool_round_trip() {

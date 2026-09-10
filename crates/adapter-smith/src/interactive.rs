@@ -2592,6 +2592,28 @@ pub async fn run(
             }
         }
 
+        let user_content = match crate::image_input::user_content(user_text.clone(), &cwd) {
+            Ok(content) => content,
+            Err(e) => {
+                let message = format!("image input error: {e:#}");
+                term.note(&format!("({message})"));
+                emit.emit(SessionEvent::Error { message });
+                emit_editor_state(&emit, &editor, &queue);
+                continue;
+            }
+        };
+        if let Err(e) = provider::ensure_image_input_supported(
+            provider.as_ref(),
+            &messages,
+            Some(&user_content),
+        ) {
+            let message = e.to_string();
+            term.note(&format!("({message})"));
+            emit.emit(SessionEvent::Error { message });
+            emit_editor_state(&emit, &editor, &queue);
+            continue;
+        }
+
         hooks
             .run(
                 "user_prompt_submit",
@@ -2609,9 +2631,7 @@ pub async fn run(
             persist,
             Message {
                 role: Role::User,
-                content: Content::Text {
-                    text: user_text.clone()
-                },
+                content: user_content,
             }
         );
         // Echo an OBSERVATION trigger into the panel (dim) before the response

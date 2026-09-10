@@ -741,6 +741,22 @@ fn message_to_input_items(m: &Message) -> Vec<Value> {
                 "content": [{ "type": typ, "text": text }],
             })]
         }
+        Content::UserInput { text, images } => {
+            let mut content = Vec::with_capacity(images.len() + 1);
+            if !text.is_empty() {
+                content.push(json!({ "type": "input_text", "text": text }));
+            }
+            content.extend(
+                images
+                    .iter()
+                    .map(|image| json!({ "type": "input_image", "image_url": image.data_url() })),
+            );
+            vec![json!({
+                "type": "message",
+                "role": "user",
+                "content": content,
+            })]
+        }
         Content::AssistantToolCalls { text, calls } => {
             let mut out = Vec::with_capacity(calls.len() + 1);
             if let Some(t) = text.as_deref().filter(|t| !t.is_empty()) {
@@ -891,6 +907,10 @@ struct FnCallAcc {
 impl LlmProvider for CodexOauth {
     fn name(&self) -> &str {
         "codex-oauth"
+    }
+
+    fn supports_image_input(&self) -> bool {
+        true
     }
 
     async fn complete(
@@ -1577,6 +1597,33 @@ mod tests {
         // disliked empty arrays here).
         assert!(body.get("tools").is_none());
         assert!(body.get("parallel_tool_calls").is_none());
+    }
+
+    #[test]
+    fn build_body_emits_responses_image_shape() {
+        let body = build_responses_body(
+            "gpt-5-codex",
+            "system",
+            &[Message {
+                role: Role::User,
+                content: Content::UserInput {
+                    text: "inspect".into(),
+                    images: vec![crate::provider::ImageInput {
+                        media_type: "image/png".into(),
+                        data: "YWJj".into(),
+                        source: Some("/tmp/not-sent.png".into()),
+                    }],
+                },
+            }],
+            &[],
+        );
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(body["input"][0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            body["input"][0]["content"][1]["image_url"],
+            "data:image/png;base64,YWJj"
+        );
+        assert!(!body.to_string().contains("not-sent.png"));
     }
 
     /// Construct injects one stable session id into the Smith adapter
