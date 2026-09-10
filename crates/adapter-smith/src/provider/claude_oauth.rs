@@ -372,6 +372,10 @@ impl LlmProvider for ClaudeOauth {
         if !tools.is_empty() {
             body["tools"] = Value::Array(super::anthropic::tools_to_anthropic(tools));
         }
+        // Claude Code's first-party endpoint supports Anthropic prompt-cache
+        // directives. Keep compatible providers (for example Kimi's shared
+        // wire helpers) unchanged by applying them only on this request path.
+        super::anthropic::apply_cache_control(&mut body);
 
         let resp = self
             .http

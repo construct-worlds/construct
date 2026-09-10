@@ -1987,6 +1987,7 @@ pub async fn run(
     let fixed_context_tokens = prompt_sections.fixed_tokens(&specs);
     let mut provider_context_window = None;
     let mut provider_context_checked = false;
+    let mut input_tokens = context::InputTokenCounter::default();
 
     let term = Terminal::new(&emit);
     let resuming = persist::is_resume();
@@ -2380,6 +2381,7 @@ pub async fn run(
                                         model = new_model;
                                         provider_context_window = None;
                                         provider_context_checked = false;
+                                        input_tokens.reset();
                                         term.note(&format!("(model → {}:{})", display_name, model));
                                         emit.emit(SessionEvent::Status {
                                             state: SessionState::Running,
@@ -2397,6 +2399,7 @@ pub async fn run(
                         }
                         CommandId::Reset => {
                             messages.clear();
+                            input_tokens.reset();
                             if let Some(p) = persist.as_mut() {
                                 p.reset();
                             }
@@ -2575,6 +2578,7 @@ pub async fn run(
                     provider = resolved.provider;
                     provider_context_window = None;
                     provider_context_checked = false;
+                    input_tokens.reset();
                     model_ready = true;
                     term.note(&format!("(model configured: {display_name}:{model})"));
                     emit.emit(SessionEvent::Status {
@@ -2669,11 +2673,11 @@ pub async fn run(
             }
             let hardcoded_cap = context::context_window_tokens(provider_name, &model);
             let learned = limits.get(provider_name, &model);
-            let est =
-                fixed_context_tokens.saturating_add(context::estimate_tokens(&messages) as u64);
+            let preflight_tokens =
+                context::preflight_input_tokens(&input_tokens, fixed_context_tokens, &messages);
             let is_probe = provider_context_window.is_none()
                 && learned.is_some()
-                && limits.should_probe(provider_name, &model, est, now_ms);
+                && limits.should_probe(provider_name, &model, preflight_tokens, now_ms);
             let effective_cap = provider_context_window
                 .or(learned)
                 .unwrap_or(hardcoded_cap as u64);
@@ -2682,7 +2686,7 @@ pub async fn run(
             } else {
                 context::UTILIZATION
             };
-            let budget = context::message_budget(effective_cap, utilization, fixed_context_tokens);
+            let budget = (effective_cap as f64 * utilization) as u64;
             // Auto-compact pass before the destructive rolling prune.
             // We try this first so historical context survives as a
             // summary instead of vanishing. On any failure (provider
@@ -2693,7 +2697,7 @@ pub async fn run(
                 match crate::compact::maybe_auto_compact(
                     &mut messages,
                     effective_cap,
-                    fixed_context_tokens,
+                    preflight_tokens,
                     provider.as_ref(),
                     &model,
                 )
@@ -2724,9 +2728,17 @@ pub async fn run(
                     }
                 }
             }
-            if context::prune_to_budget(&mut messages, budget) > 0 {
+            if context::prune_to_input_budget(
+                &mut messages,
+                budget,
+                fixed_context_tokens,
+                &input_tokens,
+            ) > 0
+            {
                 crate::agent::reset_context_serve(&tool_ctx);
             }
+            let mut sent_heuristic_tokens =
+                fixed_context_tokens.saturating_add(context::estimate_tokens(&messages) as u64);
             let mut sink = PtySink::new(&emit, pty_width, turn_started_at_ms);
             // Wrap the provider call so user typing during the
             // stream is fed to the editor and pressed-Enter lines
@@ -2774,14 +2786,18 @@ pub async fn run(
                             effective_cap,
                             now_ms,
                         );
-                        let retry_budget = context::message_budget(
-                            new_limit,
-                            context::UTILIZATION,
+                        let retry_budget = (new_limit as f64 * context::UTILIZATION) as u64;
+                        if context::prune_to_input_budget(
+                            &mut messages,
+                            retry_budget,
                             fixed_context_tokens,
-                        );
-                        if context::prune_to_budget(&mut messages, retry_budget) > 0 {
+                            &input_tokens,
+                        ) > 0
+                        {
                             crate::agent::reset_context_serve(&tool_ctx);
                         }
+                        sent_heuristic_tokens = fixed_context_tokens
+                            .saturating_add(context::estimate_tokens(&messages) as u64);
                         term.note(&format!(
                             "(context overflow — relearned cap as {} tokens, retrying)",
                             new_limit
@@ -2870,6 +2886,7 @@ pub async fn run(
                     break;
                 }
             };
+            input_tokens.record(turn.usage.input_tokens, sent_heuristic_tokens);
             // Record the call so probe state advances (and the learned
             // limit grows on a probe that pushed past the prior cap).
             limits.record_call(
@@ -2882,16 +2899,16 @@ pub async fn run(
             );
             emit.emit(SessionEvent::Cost {
                 usd: turn.usage.usd,
-                tokens_in: turn.usage.input_tokens,
+                tokens_in: turn.usage.input_tokens_or_zero(),
                 tokens_out: turn.usage.output_tokens,
                 tokens_cached: turn.usage.cached_tokens,
                 model: current_model_spec.clone(),
             });
             // Context gauge (spec 0104): prefer a provider-reported runtime
             // allocation; otherwise retain Smith's learned/static fallback.
-            if turn.usage.input_tokens > 0 {
+            if let Some(reported_input_tokens) = turn.usage.input_tokens {
                 emit.emit(SessionEvent::ContextUsage {
-                    used_tokens: turn.usage.input_tokens,
+                    used_tokens: reported_input_tokens,
                     window_tokens: Some(effective_cap),
                 });
                 // Per-component detail behind the gauge (spec 0156) — all

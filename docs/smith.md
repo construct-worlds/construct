@@ -131,6 +131,10 @@ Each `[smith.models.<name>]` entry sets:
   `api_key = "..."` inline (discouraged). If neither is set, the protocol's
   standard key env var is used (`OPENAI_API_KEY`, etc.).
 - `model` — default model name; override per call with `@<name>:<model>`.
+- Anthropic profiles may also set `anthropic_cache_control = true|false`,
+  `anthropic_betas = ["..."]`, and
+  `anthropic_context_window_tokens = 1000000`. Cache control defaults on only
+  for the public Anthropic endpoint; compatible gateways must opt in.
 
 None of the direct-API-key providers needs a profile — the key plus the
 `<provider>:` prefix already reaches its public endpoint, and the same key
@@ -160,6 +164,14 @@ model       = "grok-4.6"
 provider    = "meta"
 api_key_env = "META_API_KEY"
 model       = "muse-spark-1.1"
+
+[smith.models.claude-long]
+provider    = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+model       = "claude-sonnet-4-6"
+anthropic_cache_control = true
+anthropic_betas = ["context-1m-2025-08-07"]
+anthropic_context_window_tokens = 1000000
 ```
 
 ```text
@@ -281,16 +293,31 @@ window.
 
 Smith automatically manages context budget through two layers:
 
-- **Auto-compaction**: When estimated tokens reach 65% of the model's effective
-  context window (`AUTO_COMPACT_RATIO = 0.65`), Smith requests a structured
-  summary of older history and prepends a `[Compacted earlier context]` turn,
-  preserving recent turn pairs verbatim (`DEFAULT_KEEP_PAIRS = 4`). You can also
-  trigger manual compaction anytime with `/compact [N]`. Auto-compaction is enabled
-  by default; disable with `CONSTRUCT_SMITH_AUTO_COMPACT=off` (or `0`/`false`).
+- **Auto-compaction**: When the provider-anchored preflight count reaches 65%
+  of the model's effective context window (`AUTO_COMPACT_RATIO = 0.65`), Smith
+  requests a structured summary of older history and prepends a
+  `[Compacted earlier context]` turn, preserving recent turn pairs verbatim
+  (`DEFAULT_KEEP_PAIRS = 4`). You can also trigger manual compaction anytime
+  with `/compact [N]`. Auto-compaction is enabled by default; disable with
+  `CONSTRUCT_SMITH_AUTO_COMPACT=off` (or `0`/`false`).
 - **Rolling prune**: If context exceeds 70% utilization (`UTILIZATION = 0.70`),
   the oldest turn pairs are pruned, always keeping at least the two most-recent
   turn pairs. Smith learns and persists runtime limits when providers report
   overflow errors (spec 0070).
+
+After each response, the provider's input-token count is authoritative. Before
+the next request, Smith adds only a character-estimated delta for content added
+or removed since that report. Before the first report (including after resume),
+or when a provider omits usage, the whole request uses the character estimate
+as a preflight fallback. Smith starts Muse Spark 1.1 with its advertised
+one-million-token input window and retains the normal runtime limit-learning
+fallback.
+
+First-party Anthropic API-key and Claude OAuth requests add prompt-cache
+breakpoints to the stable system/tool prefix and recent user boundaries. Known
+Claude Sonnet 4 models on the public API also enable Anthropic's one-million-
+token context beta automatically; set the Anthropic capability options on a
+named profile for a new model or compatible endpoint.
 
 ### Ambient features that use smith
 
@@ -326,6 +353,12 @@ notice in the status bar that opens `/configure`.
   browser tools.
 - `CONSTRUCT_SMITH_AUTO_COMPACT=off` — disable auto-compaction before rolling
   prune.
+- `CONSTRUCT_SMITH_ANTHROPIC_CACHE_CONTROL=on|off` — override prompt-cache
+  breakpoints for the built-in Anthropic API-key provider.
+- `CONSTRUCT_SMITH_ANTHROPIC_BETAS=<beta,...>` — add comma-separated
+  `anthropic-beta` capabilities to the built-in Anthropic provider.
+- `CONSTRUCT_SMITH_ANTHROPIC_CONTEXT_WINDOW_TOKENS=<count>` — declare its
+  effective input window (for example `1000000`).
 - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`),
   `META_API_KEY` (or `MODEL_API_KEY`), `GROK_API_KEY` (or `XAI_API_KEY`),
   `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY` — API keys for each supported

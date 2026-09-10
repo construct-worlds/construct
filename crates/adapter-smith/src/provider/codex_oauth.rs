@@ -515,10 +515,9 @@ impl CodexOauth {
                 }
                 "response.completed" | "response.incomplete" | "response.failed" => {
                     if let Some(u) = chunk.pointer("/response/usage") {
-                        usage.input_tokens = u
-                            .get("input_tokens")
-                            .and_then(|n| n.as_u64())
-                            .unwrap_or(usage.input_tokens);
+                        if let Some(n) = u.get("input_tokens").and_then(|n| n.as_u64()) {
+                            usage.input_tokens = Some(n);
+                        }
                         usage.output_tokens = u
                             .get("output_tokens")
                             .and_then(|n| n.as_u64())
@@ -1188,10 +1187,9 @@ impl LlmProvider for CodexOauth {
                 "response.completed" | "response.incomplete" | "response.failed" => {
                     terminal_event_seen = true;
                     if let Some(u) = chunk.pointer("/response/usage") {
-                        usage.input_tokens = u
-                            .get("input_tokens")
-                            .and_then(|n| n.as_u64())
-                            .unwrap_or(usage.input_tokens);
+                        if let Some(n) = u.get("input_tokens").and_then(|n| n.as_u64()) {
+                            usage.input_tokens = Some(n);
+                        }
                         usage.output_tokens = u
                             .get("output_tokens")
                             .and_then(|n| n.as_u64())

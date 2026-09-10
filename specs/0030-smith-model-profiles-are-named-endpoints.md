@@ -14,6 +14,12 @@ referenced with an explicit `@<name>` prefix (optionally `@<name>:<model>` to
 override the model), usable anywhere a model spec is accepted — `--model`,
 `CONSTRUCT_SMITH_MODEL`, and the `/model` slash command.
 
+Profiles may also carry protocol-scoped endpoint capabilities that cannot be
+inferred from wire compatibility alone. Anthropic profiles can declare prompt
+cache-control support, beta headers, and an effective context window. These
+settings affect Smith's native provider only; routing may ignore capabilities
+that its own translation layer does not implement.
+
 Profiles exist so that multiple distinct endpoints — including several
 OpenAI-compatible vendors plus the first-party API — can coexist in a single
 session and be switched at runtime, which the single per-protocol base-URL env
@@ -46,6 +52,9 @@ endpoint's URL and credential declared in one place.
   can differ between machines with different `config.toml` files. Resolution
   failures (missing profile, missing key, unknown provider) must report
   actionable errors rather than silently falling back to a different endpoint.
+- Provider-specific capabilities must be opt-in for compatible third-party
+  endpoints. Sharing a wire dialect does not prove support for first-party
+  request fields or beta headers.
 
 ## Non-Goals
 
@@ -69,6 +78,14 @@ provider    = "openai"
 base_url    = "https://api.groq.com/openai/v1"
 api_key_env = "GROQ_API_KEY"
 model       = "llama-3.3-70b-versatile"
+
+[smith.models.claude-long]
+provider    = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+model       = "claude-sonnet-4-6"
+anthropic_cache_control = true
+anthropic_betas = ["context-1m-2025-08-07"]
+anthropic_context_window_tokens = 1000000
 ```
 
 In one session: `/model openai:gpt-5` reaches first-party OpenAI, then

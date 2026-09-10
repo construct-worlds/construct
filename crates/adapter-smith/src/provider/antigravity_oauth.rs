@@ -260,7 +260,7 @@ impl LlmProvider for AntigravityOauth {
             }
             if let Some(u) = v.get("usageMetadata") {
                 if let Some(n) = u.get("promptTokenCount").and_then(|n| n.as_u64()) {
-                    usage.input_tokens = n;
+                    usage.input_tokens = Some(n);
                 }
                 if let Some(n) = u.get("candidatesTokenCount").and_then(|n| n.as_u64()) {
                     usage.output_tokens = n;

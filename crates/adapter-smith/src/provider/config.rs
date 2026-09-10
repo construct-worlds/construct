@@ -55,6 +55,17 @@ pub struct ModelProfile {
     /// `@<name>:<model>`.
     #[serde(default)]
     pub model: Option<String>,
+    /// Anthropic-only: override prompt-cache breakpoints. Public Anthropic
+    /// endpoints default on; compatible gateways default off.
+    #[serde(default)]
+    pub anthropic_cache_control: Option<bool>,
+    /// Anthropic-only beta capabilities to send in `anthropic-beta`.
+    #[serde(default)]
+    pub anthropic_betas: Vec<String>,
+    /// Anthropic-only effective input window. Useful for newly released
+    /// large-context models and compatible gateways Smith cannot identify.
+    #[serde(default)]
+    pub anthropic_context_window_tokens: Option<u64>,
 }
 
 /// Only the `[smith]` table is deserialized; every other top-level key in
@@ -118,6 +129,9 @@ mod tests {
         assert_eq!(p.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
         assert_eq!(p.model.as_deref(), Some("deepseek-chat"));
         assert!(p.api_key.is_none());
+        assert!(p.anthropic_cache_control.is_none());
+        assert!(p.anthropic_betas.is_empty());
+        assert!(p.anthropic_context_window_tokens.is_none());
     }
 
     #[test]
@@ -171,5 +185,22 @@ mod tests {
         assert_eq!(models.len(), 2);
         assert!(models.contains_key("deepseek"));
         assert!(models.contains_key("groq"));
+    }
+
+    #[test]
+    fn parses_anthropic_capabilities() {
+        let toml = r#"
+            [smith.models.claude-long]
+            provider = "anthropic"
+            model = "claude-sonnet-4-6"
+            anthropic_cache_control = true
+            anthropic_betas = ["context-1m-2025-08-07", "example-beta"]
+            anthropic_context_window_tokens = 1000000
+        "#;
+        let models = parse(toml).expect("parse");
+        let p = models.get("claude-long").expect("profile");
+        assert_eq!(p.anthropic_cache_control, Some(true));
+        assert_eq!(p.anthropic_betas, ["context-1m-2025-08-07", "example-beta"]);
+        assert_eq!(p.anthropic_context_window_tokens, Some(1_000_000));
     }
 }
