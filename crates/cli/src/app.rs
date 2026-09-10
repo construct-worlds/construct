@@ -2647,6 +2647,9 @@ pub struct App {
     /// the feedback loop reports (or when no OP-XY profile is enabled — the
     /// indicator only renders once a report arrives), then `Some(connected)`.
     pub op_xy_link_connected: Option<bool>,
+    /// Native Work Louder surface link state. `None` means the opt-in surface
+    /// is disabled; enabled surfaces report a filled or hollow modeline dot.
+    pub creator_micro_link_connected: Option<bool>,
     /// Ambient Matrix-rain panel state for empty rows in the session list.
     pub matrix_rain: crate::matrix_rain::MatrixRain,
     /// Smoothed 0..1 foreground intensity for Matrix rain. The render path
@@ -5940,6 +5943,7 @@ async fn run_with_socket_initial_selection(
         image_resize_cache: Vec::new(),
         session_transitions: HashMap::new(),
         op_xy_link_connected: None,
+        creator_micro_link_connected: None,
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
         matrix_rain_intensity: 0.0,
         matrix_rain_intensity_updated_at: now,
@@ -6208,6 +6212,17 @@ async fn run_loop(
             (None, None)
         }
     };
+    let (creator_micro, mut creator_micro_rx, mut creator_micro_link_rx) =
+        match crate::creator_micro::start_surface() {
+            Ok(Some((surface, event_rx, link_rx))) => {
+                (Some(surface), Some(event_rx), Some(link_rx))
+            }
+            Ok(None) => (None, None, None),
+            Err(e) => {
+                app.set_status(format!("Creator Micro disabled: {e}"));
+                (None, None, None)
+            }
+        };
     let mut notifications = app
         .client
         .take_notifications()
@@ -6697,6 +6712,44 @@ async fn run_loop(
                     None => midi_link_rx = None,
                 }
             }
+            event = async {
+                match creator_micro_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => futures::future::pending().await,
+                }
+            }, if creator_micro_rx.is_some() => {
+                match event {
+                    Some(crate::creator_micro::CreatorMicroEvent::Session(slot)) => {
+                        app.select_creator_micro_session(slot);
+                    }
+                    Some(crate::creator_micro::CreatorMicroEvent::Enter) => {
+                        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+                    }
+                    Some(crate::creator_micro::CreatorMicroEvent::Approve) => {
+                        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).await;
+                    }
+                    Some(crate::creator_micro::CreatorMicroEvent::Reject) => {
+                        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)).await;
+                    }
+                    Some(crate::creator_micro::CreatorMicroEvent::Action(action)) => {
+                        if let Some(key_action) = action.key_action() {
+                            app.run_action(key_action).await;
+                        }
+                    }
+                    None => creator_micro_rx = None,
+                }
+            }
+            status = async {
+                match creator_micro_link_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => futures::future::pending().await,
+                }
+            }, if creator_micro_link_rx.is_some() => {
+                match status {
+                    Some(status) => app.apply_creator_micro_link_status(status),
+                    None => creator_micro_link_rx = None,
+                }
+            }
             hydrated = hydration_tasks.join_next(), if !hydration_tasks.is_empty() => {
                 match hydrated {
                     Some(Ok((id, Ok(h)))) => {
@@ -7044,6 +7097,9 @@ async fn run_loop(
         if let Some(feedback) = midi_feedback.as_ref() {
             feedback.update(app.op_xy_feedback_snapshot(feedback.aggregate_scope()));
         }
+        if let Some(surface) = creator_micro.as_ref() {
+            surface.update(app.creator_micro_snapshot());
+        }
     }
     Ok(())
 }
@@ -7166,6 +7222,37 @@ fn op_xy_slot_state_masks(sessions: &[SessionSummary], slots: &[Option<String>])
                 },
             )
         })
+}
+
+fn creator_micro_session_slots(sessions: &[SessionSummary]) -> Vec<String> {
+    sessions
+        .iter()
+        .filter(|session| !session.archived && is_user_list_session(session))
+        .take(6)
+        .map(|session| session.id.clone())
+        .collect()
+}
+
+fn creator_micro_snapshot_for_sessions(
+    sessions: &[SessionSummary],
+) -> crate::creator_micro::CreatorMicroSnapshot {
+    use construct_protocol::SessionState;
+    let slots = creator_micro_session_slots(sessions);
+    let mut snapshot = crate::creator_micro::CreatorMicroSnapshot::default();
+    for (slot, session_id) in slots.iter().enumerate() {
+        let bit = 1 << slot;
+        snapshot.assigned |= bit;
+        let Some(session) = sessions.iter().find(|session| session.id == *session_id) else {
+            continue;
+        };
+        if matches!(session.state, SessionState::Pending | SessionState::Running) {
+            snapshot.active |= bit;
+        }
+        if session.needs_attention {
+            snapshot.attention |= bit;
+        }
+    }
+    snapshot
 }
 
 impl App {
@@ -15002,6 +15089,46 @@ impl App {
         }
     }
 
+    pub(crate) fn apply_creator_micro_link_status(
+        &mut self,
+        status: crate::creator_micro::CreatorMicroLinkStatus,
+    ) {
+        let connected = matches!(
+            status,
+            crate::creator_micro::CreatorMicroLinkStatus::Connected { .. }
+        );
+        if self.creator_micro_link_connected == Some(connected) {
+            return;
+        }
+        self.creator_micro_link_connected = Some(connected);
+        match status {
+            crate::creator_micro::CreatorMicroLinkStatus::Connected { product, transport } => {
+                self.set_status(format!("Creator Micro connected: {product} over {transport}"));
+            }
+            crate::creator_micro::CreatorMicroLinkStatus::Disconnected => {
+                self.set_status("Creator Micro disconnected: waiting for the device".into());
+            }
+        }
+    }
+
+    pub(crate) fn select_creator_micro_session(&mut self, slot: usize) {
+        let Some(session_id) = creator_micro_session_slots(&self.sessions).get(slot).cloned() else {
+            self.set_status(format!("Creator Micro session key {} is unassigned", slot + 1));
+            return;
+        };
+        self.select_session(session_id);
+        self.focus = PaneFocus::View;
+        self.lineage_focused = false;
+        self.set_vim_insert_if_captured();
+        self.set_status(format!("Creator Micro selected session {}", slot + 1));
+    }
+
+    pub(crate) fn creator_micro_snapshot(
+        &self,
+    ) -> crate::creator_micro::CreatorMicroSnapshot {
+        creator_micro_snapshot_for_sessions(&self.sessions)
+    }
+
     pub(crate) fn op_xy_feedback_snapshot(
         &self,
         aggregate_scope: crate::midi::OpXyAggregateScope,
@@ -18133,6 +18260,7 @@ mod tests {
             image_resize_cache: Vec::new(),
             session_transitions: HashMap::new(),
             op_xy_link_connected: None,
+            creator_micro_link_connected: None,
             matrix_rain: crate::matrix_rain::MatrixRain::default(),
             matrix_rain_intensity: 0.0,
             matrix_rain_intensity_updated_at: now,
@@ -18339,6 +18467,49 @@ mod tests {
             forked_from: None,
             merge: None,
         }
+    }
+
+    #[test]
+    fn creator_micro_slots_follow_live_user_list_order() {
+        let mut sessions = (0..8)
+            .map(|index| {
+                let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+                session.id = format!("s{index}");
+                session
+            })
+            .collect::<Vec<_>>();
+        sessions[1].kind = construct_protocol::SessionKind::Subagent;
+        sessions[2].archived = true;
+
+        assert_eq!(
+            creator_micro_session_slots(&sessions),
+            vec!["s0", "s3", "s4", "s5", "s6", "s7"]
+        );
+    }
+
+    #[test]
+    fn creator_micro_snapshot_encodes_assignment_activity_and_attention() {
+        let mut idle = summary_with_kind(construct_protocol::SessionKind::User);
+        idle.id = "idle".into();
+        idle.state = construct_protocol::SessionState::Done;
+
+        let mut active = summary_with_kind(construct_protocol::SessionKind::User);
+        active.id = "active".into();
+        active.state = construct_protocol::SessionState::Running;
+
+        let mut attention = summary_with_kind(construct_protocol::SessionKind::User);
+        attention.id = "attention".into();
+        attention.state = construct_protocol::SessionState::Done;
+        attention.needs_attention = true;
+
+        assert_eq!(
+            creator_micro_snapshot_for_sessions(&[idle, active, attention]),
+            crate::creator_micro::CreatorMicroSnapshot {
+                assigned: 0b0000_0111,
+                active: 0b0000_0010,
+                attention: 0b0000_0100,
+            }
+        );
     }
 
     #[test]

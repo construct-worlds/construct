@@ -10,6 +10,7 @@ mod app;
 mod clipboard_bridge;
 mod doctor;
 mod color;
+mod creator_micro;
 mod keymap;
 mod lineage;
 mod matrix_rain;
@@ -83,6 +84,11 @@ enum Command {
     Midi {
         #[command(subcommand)]
         command: Option<midi::MidiCommand>,
+    },
+    /// Configure a Work Louder Creator Micro 2 control surface.
+    CreatorMicro {
+        #[command(subcommand)]
+        command: Option<creator_micro::CreatorMicroCommand>,
     },
     /// Search session names, playbook contents, and transcript history.
     Search {
@@ -546,6 +552,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Midi { command } => midi::run(command).await,
+        Command::CreatorMicro { command } => creator_micro::run(command),
         Command::Search {
             query,
             limit,

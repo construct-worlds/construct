@@ -122,6 +122,10 @@ impl Paths {
         self.config_dir.join("midi.toml")
     }
 
+    pub fn creator_micro_file(&self) -> PathBuf {
+        self.config_dir.join("creator-micro.toml")
+    }
+
     pub fn sessions_root(&self) -> PathBuf {
         self.data_dir.join("sessions")
     }

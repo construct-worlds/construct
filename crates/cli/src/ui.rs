@@ -13098,6 +13098,9 @@ fn render_modeline(f: &mut Frame, area: Rect, app: &mut App) {
     if let Some(connected) = app.op_xy_link_connected {
         persistent_notices.push(vec![(modeline_midi_text(connected), None)]);
     }
+    if let Some(connected) = app.creator_micro_link_connected {
+        persistent_notices.push(vec![(modeline_creator_micro_text(connected), None)]);
+    }
     // Ambient-feature degradation notice (spec 0151): shown only when the
     // daemon has actually skipped auto-naming/suggestions for lack of a
     // smith credential this run — a credential-less machine that never hit
@@ -13461,6 +13464,14 @@ fn modeline_midi_text(connected: bool) -> String {
         "● midi".to_string()
     } else {
         "○ midi".to_string()
+    }
+}
+
+fn modeline_creator_micro_text(connected: bool) -> String {
+    if connected {
+        "● micro".to_string()
+    } else {
+        "○ micro".to_string()
     }
 }
 
@@ -29511,6 +29522,12 @@ mod tests {
     fn modeline_midi_text_mirrors_the_remote_dot_vocabulary() {
         assert_eq!(modeline_midi_text(true), "● midi");
         assert_eq!(modeline_midi_text(false), "○ midi");
+    }
+
+    #[test]
+    fn modeline_creator_micro_text_mirrors_the_remote_dot_vocabulary() {
+        assert_eq!(modeline_creator_micro_text(true), "● micro");
+        assert_eq!(modeline_creator_micro_text(false), "○ micro");
     }
 
     #[test]
