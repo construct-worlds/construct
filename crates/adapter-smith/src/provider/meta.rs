@@ -60,6 +60,22 @@ fn message_to_input_items(message: &Message) -> Vec<Value> {
                 "content": [{ "type": kind, "text": text }],
             })]
         }
+        Content::UserInput { text, images } => {
+            let mut content = Vec::with_capacity(images.len() + 1);
+            if !text.is_empty() {
+                content.push(json!({ "type": "input_text", "text": text }));
+            }
+            content.extend(
+                images
+                    .iter()
+                    .map(|image| json!({ "type": "input_image", "image_url": image.data_url() })),
+            );
+            vec![json!({
+                "type": "message",
+                "role": "user",
+                "content": content,
+            })]
+        }
         Content::AssistantToolCalls { text, calls } => {
             let mut items = Vec::with_capacity(calls.len() + 1);
             if let Some(text) = text.as_deref().filter(|text| !text.is_empty()) {
@@ -144,6 +160,10 @@ struct FunctionCall {
 impl LlmProvider for Meta {
     fn name(&self) -> &str {
         "meta"
+    }
+
+    fn supports_image_input(&self) -> bool {
+        true
     }
 
     async fn complete(
@@ -335,6 +355,33 @@ impl LlmProvider for Meta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ImageInput;
+
+    #[test]
+    fn request_uses_responses_image_input_shape() {
+        let body = build_body(
+            "muse-spark-1.1",
+            "",
+            &[Message {
+                role: Role::User,
+                content: Content::UserInput {
+                    text: "inspect".into(),
+                    images: vec![ImageInput {
+                        media_type: "image/png".into(),
+                        data: "YWJj".into(),
+                        source: None,
+                    }],
+                },
+            }],
+            &[],
+        );
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(body["input"][0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            body["input"][0]["content"][1]["image_url"],
+            "data:image/png;base64,YWJj"
+        );
+    }
 
     #[test]
     fn request_uses_responses_message_and_tool_shapes() {

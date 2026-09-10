@@ -36,6 +36,7 @@ pub async fn complete(
     tools: &[ToolSpec],
     sink: &mut dyn TextSink,
 ) -> Result<ProviderTurn> {
+    crate::provider::ensure_image_input_supported(provider, messages, None)?;
     let timeout = provider_idle_timeout();
     let retry = RetryConfig {
         max_attempts: provider_retry_attempts(),

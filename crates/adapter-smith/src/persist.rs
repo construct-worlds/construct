@@ -173,7 +173,33 @@ pub fn is_resume() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{Content, Message, Role};
+    use crate::provider::{Content, ImageInput, Message, Role};
+
+    #[test]
+    fn image_turn_round_trips_without_rereading_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut persist = Persist::open(Some(dir.path())).unwrap();
+        persist.append(&Message {
+            role: Role::User,
+            content: Content::UserInput {
+                text: "/tmp/now-gone.png".into(),
+                images: vec![ImageInput {
+                    media_type: "image/png".into(),
+                    data: "c25hcHNob3Q=".into(),
+                    source: Some("/tmp/now-gone.png".into()),
+                }],
+            },
+        });
+
+        let loaded = Persist::load(persist.path()).unwrap();
+        let Content::UserInput { text, images } = &loaded[0].content else {
+            panic!("expected persisted image turn");
+        };
+        assert_eq!(text, "/tmp/now-gone.png");
+        assert_eq!(images[0].media_type, "image/png");
+        assert_eq!(images[0].data, "c25hcHNob3Q=");
+        assert_eq!(images[0].source.as_deref(), Some("/tmp/now-gone.png"));
+    }
 
     #[test]
     fn reset_truncates_persisted_messages_and_keeps_appending() {

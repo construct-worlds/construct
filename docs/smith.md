@@ -175,6 +175,28 @@ Profiles are always referenced with the explicit `@` prefix; bare names never
 resolve to a profile. The status line shows `@<name>:<model>` so you can tell
 which endpoint is active.
 
+### Image input
+
+Smith accepts PNG, JPEG, GIF, and WebP images as native multimodal user input.
+In the TUI, use `C-x v` (or `/paste`) to paste a clipboard image, drop an image
+file into the terminal, or include an explicit local path in the prompt:
+
+```text
+Describe ./screenshots/error.png
+Compare [#file:/path/to/session/attachments/before.png] with ./after.jpg
+```
+
+Construct stores pasted/uploaded bytes in the session first; Smith snapshots
+the image into its persisted conversation when the prompt is submitted. The
+same image therefore survives daemon restart and provider retry even if the
+source file later changes. Limits are 5 MiB per image and 20 images per turn.
+
+OpenAI, Anthropic (including Claude/Kimi OAuth), Gemini, Meta, Codex OAuth,
+OpenRouter/Grok, and Ollama wires receive provider-native image content. The
+selected model must itself support vision. DeepSeek's current chat endpoint is
+text-only, so Smith rejects image turns locally and asks you to switch
+providers; it does not silently send a path as plain text.
+
 ### Tools
 
 Smith registers three tool sets: local development tools, Chrome DevTools browser automation, and daemon/fleet control tools (including subagents).

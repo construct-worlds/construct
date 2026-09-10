@@ -186,6 +186,14 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
     for m in messages {
         match &m.content {
             Content::Text { text: t } => chars += t.len(),
+            Content::UserInput { text, images } => {
+                chars += text.len();
+                // Image tokenization is provider- and resolution-dependent.
+                // A conservative fixed allowance keeps base64 storage bytes
+                // from masquerading as text tokens while still budgeting the
+                // visual context carried by each image.
+                chars += images.len() * 6_000;
+            }
             Content::AssistantToolCalls { text, calls } => {
                 if let Some(t) = text {
                     chars += t.len();

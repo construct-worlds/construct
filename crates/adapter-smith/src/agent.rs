@@ -763,6 +763,25 @@ pub async fn run(
         if user_text.trim().is_empty() {
             continue;
         }
+        let user_content = match crate::image_input::user_content(user_text.clone(), &cwd) {
+            Ok(content) => content,
+            Err(e) => {
+                emit.emit(SessionEvent::Error {
+                    message: format!("image input error: {e:#}"),
+                });
+                continue;
+            }
+        };
+        if let Err(e) = provider::ensure_image_input_supported(
+            provider.as_ref(),
+            &messages,
+            Some(&user_content),
+        ) {
+            emit.emit(SessionEvent::Error {
+                message: e.to_string(),
+            });
+            continue;
+        }
         hooks
             .run(
                 "user_prompt_submit",
@@ -779,7 +798,7 @@ pub async fn run(
             persist,
             Message {
                 role: Role::User,
-                content: Content::Text { text: user_text },
+                content: user_content,
             }
         );
 
@@ -1723,7 +1742,7 @@ pub fn resolve_model_from_spec(spec_str: &str) -> Result<ResolvedModel> {
             Some(GROK_BASE_URL.to_string()),
             grok_api_key()?,
         )?),
-        provider::routing::Provider::DeepSeek => Box::new(provider::openai::OpenAi::with_config(
+        provider::routing::Provider::DeepSeek => Box::new(provider::openai::OpenAi::text_only(
             Some(DEEPSEEK_BASE_URL.to_string()),
             deepseek_api_key()?,
         )?),
@@ -1839,7 +1858,7 @@ fn build_profile_model(
             base_url.or_else(|| Some(GROK_BASE_URL.to_string())),
             profile_api_key(profile, name, &["GROK_API_KEY", "XAI_API_KEY"])?,
         )?),
-        provider::routing::Provider::DeepSeek => Box::new(provider::openai::OpenAi::with_config(
+        provider::routing::Provider::DeepSeek => Box::new(provider::openai::OpenAi::text_only(
             base_url.or_else(|| Some(DEEPSEEK_BASE_URL.to_string())),
             profile_api_key(profile, name, &["DEEPSEEK_API_KEY"])?,
         )?),

@@ -23,6 +23,8 @@ pub struct OpenAi {
     /// (the response's final usage chunk then carries the generation's real
     /// USD cost) and the attribution headers its ranking honors.
     openrouter: bool,
+    image_input: bool,
+    provider_name: &'static str,
 }
 
 impl OpenAi {
@@ -47,7 +49,19 @@ impl OpenAi {
             base_url,
             api_key,
             openrouter: false,
+            image_input: true,
+            provider_name: "openai",
         })
+    }
+
+    /// DeepSeek's chat-completions endpoint is text-only. Keep using the
+    /// shared dialect implementation while advertising that limitation at
+    /// Smith's input boundary.
+    pub fn text_only(base_url: Option<String>, api_key: String) -> Result<Self> {
+        let mut provider = Self::with_config(base_url, api_key)?;
+        provider.image_input = false;
+        provider.provider_name = "deepseek";
+        Ok(provider)
     }
 
     /// Build for an OpenRouter endpoint: same wire format, plus the
@@ -79,6 +93,19 @@ fn messages_to_openai(system: &str, messages: &[Message]) -> Vec<Value> {
         match &m.content {
             Content::Text { text } => {
                 out.push(json!({ "role": role_str(m.role), "content": text }));
+            }
+            Content::UserInput { text, images } => {
+                let mut blocks = Vec::with_capacity(images.len() + 1);
+                if !text.is_empty() {
+                    blocks.push(json!({ "type": "text", "text": text }));
+                }
+                blocks.extend(images.iter().map(|image| {
+                    json!({
+                        "type": "image_url",
+                        "image_url": { "url": image.data_url() },
+                    })
+                }));
+                out.push(json!({ "role": "user", "content": blocks }));
             }
             Content::AssistantToolCalls { text, calls } => {
                 let tool_calls: Vec<Value> = calls
@@ -146,7 +173,11 @@ fn tools_to_openai(tools: &[ToolSpec]) -> Vec<Value> {
 #[async_trait]
 impl LlmProvider for OpenAi {
     fn name(&self) -> &str {
-        "openai"
+        self.provider_name
+    }
+
+    fn supports_image_input(&self) -> bool {
+        self.image_input
     }
 
     async fn complete(
@@ -337,4 +368,63 @@ fn short_hash(s: &str) -> String {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     format!("{:x}", h.finish())[..8].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::ImageInput;
+
+    #[test]
+    fn user_images_use_chat_completions_image_url_blocks() {
+        let messages = [Message {
+            role: Role::User,
+            content: Content::UserInput {
+                text: "describe it".into(),
+                images: vec![ImageInput {
+                    media_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                    source: Some("/tmp/shot.png".into()),
+                }],
+            },
+        }];
+        let wire = messages_to_openai("", &messages);
+        assert_eq!(
+            wire[0]["content"][0],
+            json!({"type":"text","text":"describe it"})
+        );
+        assert_eq!(wire[0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            wire[0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
+        assert!(!wire[0].to_string().contains("/tmp/shot.png"));
+    }
+
+    #[test]
+    fn deepseek_dialect_is_explicitly_text_only() {
+        let provider =
+            OpenAi::text_only(Some("https://example.invalid".into()), "key".into()).unwrap();
+        assert_eq!(provider.name(), "deepseek");
+        assert!(!provider.supports_image_input());
+        let error = crate::provider::ensure_image_input_supported(
+            &provider,
+            &[Message {
+                role: Role::User,
+                content: Content::UserInput {
+                    text: "image".into(),
+                    images: vec![ImageInput {
+                        media_type: "image/png".into(),
+                        data: "YWJj".into(),
+                        source: None,
+                    }],
+                },
+            }],
+            None,
+        )
+        .unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("deepseek does not support image input"));
+        assert!(error.contains("use /reset before continuing"));
+    }
 }
