@@ -2650,6 +2650,9 @@ pub struct App {
     /// Native Work Louder surface link state. `None` means the opt-in surface
     /// is disabled; enabled surfaces report a filled or hollow modeline dot.
     pub creator_micro_link_connected: Option<bool>,
+    /// Stable hardware slots for the six most recently active user sessions.
+    /// Surviving assignments keep their physical position when recency changes.
+    pub creator_micro_session_slots: [Option<String>; 6],
     /// Ambient Matrix-rain panel state for empty rows in the session list.
     pub matrix_rain: crate::matrix_rain::MatrixRain,
     /// Smoothed 0..1 foreground intensity for Matrix rain. The render path
@@ -5944,6 +5947,7 @@ async fn run_with_socket_initial_selection(
         session_transitions: HashMap::new(),
         op_xy_link_connected: None,
         creator_micro_link_connected: None,
+        creator_micro_session_slots: Default::default(),
         matrix_rain: crate::matrix_rain::MatrixRain::default(),
         matrix_rain_intensity: 0.0,
         matrix_rain_intensity_updated_at: now,
@@ -6722,6 +6726,9 @@ async fn run_loop(
                     Some(crate::creator_micro::CreatorMicroEvent::Session(slot)) => {
                         app.select_creator_micro_session(slot);
                     }
+                    Some(crate::creator_micro::CreatorMicroEvent::Pane(index)) => {
+                        app.select_creator_micro_pane(index);
+                    }
                     Some(crate::creator_micro::CreatorMicroEvent::Enter) => {
                         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
                     }
@@ -7224,22 +7231,68 @@ fn op_xy_slot_state_masks(sessions: &[SessionSummary], slots: &[Option<String>])
         })
 }
 
-fn creator_micro_session_slots(sessions: &[SessionSummary]) -> Vec<String> {
-    sessions
+fn creator_micro_activity_at_ms(session: &SessionSummary) -> Option<i64> {
+    [
+        session.last_event_at.map(|at| at.timestamp_millis()),
+        session.last_message_at.map(|at| at.timestamp_millis()),
+        session.last_pty_at_ms,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+}
+
+fn creator_micro_recent_session_ids(sessions: &[SessionSummary]) -> Vec<String> {
+    let mut active = sessions
         .iter()
-        .filter(|session| !session.archived && is_user_list_session(session))
+        .enumerate()
+        .filter_map(|(list_index, session)| {
+            if session.archived || !is_user_list_session(session) {
+                return None;
+            }
+            creator_micro_activity_at_ms(session)
+                .map(|activity_at| (list_index, activity_at, session.id.clone()))
+        })
+        .collect::<Vec<_>>();
+    active.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    active
+        .into_iter()
         .take(6)
-        .map(|session| session.id.clone())
+        .map(|(_, _, id)| id)
         .collect()
+}
+
+fn reconcile_creator_micro_session_slots(
+    sessions: &[SessionSummary],
+    slots: &mut [Option<String>; 6],
+) {
+    let recent = creator_micro_recent_session_ids(sessions);
+    let recent_set = recent.iter().collect::<HashSet<_>>();
+    for slot in slots.iter_mut() {
+        if slot.as_ref().is_some_and(|id| !recent_set.contains(id)) {
+            *slot = None;
+        }
+    }
+    for id in recent {
+        if slots.iter().flatten().any(|assigned| assigned == &id) {
+            continue;
+        }
+        if let Some(empty) = slots.iter_mut().find(|slot| slot.is_none()) {
+            *empty = Some(id);
+        }
+    }
 }
 
 fn creator_micro_snapshot_for_sessions(
     sessions: &[SessionSummary],
+    slots: &[Option<String>; 6],
 ) -> crate::creator_micro::CreatorMicroSnapshot {
     use construct_protocol::SessionState;
-    let slots = creator_micro_session_slots(sessions);
     let mut snapshot = crate::creator_micro::CreatorMicroSnapshot::default();
     for (slot, session_id) in slots.iter().enumerate() {
+        let Some(session_id) = session_id else {
+            continue;
+        };
         let bit = 1 << slot;
         snapshot.assigned |= bit;
         let Some(session) = sessions.iter().find(|session| session.id == *session_id) else {
@@ -15112,21 +15165,51 @@ impl App {
     }
 
     pub(crate) fn select_creator_micro_session(&mut self, slot: usize) {
-        let Some(session_id) = creator_micro_session_slots(&self.sessions).get(slot).cloned() else {
+        reconcile_creator_micro_session_slots(
+            &self.sessions,
+            &mut self.creator_micro_session_slots,
+        );
+        let Some(session_id) = self
+            .creator_micro_session_slots
+            .get(slot)
+            .cloned()
+            .flatten()
+        else {
             self.set_status(format!("Creator Micro session key {} is unassigned", slot + 1));
             return;
         };
-        self.select_session(session_id);
-        self.focus = PaneFocus::View;
+        if let Some(window_id) = self
+            .main_windows
+            .leaf_panes()
+            .into_iter()
+            .find_map(|(window_id, visible_id)| {
+                (visible_id == Some(session_id.as_str())).then_some(window_id)
+            })
+        {
+            self.focus_main_window(window_id);
+        } else {
+            self.select_session(session_id);
+            self.focus = PaneFocus::View;
+        }
         self.lineage_focused = false;
         self.set_vim_insert_if_captured();
         self.set_status(format!("Creator Micro selected session {}", slot + 1));
     }
 
+    pub(crate) fn select_creator_micro_pane(&mut self, index: usize) {
+        if !self.focus_pane_by_index(index) {
+            self.set_status(format!("Creator Micro split key {index} is unassigned"));
+        }
+    }
+
     pub(crate) fn creator_micro_snapshot(
-        &self,
+        &mut self,
     ) -> crate::creator_micro::CreatorMicroSnapshot {
-        creator_micro_snapshot_for_sessions(&self.sessions)
+        reconcile_creator_micro_session_slots(
+            &self.sessions,
+            &mut self.creator_micro_session_slots,
+        );
+        creator_micro_snapshot_for_sessions(&self.sessions, &self.creator_micro_session_slots)
     }
 
     pub(crate) fn op_xy_feedback_snapshot(
@@ -18261,6 +18344,7 @@ mod tests {
             session_transitions: HashMap::new(),
             op_xy_link_connected: None,
             creator_micro_link_connected: None,
+            creator_micro_session_slots: Default::default(),
             matrix_rain: crate::matrix_rain::MatrixRain::default(),
             matrix_rain_intensity: 0.0,
             matrix_rain_intensity_updated_at: now,
@@ -18470,20 +18554,44 @@ mod tests {
     }
 
     #[test]
-    fn creator_micro_slots_follow_live_user_list_order() {
+    fn creator_micro_slots_track_recent_activity_without_moving_survivors() {
+        let base = chrono::Utc::now();
         let mut sessions = (0..8)
             .map(|index| {
                 let mut session = summary_with_kind(construct_protocol::SessionKind::User);
                 session.id = format!("s{index}");
+                session.last_event_at = Some(base + chrono::Duration::seconds(index));
                 session
             })
             .collect::<Vec<_>>();
         sessions[1].kind = construct_protocol::SessionKind::Subagent;
         sessions[2].archived = true;
 
+        let mut slots = Default::default();
+        reconcile_creator_micro_session_slots(&sessions, &mut slots);
         assert_eq!(
-            creator_micro_session_slots(&sessions),
-            vec!["s0", "s3", "s4", "s5", "s6", "s7"]
+            slots,
+            ["s7", "s6", "s5", "s4", "s3", "s0"].map(|id| Some(id.into()))
+        );
+
+        // A retained session becoming newest does not jump to a new key.
+        sessions[3].last_event_at = Some(base + chrono::Duration::seconds(20));
+        reconcile_creator_micro_session_slots(&sessions, &mut slots);
+        assert_eq!(
+            slots,
+            ["s7", "s6", "s5", "s4", "s3", "s0"].map(|id| Some(id.into()))
+        );
+
+        // A newly active session replaces the least-recent member in-place;
+        // all five surviving physical assignments remain stable.
+        let mut newcomer = summary_with_kind(construct_protocol::SessionKind::User);
+        newcomer.id = "s8".into();
+        newcomer.last_event_at = Some(base + chrono::Duration::seconds(30));
+        sessions.push(newcomer);
+        reconcile_creator_micro_session_slots(&sessions, &mut slots);
+        assert_eq!(
+            slots,
+            ["s7", "s6", "s5", "s4", "s3", "s8"].map(|id| Some(id.into()))
         );
     }
 
@@ -18501,9 +18609,17 @@ mod tests {
         attention.id = "attention".into();
         attention.state = construct_protocol::SessionState::Done;
         attention.needs_attention = true;
+        let slots = [
+            Some("idle".into()),
+            Some("active".into()),
+            Some("attention".into()),
+            None,
+            None,
+            None,
+        ];
 
         assert_eq!(
-            creator_micro_snapshot_for_sessions(&[idle, active, attention]),
+            creator_micro_snapshot_for_sessions(&[idle, active, attention], &slots),
             crate::creator_micro::CreatorMicroSnapshot {
                 assigned: 0b0000_0111,
                 active: 0b0000_0010,
@@ -36054,6 +36170,79 @@ mod tests {
         assert!(!app.focus_pane_by_index(4));
         assert_eq!(app.active_window_id, 3);
         assert_eq!(app.focus, PaneFocus::View);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn creator_micro_middle_row_focuses_split_pane_ordinals() {
+        let (mut app, _dir, server) = captured_app().await;
+        app.main_windows = three_window_tree();
+        app.focus = PaneFocus::List;
+
+        app.select_creator_micro_pane(2);
+        assert_eq!(app.focus, PaneFocus::View);
+        assert_eq!(app.active_window_id, 2);
+
+        app.select_creator_micro_pane(4);
+        assert_eq!(app.active_window_id, 2);
+        assert_eq!(
+            app.status.as_ref().map(|(message, _)| message.as_str()),
+            Some("Creator Micro split key 4 is unassigned")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn creator_micro_session_key_focuses_visible_session_or_replaces_active_pane() {
+        let (mut app, _dir, server) = captured_app().await;
+        let activity_at = chrono::Utc::now();
+        for id in ["s2", "s3"] {
+            let mut session = summary_with_kind(construct_protocol::SessionKind::User);
+            session.id = id.into();
+            session.last_event_at = Some(activity_at);
+            app.sessions.push(session);
+        }
+        if let Some(session) = app.sessions.iter_mut().find(|session| session.id == "s1") {
+            session.last_event_at = Some(activity_at);
+        }
+        app.main_windows = MainWindowTree::Split {
+            direction: WindowSplitDirection::Right,
+            ratio_percent: 50,
+            first: Box::new(MainWindowTree::Leaf {
+                id: 1,
+                selection: Selection::Session("s1".into()),
+            }),
+            second: Box::new(MainWindowTree::Leaf {
+                id: 2,
+                selection: Selection::Session("s2".into()),
+            }),
+        };
+        app.active_window_id = 1;
+        app.selection = Selection::Session("s1".into());
+        app.creator_micro_session_slots[0] = Some("s2".into());
+        app.creator_micro_session_slots[1] = Some("s3".into());
+
+        app.select_creator_micro_session(0);
+        assert_eq!(app.active_window_id, 2);
+        assert_eq!(
+            app.selection_for_window(1),
+            Some(Selection::Session("s1".into()))
+        );
+        assert_eq!(
+            app.selection_for_window(2),
+            Some(Selection::Session("s2".into()))
+        );
+
+        app.select_creator_micro_session(1);
+        assert_eq!(app.active_window_id, 2);
+        assert_eq!(
+            app.selection_for_window(1),
+            Some(Selection::Session("s1".into()))
+        );
+        assert_eq!(
+            app.selection_for_window(2),
+            Some(Selection::Session("s3".into()))
+        );
         server.abort();
     }
 
