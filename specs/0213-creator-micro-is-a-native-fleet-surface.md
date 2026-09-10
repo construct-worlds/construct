@@ -19,10 +19,17 @@ amber is running, and bright green needs attention. An unassigned key is off.
 Pressing an agent key selects that session in the active pane and gives its view
 keyboard focus. If that session is already visible in another split pane, the
 key focuses that pane without swapping its contents; otherwise it replaces the
-session in the currently active pane. The four middle-row action keys focus
-split panes 1–4 in their visible ordinal order. The three bottom-row switches
-dispatch yes, no, and enter. The encoder dispatches the same scroll and focus
-actions as Construct's keyboard, mouse, and MIDI inputs.
+session in the currently active pane. The four middle-row keys focus split
+panes 1–4 in their visible ordinal order and show whether each pane exists and
+which one is focused. The three bottom-row switches dispatch yes, no, and enter
+and use stable semantic colours. The encoder dispatches the same scroll and
+focus actions as Construct's keyboard, mouse, and MIDI inputs.
+
+All thirteen switch positions use Agent keycodes so their LEDs are independently
+addressable through thread-status feedback. Construct also previews the general
+underglow as an aggregate fleet signal: blue is idle, breathing amber is active,
+and breathing green needs attention. Lighting previews are transient and do not
+rewrite the saved keymap or its stored lighting configuration.
 
 The integration is disabled until the user opts in. Once enabled, a sleeping or
 disconnected wireless device is retried without blocking the TUI and has a
@@ -47,9 +54,10 @@ clients, so the middle row can target them without a second numbering scheme.
 
 - Native control currently depends on macOS HID support.
 - A TUI must be open; the daemon alone does not own the physical surface.
-- The active device layer must map its controls to the firmware's vendor agent,
-  action, and encoder keycodes. Those keycodes emit host events instead of
-  ordinary keystrokes.
+- The active device layer must map all thirteen switches to the firmware's
+  `AG00` through `AG12` keycodes for independent lighting. Legacy action
+  keycodes remain accepted for input compatibility but do not expose their
+  switches to thread-status lighting.
 - Archived sessions, subagents, operators, and the minibuffer do not consume one
   of the six fleet keys.
 - Sessions with no recorded event, message, or PTY activity do not consume a

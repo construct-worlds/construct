@@ -31,6 +31,10 @@ const REPORT_SIZE: usize = 64;
 const MAX_PAYLOAD: usize = 61;
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const FEEDBACK_HEARTBEAT: Duration = Duration::from_secs(10);
+const LIGHTING_WRITE_COOLDOWN: Duration = Duration::from_millis(50);
+const SESSION_KEY_COUNT: usize = 6;
+const PANE_KEY_COUNT: usize = 4;
+const THREAD_KEY_COUNT: usize = 13;
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum CreatorMicroCommand {
@@ -102,9 +106,10 @@ pub fn run(command: Option<CreatorMicroCommand>) -> Result<()> {
             println!("Open a new Construct TUI to connect.");
             println!();
             println!("The active Work Louder layer must use these Input keycodes:");
-            println!("  keys 1-6: KV_OAI_AG00 through KV_OAI_AG05");
-            println!("  action row: KV_OAI_ACT06 through KV_OAI_ACT12");
+            println!("  all 13 keys: KV_OAI_AG00 through KV_OAI_AG12");
             println!("  encoder: KV_OAI_ENC_CC / KV_OAI_ENC_CW / KV_OAI_ENC_CLK");
+            println!("  legacy KV_OAI_ACT06 through KV_OAI_ACT12 inputs still work,");
+            println!("  but AG06 through AG12 are required for individual lighting.");
             Ok(())
         }
         CreatorMicroCommand::Disable => {
@@ -122,6 +127,13 @@ pub(crate) struct CreatorMicroSnapshot {
     pub assigned: u8,
     pub active: u8,
     pub attention: u8,
+    /// Number of visible split panes, capped at the four hardware pane keys.
+    pub pane_count: u8,
+    /// Zero-based visible pane ordinal when a split pane owns keyboard focus.
+    pub focused_pane: Option<u8>,
+    /// Aggregate fleet state drives the device underglow.
+    pub fleet_active: bool,
+    pub fleet_attention: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,27 +353,79 @@ fn send_feedback(
     snapshot: CreatorMicroSnapshot,
     request_id: &mut u16,
 ) -> Result<()> {
-    let params = (0..6)
+    let preview = lighting_preview_message(snapshot, *request_id);
+    *request_id = (*request_id + 1) % 999;
+    write_rpc(device, &preview).context("write Creator Micro underglow")?;
+    std::thread::sleep(LIGHTING_WRITE_COOLDOWN);
+
+    let message = thread_status_message(snapshot, *request_id);
+    *request_id = (*request_id + 1) % 999;
+    write_rpc(device, &message).context("write Creator Micro key feedback")
+}
+
+fn thread_status_message(snapshot: CreatorMicroSnapshot, request_id: u16) -> Value {
+    let params = (0..THREAD_KEY_COUNT)
         .map(|slot| {
-            let bit = 1 << slot;
-            if snapshot.attention & bit != 0 {
+            let session_bit = if slot < SESSION_KEY_COUNT {
+                1u8 << slot
+            } else {
+                0
+            };
+            if slot < SESSION_KEY_COUNT && snapshot.attention & session_bit != 0 {
                 json!({"id": slot, "c": 0x00c853, "b": 1.0, "e": 6, "s": 0.75})
-            } else if snapshot.active & bit != 0 {
+            } else if slot < SESSION_KEY_COUNT && snapshot.active & session_bit != 0 {
                 json!({"id": slot, "c": 0xffc400, "b": 0.9, "e": 4, "s": 0.6})
-            } else if snapshot.assigned & bit != 0 {
+            } else if slot < SESSION_KEY_COUNT && snapshot.assigned & session_bit != 0 {
                 json!({"id": slot, "c": 0x2d7ff9, "b": 0.22, "e": 1, "s": 0.0})
+            } else if (SESSION_KEY_COUNT..SESSION_KEY_COUNT + PANE_KEY_COUNT).contains(&slot) {
+                let pane = (slot - SESSION_KEY_COUNT) as u8;
+                if snapshot.focused_pane == Some(pane) {
+                    json!({"id": slot, "c": 0x5ce1ff, "b": 1.0, "e": 1, "s": 0.0})
+                } else if pane < snapshot.pane_count {
+                    json!({"id": slot, "c": 0x2d7ff9, "b": 0.28, "e": 1, "s": 0.0})
+                } else {
+                    json!({"id": slot, "c": 0, "b": 0.0, "e": 0, "s": 0.0})
+                }
+            } else if slot == 10 {
+                json!({"id": slot, "c": 0x00c853, "b": 0.5, "e": 1, "s": 0.0})
+            } else if slot == 11 {
+                json!({"id": slot, "c": 0xff4d5f, "b": 0.5, "e": 1, "s": 0.0})
+            } else if slot == 12 {
+                json!({"id": slot, "c": 0xffffff, "b": 0.6, "e": 1, "s": 0.0})
             } else {
                 json!({"id": slot, "c": 0, "b": 0.0, "e": 0, "s": 0.0})
             }
         })
         .collect::<Vec<_>>();
-    let message = json!({
+    json!({
         "method": "v.oai.thstatus",
         "params": params,
-        "id": *request_id,
-    });
-    *request_id = (*request_id + 1) % 999;
-    write_rpc(device, &message).context("write Creator Micro feedback")
+        "id": request_id,
+    })
+}
+
+fn lighting_preview_message(snapshot: CreatorMicroSnapshot, request_id: u16) -> Value {
+    let (effect, brightness, speed, color) = if snapshot.fleet_attention {
+        ("breath", 0.65, 0.6, 0x00c853)
+    } else if snapshot.fleet_active {
+        ("breath", 0.5, 0.6, 0xffc400)
+    } else {
+        ("solid", 0.18, 0.0, 0x2d7ff9)
+    };
+    json!({
+        "method": "lights.preview",
+        "params": {
+            "backlight": {
+                "effect": "off", "brightness": 0.0, "speed": 0.0,
+                "magic": 0.0, "color": 0
+            },
+            "underglow": {
+                "effect": effect, "brightness": brightness, "speed": speed,
+                "magic": 0.0, "color": color
+            }
+        },
+        "id": request_id,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -488,9 +552,15 @@ fn event_from_message(message: &Value) -> Option<CreatorMicroEvent> {
     if let Some(slot) = key
         .strip_prefix("AG")
         .and_then(|slot| slot.parse::<usize>().ok())
-        .filter(|slot| *slot < 6)
     {
-        return Some(CreatorMicroEvent::Session(slot));
+        return Some(match slot {
+            0..=5 => CreatorMicroEvent::Session(slot),
+            6..=9 => CreatorMicroEvent::Pane(slot - 5),
+            10 => CreatorMicroEvent::Approve,
+            11 => CreatorMicroEvent::Reject,
+            12 => CreatorMicroEvent::Enter,
+            _ => return None,
+        });
     }
     Some(match key {
         "ACT06" => CreatorMicroEvent::Pane(1),
@@ -581,6 +651,22 @@ mod tests {
             Some(CreatorMicroEvent::Session(5))
         );
         assert_eq!(
+            event_from_message(&event("AG07")),
+            Some(CreatorMicroEvent::Pane(2))
+        );
+        assert_eq!(
+            event_from_message(&event("AG10")),
+            Some(CreatorMicroEvent::Approve)
+        );
+        assert_eq!(
+            event_from_message(&event("AG11")),
+            Some(CreatorMicroEvent::Reject)
+        );
+        assert_eq!(
+            event_from_message(&event("AG12")),
+            Some(CreatorMicroEvent::Enter)
+        );
+        assert_eq!(
             event_from_message(&event("ACT07")),
             Some(CreatorMicroEvent::Pane(2))
         );
@@ -600,6 +686,47 @@ mod tests {
             event_from_message(&event("ENC_CW")),
             Some(CreatorMicroEvent::Action(MidiAction::ScrollDown))
         );
+    }
+
+    #[test]
+    fn feedback_lights_all_thirteen_keys_and_aggregate_underglow() {
+        let snapshot = CreatorMicroSnapshot {
+            assigned: 0b0000_0001,
+            active: 0,
+            attention: 0,
+            pane_count: 2,
+            focused_pane: Some(1),
+            fleet_active: true,
+            fleet_attention: false,
+        };
+        let thread_status = thread_status_message(snapshot, 7);
+        let keys = thread_status["params"].as_array().unwrap();
+        assert_eq!(thread_status["method"], "v.oai.thstatus");
+        assert_eq!(thread_status["id"], 7);
+        assert_eq!(keys.len(), 13);
+        assert_eq!(keys[0]["c"], 0x2d7ff9);
+        assert_eq!(keys[6]["c"], 0x2d7ff9);
+        assert_eq!(keys[7]["c"], 0x5ce1ff);
+        assert_eq!(keys[8]["b"], 0.0);
+        assert_eq!(keys[10]["c"], 0x00c853);
+        assert_eq!(keys[11]["c"], 0xff4d5f);
+        assert_eq!(keys[12]["c"], 0xffffff);
+
+        let preview = lighting_preview_message(snapshot, 8);
+        assert_eq!(preview["method"], "lights.preview");
+        assert_eq!(preview["id"], 8);
+        assert_eq!(preview["params"]["backlight"]["effect"], "off");
+        assert_eq!(preview["params"]["underglow"]["effect"], "breath");
+        assert_eq!(preview["params"]["underglow"]["color"], 0xffc400);
+
+        let attention = lighting_preview_message(
+            CreatorMicroSnapshot {
+                fleet_attention: true,
+                ..snapshot
+            },
+            9,
+        );
+        assert_eq!(attention["params"]["underglow"]["color"], 0x00c853);
     }
 
     #[test]
