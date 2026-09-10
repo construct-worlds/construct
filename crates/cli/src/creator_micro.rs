@@ -127,6 +127,7 @@ pub(crate) struct CreatorMicroSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CreatorMicroEvent {
     Session(usize),
+    Pane(usize),
     Enter,
     Approve,
     Reject,
@@ -300,7 +301,6 @@ fn run_connection(
     send_feedback(&device, *snapshot, &mut request_id)?;
     let mut last_feedback = Instant::now();
     let mut reassembler = JsonReassembler::default();
-    let mut wide_pressed_at: Option<Instant> = None;
     let mut buffer = [0u8; REPORT_SIZE];
 
     while !stop.load(Ordering::Relaxed) {
@@ -327,7 +327,7 @@ fn run_connection(
             continue;
         }
         for message in reassembler.push(&buffer[3..3 + payload_len]) {
-            if let Some(event) = event_from_message(&message, &mut wide_pressed_at) {
+            if let Some(event) = event_from_message(&message) {
                 let _ = event_tx.send(event);
             }
         }
@@ -475,10 +475,7 @@ impl JsonReassembler {
     }
 }
 
-fn event_from_message(
-    message: &Value,
-    wide_pressed_at: &mut Option<Instant>,
-) -> Option<CreatorMicroEvent> {
+fn event_from_message(message: &Value) -> Option<CreatorMicroEvent> {
     if message.get("m")?.as_str()? != "v.oai.hid" {
         return None;
     }
@@ -496,23 +493,13 @@ fn event_from_message(
         return Some(CreatorMicroEvent::Session(slot));
     }
     Some(match key {
-        "ACT06" => CreatorMicroEvent::Enter,
-        "ACT07" => CreatorMicroEvent::Approve,
-        "ACT08" => CreatorMicroEvent::Reject,
-        "ACT09" => CreatorMicroEvent::Action(MidiAction::Interrupt),
-        // One wide physical cap can press ACT10 and ACT11 together. Treat the
-        // pair as one New Session gesture instead of opening two dialogs.
-        "ACT10" | "ACT11" => {
-            let now = Instant::now();
-            if wide_pressed_at
-                .is_some_and(|last| now.duration_since(last) < Duration::from_millis(80))
-            {
-                return None;
-            }
-            *wide_pressed_at = Some(now);
-            CreatorMicroEvent::Action(MidiAction::NewSession)
-        }
-        "ACT12" => CreatorMicroEvent::Action(MidiAction::CommandPalette),
+        "ACT06" => CreatorMicroEvent::Pane(1),
+        "ACT07" => CreatorMicroEvent::Pane(2),
+        "ACT08" => CreatorMicroEvent::Pane(3),
+        "ACT09" => CreatorMicroEvent::Pane(4),
+        "ACT10" => CreatorMicroEvent::Approve,
+        "ACT11" => CreatorMicroEvent::Reject,
+        "ACT12" => CreatorMicroEvent::Enter,
         "ENC_CC" => CreatorMicroEvent::Action(MidiAction::ScrollUp),
         "ENC_CW" => CreatorMicroEvent::Action(MidiAction::ScrollDown),
         "ENC_CLK" => CreatorMicroEvent::Action(MidiAction::SwitchFocus),
@@ -588,34 +575,37 @@ mod tests {
 
     #[test]
     fn agent_and_action_keys_map_to_construct_semantics() {
-        let mut wide = None;
         let event = |key: &str| json!({"m":"v.oai.hid","p":{"k":key,"act":1}});
         assert_eq!(
-            event_from_message(&event("AG05"), &mut wide),
+            event_from_message(&event("AG05")),
             Some(CreatorMicroEvent::Session(5))
         );
         assert_eq!(
-            event_from_message(&event("ACT07"), &mut wide),
+            event_from_message(&event("ACT07")),
+            Some(CreatorMicroEvent::Pane(2))
+        );
+        assert_eq!(
+            event_from_message(&event("ACT10")),
             Some(CreatorMicroEvent::Approve)
         );
         assert_eq!(
-            event_from_message(&event("ENC_CW"), &mut wide),
+            event_from_message(&event("ACT11")),
+            Some(CreatorMicroEvent::Reject)
+        );
+        assert_eq!(
+            event_from_message(&event("ACT12")),
+            Some(CreatorMicroEvent::Enter)
+        );
+        assert_eq!(
+            event_from_message(&event("ENC_CW")),
             Some(CreatorMicroEvent::Action(MidiAction::ScrollDown))
         );
     }
 
     #[test]
-    fn releases_and_second_wide_switch_are_suppressed() {
-        let mut wide = None;
+    fn releases_are_suppressed() {
         let release = json!({"m":"v.oai.hid","p":{"k":"AG00","act":0}});
-        assert_eq!(event_from_message(&release, &mut wide), None);
-        let first = json!({"m":"v.oai.hid","p":{"k":"ACT10","act":1}});
-        let second = json!({"m":"v.oai.hid","p":{"k":"ACT11","act":1}});
-        assert_eq!(
-            event_from_message(&first, &mut wide),
-            Some(CreatorMicroEvent::Action(MidiAction::NewSession))
-        );
-        assert_eq!(event_from_message(&second, &mut wide), None);
+        assert_eq!(event_from_message(&release), None);
     }
 
     #[test]

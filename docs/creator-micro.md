@@ -12,13 +12,11 @@ keycodes:
 
 | Physical control | Input keycode | Construct behavior |
 |---|---|---|
-| Six agent keys | `KV_OAI_AG00` … `KV_OAI_AG05` | Select live sessions 1–6 |
-| Play | `KV_OAI_ACT06` | Enter / submit |
-| Approve | `KV_OAI_ACT07` | Answer yes |
-| Reject | `KV_OAI_ACT08` | Answer no |
-| Stop | `KV_OAI_ACT09` | Interrupt the selected session |
-| Wide key (both switches) | `KV_OAI_ACT10`, `KV_OAI_ACT11` | New session (coalesced once) |
-| Four-dot key | `KV_OAI_ACT12` | Command palette |
+| Six agent keys | `KV_OAI_AG00` … `KV_OAI_AG05` | Select six recent sessions in stable hardware slots |
+| Middle row | `KV_OAI_ACT06` … `KV_OAI_ACT09` | Focus split panes 1–4 |
+| Bottom-left | `KV_OAI_ACT10` | Answer yes |
+| Bottom-middle | `KV_OAI_ACT11` | Answer no |
+| Bottom-right | `KV_OAI_ACT12` | Enter / submit |
 | Encoder left/right/click | `KV_OAI_ENC_CC`, `KV_OAI_ENC_CW`, `KV_OAI_ENC_CLK` | Scroll up/down; switch focus |
 
 The `KV_OAI_*` keycodes produce vendor events instead of ordinary keystrokes.
@@ -44,9 +42,15 @@ construct
 means the feature is enabled and Construct is waiting for the sleeping or
 disconnected board. Bluetooth reconnects automatically.
 
-The six agent keys follow the first six non-archived, top-level user sessions in
-the visible Construct list order. Reordering the list also reorders the hardware
-slots. Subagents, operators, and the minibuffer do not take a key.
+The six agent keys track the six most recently active non-archived, top-level
+user sessions. A session that remains in that set keeps its physical key even
+when its recency rank changes. When a newly active session enters a full set, it
+inherits the key vacated by the least-recent session. Subagents, operators, the
+minibuffer, and sessions with no recorded activity do not take a key.
+
+`ACT10` and `ACT11` are independent yes/no inputs. A stock wide keycap can
+actuate both switches together; use independently pressable keycaps for this
+mapping so one gesture cannot send both answers.
 
 Key colours are:
 
