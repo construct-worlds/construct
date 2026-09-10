@@ -166,17 +166,15 @@ impl ModelLimits {
         new_limit
     }
 
-    /// Called after a successful provider call. `actual_input_tokens`
-    /// is what the provider reported in its usage block; far more
-    /// accurate than our chars/3.5 estimate. If this call was a
-    /// probe AND the actual usage exceeded the prior learned limit,
-    /// bump the learned limit to `actual + 5%` so subsequent calls
-    /// can use the headroom.
+    /// Called after a successful provider call. `actual_input_tokens` is the
+    /// provider's authoritative usage when present. If this call was a probe
+    /// and that usage exceeded the prior learned limit, bump the limit to
+    /// `actual + 5%`; missing usage never manufactures a successful probe.
     pub fn record_call(
         &mut self,
         provider: &str,
         model: &str,
-        actual_input_tokens: u64,
+        actual_input_tokens: Option<u64>,
         was_probe: bool,
         fallback: u64,
         now_ms: i64,
@@ -194,8 +192,10 @@ impl ModelLimits {
             entry.calls_since_probe = 0;
             // Bump only if the probe actually pushed past the prior
             // limit — otherwise the probe didn't test anything.
-            if actual_input_tokens > entry.learned_input_tokens {
-                entry.learned_input_tokens = ((actual_input_tokens as f64) * 1.05) as u64;
+            if let Some(actual_input_tokens) = actual_input_tokens {
+                if actual_input_tokens > entry.learned_input_tokens {
+                    entry.learned_input_tokens = ((actual_input_tokens as f64) * 1.05) as u64;
+                }
             }
         } else {
             entry.calls_since_probe = entry.calls_since_probe.saturating_add(1);
@@ -242,11 +242,19 @@ mod tests {
         let mut s = ModelLimits::default();
         s.record_overflow("openai", "gpt-5", Some(400_000), 400_000, 0);
         // Probe that didn't actually push past 400K → no bump.
-        s.record_call("openai", "gpt-5", 380_000, true, 400_000, 1_000);
+        s.record_call("openai", "gpt-5", Some(380_000), true, 400_000, 1_000);
         assert_eq!(s.get("openai", "gpt-5"), Some(400_000));
         // Probe that pushed to 450K → bump to 450K * 1.05.
-        s.record_call("openai", "gpt-5", 450_000, true, 400_000, 2_000);
+        s.record_call("openai", "gpt-5", Some(450_000), true, 400_000, 2_000);
         assert_eq!(s.get("openai", "gpt-5"), Some((450_000.0 * 1.05) as u64));
+    }
+
+    #[test]
+    fn missing_probe_usage_does_not_raise_learned_limit() {
+        let mut s = ModelLimits::default();
+        s.record_overflow("openai", "gpt-5", Some(400_000), 400_000, 0);
+        s.record_call("openai", "gpt-5", None, true, 400_000, 1_000);
+        assert_eq!(s.get("openai", "gpt-5"), Some(400_000));
     }
 
     /// Round-trip via the same JSON shape the daemon stores on disk.

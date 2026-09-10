@@ -19,34 +19,152 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
+pub(crate) const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
+const CONTEXT_1M_TOKENS: u64 = 1_000_000;
+const DEFAULT_CONTEXT_TOKENS: u64 = 200_000;
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+/// Capabilities for an Anthropic endpoint. Named profiles populate these
+/// fields directly; the built-in provider reads equivalent environment
+/// overrides (documented in `docs/smith.md`).
+#[derive(Debug, Clone, Default)]
+pub struct AnthropicOptions {
+    pub cache_control: Option<bool>,
+    pub betas: Vec<String>,
+    pub context_window_tokens: Option<u64>,
+}
+
 pub struct Anthropic {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    cache_control: bool,
+    betas: Vec<String>,
+    context_window_tokens: Option<u64>,
+    first_party: bool,
 }
 
 impl Anthropic {
     pub fn from_env() -> Result<Self> {
         let api_key =
             std::env::var("ANTHROPIC_API_KEY").map_err(|_| anyhow!("ANTHROPIC_API_KEY not set"))?;
-        Self::with_config(std::env::var("ANTHROPIC_BASE_URL").ok(), api_key)
+        Self::with_options(
+            std::env::var("ANTHROPIC_BASE_URL").ok(),
+            options_from_env()?,
+            api_key,
+        )
     }
 
     /// Build with an explicit base URL (None → public Anthropic) and key.
     /// Used by named `[smith.models.*]` profiles.
+    #[cfg(test)]
     pub fn with_config(base_url: Option<String>, api_key: String) -> Result<Self> {
+        Self::with_options(base_url, AnthropicOptions::default(), api_key)
+    }
+
+    /// Build with endpoint capabilities supplied by a named model profile.
+    /// Options precede the key so call sites keep credentials visually last.
+    pub fn with_options(
+        base_url: Option<String>,
+        options: AnthropicOptions,
+        api_key: String,
+    ) -> Result<Self> {
+        if options.context_window_tokens == Some(0) {
+            anyhow::bail!("Anthropic context window must be greater than zero");
+        }
         let base_url = base_url
             .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string())
             .trim_end_matches('/')
             .to_string();
+        let first_party = is_first_party_endpoint(&base_url);
         Ok(Self {
             client: reqwest::Client::builder()
                 .build()
                 .context("build reqwest client")?,
             base_url,
             api_key,
+            cache_control: options.cache_control.unwrap_or(first_party),
+            betas: dedup_betas(options.betas),
+            context_window_tokens: options.context_window_tokens,
+            first_party,
         })
     }
+
+    fn request_betas(&self, model: &str) -> Vec<String> {
+        let mut betas = self.betas.clone();
+        let explicitly_capped_at_default = self
+            .context_window_tokens
+            .is_some_and(|tokens| tokens <= DEFAULT_CONTEXT_TOKENS);
+        if self.first_party
+            && supports_context_1m_beta(model)
+            && !explicitly_capped_at_default
+            && !betas.iter().any(|beta| beta == CONTEXT_1M_BETA)
+        {
+            betas.push(CONTEXT_1M_BETA.to_string());
+        }
+        betas
+    }
+
+    fn context_window_for_model(&self, model: &str) -> Option<u64> {
+        self.context_window_tokens.or_else(|| {
+            self.request_betas(model)
+                .iter()
+                .any(|beta| beta == CONTEXT_1M_BETA)
+                .then_some(CONTEXT_1M_TOKENS)
+        })
+    }
+}
+
+fn supports_context_1m_beta(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("claude-sonnet-4")
+}
+
+fn is_first_party_endpoint(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| host.eq_ignore_ascii_case("api.anthropic.com"))
+}
+
+fn dedup_betas(betas: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for beta in betas {
+        let beta = beta.trim();
+        if !beta.is_empty() && !out.iter().any(|existing| existing == beta) {
+            out.push(beta.to_string());
+        }
+    }
+    out
+}
+
+fn options_from_env() -> Result<AnthropicOptions> {
+    let cache_control = match std::env::var("CONSTRUCT_SMITH_ANTHROPIC_CACHE_CONTROL") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" | "yes" => Some(true),
+            "0" | "false" | "off" | "no" => Some(false),
+            other => anyhow::bail!(
+                "CONSTRUCT_SMITH_ANTHROPIC_CACHE_CONTROL must be on/off (got `{other}`)"
+            ),
+        },
+        Err(_) => None,
+    };
+    let betas = std::env::var("CONSTRUCT_SMITH_ANTHROPIC_BETAS")
+        .ok()
+        .map(|value| value.split(',').map(str::to_string).collect())
+        .unwrap_or_default();
+    let context_window_tokens = std::env::var("CONSTRUCT_SMITH_ANTHROPIC_CONTEXT_WINDOW_TOKENS")
+        .ok()
+        .map(|value| {
+            value.parse::<u64>().with_context(|| {
+                "CONSTRUCT_SMITH_ANTHROPIC_CONTEXT_WINDOW_TOKENS must be a positive integer"
+            })
+        })
+        .transpose()?;
+    Ok(AnthropicOptions {
+        cache_control,
+        betas,
+        context_window_tokens,
+    })
 }
 
 pub(crate) fn messages_to_anthropic(messages: &[Message]) -> Vec<Value> {
@@ -139,6 +257,99 @@ pub(crate) fn tools_to_anthropic(tools: &[ToolSpec]) -> Vec<Value> {
         .collect()
 }
 
+/// Add up to Anthropic's four ephemeral cache breakpoints in stable-prefix
+/// order: system, tool definitions, then the latest user-message boundaries.
+/// This mutates an already valid Messages request so the same policy works for
+/// API-key and Claude OAuth requests while Anthropic-compatible providers can
+/// continue using the unmodified wire helpers.
+pub(crate) fn apply_cache_control(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let mut remaining = MAX_CACHE_BREAKPOINTS;
+
+    if remaining > 0 {
+        if let Some(system) = object.get_mut("system") {
+            if mark_content_tail(system) {
+                remaining -= 1;
+            }
+        }
+    }
+    if remaining > 0 {
+        if let Some(last_tool) = object
+            .get_mut("tools")
+            .and_then(Value::as_array_mut)
+            .and_then(|tools| tools.last_mut())
+        {
+            if mark_object(last_tool) {
+                remaining -= 1;
+            }
+        }
+    }
+    if remaining == 0 {
+        return;
+    }
+    let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages.iter_mut().rev() {
+        if remaining == 0 {
+            break;
+        }
+        if message.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        if message.get_mut("content").is_some_and(mark_content_tail) {
+            remaining -= 1;
+        }
+    }
+}
+
+fn mark_content_tail(content: &mut Value) -> bool {
+    if let Some(text) = content.as_str().map(str::to_owned) {
+        *content = json!([{
+            "type": "text",
+            "text": text,
+            "cache_control": { "type": "ephemeral" },
+        }]);
+        return true;
+    }
+    content
+        .as_array_mut()
+        .and_then(|blocks| blocks.last_mut())
+        .is_some_and(mark_object)
+}
+
+fn mark_object(value: &mut Value) -> bool {
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    object.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+    true
+}
+
+/// Anthropic reports uncached, cache-write, and cache-read prompt tokens as
+/// separate fields. Their sum is what occupied the model's input window; only
+/// the read portion is the cached-token subset shown in cost telemetry.
+fn update_input_usage(usage: &mut Usage, value: &Value) {
+    let fresh = value.get("input_tokens").and_then(Value::as_u64);
+    let created = value
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64);
+    let read = value.get("cache_read_input_tokens").and_then(Value::as_u64);
+    if fresh.is_some() || created.is_some() || read.is_some() {
+        usage.input_tokens = Some(
+            fresh
+                .unwrap_or(0)
+                .saturating_add(created.unwrap_or(0))
+                .saturating_add(read.unwrap_or(0)),
+        );
+    }
+    if let Some(read) = read {
+        usage.cached_tokens = read;
+    }
+}
+
 /// Shared handler for an Anthropic Messages API streaming response: checks
 /// the HTTP status (mapping context-overflow 400s to [`super::ContextOverflow`]
 /// so the agent loop's learn-and-retry path can fire), then parses the typed
@@ -189,12 +400,7 @@ pub(crate) async fn read_message_stream(
         match ty {
             "message_start" => {
                 if let Some(u) = v.pointer("/message/usage") {
-                    usage.input_tokens =
-                        u.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
-                    usage.cached_tokens = u
-                        .get("cache_read_input_tokens")
-                        .and_then(|n| n.as_u64())
-                        .unwrap_or(0);
+                    update_input_usage(&mut usage, u);
                 }
             }
             "content_block_start" => {
@@ -324,6 +530,10 @@ impl LlmProvider for Anthropic {
         true
     }
 
+    async fn effective_context_window_tokens(&self, model: &str) -> Option<u64> {
+        self.context_window_for_model(model)
+    }
+
     async fn complete(
         &self,
         model: &str,
@@ -344,13 +554,21 @@ impl LlmProvider for Anthropic {
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools_to_anthropic(tools));
         }
+        if self.cache_control {
+            apply_cache_control(&mut body);
+        }
 
         let url = format!("{}/messages", self.base_url);
-        let resp = self
+        let mut request = self
             .client
             .post(&url)
             .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", "2023-06-01");
+        let betas = self.request_betas(model);
+        if !betas.is_empty() {
+            request = request.header("anthropic-beta", betas.join(","));
+        }
+        let resp = request
             .json(&body)
             .send()
             .await
@@ -403,5 +621,141 @@ mod tests {
         assert_eq!(wire[0]["content"][1]["source"]["type"], "base64");
         assert_eq!(wire[0]["content"][1]["source"]["media_type"], "image/jpeg");
         assert_eq!(wire[0]["content"][1]["source"]["data"], "YWJj");
+    }
+
+    fn test_message(role: Role, text: &str) -> Message {
+        Message {
+            role,
+            content: Content::Text {
+                text: text.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn usage_sums_fresh_cache_write_and_cache_read_tokens() {
+        let mut usage = Usage::default();
+        update_input_usage(
+            &mut usage,
+            &json!({
+                "input_tokens": 101,
+                "cache_creation_input_tokens": 2_000,
+                "cache_read_input_tokens": 30_000,
+            }),
+        );
+        assert_eq!(usage.input_tokens, Some(32_101));
+        assert_eq!(usage.cached_tokens, 30_000);
+    }
+
+    #[test]
+    fn cache_control_marks_four_stable_prefix_breakpoints() {
+        let messages = vec![
+            test_message(Role::User, "one"),
+            test_message(Role::Assistant, "answer"),
+            test_message(Role::User, "two"),
+            test_message(Role::Assistant, "answer"),
+            test_message(Role::User, "three"),
+        ];
+        let tools = vec![ToolSpec {
+            name: "shell".into(),
+            description: "run".into(),
+            schema: json!({"type": "object"}),
+        }];
+        let mut body = json!({
+            "system": "stable system",
+            "tools": tools_to_anthropic(&tools),
+            "messages": messages_to_anthropic(&messages),
+        });
+        apply_cache_control(&mut body);
+
+        fn count(value: &Value) -> usize {
+            match value {
+                Value::Array(values) => values.iter().map(count).sum(),
+                Value::Object(map) => {
+                    usize::from(map.contains_key("cache_control"))
+                        + map.values().map(count).sum::<usize>()
+                }
+                _ => 0,
+            }
+        }
+        assert_eq!(count(&body), MAX_CACHE_BREAKPOINTS);
+        assert_eq!(
+            body.pointer("/system/0/cache_control/type")
+                .and_then(Value::as_str),
+            Some("ephemeral")
+        );
+        assert_eq!(
+            body.pointer("/tools/0/cache_control/type")
+                .and_then(Value::as_str),
+            Some("ephemeral")
+        );
+        // With system + tools consuming two slots, the newest two user
+        // boundaries are cached and the oldest remains untouched.
+        assert!(body.pointer("/messages/0/content").unwrap().is_string());
+        assert_eq!(
+            body.pointer("/messages/2/content/0/cache_control/type")
+                .and_then(Value::as_str),
+            Some("ephemeral")
+        );
+        assert_eq!(
+            body.pointer("/messages/4/content/0/cache_control/type")
+                .and_then(Value::as_str),
+            Some("ephemeral")
+        );
+    }
+
+    #[tokio::test]
+    async fn first_party_sonnet_enables_1m_beta_and_window() {
+        let provider = Anthropic::with_config(None, "test".into()).unwrap();
+        assert_eq!(
+            provider
+                .effective_context_window_tokens("claude-sonnet-4-6")
+                .await,
+            Some(CONTEXT_1M_TOKENS)
+        );
+        assert_eq!(
+            provider.request_betas("claude-sonnet-4-6"),
+            [CONTEXT_1M_BETA]
+        );
+    }
+
+    #[tokio::test]
+    async fn compatible_endpoint_requires_explicit_capabilities() {
+        let provider =
+            Anthropic::with_config(Some("https://gateway.example/v1".into()), "test".into())
+                .unwrap();
+        assert!(!provider.cache_control);
+        assert!(provider.request_betas("claude-sonnet-4-6").is_empty());
+        assert_eq!(
+            provider
+                .effective_context_window_tokens("claude-sonnet-4-6")
+                .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn compatible_endpoint_accepts_declared_capabilities() {
+        let provider = Anthropic::with_options(
+            Some("https://gateway.example/v1".into()),
+            AnthropicOptions {
+                cache_control: Some(true),
+                betas: vec!["gateway-long-context".into(), "gateway-long-context".into()],
+                context_window_tokens: Some(750_000),
+            },
+            "test".into(),
+        )
+        .unwrap();
+        assert!(provider.cache_control);
+        assert_eq!(
+            provider.request_betas("vendor-model"),
+            ["gateway-long-context"]
+        );
+        assert_eq!(
+            provider
+                .effective_context_window_tokens("vendor-model")
+                .await,
+            Some(750_000)
+        );
     }
 }

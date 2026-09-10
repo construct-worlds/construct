@@ -291,10 +291,8 @@ impl LlmProvider for Meta {
                 "response.completed" | "response.incomplete" | "response.failed" => {
                     terminal_event_seen = true;
                     if let Some(provider_usage) = chunk.pointer("/response/usage") {
-                        usage.input_tokens = provider_usage
-                            .get("input_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or_default();
+                        usage.input_tokens =
+                            provider_usage.get("input_tokens").and_then(Value::as_u64);
                         usage.output_tokens = provider_usage
                             .get("output_tokens")
                             .and_then(Value::as_u64)

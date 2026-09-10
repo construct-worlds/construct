@@ -280,6 +280,11 @@ enabled = true
 # provider    = "anthropic"
 # api_key_env = "ANTHROPIC_API_KEY"
 # model       = "claude-sonnet-4-6"
+# # Public Anthropic defaults cache control on and enables the known Sonnet 4
+# # one-million-token beta automatically. Explicit endpoint capabilities:
+# # anthropic_cache_control = true
+# # anthropic_betas = ["context-1m-2025-08-07"]
+# # anthropic_context_window_tokens = 1000000
 
 # Gemini direct API:
 # [smith.models.gemini]
@@ -363,6 +368,9 @@ enabled = true
 #   CONSTRUCT_SMITH_AUTOMODE      — set to "1" to enable autonomous mode by default
 #   CONSTRUCT_SMITH_MAX_STEPS     — max tool-call steps per turn
 #   CONSTRUCT_SMITH_MAX_TURN_SECS — max seconds per turn
+#   CONSTRUCT_SMITH_ANTHROPIC_CACHE_CONTROL — on/off; public endpoint defaults on
+#   CONSTRUCT_SMITH_ANTHROPIC_BETAS — comma-separated anthropic-beta capabilities
+#   CONSTRUCT_SMITH_ANTHROPIC_CONTEXT_WINDOW_TOKENS — effective input window
 #   CONSTRUCT_SMITH_HOOKS_JSON    — inline JSON hooks config
 #   CONSTRUCT_SMITH_HOOKS_CONFIG  — path to a hooks config file
 #   META_API_KEY / MODEL_API_KEY  — Meta Model API credential

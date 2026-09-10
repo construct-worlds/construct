@@ -310,7 +310,7 @@ impl LlmProvider for Ollama {
                 }
                 if v.get("done").and_then(|b| b.as_bool()).unwrap_or(false) {
                     if let Some(n) = v.get("prompt_eval_count").and_then(|n| n.as_u64()) {
-                        usage.input_tokens = n;
+                        usage.input_tokens = Some(n);
                     }
                     if let Some(n) = v.get("eval_count").and_then(|n| n.as_u64()) {
                         usage.output_tokens = n;

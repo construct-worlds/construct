@@ -256,10 +256,9 @@ impl LlmProvider for OpenAi {
                 Err(_) => continue,
             };
             if let Some(u) = chunk.get("usage") {
-                usage.input_tokens = u
-                    .get("prompt_tokens")
-                    .and_then(|n| n.as_u64())
-                    .unwrap_or(usage.input_tokens);
+                if let Some(n) = u.get("prompt_tokens").and_then(|n| n.as_u64()) {
+                    usage.input_tokens = Some(n);
+                }
                 usage.output_tokens = u
                     .get("completion_tokens")
                     .and_then(|n| n.as_u64())

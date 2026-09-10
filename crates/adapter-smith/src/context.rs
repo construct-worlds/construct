@@ -1,13 +1,12 @@
 //! Rolling-window context manager.
 //!
-//! Estimates token count with a coarse `chars / 3.5` heuristic + a
-//! safety margin, then prunes complete turn pairs (user → assistant →
-//! tool exchanges between them) from the oldest end when the budget
-//! is exceeded. The system prompt is owned by the caller and not
-//! included here; we always keep the most-recent N turns.
-//!
-//! Approximate by design. v2 can swap in a real tokenizer (`tiktoken`,
-//! `tokenizers`) and provider-native prompt caching.
+//! Provider-reported input usage anchors context pressure after every
+//! successful response. Between calls, a coarse `chars / 3.5` delta estimates
+//! additions/removals for preflight pruning; before the first usage report (or
+//! when a provider omits usage), the same heuristic estimates the whole input.
+//! Complete turn pairs are pruned from the oldest end when the budget is
+//! exceeded. The system prompt is owned by the caller; we always keep the
+//! most-recent N turns.
 
 use crate::provider::{Content, Message, Role};
 
@@ -22,10 +21,9 @@ use crate::provider::{Content, Message, Role};
 ///   * OpenAI o-series (o1/o3/o4): 200K input.
 ///   * Anthropic Claude 4.x Sonnet has a 1M-context tier available
 ///     *only* with the `anthropic-beta: context-1m-2025-08-07`
-///     header. Without that header it's 200K — and the current
-///     `provider/anthropic.rs` does not send the header. So the
-///     200K value here matches what the wire actually allows.
-///     Opus and Haiku stay at 200K regardless.
+///     header. The first-party Anthropic provider advertises its effective 1M
+///     allocation at runtime when it adds that beta; this conservative table
+///     remains the fallback for compatible endpoints and other Claude models.
 pub fn context_window_tokens(provider: &str, model: &str) -> usize {
     match (provider, model) {
         ("openai", m) if m.starts_with("gpt-5") => 400_000,
@@ -68,6 +66,59 @@ pub fn context_window_tokens(provider: &str, model: &str) -> usize {
 
 pub const UTILIZATION: f64 = 0.7;
 const MIN_KEEP_TURNS: usize = 2;
+
+/// Session-local input-token accounting.
+///
+/// A provider report applies to the exact request that produced it. We retain
+/// the char estimate for that request only as a coordinate: the next
+/// preflight count starts from the provider's authoritative number and adds
+/// or subtracts the estimated content delta. This avoids replacing a real
+/// tokenizer result with Smith's heuristic while still accounting for new
+/// user/tool messages that have not reached the provider yet.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct InputTokenCounter {
+    anchor: Option<InputTokenAnchor>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InputTokenAnchor {
+    reported: u64,
+    heuristic_at_request: u64,
+}
+
+impl InputTokenCounter {
+    /// Record usage for the exact request whose full-input heuristic was
+    /// `heuristic_at_request`. Missing usage clears any stale provider anchor,
+    /// making subsequent calls use the documented full-estimate fallback.
+    pub fn record(&mut self, reported: Option<u64>, heuristic_at_request: u64) {
+        self.anchor = reported.map(|reported| InputTokenAnchor {
+            reported,
+            heuristic_at_request,
+        });
+    }
+
+    /// Estimate the next request from the latest provider count plus only the
+    /// char-estimated delta since that report. With no report, return the full
+    /// heuristic unchanged.
+    pub fn preflight(&self, current_heuristic: u64) -> u64 {
+        let Some(anchor) = self.anchor else {
+            return current_heuristic;
+        };
+        if current_heuristic >= anchor.heuristic_at_request {
+            anchor
+                .reported
+                .saturating_add(current_heuristic - anchor.heuristic_at_request)
+        } else {
+            anchor
+                .reported
+                .saturating_sub(anchor.heuristic_at_request - current_heuristic)
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.anchor = None;
+    }
+}
 
 /// Char-heuristic token estimate for a raw string — the same `chars / 3.5`
 /// rule as [`estimate_tokens`], for prompt sections that aren't `Message`s.
@@ -175,9 +226,52 @@ fn estimate_tool_tokens(tool_specs: &[crate::provider::ToolSpec]) -> u64 {
 
 /// Convert a whole-window utilization target into the portion available to
 /// conversation messages after the fixed prompt and tool overhead is paid.
+#[cfg(test)]
 pub fn message_budget(window_tokens: u64, utilization: f64, fixed_tokens: u64) -> usize {
     let total_budget = (window_tokens as f64 * utilization) as u64;
     usize::try_from(total_budget.saturating_sub(fixed_tokens)).unwrap_or(usize::MAX)
+}
+
+/// Full preflight input estimate (fixed prompt/tools plus conversation),
+/// anchored to provider usage when available.
+pub fn preflight_input_tokens(
+    counter: &InputTokenCounter,
+    fixed_tokens: u64,
+    messages: &[Message],
+) -> u64 {
+    let heuristic = fixed_tokens.saturating_add(estimate_tokens(messages) as u64);
+    counter.preflight(heuristic)
+}
+
+/// Prune oldest turn pairs against a whole-input budget. Unlike
+/// [`prune_to_budget`], this includes fixed prompt/tool overhead and uses the
+/// latest provider report as its baseline when one exists.
+pub fn prune_to_input_budget(
+    messages: &mut Vec<Message>,
+    budget: u64,
+    fixed_tokens: u64,
+    counter: &InputTokenCounter,
+) -> usize {
+    let mut pruned = 0;
+    while preflight_input_tokens(counter, fixed_tokens, messages) > budget {
+        let mut user_seen = 0;
+        let can_prune = messages.iter().any(|m| {
+            if matches!(m.role, Role::User) {
+                user_seen += 1;
+            }
+            user_seen == MIN_KEEP_TURNS + 1
+        });
+        if !can_prune {
+            break;
+        }
+        let cut = find_first_user_run_end(messages);
+        if cut == 0 {
+            break;
+        }
+        messages.drain(..cut);
+        pruned += 1;
+    }
+    pruned
 }
 
 /// Rough token estimate (chars / 3.5). Safe to overestimate.
@@ -227,10 +321,10 @@ pub fn prune(messages: &mut Vec<Message>, provider: &str, model: &str) -> usize 
     prune_to_budget(messages, cap)
 }
 
-/// Variant of `prune` that takes an explicit token budget instead
-/// of looking up the hardcoded table. Used by the learned-limit /
-/// probe path in `agent.rs` so the budget reflects the per-model
-/// runtime knowledge.
+/// Legacy message-only variant retained to exercise heuristic fallback pruning
+/// in unit tests. Production paths use [`prune_to_input_budget`] so fixed
+/// overhead and provider-reported usage participate in the decision.
+#[cfg(test)]
 pub fn prune_to_budget(messages: &mut Vec<Message>, cap: usize) -> usize {
     let mut pruned = 0;
     while estimate_tokens(messages) > cap {
@@ -433,6 +527,47 @@ mod tests {
     fn message_budget_subtracts_fixed_overhead_after_utilization() {
         assert_eq!(message_budget(32_768, 0.7, 20_000), 2_937);
         assert_eq!(message_budget(8_000, 0.7, 20_000), 0);
+    }
+
+    #[test]
+    fn provider_report_anchors_only_the_preflight_delta() {
+        let mut counter = InputTokenCounter::default();
+        counter.record(Some(12_000), 10_000);
+        assert_eq!(counter.preflight(10_700), 12_700);
+        assert_eq!(counter.preflight(8_500), 10_500);
+    }
+
+    #[test]
+    fn missing_provider_usage_falls_back_to_full_heuristic() {
+        let mut counter = InputTokenCounter::default();
+        assert_eq!(counter.preflight(9_000), 9_000);
+        counter.record(Some(12_000), 10_000);
+        counter.record(None, 11_000);
+        assert_eq!(counter.preflight(9_000), 9_000);
+    }
+
+    #[test]
+    fn input_budget_pruning_uses_provider_anchored_pressure() {
+        let large = "x".repeat(10_000);
+        let mut messages = vec![
+            user(&large),
+            asst(&large),
+            user("middle"),
+            asst("answer"),
+            user("latest"),
+            asst("answer"),
+        ];
+        let heuristic = 1_000 + estimate_tokens(&messages) as u64;
+        let mut counter = InputTokenCounter::default();
+        // Provider tokenizer says this exact request is much larger than the
+        // char heuristic. A 9K budget must therefore prune the oldest turn.
+        counter.record(Some(12_000), heuristic);
+        assert_eq!(
+            prune_to_input_budget(&mut messages, 9_000, 1_000, &counter),
+            1
+        );
+        assert!(matches!(messages.first().map(|m| m.role), Some(Role::User)));
+        assert_eq!(messages.len(), 4);
     }
 
     #[test]

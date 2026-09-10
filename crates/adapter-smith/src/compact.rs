@@ -165,19 +165,18 @@ pub async fn compact(
 /// the rolling-prune path.
 ///
 /// `effective_cap` is the per-model input-token cap the caller is using for
-/// budget math. `fixed_tokens` is the system/tool prefix paid on every call.
-/// The trigger compares their sum with the whole-window threshold so a large
-/// fixed prefix cannot make Smith believe the context is emptier than it is.
+/// budget math. `preflight_input_tokens` is provider-anchored when the prior
+/// response reported usage and otherwise is Smith's full char heuristic. The
+/// trigger never re-estimates that authoritative baseline here.
 pub async fn maybe_auto_compact(
     messages: &mut Vec<Message>,
     effective_cap: u64,
-    fixed_tokens: u64,
+    preflight_input_tokens: u64,
     provider: &dyn LlmProvider,
     model: &str,
 ) -> Result<Option<CompactOutcome>> {
-    let est = fixed_tokens.saturating_add(context::estimate_tokens(messages) as u64);
     let trigger = ((effective_cap as f64) * AUTO_COMPACT_RATIO) as u64;
-    if est < trigger {
+    if preflight_input_tokens < trigger {
         return Ok(None);
     }
     compact(messages, DEFAULT_KEEP_PAIRS, provider, model).await
@@ -619,7 +618,8 @@ mod tests {
         let provider = StubProvider::new("unused");
         // cap = 100k tokens; conversation is ~10 tokens; way under
         // threshold.
-        let outcome = maybe_auto_compact(&mut messages, 100_000, 0, &provider, "stub")
+        let preflight = context::estimate_tokens(&messages) as u64;
+        let outcome = maybe_auto_compact(&mut messages, 100_000, preflight, &provider, "stub")
             .await
             .unwrap();
         assert!(outcome.is_none());
@@ -640,7 +640,8 @@ mod tests {
         messages.push(user("recent"));
         messages.push(asst("latest"));
         let provider = StubProvider::new("auto-summary");
-        let outcome = maybe_auto_compact(&mut messages, 1000, 0, &provider, "stub")
+        let preflight = context::estimate_tokens(&messages) as u64;
+        let outcome = maybe_auto_compact(&mut messages, 1000, preflight, &provider, "stub")
             .await
             .unwrap()
             .expect("should auto-compact");
@@ -670,10 +671,16 @@ mod tests {
         assert!(est < prune_budget);
 
         let provider = StubProvider::new("pre-prune-summary");
-        let outcome = maybe_auto_compact(&mut messages, effective_cap as u64, 0, &provider, "stub")
-            .await
-            .unwrap()
-            .expect("should auto-compact before rolling prune would fire");
+        let outcome = maybe_auto_compact(
+            &mut messages,
+            effective_cap as u64,
+            est as u64,
+            &provider,
+            "stub",
+        )
+        .await
+        .unwrap()
+        .expect("should auto-compact before rolling prune would fire");
         assert!(outcome.dropped_turn_pairs > 0);
     }
 
@@ -692,10 +699,39 @@ mod tests {
         assert!(message_tokens < (effective_cap as f64 * AUTO_COMPACT_RATIO) as u64);
 
         let provider = StubProvider::new("fixed-overhead-summary");
-        let outcome = maybe_auto_compact(&mut messages, effective_cap, 6_000, &provider, "stub")
+        let outcome = maybe_auto_compact(
+            &mut messages,
+            effective_cap,
+            message_tokens + 6_000,
+            &provider,
+            "stub",
+        )
+        .await
+        .unwrap()
+        .expect("fixed overhead should push the total over the trigger");
+        assert!(outcome.dropped_turn_pairs > 0);
+    }
+
+    #[tokio::test]
+    async fn auto_compact_obeys_provider_anchored_pressure() {
+        let mut messages = vec![
+            user("one"),
+            asst("one"),
+            user("two"),
+            asst("two"),
+            user("three"),
+            asst("three"),
+            user("four"),
+            asst("four"),
+            user("five"),
+            asst("five"),
+        ];
+        assert!(context::estimate_tokens(&messages) < 100);
+        let provider = StubProvider::new("provider-pressure-summary");
+        let outcome = maybe_auto_compact(&mut messages, 1_000, 700, &provider, "stub")
             .await
             .unwrap()
-            .expect("fixed overhead should push the total over the trigger");
+            .expect("provider count above 65% should trigger compaction");
         assert!(outcome.dropped_turn_pairs > 0);
     }
 }

@@ -162,11 +162,24 @@ pub struct ToolCall {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Usage {
-    pub input_tokens: u64,
+    /// Provider-reported prompt tokens. `None` means the provider omitted
+    /// usage; keep that distinct from a real zero so context budgeting can
+    /// fall back to an estimate deliberately rather than treating missing
+    /// telemetry as authoritative.
+    pub input_tokens: Option<u64>,
     pub output_tokens: u64,
     /// Cached input tokens (subset of `input_tokens`). 0 when unknown.
     pub cached_tokens: u64,
     pub usd: f64,
+}
+
+impl Usage {
+    /// Value used by cumulative cost events, whose protocol predates the
+    /// explicit unknown state. Context-pressure decisions should use the
+    /// `Option` directly instead.
+    pub fn input_tokens_or_zero(self) -> u64 {
+        self.input_tokens.unwrap_or(0)
+    }
 }
 
 /// Why the provider stopped producing tokens.
