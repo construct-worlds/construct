@@ -7305,6 +7305,16 @@ fn creator_micro_snapshot_for_sessions(
             snapshot.attention |= bit;
         }
     }
+    for session in sessions
+        .iter()
+        .filter(|session| !session.archived && is_user_list_session(session))
+    {
+        snapshot.fleet_active |= matches!(
+            session.state,
+            SessionState::Pending | SessionState::Running
+        );
+        snapshot.fleet_attention |= session.needs_attention;
+    }
     snapshot
 }
 
@@ -15209,7 +15219,18 @@ impl App {
             &self.sessions,
             &mut self.creator_micro_session_slots,
         );
-        creator_micro_snapshot_for_sessions(&self.sessions, &self.creator_micro_session_slots)
+        let mut snapshot =
+            creator_micro_snapshot_for_sessions(&self.sessions, &self.creator_micro_session_slots);
+        let panes = self.main_windows.leaf_panes();
+        snapshot.pane_count = panes.len().min(4) as u8;
+        if self.focus == PaneFocus::View {
+            snapshot.focused_pane = panes
+                .iter()
+                .position(|(window_id, _)| *window_id == self.active_window_id)
+                .filter(|pane| *pane < 4)
+                .map(|pane| pane as u8);
+        }
+        snapshot
     }
 
     pub(crate) fn op_xy_feedback_snapshot(
@@ -18624,6 +18645,10 @@ mod tests {
                 assigned: 0b0000_0111,
                 active: 0b0000_0010,
                 attention: 0b0000_0100,
+                pane_count: 0,
+                focused_pane: None,
+                fleet_active: true,
+                fleet_attention: true,
             }
         );
     }
@@ -36182,6 +36207,9 @@ mod tests {
         app.select_creator_micro_pane(2);
         assert_eq!(app.focus, PaneFocus::View);
         assert_eq!(app.active_window_id, 2);
+        let snapshot = app.creator_micro_snapshot();
+        assert_eq!(snapshot.pane_count, 3);
+        assert_eq!(snapshot.focused_pane, Some(1));
 
         app.select_creator_micro_pane(4);
         assert_eq!(app.active_window_id, 2);
