@@ -3992,8 +3992,8 @@ mod tests {
         r.attach_session("s1", "codex", None).unwrap();
 
         let cases = [
-            ("sonnet", "claude-sonnet-4-6"),
-            ("opus", "claude-opus-4-8"),
+            ("sonnet", "claude-sonnet-5"),
+            ("opus", "claude-opus-5"),
             ("fable", "claude-fable-5-1"),
         ];
         for (alias, concrete) in cases {
