@@ -33,8 +33,8 @@ A target is somewhere the router can send a model request:
 
   | Key | Route | Default model |
   | :--- | :--- | :--- |
-  | `ANTHROPIC_API_KEY` | `anthropic` | `claude-opus-4-8` |
-  | `OPENAI_API_KEY` | `openai` | `gpt-5` |
+  | `ANTHROPIC_API_KEY` | `anthropic` | `claude-opus-5` |
+  | `OPENAI_API_KEY` | `openai` | `gpt-6-astra` |
   | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `gemini` | `gemini-2.5-pro` |
   | `META_API_KEY` / `MODEL_API_KEY` | `meta` | `muse-spark-1.1` |
   | `GROK_API_KEY` / `XAI_API_KEY` | `grok` | `grok-4.6` |
@@ -222,7 +222,7 @@ publish_models = true    # default; false keeps redirects, stops augmenting pick
 # spawn_agent; this list chooses that roster.
 featured_models = [
   "claude-oauth/opus",
-  "codex-oauth/gpt-5.6-sol",
+  "codex-oauth/gpt-6-sol",
 ]
 
 [router.oauth]
@@ -230,7 +230,7 @@ featured_models = [
 # the same curated one behind smith's /model completion. One string pins
 # a single model; a list becomes the picker's second step.
 claude-oauth = ["opus", "sonnet"]
-codex-oauth  = ["gpt-5.6-sol", "gpt-5.5"]
+codex-oauth  = ["gpt-6-sol", "gpt-5.5"]
 grok-oauth   = "grok-4.6"
 ```
 

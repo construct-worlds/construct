@@ -418,14 +418,14 @@ pub async fn smith_auth_methods(
         "anthropic_api_key",
         "Anthropic API key",
         "anthropic",
-        "claude-opus-4-8",
+        "claude-opus-5",
         &["ANTHROPIC_API_KEY"],
     );
     let openai = env_key_method(
         "openai_api_key",
         "OpenAI API key",
         "openai",
-        "gpt-5",
+        "gpt-6-astra",
         &["OPENAI_API_KEY"],
     );
     let gemini = env_key_method(
@@ -468,7 +468,7 @@ pub async fn smith_auth_methods(
         id: "claude_subscription",
         label: "Claude subscription",
         model_prefix: "claude-oauth",
-        default_model: "claude-sonnet-4-6",
+        default_model: "claude-sonnet-5",
         available: claude_sub_present,
         detail: if claude_sub_present {
             "Claude Code credentials found".to_string()

@@ -397,6 +397,10 @@ pub fn popup_names() -> impl Iterator<Item = &'static str> {
 /// models that are not listed here yet.
 pub const MODEL_COMPLETIONS: &[&str] = &[
     // ChatGPT subscription / Codex CLI OAuth path.
+    "codex-oauth:gpt-6-astra",
+    "codex-oauth:gpt-6.1-sol",
+    "codex-oauth:gpt-6-sol",
+    "codex-oauth:gpt-6-luna",
     "codex-oauth:gpt-5.6-sol",
     "codex-oauth:gpt-5.6-terra",
     "codex-oauth:gpt-5.6-luna",
@@ -404,6 +408,10 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     "codex-oauth:gpt-5.4-mini",
     "codex-oauth:gpt-5.3-codex-spark",
     // OpenAI platform API path.
+    "openai:gpt-6-astra",
+    "openai:gpt-6.1-sol",
+    "openai:gpt-6-sol",
+    "openai:gpt-6-luna",
     "openai:gpt-5.6-sol",
     "openai:gpt-5.6-terra",
     "openai:gpt-5.6-luna",
@@ -415,6 +423,7 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     "claude-oauth:opus",
     "claude-oauth:fable",
     // Anthropic API path.
+    "anthropic:claude-opus-5",
     "anthropic:claude-sonnet-5",
     "anthropic:claude-fable-5-1",
     "anthropic:claude-fable-5",
@@ -487,8 +496,8 @@ pub fn models_for_provider(provider: &str) -> Vec<String> {
 /// alias cannot be wired on one side and forgotten on the other.
 pub fn resolve_claude_oauth_model(model: &str) -> String {
     match model.trim() {
-        "opus" => "claude-opus-4-8".to_string(),
-        "sonnet" => "claude-sonnet-4-6".to_string(),
+        "opus" => "claude-opus-5".to_string(),
+        "sonnet" => "claude-sonnet-5".to_string(),
         "haiku" => "claude-haiku-4-5".to_string(),
         "fable" => "claude-fable-5-1".to_string(),
         other => other.to_string(),
@@ -665,15 +674,15 @@ mod tests {
 
     #[test]
     fn claude_oauth_aliases_expand_to_concrete_anthropic_ids() {
-        assert_eq!(resolve_claude_oauth_model("sonnet"), "claude-sonnet-4-6");
-        assert_eq!(resolve_claude_oauth_model("opus"), "claude-opus-4-8");
+        assert_eq!(resolve_claude_oauth_model("sonnet"), "claude-sonnet-5");
+        assert_eq!(resolve_claude_oauth_model("opus"), "claude-opus-5");
         assert_eq!(resolve_claude_oauth_model("haiku"), "claude-haiku-4-5");
         assert_eq!(resolve_claude_oauth_model("fable"), "claude-fable-5-1");
         assert_eq!(
             resolve_claude_oauth_model("claude-sonnet-4-6"),
             "claude-sonnet-4-6"
         );
-        assert_eq!(resolve_claude_oauth_model("  sonnet  "), "claude-sonnet-4-6");
+        assert_eq!(resolve_claude_oauth_model("  sonnet  "), "claude-sonnet-5");
     }
 
     /// The leak fix in action: a `/zoom` ClientCommand event is hidden from

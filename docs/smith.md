@@ -95,8 +95,8 @@ CLI uses. Models: `k3`, `k3-256k`, `kimi-for-coding`,
 `kimi-for-coding-highspeed`.
 
 If you don't pass a model and `CONSTRUCT_SMITH_MODEL` isn't set, smith
-picks: `ANTHROPIC_API_KEY` → `claude-opus-4-8`, else `OPENAI_API_KEY`
-→ `gpt-5`, else `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) →
+picks: `ANTHROPIC_API_KEY` → `claude-opus-5`, else `OPENAI_API_KEY`
+→ `gpt-6-astra`, else `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) →
 `gemini-2.5-pro`, else `META_API_KEY` (or `MODEL_API_KEY`) →
 `muse-spark-1.1`, else `DEEPSEEK_API_KEY` → `deepseek-v4-pro`,
 else `OPENROUTER_API_KEY` → `openrouter/auto`,
