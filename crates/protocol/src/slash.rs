@@ -636,6 +636,7 @@ mod tests {
         assert_eq!(
             models_for_provider("anthropic"),
             vec![
+                "claude-opus-5",
                 "claude-sonnet-5",
                 "claude-fable-5-1",
                 "claude-fable-5",
