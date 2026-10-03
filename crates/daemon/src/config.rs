@@ -226,8 +226,8 @@ enabled = true
 # Every direct-API-key provider below is BUILT IN: export its key and it is
 # already a route target, with nothing to declare here (spec 0179).
 #
-#   ANTHROPIC_API_KEY              -> anthropic  (claude-opus-4-8)
-#   OPENAI_API_KEY                 -> openai     (gpt-5)
+#   ANTHROPIC_API_KEY              -> anthropic  (claude-opus-5)
+#   OPENAI_API_KEY                 -> openai     (gpt-6-astra)
 #   GEMINI_API_KEY / GOOGLE_API_KEY-> gemini     (gemini-2.5-pro)
 #   META_API_KEY / MODEL_API_KEY   -> meta       (muse-spark-1.1)
 #   GROK_API_KEY / XAI_API_KEY     -> grok       (grok-4.6)
@@ -747,14 +747,14 @@ pub const BUILTIN_TARGETS: &[BuiltinTarget] = &[
         provider: "anthropic",
         base_url: "https://api.anthropic.com/v1",
         key_envs: &["ANTHROPIC_API_KEY"],
-        default_model: "claude-opus-4-8",
+        default_model: "claude-opus-5",
     },
     BuiltinTarget {
         route: "openai",
         provider: "openai",
         base_url: "https://api.openai.com/v1",
         key_envs: &["OPENAI_API_KEY"],
-        default_model: "gpt-5",
+        default_model: "gpt-6-astra",
     },
     BuiltinTarget {
         route: "gemini",

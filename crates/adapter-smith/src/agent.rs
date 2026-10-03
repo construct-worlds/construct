@@ -1663,8 +1663,8 @@ impl ResolvedModel {
 /// model name. Order of precedence:
 ///   1. `params.model` if provided.
 ///   2. `CONSTRUCT_SMITH_MODEL`.
-///   3. ANTHROPIC_API_KEY set → `claude-opus-4-8`.
-///   4. OPENAI_API_KEY set → `gpt-5`.
+///   3. ANTHROPIC_API_KEY set → `claude-opus-5`.
+///   4. OPENAI_API_KEY set → `gpt-6-astra`.
 ///   5. GEMINI_API_KEY (or GOOGLE_API_KEY) set → `gemini-2.5-pro`.
 ///   6. META_API_KEY (or MODEL_API_KEY) set → `muse-spark-1.1`.
 ///   7. DEEPSEEK_API_KEY set → `deepseek-v4-pro`.
@@ -1700,10 +1700,10 @@ pub fn resolve_model(params: &SessionStartParams) -> Result<ResolvedModel> {
 /// error rather than silently picking a provider that isn't configured.
 fn default_auto_detect_spec() -> Result<String> {
     if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-        return Ok("anthropic:claude-opus-4-8".to_string());
+        return Ok("anthropic:claude-opus-5".to_string());
     }
     if std::env::var("OPENAI_API_KEY").is_ok() {
-        return Ok("openai:gpt-5".to_string());
+        return Ok("openai:gpt-6-astra".to_string());
     }
     if std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok() {
         return Ok("gemini:gemini-2.5-pro".to_string());
@@ -2467,7 +2467,7 @@ mod tests {
         assert_eq!(deepseek_over_openrouter, "deepseek:deepseek-v4-pro");
         assert_eq!(meta_only, "meta:muse-spark-1.1");
         assert_eq!(gemini_over_meta, "gemini:gemini-2.5-pro");
-        assert_eq!(openai_over_gemini, "openai:gpt-5");
-        assert_eq!(anthropic_over_both, "anthropic:claude-opus-4-8");
+        assert_eq!(openai_over_gemini, "openai:gpt-6-astra");
+        assert_eq!(anthropic_over_both, "anthropic:claude-opus-5");
     }
 }

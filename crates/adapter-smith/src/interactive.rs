@@ -1205,7 +1205,7 @@ mod tests {
         );
         assert_eq!(
             default_monitor_spec("anthropic", "claude-opus-4-8").as_deref(),
-            Some("anthropic:claude-sonnet-4-5")
+            Some("anthropic:claude-sonnet-5")
         );
         // Already-small minibuffer models → keep them (no downgrade).
         assert_eq!(default_monitor_spec("openai", "gpt-5-mini"), None);
@@ -3451,7 +3451,7 @@ fn default_monitor_spec(provider_name: &str, minibuffer_model: &str) -> Option<S
         // startup health-check falls back if an account lacks it.
         "codex-oauth" => Some("codex-oauth:gpt-5.4-mini".to_string()),
         "openai" => Some("openai:gpt-5-mini".to_string()),
-        "anthropic" if !m.contains("sonnet") => Some("anthropic:claude-sonnet-4-5".to_string()),
+        "anthropic" if !m.contains("sonnet") => Some("anthropic:claude-sonnet-5".to_string()),
         // anthropic already on sonnet, or gemini/ollama/unknown → keep minibuffer's.
         _ => None,
     }
