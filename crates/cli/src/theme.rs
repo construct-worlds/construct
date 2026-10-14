@@ -246,6 +246,16 @@ impl ThemeConfig {
         parse_theme_onto(base.clone(), &self.text).unwrap_or(base)
     }
 
+    /// `animations = true` opts into spinners, the rain body, name marquees,
+    /// focus sweeps and playbook shimmer. Off by default: their constant
+    /// repaints read as flicker on some terminals.
+    pub fn animations(&self) -> bool {
+        toml::from_str::<RawTheme>(&self.text)
+            .ok()
+            .and_then(|r| r.animations)
+            .unwrap_or(false)
+    }
+
     pub fn active_name(&self, detected_light: Option<bool>) -> ThemeName {
         if let Some(name) = self.name {
             return name;
@@ -892,6 +902,8 @@ struct RawTheme {
     #[serde(default)]
     mode: Option<String>,
     #[serde(default)]
+    animations: Option<bool>,
+    #[serde(default)]
     colors: Option<RawColors>,
 }
 
@@ -1125,6 +1137,19 @@ mod tests {
             warning: None,
         };
         assert_eq!(cfg.resolve(Some(true)).text, Theme::dark_ui().text);
+    }
+
+    #[test]
+    fn animations_are_off_unless_opted_in() {
+        let cfg = |text: &str| ThemeConfig {
+            mode: ThemeMode::Auto,
+            name: None,
+            text: text.to_string(),
+            warning: None,
+        };
+        assert!(!cfg("").animations());
+        assert!(!cfg("mode = \"dark\"").animations());
+        assert!(cfg("animations = true").animations());
     }
 
     #[test]

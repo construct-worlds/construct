@@ -2137,6 +2137,9 @@ pub struct App {
     /// Bumped whenever `theme` is replaced, so the render loop knows to
     /// recompute the quantizer's contrast repairs for the new palette.
     pub theme_revision: u64,
+    /// `animations` from `theme.toml`. Off freezes every looping effect on a
+    /// static frame so idle repaints write no cells.
+    pub animations: bool,
     terminal_background_is_light: Option<bool>,
     pub help_visible: bool,
     /// Wrapped-row scroll offset into the help dialog's content, clamped to
@@ -5812,6 +5815,7 @@ async fn run_with_socket_initial_selection(
         theme_name: theme_config.active_name(None),
         color_depth: crate::color::ColorDepth::default(),
         theme_revision: 0,
+        animations: theme_config.animations(),
         terminal_background_is_light: None,
         help_visible: false,
         help_scroll_offset: 0,
@@ -6404,7 +6408,17 @@ async fn run_loop(
                 pairs
             });
             app.tick_redraw_requested.set(false);
+            // Synchronized output (DEC 2026): the terminal shows the frame only
+            // once it is complete, so a repaint never flashes half-drawn.
+            crossterm::queue!(
+                terminal.backend_mut(),
+                crossterm::terminal::BeginSynchronizedUpdate
+            )?;
             terminal.draw(|f| ui::render(f, app))?;
+            crossterm::execute!(
+                terminal.backend_mut(),
+                crossterm::terminal::EndSynchronizedUpdate
+            )?;
             last_draw = Instant::now();
         }
 
@@ -11686,6 +11700,9 @@ impl App {
     /// Current spinner frame, ticking on wall-time so all sessions animate
     /// in phase.
     pub fn spinner_frame(&self) -> &'static str {
+        if !self.animations {
+            return SPINNER_FRAMES[0];
+        }
         let idx = (self.start_instant.elapsed().as_millis() / SPINNER_FRAME_MS) as usize
             % SPINNER_FRAMES.len();
         SPINNER_FRAMES[idx]
@@ -18235,6 +18252,7 @@ mod tests {
             theme_name: crate::theme::ThemeName::Matrix,
             color_depth: crate::color::ColorDepth::default(),
             theme_revision: 0,
+            animations: true,
             terminal_background_is_light: None,
             help_visible: false,
             help_scroll_offset: 0,

@@ -156,6 +156,15 @@ matrix_dim = "indexed:34"
 Colors accept `#rrggbb`, `indexed:N`, or ANSI names such as `green`, `cyan`,
 `dark_gray`, and `light_yellow`. Omitted slots keep the variant's default.
 
+Animations — busy spinners, the Matrix rain body, scrolling session names,
+the focus-border sweep, and the playbook run shimmer — are off by default and
+hold a static frame (the rain panel shows the token meter instead). Opt in
+with:
+
+```toml
+animations = true
+```
+
 ### Color depth
 
 The palette is authored in 24-bit color. Terminals that only speak 256 colors

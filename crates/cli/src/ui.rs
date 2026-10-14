@@ -3465,7 +3465,7 @@ fn render_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                             raw_name.push_str(&format!(" ⑂{forks}"));
                         }
                     }
-                    let scroll = if is_selected && focused {
+                    let scroll = if is_selected && focused && app.animations {
                         // ~6 chars/sec (was 5; +20% per user feedback).
                         if raw_name.chars().count() > name_avail {
                             app.request_tick_redraw();
@@ -4419,7 +4419,8 @@ fn render_matrix_rain(f: &mut Frame, rain_area: Rect, app: &mut App) {
     // still overlay it (spec 0019), and intensity keeps easing above so the
     // rain resumes mid-stride rather than snapping when the user switches
     // back.
-    if app.matrix_panel_mode == crate::app::MatrixPanelMode::Tokens {
+    // The rain body is pure animation, so animations off shows the meter.
+    if app.matrix_panel_mode == crate::app::MatrixPanelMode::Tokens || !app.animations {
         render_token_meter(f, rain_area, app, now);
         render_matrix_widget_viewport(f, rain_area, app, now);
         return;
@@ -15202,6 +15203,10 @@ fn pane_border_style(theme: &Theme, focused: bool) -> Style {
 /// sweep.
 fn render_focus_border_sweep(f: &mut Frame, app: &mut App, now: Instant) {
     let target = app.focused_border_target();
+    if !app.animations {
+        app.focus_border_sweep.sync(target);
+        return;
+    }
     let rect = match target {
         FocusBorderTarget::SessionList => app.layout.list_area,
         FocusBorderTarget::Lineage => app.layout.lineage_area,
@@ -18034,7 +18039,7 @@ fn render_playbook_popup_at(
     );
     // Run shimmer (spec 0042): while a playbook Run is executing for this session,
     // sweep a highlight through the blocks that have not settled yet.
-    if let Some(shimmer) = playbook_run_shimmer(app, popup, now) {
+    if let Some(shimmer) = playbook_run_shimmer(app, popup, now).filter(|_| app.animations) {
         app.request_tick_redraw();
         apply_playbook_shimmer(&mut lines, &shimmer, &app.theme);
     }
