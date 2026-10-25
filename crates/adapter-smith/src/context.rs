@@ -310,6 +310,18 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
             Content::Reasoning(item) => {
                 chars += item.encrypted_content.as_deref().map(str::len).unwrap_or(0)
                     + item.summary.iter().map(String::len).sum::<usize>();
+                if let Some(blocks) = &item.anthropic_blocks {
+                    chars += blocks
+                        .iter()
+                        .filter(|block| {
+                            matches!(
+                                block.get("type").and_then(serde_json::Value::as_str),
+                                Some("thinking" | "redacted_thinking")
+                            )
+                        })
+                        .map(|block| block.to_string().len())
+                        .sum::<usize>();
+                }
             }
         }
     }

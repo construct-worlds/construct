@@ -508,6 +508,7 @@ impl CodexOauth {
                                     id,
                                     encrypted_content,
                                     summary,
+                                    anthropic_blocks: None,
                                 });
                             }
                         }
@@ -803,6 +804,9 @@ fn message_to_input_items(m: &Message) -> Vec<Value> {
             })]
         }
         Content::Reasoning(item) => {
+            if item.anthropic_blocks.is_some() {
+                return Vec::new();
+            }
             // Echo the reasoning item back verbatim (id + encrypted_content
             // + summary) so the backend caches the prefix and the model
             // keeps its prior reasoning. Dropping it busts the cache.
@@ -1148,6 +1152,7 @@ impl LlmProvider for CodexOauth {
                                     id,
                                     encrypted_content,
                                     summary,
+                                    anthropic_blocks: None,
                                 });
                             }
                         }

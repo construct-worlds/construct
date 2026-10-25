@@ -10,8 +10,8 @@
 //! in how it authenticates the request and shapes the system prompt.
 
 use super::{
-    Content, LlmProvider, Message, ProviderTurn, Role, StopReason, TextSink, ToolCall, ToolSpec,
-    Usage,
+    Content, LlmProvider, Message, ProviderTurn, ReasoningItem, Role, StopReason, TextSink,
+    ToolCall, ToolSpec, Usage,
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -169,9 +169,21 @@ fn options_from_env() -> Result<AnthropicOptions> {
 
 pub(crate) fn messages_to_anthropic(messages: &[Message]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::with_capacity(messages.len());
+    let mut skip_rebuilt_assistant = false;
     // Anthropic merges consecutive same-role messages on the wire.
     // We don't, but we do skip the system role (passed top-level).
     for m in messages {
+        if skip_rebuilt_assistant {
+            skip_rebuilt_assistant = false;
+            if m.role == Role::Assistant
+                && matches!(
+                    &m.content,
+                    Content::Text { .. } | Content::AssistantToolCalls { .. }
+                )
+            {
+                continue;
+            }
+        }
         match (m.role, &m.content) {
             (Role::System, _) => {} // attached as `system` field on the request
             (_, Content::Text { text }) => {
@@ -237,8 +249,12 @@ pub(crate) fn messages_to_anthropic(messages: &[Message]) -> Vec<Value> {
                 let body = format!("{}{}", super::SUMMARY_WIRE_PREFIX, text);
                 out.push(json!({ "role": "user", "content": body }));
             }
-            // codex-oauth-only; nothing to send to the Anthropic API.
-            (_, Content::Reasoning(_)) => {}
+            (_, Content::Reasoning(item)) => {
+                if let Some(blocks) = &item.anthropic_blocks {
+                    out.push(json!({ "role": "assistant", "content": blocks }));
+                    skip_rebuilt_assistant = true;
+                }
+            }
         }
     }
     out
@@ -410,6 +426,7 @@ pub(crate) async fn read_message_stream(
                 }
                 let block = v.get("content_block").cloned().unwrap_or(Value::Null);
                 let bty = block.get("type").and_then(|s| s.as_str()).unwrap_or("");
+                blocks[idx].raw = block.clone();
                 match bty {
                     "tool_use" => {
                         blocks[idx].kind = BlockKind::ToolUse;
@@ -426,10 +443,24 @@ pub(crate) async fn read_message_stream(
                     }
                     "thinking" => {
                         blocks[idx].kind = BlockKind::Thinking;
+                        blocks[idx].text = block
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
                     }
-                    _ => {
+                    "redacted_thinking" => {
+                        blocks[idx].kind = BlockKind::RedactedThinking;
+                    }
+                    "text" => {
                         blocks[idx].kind = BlockKind::Text;
+                        blocks[idx].text = block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
                     }
+                    _ => blocks[idx].kind = BlockKind::Other,
                 }
             }
             "content_block_delta" => {
@@ -458,16 +489,17 @@ pub(crate) async fn read_message_stream(
                     // sink's reasoning channel so the TUI renders
                     // it dim/italic and the headless transcript
                     // gets a separate `SessionEvent::Reasoning`.
-                    // The accompanying `signature_delta` event
-                    // (Anthropic-internal signature for the
-                    // thinking block; not user-visible) is
-                    // ignored by the catch-all below.
                     "thinking_delta" => {
                         if let Some(t) = delta.get("thinking").and_then(|s| s.as_str()) {
                             if !t.is_empty() {
                                 sink.reasoning_delta(t);
                                 blocks[idx].text.push_str(t);
                             }
+                        }
+                    }
+                    "signature_delta" => {
+                        if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                            blocks[idx].raw["signature"] = json!(signature);
                         }
                     }
                     _ => {}
@@ -492,20 +524,44 @@ pub(crate) async fn read_message_stream(
     }
 
     let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut raw_blocks = Vec::new();
+    let mut has_thinking = false;
     for b in blocks {
-        if matches!(b.kind, BlockKind::ToolUse) {
-            let input = if b.input_json.is_empty() {
-                json!({})
-            } else {
-                serde_json::from_str::<Value>(&b.input_json).unwrap_or_else(|_| json!({}))
-            };
-            tool_calls.push(ToolCall {
-                id: b.id,
-                name: b.name,
-                input,
-            });
+        let mut raw = b.raw;
+        match b.kind {
+            BlockKind::ToolUse => {
+                let input = if b.input_json.is_empty() {
+                    raw.get("input").cloned().unwrap_or_else(|| json!({}))
+                } else {
+                    serde_json::from_str::<Value>(&b.input_json).unwrap_or_else(|_| json!({}))
+                };
+                raw["input"] = input.clone();
+                tool_calls.push(ToolCall {
+                    id: b.id,
+                    name: b.name,
+                    input,
+                });
+            }
+            BlockKind::Text => raw["text"] = json!(b.text),
+            BlockKind::Thinking => {
+                raw["thinking"] = json!(b.text);
+                has_thinking = true;
+            }
+            BlockKind::RedactedThinking => has_thinking = true,
+            BlockKind::Other => {}
+        }
+        if raw.is_object() {
+            raw_blocks.push(raw);
         }
     }
+    let reasoning_items = if has_thinking {
+        vec![ReasoningItem {
+            anthropic_blocks: Some(raw_blocks),
+            ..ReasoningItem::default()
+        }]
+    } else {
+        Vec::new()
+    };
 
     Ok(ProviderTurn {
         text: if assistant_text.is_empty() {
@@ -516,7 +572,7 @@ pub(crate) async fn read_message_stream(
         tool_calls,
         stop_reason,
         usage,
-        reasoning_items: Vec::new(),
+        reasoning_items,
     })
 }
 
@@ -580,6 +636,7 @@ impl LlmProvider for Anthropic {
 #[derive(Default)]
 struct BlockAcc {
     kind: BlockKind,
+    raw: Value,
     text: String,
     id: String,
     name: String,
@@ -589,6 +646,7 @@ struct BlockAcc {
 #[derive(Default)]
 enum BlockKind {
     #[default]
+    Other,
     Text,
     ToolUse,
     /// Extended-thinking content block from Anthropic models that
@@ -596,6 +654,7 @@ enum BlockKind {
     /// Streamed via `thinking_delta` content-block deltas; we route
     /// these to `TextSink::reasoning_delta` instead of `delta`.
     Thinking,
+    RedactedThinking,
 }
 
 #[cfg(test)]
@@ -621,6 +680,66 @@ mod tests {
         assert_eq!(wire[0]["content"][1]["source"]["type"], "base64");
         assert_eq!(wire[0]["content"][1]["source"]["media_type"], "image/jpeg");
         assert_eq!(wire[0]["content"][1]["source"]["data"], "YWJj");
+    }
+
+    #[test]
+    fn signed_thinking_survives_tool_result_replay() {
+        let blocks = vec![
+            json!({"type":"thinking","thinking":"","signature":"signed"}),
+            json!({"type":"tool_use","id":"t1","name":"shell","input":{"cmd":"pwd"}}),
+            json!({"type":"thinking","thinking":"","signature":"interleaved"}),
+            json!({"type":"redacted_thinking","data":"opaque"}),
+        ];
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: Content::Reasoning(ReasoningItem {
+                    anthropic_blocks: Some(blocks.clone()),
+                    ..ReasoningItem::default()
+                }),
+            },
+            Message {
+                role: Role::Assistant,
+                content: Content::AssistantToolCalls {
+                    text: None,
+                    calls: vec![ToolCall {
+                        id: "t1".into(),
+                        name: "shell".into(),
+                        input: json!({"cmd":"pwd"}),
+                    }],
+                },
+            },
+            Message {
+                role: Role::Tool,
+                content: Content::ToolResult {
+                    call_id: "t1".into(),
+                    output: "ok".into(),
+                    is_error: false,
+                },
+            },
+        ];
+        let persisted = serde_json::to_string(&messages).unwrap();
+        let restored: Vec<Message> = serde_json::from_str(&persisted).unwrap();
+        let wire = messages_to_anthropic(&restored);
+        assert_eq!(wire.len(), 2, "the reconstructed assistant turn is skipped");
+        assert_eq!(wire[0]["content"], json!(blocks));
+        assert_eq!(wire[1]["content"][0]["tool_use_id"], "t1");
+
+        let final_turn = messages_to_anthropic(&[
+            Message {
+                role: Role::Assistant,
+                content: Content::Reasoning(ReasoningItem {
+                    anthropic_blocks: Some(vec![
+                        json!({"type":"thinking","thinking":"","signature":"final"}),
+                        json!({"type":"text","text":"done"}),
+                    ]),
+                    ..ReasoningItem::default()
+                }),
+            },
+            test_message(Role::Assistant, "done"),
+        ]);
+        assert_eq!(final_turn.len(), 1);
+        assert_eq!(final_turn[0]["content"][1]["text"], "done");
     }
 
     fn test_message(role: Role, text: &str) -> Message {
