@@ -2786,6 +2786,10 @@ mod tests {
     #[test]
     fn deepseek_effort_scale_is_flash_only() {
         assert_eq!(
+            profile_effort_support("deepseek", "deepseek-flash"),
+            EffortSupport::DeepSeek
+        );
+        assert_eq!(
             profile_effort_support("deepseek", "deepseek-v4-flash"),
             EffortSupport::DeepSeek
         );
@@ -3992,8 +3996,9 @@ mod tests {
         r.attach_session("s1", "codex", None).unwrap();
 
         let cases = [
-            ("sonnet", "claude-sonnet-5"),
-            ("opus", "claude-opus-5"),
+            ("sonnet", "claude-sonnet-5-5"),
+            ("opus", "claude-opus-5-5"),
+            ("haiku", "claude-haiku-5-5"),
             ("fable", "claude-fable-5-1"),
         ];
         for (alias, concrete) in cases {

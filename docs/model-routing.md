@@ -50,7 +50,7 @@ A target is somewhere the router can send a model request:
   Grok) show both, side by side — they are different billing paths, not
   duplicates.
 
-  DeepSeek's reasoning effort is offered per model: `deepseek-v4-flash`
+  DeepSeek's reasoning effort is offered per model: `deepseek-flash`
   exposes `low` / `high` / `max` (default `high`), and `deepseek-v4-pro`
   exposes none, because it floors every level to the same default. Effort
   levels are advertised only where they were measured to change the work

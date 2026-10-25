@@ -33,13 +33,13 @@ Pass `--model <spec>` on `construct new` (or set `CONSTRUCT_SMITH_MODEL`).
 The spec is one of:
 
 - `openai:<name>` — e.g. `openai:gpt-5-mini`
-- `anthropic:<name>` — e.g. `anthropic:claude-haiku-4-5`
+- `anthropic:<name>` — e.g. `anthropic:claude-haiku-5-5`
 - `claude-oauth:<name>` — e.g. `claude-oauth:sonnet` (alias: `claude-code-oauth:`)
 - `gemini:<name>` — e.g. `gemini:gemini-2.5-pro`
 - `meta:<name>` — e.g. `meta:muse-spark-1.1` using `META_API_KEY` or
   `MODEL_API_KEY`
 - `grok:<name>` — e.g. `grok:grok-4.6` using `GROK_API_KEY` or `XAI_API_KEY`
-- `deepseek:<name>` — e.g. `deepseek:deepseek-v4-pro` using `DEEPSEEK_API_KEY`
+- `deepseek:<name>` — e.g. `deepseek:deepseek-flash` using `DEEPSEEK_API_KEY`
 - `openrouter:<name>` — e.g. `openrouter:openrouter/auto` using `OPENROUTER_API_KEY`
 - `grok-oauth:<name>` — e.g. `grok-oauth:grok-4.6` using the Grok CLI auth file
 - `kimi-oauth:<name>` — e.g. `kimi-oauth:k3` using the Kimi Code CLI login
