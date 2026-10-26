@@ -421,8 +421,12 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     // Claude Code subscription OAuth path.
     "claude-oauth:sonnet",
     "claude-oauth:opus",
+    "claude-oauth:haiku",
     "claude-oauth:fable",
     // Anthropic API path.
+    "anthropic:claude-opus-5-5",
+    "anthropic:claude-sonnet-5-5",
+    "anthropic:claude-haiku-5-5",
     "anthropic:claude-opus-5",
     "anthropic:claude-sonnet-5",
     "anthropic:claude-fable-5-1",
@@ -431,7 +435,10 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     "anthropic:claude-sonnet-4-6",
     "anthropic:claude-haiku-4-5",
     // Google Gemini API path.
+    "gemini:gemini-4-argon",
     "gemini:gemini-3.8-flash",
+    "gemini:gemini-3.6-flash",
+    "gemini:gemini-3.5-flash-lite",
     "gemini:gemini-3.1-pro",
     "gemini:gemini-3.5-flash",
     "gemini:gemini-2.5-pro",
@@ -442,6 +449,7 @@ pub const MODEL_COMPLETIONS: &[&str] = &[
     "meta:muse-spark-1.1",
     // DeepSeek platform API path.
     "deepseek:deepseek-v4-pro",
+    "deepseek:deepseek-flash",
     "deepseek:deepseek-v4-flash",
     // OpenRouter aggregator path. `openrouter/auto` is the stable
     // meta-router id; any `vendor/model` id on openrouter.ai works, and
@@ -496,9 +504,9 @@ pub fn models_for_provider(provider: &str) -> Vec<String> {
 /// alias cannot be wired on one side and forgotten on the other.
 pub fn resolve_claude_oauth_model(model: &str) -> String {
     match model.trim() {
-        "opus" => "claude-opus-5".to_string(),
-        "sonnet" => "claude-sonnet-5".to_string(),
-        "haiku" => "claude-haiku-4-5".to_string(),
+        "opus" => "claude-opus-5-5".to_string(),
+        "sonnet" => "claude-sonnet-5-5".to_string(),
+        "haiku" => "claude-haiku-5-5".to_string(),
         "fable" => "claude-fable-5-1".to_string(),
         other => other.to_string(),
     }
@@ -631,11 +639,15 @@ mod tests {
         let matches = model_completion_matches("/model claude-oauth:");
         assert!(matches.contains(&"/model claude-oauth:sonnet".to_string()));
         assert!(matches.contains(&"/model claude-oauth:opus".to_string()));
+        assert!(matches.contains(&"/model claude-oauth:haiku".to_string()));
         assert!(matches.contains(&"/model claude-oauth:fable".to_string()));
 
         assert_eq!(
             models_for_provider("anthropic"),
             vec![
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5",
                 "claude-opus-5",
                 "claude-sonnet-5",
                 "claude-fable-5-1",
@@ -648,7 +660,10 @@ mod tests {
         assert_eq!(
             models_for_provider("gemini"),
             vec![
+                "gemini-4-argon",
                 "gemini-3.8-flash",
+                "gemini-3.6-flash",
+                "gemini-3.5-flash-lite",
                 "gemini-3.1-pro",
                 "gemini-3.5-flash",
                 "gemini-2.5-pro",
@@ -658,6 +673,10 @@ mod tests {
         assert_eq!(
             models_for_provider("meta"),
             vec!["muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.1"]
+        );
+        assert_eq!(
+            models_for_provider("deepseek"),
+            vec!["deepseek-v4-pro", "deepseek-flash", "deepseek-v4-flash"]
         );
         assert_eq!(
             models_for_provider("ollama"),
@@ -675,15 +694,18 @@ mod tests {
 
     #[test]
     fn claude_oauth_aliases_expand_to_concrete_anthropic_ids() {
-        assert_eq!(resolve_claude_oauth_model("sonnet"), "claude-sonnet-5");
-        assert_eq!(resolve_claude_oauth_model("opus"), "claude-opus-5");
-        assert_eq!(resolve_claude_oauth_model("haiku"), "claude-haiku-4-5");
+        assert_eq!(resolve_claude_oauth_model("sonnet"), "claude-sonnet-5-5");
+        assert_eq!(resolve_claude_oauth_model("opus"), "claude-opus-5-5");
+        assert_eq!(resolve_claude_oauth_model("haiku"), "claude-haiku-5-5");
         assert_eq!(resolve_claude_oauth_model("fable"), "claude-fable-5-1");
         assert_eq!(
             resolve_claude_oauth_model("claude-sonnet-4-6"),
             "claude-sonnet-4-6"
         );
-        assert_eq!(resolve_claude_oauth_model("  sonnet  "), "claude-sonnet-5");
+        assert_eq!(
+            resolve_claude_oauth_model("  sonnet  "),
+            "claude-sonnet-5-5"
+        );
     }
 
     /// The leak fix in action: a `/zoom` ClientCommand event is hidden from

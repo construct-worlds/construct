@@ -16,8 +16,8 @@ use crate::provider::{Content, Message, Role};
 /// tier, updated for the 2026 model line-ups.
 ///
 /// Notes:
-///   * OpenAI gpt-5 family: 400K input tokens (output is a separate
-///     128K budget, not counted here).
+///   * OpenAI gpt-6 family: 1.05M context tokens (including output).
+///   * OpenAI gpt-5 family: 400K input tokens (output is separate).
 ///   * OpenAI o-series (o1/o3/o4): 200K input.
 ///   * Anthropic Claude 4.x Sonnet has a 1M-context tier available
 ///     *only* with the `anthropic-beta: context-1m-2025-08-07`
@@ -26,10 +26,14 @@ use crate::provider::{Content, Message, Role};
 ///     remains the fallback for compatible endpoints and other Claude models.
 pub fn context_window_tokens(provider: &str, model: &str) -> usize {
     match (provider, model) {
+        ("openai", m) if m.starts_with("gpt-6") => 1_050_000,
         ("openai", m) if m.starts_with("gpt-5") => 400_000,
         ("openai", m) if m.starts_with("o") => 200_000,
         ("openai", _) => 32_000,
+        ("anthropic", m) if m.ends_with("-5-5") => 1_000_000,
         ("anthropic", _) => 200_000,
+        ("gemini", "gemini-4-argon") => 1_048_576,
+        ("gemini", m) if m.starts_with("gemini-3") => 1_048_576,
         ("meta", "muse-spark-1.1") => 1_000_000,
         ("meta", _) => 128_000,
         ("ollama", _) => 8_000,
@@ -37,8 +41,8 @@ pub fn context_window_tokens(provider: &str, model: &str) -> usize {
         // subscription paths. Older models keep the conservative cap below.
         ("grok" | "grok-oauth", "grok-4.6") => 500_000,
         ("grok", _) => 100_000,
-        // DeepSeek's V4 line (pro and flash) both advertise a 1M-token
-        // context window. Without an entry here the `_` arm would cap the
+        // DeepSeek's V4 line (pro and the current flash alias) advertises a
+        // 1M-token context window. Without an entry here the `_` arm would cap the
         // session at 8K and compact almost immediately on a model that can
         // hold the whole conversation.
         ("deepseek", _) => 1_000_000,
@@ -47,15 +51,15 @@ pub fn context_window_tokens(provider: &str, model: &str) -> usize {
         // overflow learn-and-retry path tightens it when a routed model
         // enforces less. The 8K default would compact almost immediately.
         ("openrouter", _) => 128_000,
-        // ChatGPT-subscription Codex backend. Same gpt-5* family,
-        // same advertised context window as the platform API — the
-        // billing pipe is what differs, not the model. Starting
-        // value; the runtime overflow-learn path in `model_limits.rs`
-        // will tighten if the subscription tier enforces something
-        // lower in practice.
+        // The GPT-6.1 Sol subscription tier advertises 500K; older Codex
+        // models keep the conservative starting value below. The runtime
+        // overflow-learn path can tighten either value when needed.
+        ("codex-oauth", "gpt-6.1-sol") => 500_000,
         ("codex-oauth", _) => 400_000,
         // Claude Code OAuth hits the Anthropic API directly with the
-        // subscription token; same 200k context as the `anthropic:` path.
+        // subscription token; current 5.5 aliases have 1M context.
+        ("claude-oauth", "opus" | "sonnet" | "haiku") => 1_000_000,
+        ("claude-oauth", m) if m.ends_with("-5-5") => 1_000_000,
         ("claude-oauth", _) => 200_000,
         // Kimi Code subscription backend: every model it serves advertises
         // a 262144-token window (from the backend's own models endpoint).
@@ -306,6 +310,18 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
             Content::Reasoning(item) => {
                 chars += item.encrypted_content.as_deref().map(str::len).unwrap_or(0)
                     + item.summary.iter().map(String::len).sum::<usize>();
+                if let Some(blocks) = &item.anthropic_blocks {
+                    chars += blocks
+                        .iter()
+                        .filter(|block| {
+                            matches!(
+                                block.get("type").and_then(serde_json::Value::as_str),
+                                Some("thinking" | "redacted_thinking")
+                            )
+                        })
+                        .map(|block| block.to_string().len())
+                        .sum::<usize>();
+                }
             }
         }
     }
@@ -513,6 +529,7 @@ mod tests {
     #[test]
     fn deepseek_gets_its_real_context_window_not_the_default() {
         assert_eq!(context_window_tokens("deepseek", "deepseek-v4-pro"), 1_000_000);
+        assert_eq!(context_window_tokens("deepseek", "deepseek-flash"), 1_000_000);
         assert_eq!(
             context_window_tokens("deepseek", "deepseek-v4-flash"),
             1_000_000
@@ -521,6 +538,16 @@ mod tests {
             context_window_tokens("deepseek", "some-future-model") > 8_000,
             "an unrecognized DeepSeek model must not fall to the generic default"
         );
+    }
+
+    #[test]
+    fn newly_cataloged_models_get_their_published_context_windows() {
+        assert_eq!(context_window_tokens("openai", "gpt-6.1-sol"), 1_050_000);
+        assert_eq!(context_window_tokens("codex-oauth", "gpt-6.1-sol"), 500_000);
+        assert_eq!(context_window_tokens("anthropic", "claude-opus-5-5"), 1_000_000);
+        assert_eq!(context_window_tokens("claude-oauth", "opus"), 1_000_000);
+        assert_eq!(context_window_tokens("gemini", "gemini-4-argon"), 1_048_576);
+        assert_eq!(context_window_tokens("gemini", "gemini-3.6-flash"), 1_048_576);
     }
 
     #[test]

@@ -2929,6 +2929,17 @@ pub async fn run(
                 break;
             }
 
+            for item in &turn.reasoning_items {
+                push_msg!(
+                    messages,
+                    persist,
+                    Message {
+                        role: Role::Assistant,
+                        content: Content::Reasoning(item.clone()),
+                    }
+                );
+            }
+
             if turn.tool_calls.is_empty() {
                 if let Some(text) = turn.text {
                     push_msg!(

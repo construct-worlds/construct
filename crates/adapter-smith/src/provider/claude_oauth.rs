@@ -397,9 +397,9 @@ mod tests {
 
     #[test]
     fn resolve_model_maps_aliases_and_passes_through() {
-        assert_eq!(resolve_model("opus"), "claude-opus-5");
-        assert_eq!(resolve_model("sonnet"), "claude-sonnet-5");
-        assert_eq!(resolve_model("haiku"), "claude-haiku-4-5");
+        assert_eq!(resolve_model("opus"), "claude-opus-5-5");
+        assert_eq!(resolve_model("sonnet"), "claude-sonnet-5-5");
+        assert_eq!(resolve_model("haiku"), "claude-haiku-5-5");
         assert_eq!(resolve_model("fable"), "claude-fable-5-1");
         // Concrete ids pass through untouched.
         assert_eq!(resolve_model("claude-sonnet-4-6"), "claude-sonnet-4-6");
